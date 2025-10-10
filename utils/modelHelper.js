@@ -1,0 +1,1215 @@
+const path = require('path');
+const fs = require('fs');
+
+/**
+ * Get the controller name from the calling file
+ * @returns {string} The controller name
+ */
+const getControllerName = () => {
+  // Get the calling file name from stack trace
+  const stack = new Error().stack;
+  const lines = stack.split('\n');
+  
+  console.log('🔍 Stack trace for controller detection:');
+  lines.forEach((line, index) => {
+    console.log(`  ${index}: ${line.trim()}`);
+  });
+  
+  // Look for the controller file in the stack trace
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    console.log(`🔍 Checking line ${i}: ${line.trim()}`);
+    
+    // Look for lines that contain controller files (not modelHelper.js)
+    if (line.includes('controllers/') && !line.includes('modelHelper.js')) {
+      console.log(`🔍 Found controller line: ${line}`);
+      
+      // Try different regex patterns for file path extraction
+      let filePath = null;
+      
+      // Pattern 1: (file:///path/to/file)
+      let match = line.match(/\(file:\/\/\/(.+)\)/);
+      if (match) {
+        filePath = match[1];
+      }
+      
+      // Pattern 2: (path/to/file)
+      if (!filePath) {
+        match = line.match(/\((.+)\)/);
+        if (match) {
+          filePath = match[1];
+        }
+      }
+      
+      // Pattern 3: at Function (path/to/file)
+      if (!filePath) {
+        match = line.match(/at\s+\w+\s+\((.+)\)/);
+        if (match) {
+          filePath = match[1];
+        }
+      }
+      
+      if (filePath) {
+        const fileName = path.basename(filePath, '.js');
+        console.log(`🔍 Auto-detected controller name: ${fileName} from ${filePath}`);
+        return fileName;
+      }
+    }
+  }
+  
+  // Fallback: try to get from the immediate caller (line 2)
+  if (lines.length > 2) {
+    const callerLine = lines[2];
+    console.log(`🔍 Trying fallback with line 2: ${callerLine.trim()}`);
+    
+    let filePath = null;
+    let match = callerLine.match(/\((.+)\)/);
+    if (match) {
+      filePath = match[1];
+    }
+    
+    if (filePath) {
+      const fileName = path.basename(filePath, '.js');
+      console.log(`🔍 Fallback controller name: ${fileName} from ${filePath}`);
+      return fileName;
+    }
+  }
+  
+  console.log('⚠️ Could not detect controller name, using default: user');
+  return 'user'; // Default fallback
+};
+
+/**
+ * Dynamically get model based on controller name
+ * @param {string} controllerName - The name of the controller/model
+ * @param {string} customPath - Optional custom path to models directory
+ * @returns {Object} Mongoose model
+ */
+const getModelFromController = (controllerName, customPath = null) => {
+  if (!controllerName) {
+    throw new Error('Controller name is required');
+  }
+  
+  // Determine models directory path
+  const modelsPath = customPath || path.join(__dirname, '..', 'models');
+  
+  // Dynamic require based on model name
+  try {
+    const Model = require(path.join(modelsPath, controllerName));
+    return Model;
+  } catch (error) {
+    throw new Error(`Model '${controllerName}' not found in ${modelsPath}`);
+  }
+};
+
+/**
+ * Handle image upload for fields with field_type: "image"
+ * Supports multiple files if the client sends multiple files under the same field name.
+ * @param {Object} req - Express request object
+ * @param {string} fieldName - The field name
+ * @param {string} modelName - The model name
+ * @param {string} recordId - The record ID
+ * @returns {Promise<string|string[]|null>} The uploaded image path(s) or null if no image
+ */
+const handleImageUpload = async (req, fieldName, modelName, recordId) => {
+  try {
+    // Check if there's a file in the request
+    if (!req.files || !req.files[fieldName]) {
+      return null;
+    }
+
+    const uploaded = req.files[fieldName];
+    const filesArray = Array.isArray(uploaded) ? uploaded : [uploaded];
+
+    // Validate file types
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+
+    // Ensure directory exists: uploads/{modelName}/{recordId}/
+    const uploadDir = path.join(__dirname, '..', 'uploads', modelName, recordId);
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    const moveOne = (file, index) => new Promise((resolve, reject) => {
+      if (!allowedTypes.includes(file.mimetype)) {
+        return reject(new Error(`Invalid file type. Allowed types: ${allowedTypes.join(', ')}`));
+      }
+      const timestamp = Date.now();
+      const fileExtension = path.extname(file.name);
+      const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
+      const filePath = path.join(uploadDir, fileName);
+      file.mv(filePath, (err) => {
+        if (err) {
+          console.error('Error moving file:', err);
+          return reject(new Error('Failed to save image file'));
+        }
+        const relativePath = path.join('uploads', modelName, recordId, fileName).replace(/\\/g, '/');
+        console.log(`✅ Image uploaded successfully: ${relativePath}`);
+        resolve(relativePath);
+      });
+    });
+
+    const paths = await Promise.all(filesArray.map((f, idx) => moveOne(f, idx)));
+    return Array.isArray(uploaded) ? paths : paths[0];
+  } catch (error) {
+    console.error('❌ Image upload error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Generic create function that works with any model
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
+ * @param {Object} options - Additional options
+ * @returns {Promise} Express response
+ */
+const handleGenericCreate = async (req, controllerName = null, options = {}) => {
+  // Auto-detect controller name if not provided or empty
+  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
+  
+  const {
+    excludeFields = [], // Fields to exclude from response
+    customValidation = null, // Custom validation function
+    beforeCreate = null, // Function to run before creating
+    afterCreate = null, // Function to run after creating
+    errorHandlers = {} // Custom error handlers
+  } = options;
+
+  if (!req.body || Object.keys(req.body).length === 0) {
+    return {
+      success: false,
+      status: 400,
+      error: "Request body is empty",
+      message: "Please send form data with required fields",
+      contentType: req.get("Content-Type"),
+    };
+  }
+
+  try {
+    // Dynamically get the model
+    const Model = getModelFromController(modelName);
+    const modelSchema = Model.schema.obj;
+    
+    const requiredFields = Object.keys(modelSchema).filter((field) => {
+      const fieldConfig = modelSchema[field];
+      return fieldConfig.required === true && !fieldConfig.default;
+    });
+
+    // Validate required fields dynamically
+    const missingFields = requiredFields.filter(
+      (field) => !req.body[field] || req.body[field].trim().length === 0
+    );
+
+    if (missingFields.length > 0) {
+      return {
+        success: false,
+        status: 400,
+        error: "Missing required fields",
+        required: requiredFields,
+        missing: missingFields,
+        received: Object.keys(req.body),
+      };
+    }
+
+    // Run custom validation if provided
+    if (customValidation) {
+      const validationResult = await customValidation(req.body, modelSchema);
+      if (validationResult.error) {
+        return {
+          success: false,
+          status: 400,
+          ...validationResult
+        };
+      }
+    }
+
+    // Prepare data for creation (only include fields that exist in schema)
+    const modelData = {};
+    Object.keys(req.body).forEach((key) => {
+      if (modelSchema[key]) {
+        modelData[key] = req.body[key].trim();
+      }
+    });
+
+    console.log(`📝 Preparing data for ${modelName} creation:`, {
+      receivedFields: Object.keys(req.body),
+      schemaFields: Object.keys(modelSchema),
+      modelDataFields: Object.keys(modelData),
+    });
+
+    // Add default values for fields with defaults
+    Object.keys(modelSchema).forEach((field) => {
+      const fieldConfig = modelSchema[field];
+      if (fieldConfig.default && !modelData[field]) {
+        modelData[field] = fieldConfig.default;
+      }
+    });
+
+    // Handle image uploads for fields with field_type: "image"
+    const imageFields = Object.keys(modelSchema).filter((field) => {
+      const fieldConfig = modelSchema[field];
+      return fieldConfig.field_type === "image";
+    });
+
+    // Run beforeCreate hook if provided
+    if (beforeCreate) {
+      await beforeCreate(modelData, req);
+    }
+
+    console.log(`✅ Creating ${modelName} with data:`, {
+      ...modelData,
+      password: modelData.password ? "[HIDDEN]" : undefined,
+    });
+
+    const result = await Model.create(modelData);
+
+    // Now handle image uploads with the record ID
+    for (const imageField of imageFields) {
+      try {
+        const uploaded = await handleImageUpload(req, imageField, modelName, result._id.toString());
+        if (uploaded) {
+          // If schema expects array (type: [String]) store as array; else store single string
+          const expectsArray = Array.isArray(Model.schema.obj[imageField]?.type) || Model.schema.paths[imageField]?.instance === 'Array';
+          result[imageField] = expectsArray ? (Array.isArray(uploaded) ? uploaded : [uploaded]) : (Array.isArray(uploaded) ? uploaded[0] : uploaded);
+          await result.save();
+        }
+      } catch (error) {
+        console.error(`❌ Error uploading image for field ${imageField}:`, error);
+        // Continue with other fields even if one image upload fails
+      }
+    }
+
+    // Run afterCreate hook if provided
+    if (afterCreate) {
+      await afterCreate(result, req);
+    }
+
+    // Prepare response data (exclude specified fields)
+    const responseData = { ...result.toObject() };
+    excludeFields.forEach(field => {
+      delete responseData[field];
+    });
+
+    return {
+      success: true,
+      status: 201,
+      data: responseData,
+    };
+
+  } catch (error) {
+    console.error("❌ Creation error:", error);
+
+    // Handle custom error handlers first
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    // Handle specific error types
+    switch (error.name) {
+      case "ValidationError":
+        const validationErrors = Object.values(error.errors).map(
+          (err) => err.message
+        );
+        return {
+          success: false,
+          status: 400,
+          error: "Validation failed",
+          details: validationErrors,
+          type: "validation"
+        };
+
+      case "CastError":
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data type",
+          details: `${error.path} should be ${error.kind}`,
+          type: "cast"
+        };
+
+      case "MongoError":
+      case "MongoServerError":
+        // Handle MongoDB specific errors
+        switch (error.code) {
+          case 11000:
+            const duplicateField = Object.keys(error.keyPattern)[0];
+            return {
+              success: false,
+              status: 409,
+              error: "Duplicate entry",
+              details: `${duplicateField} already exists`,
+              type: "duplicate"
+            };
+          case 121:
+            return {
+              success: false,
+              status: 400,
+              error: "Document validation failed",
+              details: error.errmsg,
+              type: "document_validation"
+            };
+          default:
+            return {
+              success: false,
+              status: 500,
+              error: "Database error",
+              details: error.message,
+              type: "database"
+            };
+        }
+
+      case "TypeError":
+        return {
+          success: false,
+          status: 400,
+          error: "Type error",
+          details: error.message,
+          type: "type"
+        };
+
+      case "ReferenceError":
+        return {
+          success: false,
+          status: 500,
+          error: "Reference error",
+          details: error.message,
+          type: "reference"
+        };
+
+      case "SyntaxError":
+        return {
+          success: false,
+          status: 400,
+          error: "Syntax error",
+          details: error.message,
+          type: "syntax"
+        };
+
+      case "RangeError":
+        return {
+          success: false,
+          status: 400,
+          error: "Range error",
+          details: error.message,
+          type: "range"
+        };
+
+      case "URIError":
+        return {
+          success: false,
+          status: 400,
+          error: "URI error",
+          details: error.message,
+          type: "uri"
+        };
+
+      case "EvalError":
+        return {
+          success: false,
+          status: 500,
+          error: "Evaluation error",
+          details: error.message,
+          type: "eval"
+        };
+
+      default:
+        // Handle unknown errors
+        if (error.code) {
+          // Handle HTTP status codes
+          const statusCode = error.code >= 400 && error.code < 600 ? error.code : 500;
+          return {
+            success: false,
+            status: statusCode,
+            error: error.message || "Unknown error",
+            details: error.stack,
+            type: "unknown",
+            code: error.code
+          };
+        }
+
+        // Handle network/connection errors
+        if (error.message && error.message.includes('ECONNREFUSED')) {
+          return {
+            success: false,
+            status: 503,
+            error: "Database connection failed",
+            details: "Unable to connect to database",
+            type: "connection"
+          };
+        }
+
+        if (error.message && error.message.includes('timeout')) {
+          return {
+            success: false,
+            status: 408,
+            error: "Request timeout",
+            details: "Operation timed out",
+            type: "timeout"
+          };
+        }
+
+        // Handle memory errors
+        if (error.message && error.message.includes('ENOMEM')) {
+          return {
+            success: false,
+            status: 507,
+            error: "Insufficient storage",
+            details: "Server is out of memory",
+            type: "memory"
+          };
+        }
+
+        // Handle file system errors
+        if (error.code && error.code.startsWith('ENOENT')) {
+          return {
+            success: false,
+            status: 500,
+            error: "File not found",
+            details: "Required file or directory not found",
+            type: "file_system"
+          };
+        }
+
+        // Generic error handler
+        return {
+          success: false,
+          status: 500,
+          error: "Internal server error",
+          details: process.env.NODE_ENV === 'development' ? error.stack : "Something went wrong",
+          type: "internal",
+          timestamp: new Date().toISOString()
+        };
+    }
+  }
+};
+
+/**
+ * Generic update function that works with any model
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {string} controllerName - The name of the controller/model (required)
+ * @param {Object} options - Additional options
+ * @returns {Promise} Express response
+ */
+const handleGenericUpdate = async (req, controllerName, options = {}) => {
+  // Auto-detect controller name if not provided or empty
+  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
+  
+  if (!modelName) {
+    return {
+      success: false,
+      status: 500,
+      error: "Controller name is required",
+      details: "Please provide the controller name as the third parameter",
+      type: "configuration",
+    };
+  }
+
+  const {
+    idParam = "id", // URL parameter name for ID (default: 'id')
+    excludeFields = [], // Fields to exclude from response
+    customValidation = null, // Custom validation function
+    beforeUpdate = null, // Function to run before updating
+    afterUpdate = null, // Function to run after updating
+    errorHandlers = {}, // Custom error handlers
+    allowedFields = [], // Fields that can be updated (empty = all fields)
+  } = options;
+
+  // Get ID from URL parameters
+  const recordId = req.params[idParam];
+  if (!recordId) {
+    return {
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: `Please provide ${idParam} in the URL parameters`,
+      type: "missing_id",
+    };
+  }
+
+  if (!req.body || Object.keys(req.body).length === 0) {
+    return {
+      success: false,
+      status: 400,
+      error: "Request body is empty",
+      message: "Please send form data with fields to update",
+      contentType: req.get("Content-Type"),
+    };
+  }
+
+  try {
+    // Dynamically get the model
+    const Model = getModelFromController(modelName);
+    const modelSchema = Model.schema.obj;
+
+    // Find the existing record
+    const existingRecord = await Model.findById(recordId);
+    if (!existingRecord) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with ID ${recordId} not found`,
+        type: "not_found",
+      };
+    }
+
+    // Prepare update data (only include fields that exist in schema)
+    const updateData = {};
+    
+    // If allowedFields is specified, only allow those fields
+    if (allowedFields.length > 0) {
+      Object.keys(req.body).forEach((key) => {
+        if (modelSchema[key] && allowedFields.includes(key)) {
+          updateData[key] = req.body[key].trim();
+        }
+      });
+    } else {
+      // If no allowedFields specified, allow all fields except password for security
+      Object.keys(req.body).forEach((key) => {
+        if (modelSchema[key] && key !== 'password') {
+          updateData[key] = req.body[key].trim();
+        }
+      });
+    }
+
+    console.log(`📝 Preparing data for ${modelName} update:`, {
+      receivedFields: Object.keys(req.body),
+      schemaFields: Object.keys(modelSchema),
+      allowedFields: allowedFields.length > 0 ? allowedFields : 'ALL (except password)',
+      updateDataFields: Object.keys(updateData),
+    });
+
+    // Run custom validation if provided
+    if (customValidation) {
+      const validationResult = await customValidation(updateData, modelSchema, existingRecord);
+      if (validationResult.error) {
+        return {
+          success: false,
+          status: 400,
+          ...validationResult
+        };
+      }
+    }
+
+    // Handle image uploads for fields with field_type: "image"
+    const imageFields = Object.keys(modelSchema).filter((field) => {
+      const fieldConfig = modelSchema[field];
+      return fieldConfig.field_type === "image";
+    });
+
+    // Run beforeUpdate hook if provided
+    if (beforeUpdate) {
+      await beforeUpdate(updateData, req, existingRecord);
+    }
+
+    console.log(`✅ Updating ${modelName} with ID ${recordId}:`, {
+      ...updateData,
+      password: updateData.password ? "[HIDDEN]" : undefined,
+    });
+
+    // Update the record
+    const updatedRecord = await Model.findByIdAndUpdate(
+      recordId,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    // Handle image uploads for update
+    for (const imageField of imageFields) {
+      try {
+        const uploaded = await handleImageUpload(req, imageField, modelName, recordId);
+        if (uploaded) {
+          const expectsArray = Array.isArray(Model.schema.obj[imageField]?.type) || Model.schema.paths[imageField]?.instance === 'Array';
+          updatedRecord[imageField] = expectsArray ? (Array.isArray(uploaded) ? uploaded : [uploaded]) : (Array.isArray(uploaded) ? uploaded[0] : uploaded);
+          await updatedRecord.save();
+        }
+      } catch (error) {
+        console.error(`❌ Error uploading image for field ${imageField}:`, error);
+        // Continue with other fields even if one image upload fails
+      }
+    }
+
+    // Run afterUpdate hook if provided
+    if (afterUpdate) {
+      await afterUpdate(updatedRecord, req, existingRecord);
+    }
+
+    // Prepare response data (exclude specified fields)
+    const responseData = { ...updatedRecord.toObject() };
+    excludeFields.forEach((field) => {
+      delete responseData[field];
+    });
+
+    return {
+      success: true,
+      status: 200,
+      message: `${modelName} updated successfully`,
+      data: responseData,
+    };
+
+  } catch (error) {
+    console.error("❌ Update error:", error);
+
+    // Handle custom error handlers first
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    // Handle specific error types
+    switch (error.name) {
+      case "ValidationError":
+        const validationErrors = Object.values(error.errors).map(
+          (err) => err.message
+        );
+        return {
+          success: false,
+          status: 400,
+          error: "Validation failed",
+          details: validationErrors,
+          type: "validation",
+        };
+
+      case "CastError":
+        if (error.path === "_id") {
+          return {
+            success: false,
+            status: 400,
+            error: "Invalid ID format",
+            details: "The provided ID is not in the correct format",
+            type: "invalid_id",
+          };
+        }
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data type",
+          details: `${error.path} should be ${error.kind}`,
+          type: "cast",
+        };
+
+      case "MongoError":
+      case "MongoServerError":
+        // Handle MongoDB specific errors
+        switch (error.code) {
+          case 11000:
+            const duplicateField = Object.keys(error.keyPattern)[0];
+            return {
+              success: false,
+              status: 409,
+              error: "Duplicate entry",
+              details: `${duplicateField} already exists`,
+              type: "duplicate",
+            };
+          case 121:
+            return {
+              success: false,
+              status: 400,
+              error: "Document validation failed",
+              details: error.errmsg,
+              type: "document_validation",
+            };
+          default:
+            return {
+              success: false,
+              status: 500,
+              error: "Database error",
+              details: error.message,
+              type: "database",
+            };
+        }
+
+      case "TypeError":
+        return {
+          success: false,
+          status: 400,
+          error: "Type error",
+          details: error.message,
+          type: "type",
+        };
+
+      case "ReferenceError":
+        return {
+          success: false,
+          status: 500,
+          error: "Reference error",
+          details: error.message,
+          type: "reference",
+        };
+
+      case "SyntaxError":
+        return {
+          success: false,
+          status: 400,
+          error: "Syntax error",
+          details: error.message,
+          type: "syntax",
+        };
+
+      case "RangeError":
+        return {
+          success: false,
+          status: 400,
+          error: "Range error",
+          details: error.message,
+          type: "range",
+        };
+
+      case "URIError":
+        return {
+          success: false,
+          status: 400,
+          error: "URI error",
+          details: error.message,
+          type: "uri",
+        };
+
+      case "EvalError":
+        return {
+          success: false,
+          status: 500,
+          error: "Evaluation error",
+          details: error.message,
+          type: "eval",
+        };
+
+      default:
+        // Handle unknown errors
+        if (error.code) {
+          // Handle HTTP status codes
+          const statusCode =
+            error.code >= 400 && error.code < 600 ? error.code : 500;
+          return {
+            success: false,
+            status: statusCode,
+            error: error.message || "Unknown error",
+            details: error.stack,
+            type: "unknown",
+            code: error.code,
+          };
+        }
+
+        // Handle network/connection errors
+        if (error.message && error.message.includes("ECONNREFUSED")) {
+          return {
+            success: false,
+            status: 503,
+            error: "Database connection failed",
+            details: "Unable to connect to database",
+            type: "connection",
+          };
+        }
+
+        if (error.message && error.message.includes("timeout")) {
+          return {
+            success: false,
+            status: 408,
+            error: "Request timeout",
+            details: "Operation timed out",
+            type: "timeout",
+          };
+        }
+
+        // Handle memory errors
+        if (error.message && error.message.includes("ENOMEM")) {
+          return {
+            success: false,
+            status: 507,
+            error: "Insufficient storage",
+            details: "Server is out of memory",
+            type: "memory",
+          };
+        }
+
+        // Handle file system errors
+        if (error.code && error.code.startsWith("ENOENT")) {
+          return {
+            success: false,
+            status: 500,
+            error: "File not found",
+            details: "Required file or directory not found",
+            type: "file_system",
+          };
+        }
+
+        // Generic error handler
+        return {
+          success: false,
+          status: 500,
+          error: "Internal server error",
+          details:
+            process.env.NODE_ENV === "development"
+              ? error.stack
+              : "Something went wrong",
+          type: "internal",
+          timestamp: new Date().toISOString(),
+        };
+    }
+  }
+};
+
+/**
+ * Generic get all records function that works with any model
+ * @param {Object} req - Express request object
+ * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
+ * @param {Object} options - Additional options
+ * @returns {Promise} Express response
+ */
+const handleGenericGetAll = async (req, controllerName = null, options = {}) => {
+  // Auto-detect controller name if not provided or empty
+  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
+  
+  if (!modelName) {
+    return {
+      success: false,
+      status: 500,
+      error: "Controller name is required",
+      details: "Please provide the controller name as the third parameter",
+      type: "configuration",
+    };
+  }
+
+  const {
+    excludeFields = [], // Fields to exclude from response
+    populate = [], // Fields to populate (array of field names)
+    sort = { createdAt: -1 }, // Sort options
+    limit = null, // Limit number of records
+    skip = 0, // Skip number of records (for pagination)
+    filter = {}, // Filter conditions
+    errorHandlers = {}, // Custom error handlers
+  } = options;
+
+  try {
+    // Dynamically get the model
+    const Model = getModelFromController(modelName);
+
+    console.log(`🔍 Fetching all ${modelName} records with filter:`, filter);
+
+    // Build query
+    let query = Model.find(filter);
+
+    // Add population if specified
+    if (populate && populate.length > 0) {
+      populate.forEach(field => {
+        query = query.populate(field);
+      });
+    }
+
+    // Add sorting
+    if (sort) {
+      query = query.sort(sort);
+    }
+
+    // Add pagination
+    if (skip > 0) {
+      query = query.skip(skip);
+    }
+
+    if (limit) {
+      query = query.limit(limit);
+    }
+
+    // Execute query
+    const records = await query;
+
+    // Get total count for pagination info
+    const totalCount = await Model.countDocuments(filter);
+
+    // Prepare response data (exclude specified fields)
+    const responseData = records.map(record => {
+      const data = { ...record.toObject() };
+      excludeFields.forEach((field) => {
+        delete data[field];
+      });
+      return data;
+    });
+
+    console.log(`✅ Successfully fetched ${responseData.length} ${modelName} records`);
+
+    return {
+      success: true,
+      status: 200,
+      data: responseData,
+      pagination: {
+        total: totalCount,
+        count: responseData.length,
+        skip: skip,
+        limit: limit,
+      },
+    };
+
+  } catch (error) {
+    console.error("❌ Get all error:", error);
+
+    // Handle custom error handlers first
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    // Handle specific error types
+    switch (error.name) {
+      case "CastError":
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data type",
+          details: `${error.path} should be ${error.kind}`,
+          type: "cast",
+        };
+
+      case "MongoError":
+      case "MongoServerError":
+        return {
+          success: false,
+          status: 500,
+          error: "Database error",
+          details: error.message,
+          type: "database",
+        };
+
+      case "TypeError":
+        return {
+          success: false,
+          status: 400,
+          error: "Type error",
+          details: error.message,
+          type: "type",
+        };
+
+      case "ReferenceError":
+        return {
+          success: false,
+          status: 500,
+          error: "Reference error",
+          details: error.message,
+          type: "reference",
+        };
+
+      default:
+        // Handle unknown errors
+        if (error.code) {
+          // Handle HTTP status codes
+          const statusCode = error.code >= 400 && error.code < 600 ? error.code : 500;
+          return {
+            success: false,
+            status: statusCode,
+            error: error.message || "Unknown error",
+            details: error.stack,
+            type: "unknown",
+            code: error.code,
+          };
+        }
+
+        // Handle network/connection errors
+        if (error.message && error.message.includes("ECONNREFUSED")) {
+          return {
+            success: false,
+            status: 503,
+            error: "Database connection failed",
+            details: "Unable to connect to database",
+            type: "connection",
+          };
+        }
+
+        // Generic error handler
+        return {
+          success: false,
+          status: 500,
+          error: "Internal server error",
+          details: process.env.NODE_ENV === "development" ? error.stack : "Something went wrong",
+          type: "internal",
+          timestamp: new Date().toISOString(),
+        };
+    }
+  }
+};
+
+/**
+ * Generic get by ID function that works with any model
+ * @param {Object} req - Express request object
+ * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
+ * @param {Object} options - Additional options
+ * @returns {Promise} Express response
+ */
+const handleGenericGetById = async (req, controllerName = null, options = {}) => {
+  // Auto-detect controller name if not provided or empty
+  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
+  
+  if (!modelName) {
+    return {
+      success: false,
+      status: 500,
+      error: "Controller name is required",
+      details: "Please provide the controller name as the third parameter",
+      type: "configuration",
+    };
+  }
+
+  const {
+    idParam = "id", // URL parameter name for ID (default: 'id')
+    excludeFields = [], // Fields to exclude from response
+    populate = [], // Fields to populate (array of field names)
+    errorHandlers = {}, // Custom error handlers
+  } = options;
+
+  // Get ID from URL parameters
+  const recordId = req.params[idParam];
+  if (!recordId) {
+    return {
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: `Please provide ${idParam} in the URL parameters`,
+      type: "missing_id",
+    };
+  }
+
+  try {
+    // Dynamically get the model
+    const Model = getModelFromController(modelName);
+
+    console.log(`🔍 Fetching ${modelName} with ID: ${recordId}`);
+
+    // Build query
+    let query = Model.findById(recordId);
+
+    // Add population if specified
+    if (populate && populate.length > 0) {
+      populate.forEach(field => {
+        query = query.populate(field);
+      });
+    }
+
+    // Execute query
+    const record = await query;
+
+    if (!record) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with ID ${recordId} not found`,
+        type: "not_found",
+      };
+    }
+
+    // Prepare response data (exclude specified fields)
+    const responseData = { ...record.toObject() };
+    excludeFields.forEach((field) => {
+      delete responseData[field];
+    });
+
+    console.log(`✅ Successfully fetched ${modelName} with ID: ${recordId}`);
+
+    return {
+      success: true,
+      status: 200,
+      data: responseData,
+    };
+
+  } catch (error) {
+    console.error("❌ Get by ID error:", error);
+
+    // Handle custom error handlers first
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    // Handle specific error types
+    switch (error.name) {
+      case "CastError":
+        if (error.path === "_id") {
+          return {
+            success: false,
+            status: 400,
+            error: "Invalid ID format",
+            details: "The provided ID is not in the correct format",
+            type: "invalid_id",
+          };
+        }
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data type",
+          details: `${error.path} should be ${error.kind}`,
+          type: "cast",
+        };
+
+      case "MongoError":
+      case "MongoServerError":
+        return {
+          success: false,
+          status: 500,
+          error: "Database error",
+          details: error.message,
+          type: "database",
+        };
+
+      case "TypeError":
+        return {
+          success: false,
+          status: 400,
+          error: "Type error",
+          details: error.message,
+          type: "type",
+        };
+
+      case "ReferenceError":
+        return {
+          success: false,
+          status: 500,
+          error: "Reference error",
+          details: error.message,
+          type: "reference",
+        };
+
+      default:
+        // Handle unknown errors
+        if (error.code) {
+          // Handle HTTP status codes
+          const statusCode = error.code >= 400 && error.code < 600 ? error.code : 500;
+          return {
+            success: false,
+            status: statusCode,
+            error: error.message || "Unknown error",
+            details: error.stack,
+            type: "unknown",
+            code: error.code,
+          };
+        }
+
+        // Handle network/connection errors
+        if (error.message && error.message.includes("ECONNREFUSED")) {
+          return {
+            success: false,
+            status: 503,
+            error: "Database connection failed",
+            details: "Unable to connect to database",
+            type: "connection",
+          };
+        }
+
+        // Generic error handler
+        return {
+          success: false,
+          status: 500,
+          error: "Internal server error",
+          details: process.env.NODE_ENV === "development" ? error.stack : "Something went wrong",
+          type: "internal",
+          timestamp: new Date().toISOString(),
+        };
+    }
+  }
+};
+
+module.exports = {
+  getControllerName,
+  getModelFromController,
+  handleGenericCreate,
+  handleGenericUpdate,
+  handleGenericGetById,
+  handleGenericGetAll,
+  handleImageUpload,
+};

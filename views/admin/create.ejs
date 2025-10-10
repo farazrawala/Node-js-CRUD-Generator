@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar.collapsed { transform: translateX(-100%); }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .main-content.expanded { margin-left: 0; }
+        
+        .sub-menu {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-in-out;
+        }
+        
+        .sub-menu.expanded {
+            max-height: 200px;
+        }
+        
+        .menu-item.has-submenu .chevron {
+            transition: transform 0.3s ease-in-out;
+        }
+        
+        .menu-item.has-submenu.expanded .chevron {
+            transform: rotate(180deg);
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b border-gray-200 fixed top-0 left-0 right-0 z-50">
+        <div class="flex items-center justify-between px-6 py-4">
+            <div class="flex items-center">
+                <button id="sidebarToggle" class="text-gray-500 hover:text-gray-700 mr-4">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+                <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                </a>
+                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white shadow-lg z-40">
+        <nav class="mt-8">
+            <div class="px-4 py-2">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+            </div>
+            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+                <% routes.forEach(route => { %>
+                    <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
+                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900" 
+                           <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
+                            <i class="<%= route.icon %> mr-3"></i>
+                            <span><%= route.name %></span>
+                            <% if (route.subMenus && route.subMenus.length > 0) { %>
+                                <i class="fas fa-chevron-down ml-auto text-xs chevron"></i>
+                            <% } %>
+                        </a>
+                        <% if (route.subMenus && route.subMenus.length > 0) { %>
+                            <div class="sub-menu ml-4">
+                                <% route.subMenus.forEach(subMenu => { %>
+                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800">
+                                        <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
+                                        <span><%= subMenu.name %></span>
+                                    </a>
+                                <% }); %>
+                            </div>
+                        <% } %>
+                    </div>
+                <% }); %>
+            <% } else { %>
+                <!-- Fallback static routes if dynamic routes are not available -->
+                <a href="/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-users mr-3"></i>
+                    <span>Users</span>
+                </a>
+                <a href="/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-box mr-3"></i>
+                    <span>Products</span>
+                </a>
+                <a href="/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-blog mr-3"></i>
+                    <span>Blogs</span>
+                </a>
+                <a href="/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-shopping-cart mr-3"></i>
+                    <span>Orders</span>
+                </a>
+                <a href="/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-tags mr-3"></i>
+                    <span>Categories</span>
+                </a>
+                <a href="/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-exclamation-triangle mr-3"></i>
+                    <span>Complaints</span>
+                </a>
+            <% } %>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main id="mainContent" class="main-content ml-64 mt-16 p-6">
+        <!-- Breadcrumb -->
+        <nav class="flex mb-6" aria-label="Breadcrumb">
+            <ol class="inline-flex items-center space-x-1 md:space-x-3">
+                <li class="inline-flex items-center">
+                    <a href="/admin/dashboard" class="inline-flex items-center text-sm font-medium text-gray-700 hover:text-blue-600">
+                        <i class="fas fa-home mr-2"></i>
+                        Dashboard
+                    </a>
+                </li>
+                <li>
+                    <div class="flex items-center">
+                        <i class="fas fa-chevron-right text-gray-400 mx-2"></i>
+                        <a href="/admin/<%= modelName %>" class="text-sm font-medium text-gray-700 hover:text-blue-600">
+                            <%= titleCase %>s
+                        </a>
+                    </div>
+                </li>
+                <li aria-current="page">
+                    <div class="flex items-center">
+                        <i class="fas fa-chevron-right text-gray-400 mx-2"></i>
+                        <span class="text-sm font-medium text-gray-500">Create</span>
+                    </div>
+                </li>
+            </ol>
+        </nav>
+
+        <!-- Page Header -->
+        <div class="mb-6">
+            <h2 class="text-3xl font-bold text-gray-900"><%= title %></h2>
+            <p class="text-gray-600">Add a new <%= singularName.toLowerCase() %> to your system</p>
+        </div>
+
+        <!-- Create Form -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <form method="POST" action="<%= action %>" enctype="multipart/form-data" class="space-y-6">
+                <!-- Dynamic Form Fields -->
+                <% Object.keys(fieldConfig).forEach(fieldName => { %>
+                    <% const field = fieldConfig[fieldName]; %>
+                    <div class="<%= field.type === 'checkbox' ? 'flex items-center' : '' %>">
+                        <% if (field.type !== 'checkbox') { %>
+                            <label for="<%= field.name %>" class="block text-sm font-medium text-gray-700 mb-2">
+                                <%= field.label %>
+                                <% if (field.required) { %>
+                                    <span class="text-red-500">*</span>
+                                <% } %>
+                            </label>
+                        <% } %>
+                        
+                        <% if (field.type === 'text' || field.type === 'email') { %>
+                            <input type="<%= field.type %>" 
+                                   id="<%= field.name %>" 
+                                   name="<%= field.name %>" 
+                                   value="<%= record[field.name] || '' %>"
+                                   placeholder="<%= field.placeholder %>"
+                                   <% if (field.required) { %>required<% } %>
+                                   <% if (field.validation && field.validation.minLength) { %>minlength="<%= field.validation.minLength %>"<% } %>
+                                   <% if (field.validation && field.validation.maxLength) { %>maxlength="<%= field.validation.maxLength %>"<% } %>
+                                   <% if (field.validation && field.validation.pattern) { %>pattern="<%= field.validation.pattern %>"<% } %>
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                        
+                        <% } else if (field.type === 'password') { %>
+                            <input type="password" 
+                                   id="<%= field.name %>" 
+                                   name="<%= field.name %>" 
+                                   value="<%= record[field.name] || '' %>"
+                                   placeholder="<%= field.placeholder %>"
+                                   <% if (field.required) { %>required<% } %>
+                                   <% if (field.validation && field.validation.minLength) { %>minlength="<%= field.validation.minLength %>"<% } %>
+                                   <% if (field.validation && field.validation.maxLength) { %>maxlength="<%= field.validation.maxLength %>"<% } %>
+                                   <% if (field.validation && field.validation.pattern) { %>pattern="<%= field.validation.pattern %>"<% } %>
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                        
+                        <% } else if (field.type === 'number') { %>
+                            <input type="number" 
+                                   id="<%= field.name %>" 
+                                   name="<%= field.name %>" 
+                                   value="<%= record[field.name] || '' %>"
+                                   placeholder="<%= field.placeholder %>"
+                                   <% if (field.required) { %>required<% } %>
+                                   <% if (field.validation && field.validation.min) { %>min="<%= field.validation.min %>"<% } %>
+                                   <% if (field.validation && field.validation.max) { %>max="<%= field.validation.max %>"<% } %>
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                        
+                        <% } else if (field.type === 'textarea') { %>
+                            <textarea id="<%= field.name %>" 
+                                      name="<%= field.name %>" 
+                                      rows="4"
+                                      placeholder="<%= field.placeholder %>"
+                                      <% if (field.required) { %>required<% } %>
+                                      <% if (field.validation && field.validation.minLength) { %>minlength="<%= field.validation.minLength %>"<% } %>
+                                      <% if (field.validation && field.validation.maxLength) { %>maxlength="<%= field.validation.maxLength %>"<% } %>
+                                      class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>"><%= record[field.name] || '' %></textarea>
+                        
+                        <% } else if (field.type === 'select') { %>
+                            <select id="<%= field.name %>" 
+                                    name="<%= field.name  %>" 
+                                    <% if (field.required) { %>required<% } %>
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                                <option value="">Select <%= field.label %></option>
+                                <% if (field.options && field.options.length > 0) { %>
+                                    <% field.options.forEach(option => { %>
+                                        <option value="<%= option.value %>" <%= (record[field.name] && record[field.name].toString() === option.value) ? 'selected' : '' %>>
+                                            <%= option.label %>
+                                        </option>
+                                    <% }); %>
+                                <% } %>
+                            </select>
+                        
+                        <% } else if (field.type === 'multiselect') { %>
+                            <select id="<%= field.name %>" 
+                                    name="<%= field.name %>[]" 
+                                    multiple
+                                    <% if (field.required) { %>required<% } %>
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                                <% if (field.options && field.options.length > 0) { %>
+                                    <% field.options.forEach(option => { %>
+                                        <option value="<%= option.value %>" <%= (Array.isArray(record[field.name]) && record[field.name].includes(option.value)) ? 'selected' : '' %>>
+                                            <%= option.label %>
+                                        </option>
+                                    <% }); %>
+                                <% } %>
+                            </select>
+                            <p class="mt-1 text-sm text-gray-500">Hold Ctrl (or Cmd on Mac) to select multiple options</p>
+                        
+                        <% } else if (field.type === 'checkbox') { %>
+                            <div class="flex items-center">
+                                <input type="checkbox" 
+                                       id="<%= field.name %>" 
+                                       name="<%= field.name %>" 
+                                       value="true"
+                                       <%= record[field.name] ? 'checked' : '' %>
+                                       class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                                <label for="<%= field.name %>" class="ml-2 block text-sm text-gray-900">
+                                    <%= field.label %>
+                                    <% if (field.required) { %>
+                                        <span class="text-red-500">*</span>
+                                    <% } %>
+                                </label>
+                            </div>
+                        
+                        <% } else if (field.type === 'date') { %>
+                            <input type="date" 
+                                   id="<%= field.name %>" 
+                                   name="<%= field.name %>" 
+                                   value="<%= record[field.name] ? new Date(record[field.name]).toISOString().split('T')[0] : '' %>"
+                                   <% if (field.required) { %>required<% } %>
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                        
+                        <% } else if (field.type === 'file') { %>
+                            <input type="file" 
+                                   id="<%= field.name %>" 
+                                   name="<%= field.name %>" 
+                                   accept="image/*"
+                                   <% if (field.required) { %>required<% } %>
+                                   <% 
+                                     // Check if this field is an array field (for multiple file uploads)
+                                     const isArrayField = field.name.includes('multi_') || field.name.includes('images') || field.name.includes('photos');
+                                     if (isArrayField) { 
+                                   %>multiple<% } %>
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                            <% if (isArrayField) { %>
+                                <p class="mt-1 text-sm text-gray-500">You can select multiple images</p>
+                            <% } %>
+                        
+                        <% } else if (field.type === 'tags') { %>
+                            <input type="text" 
+                                   id="<%= field.name %>" 
+                                   name="<%= field.name %>" 
+                                   value="<%= Array.isArray(record[field.name]) ? record[field.name].join(', ') : '' %>"
+                                   placeholder="Enter tags separated by commas"
+                                   <% if (field.required) { %>required<% } %>
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
+                        <% } %>
+                        
+                        <!-- Field Help Text -->
+                        <% if (field.helpText) { %>
+                            <p class="mt-1 text-sm text-gray-500"><%= field.helpText %></p>
+                        <% } %>
+                        
+                        <!-- Field Validation Error -->
+                        <% if (errors && errors.find(e => e.field === field.name)) { %>
+                            <% const error = errors.find(e => e.field === field.name); %>
+                            <p class="mt-1 text-sm text-red-600"><%= error.message %></p>
+                        <% } %>
+                    </div>
+                <% }); %>
+
+                <!-- Form Actions -->
+                <div class="flex justify-end space-x-3 pt-6 border-t border-gray-200">
+                    <a href="/admin/<%= modelName %>" 
+                       class="bg-gray-300 hover:bg-gray-400 text-gray-800 px-6 py-2 rounded-md font-medium transition duration-200">
+                        Cancel
+                    </a>
+                    <button type="submit" 
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition duration-200">
+                        <i class="fas fa-save mr-2"></i>Create <%= titleCase %>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </main>
+
+    <script>
+        // Sidebar toggle
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('mainContent');
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        
+        sidebarToggle.addEventListener('click', () => {
+            sidebar.classList.toggle('collapsed');
+            mainContent.classList.toggle('expanded');
+        });
+
+        // Sub-menu toggle functionality
+        function toggleSubMenu(event, element) {
+            event.preventDefault();
+            const menuItem = element.closest('.menu-item');
+            const subMenu = menuItem.querySelector('.sub-menu');
+            
+            if (subMenu) {
+                const isExpanded = menuItem.classList.contains('expanded');
+                
+                if (isExpanded) {
+                    menuItem.classList.remove('expanded');
+                    subMenu.classList.remove('expanded');
+                } else {
+                    menuItem.classList.add('expanded');
+                    subMenu.classList.add('expanded');
+                }
+            }
+        }
+
+        // Form validation
+        document.querySelector('form').addEventListener('submit', function(e) {
+            const requiredFields = document.querySelectorAll('[required]');
+            let isValid = true;
+            
+            requiredFields.forEach(field => {
+                if (!field.value.trim()) {
+                    isValid = false;
+                    field.classList.add('border-red-500');
+                } else {
+                    field.classList.remove('border-red-500');
+                }
+            });
+            
+            if (!isValid) {
+                e.preventDefault();
+                alert('Please fill in all required fields');
+            }
+        });
+
+        // Real-time validation
+        document.querySelectorAll('input, textarea, select').forEach(field => {
+            field.addEventListener('blur', function() {
+                if (this.hasAttribute('required') && !this.value.trim()) {
+                    this.classList.add('border-red-500');
+                } else {
+                    this.classList.remove('border-red-500');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

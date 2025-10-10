@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100">
+    <div class="min-h-screen flex items-center justify-center">
+        <div class="max-w-md w-full bg-white rounded-lg shadow-lg p-8">
+            <div class="text-center">
+                <!-- Error Icon -->
+                <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-red-100 mb-4">
+                    <i class="fas fa-exclamation-triangle text-red-600 text-2xl"></i>
+                </div>
+                
+                <!-- Error Title -->
+                <h1 class="text-2xl font-bold text-gray-900 mb-2"><%= title %></h1>
+                
+                <!-- Error Message -->
+                <p class="text-gray-600 mb-6"><%= message %></p>
+                
+                <!-- Error Details (Development Only) -->
+                <% if (error && error.details && process.env.NODE_ENV === 'development') { %>
+                    <div class="bg-gray-50 rounded-md p-4 mb-6 text-left">
+                        <h3 class="text-sm font-medium text-gray-900 mb-2">Error Details:</h3>
+                        <pre class="text-xs text-gray-600 overflow-auto"><%= JSON.stringify(error.details, null, 2) %></pre>
+                    </div>
+                <% } %>
+                
+                <!-- Action Buttons -->
+                <div class="flex space-x-3">
+                    <button onclick="history.back()" class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded-md font-medium transition duration-200">
+                        <i class="fas fa-arrow-left mr-2"></i>Go Back
+                    </button>
+                    <a href="/admin/dashboard" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium transition duration-200">
+                        <i class="fas fa-home mr-2"></i>Dashboard
+                    </a>
+                </div>
+                
+                <!-- Additional Help -->
+                <div class="mt-6 text-sm text-gray-500">
+                    <p>If this error persists, please contact your system administrator.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Route Management - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar.collapsed { transform: translateX(-100%); }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .main-content.expanded { margin-left: 0; }
+        .sortable-item { cursor: move; }
+        .sortable-item:hover { background-color: #f3f4f6; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b border-gray-200 fixed top-0 left-0 right-0 z-50">
+        <div class="flex items-center justify-between px-6 py-4">
+            <div class="flex items-center">
+                <button id="sidebarToggle" class="text-gray-500 hover:text-gray-700 mr-4">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+                <h1 class="text-2xl font-bold text-gray-900">Route Management</h1>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                </a>
+                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white shadow-lg z-40">
+        <nav class="mt-8">
+            <div class="px-4 py-2">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+            </div>
+            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+                <% routes.forEach(route => { %>
+                    <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                        <i class="<%= route.icon %> mr-3"></i>
+                        <span><%= route.name %></span>
+                    </a>
+                <% }); %>
+            <% } else { %>
+                <!-- Fallback static routes -->
+                <a href="/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-users mr-3"></i>
+                    <span>Users</span>
+                </a>
+                <a href="/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-box mr-3"></i>
+                    <span>Products</span>
+                </a>
+                <a href="/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-blog mr-3"></i>
+                    <span>Blogs 3232</span>
+                </a>
+                <a href="/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-shopping-cart mr-3"></i>
+                    <span>Orders</span>
+                </a>
+                <a href="/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-tags mr-3"></i>
+                    <span>Categories</span>
+                </a>
+            <% } %>
+            
+            <!-- Route Management Section -->
+            <div class="px-4 py-2 mt-6">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Route Management</h3>
+            </div>
+            <a href="/admin/routes" class="flex items-center px-4 py-3 text-blue-600 bg-blue-50 hover:bg-blue-100">
+                <i class="fas fa-route mr-3"></i>
+                <span>Manage Routes</span>
+            </a>
+            <a href="/admin/routes/create" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <i class="fas fa-plus mr-3"></i>
+                <span>Create Route</span>
+            </a>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main id="mainContent" class="main-content ml-64 mt-16 p-6">
+        <!-- Breadcrumb -->
+        <nav class="flex mb-6" aria-label="Breadcrumb">
+            <ol class="inline-flex items-center space-x-1 md:space-x-3">
+                <li class="inline-flex items-center">
+                    <a href="/admin/dashboard" class="inline-flex items-center text-sm font-medium text-gray-700 hover:text-blue-600">
+                        <i class="fas fa-home mr-2"></i>
+                        Dashboard
+                    </a>
+                </li>
+                <li aria-current="page">
+                    <div class="flex items-center">
+                        <i class="fas fa-chevron-right text-gray-400 mx-2"></i>
+                        <span class="text-sm font-medium text-gray-500">Route Management</span>
+                    </div>
+                </li>
+            </ol>
+        </nav>
+
+        <!-- Page Header -->
+        <div class="mb-6">
+            <h2 class="text-3xl font-bold text-gray-900">Route Management</h2>
+            <p class="text-gray-600">Manage and configure admin panel routes dynamically</p>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="p-2 bg-blue-100 rounded-lg">
+                        <i class="fas fa-route text-blue-600 text-xl"></i>
+                    </div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-600">Total Routes</p>
+                        <p class="text-2xl font-bold text-gray-900" id="totalRoutes">-</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="p-2 bg-green-100 rounded-lg">
+                        <i class="fas fa-check-circle text-green-600 text-xl"></i>
+                    </div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-600">Enabled Routes</p>
+                        <p class="text-2xl font-bold text-gray-900" id="enabledRoutes">-</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="p-2 bg-red-100 rounded-lg">
+                        <i class="fas fa-times-circle text-red-600 text-xl"></i>
+                    </div>
+                    <div class="ml-4">
+                        <p class="text-sm font-medium text-gray-600">Disabled Routes</p>
+                        <p class="text-2xl font-bold text-gray-900" id="disabledRoutes">-</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="flex justify-between items-center mb-6">
+            <div class="flex space-x-3">
+                <button onclick="loadRoutes()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium transition duration-200">
+                    <i class="fas fa-refresh mr-2"></i>Refresh
+                </button>
+                <button onclick="showCreateForm()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md font-medium transition duration-200">
+                    <i class="fas fa-plus mr-2"></i>Create Route
+                </button>
+            </div>
+            <div class="flex items-center space-x-2">
+                <label class="text-sm text-gray-600">Show:</label>
+                <select id="filterStatus" onchange="filterRoutes()" class="border border-gray-300 rounded-md px-3 py-1 text-sm">
+                    <option value="all">All Routes</option>
+                    <option value="enabled">Enabled Only</option>
+                    <option value="disabled">Disabled Only</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Routes Table -->
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-medium text-gray-900">Routes</h3>
+                <p class="text-sm text-gray-600">Drag to reorder routes</p>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Order</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Icon</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="routesTableBody" class="bg-white divide-y divide-gray-200">
+                        <!-- Routes will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Loading State -->
+        <div id="loadingState" class="text-center py-8 hidden">
+            <i class="fas fa-spinner fa-spin text-2xl text-gray-400"></i>
+            <p class="text-gray-600 mt-2">Loading routes...</p>
+        </div>
+
+        <!-- Empty State -->
+        <div id="emptyState" class="text-center py-12 hidden">
+            <i class="fas fa-route text-4xl text-gray-300 mb-4"></i>
+            <h3 class="text-lg font-medium text-gray-900 mb-2">No routes found</h3>
+            <p class="text-gray-600 mb-4">Get started by creating your first route</p>
+            <button onclick="showCreateForm()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium">
+                Create Route
+            </button>
+        </div>
+    </main>
+
+    <!-- Create/Edit Route Modal -->
+    <div id="routeModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
+        <div class="flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white rounded-lg shadow-xl max-w-md w-full">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h3 class="text-lg font-medium text-gray-900" id="modalTitle">Create Route</h3>
+                </div>
+                <form id="routeForm" class="p-6 space-y-4">
+                    <div>
+                        <label for="routeKey" class="block text-sm font-medium text-gray-700">Route Key</label>
+                        <input type="text" id="routeKey" name="key" required
+                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <p class="text-xs text-gray-500 mt-1">Unique identifier for the route (e.g., 'custom_module')</p>
+                    </div>
+                    <div>
+                        <label for="routeName" class="block text-sm font-medium text-gray-700">Display Name</label>
+                        <input type="text" id="routeName" name="name" required
+                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label for="routePath" class="block text-sm font-medium text-gray-700">Path</label>
+                        <input type="text" id="routePath" name="path"
+                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <p class="text-xs text-gray-500 mt-1">Leave empty to auto-generate from key</p>
+                    </div>
+                    <div>
+                        <label for="routeIcon" class="block text-sm font-medium text-gray-700">Icon Class</label>
+                        <input type="text" id="routeIcon" name="icon" placeholder="fas fa-cog"
+                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <p class="text-xs text-gray-500 mt-1">FontAwesome icon class (e.g., fas fa-users)</p>
+                    </div>
+                    <div>
+                        <label for="routeDescription" class="block text-sm font-medium text-gray-700">Description</label>
+                        <textarea id="routeDescription" name="description" rows="2"
+                                  class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                    </div>
+                    <div class="flex items-center">
+                        <input type="checkbox" id="routeEnabled" name="enabled" checked
+                               class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                        <label for="routeEnabled" class="ml-2 block text-sm text-gray-900">Enabled</label>
+                    </div>
+                </form>
+                <div class="px-6 py-4 border-t border-gray-200 flex justify-end space-x-3">
+                    <button onclick="hideCreateForm()" class="bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded-md font-medium">
+                        Cancel
+                    </button>
+                    <button onclick="saveRoute()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium">
+                        Save Route
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let routes = [];
+        let editingRoute = null;
+
+        // Load routes on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadRoutes();
+        });
+
+        // Sidebar toggle
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('mainContent');
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        
+        sidebarToggle.addEventListener('click', () => {
+            sidebar.classList.toggle('collapsed');
+            mainContent.classList.toggle('expanded');
+        });
+
+        // Load routes from API
+        async function loadRoutes() {
+            showLoading();
+            try {
+                const response = await fetch('/admin/routes');
+                const data = await response.json();
+                
+                if (data.success) {
+                    routes = data.data.routes;
+                    updateStats(data.data.stats);
+                    renderRoutes();
+                } else {
+                    showError('Failed to load routes: ' + data.message);
+                }
+            } catch (error) {
+                showError('Error loading routes: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // Update statistics
+        function updateStats(stats) {
+            document.getElementById('totalRoutes').textContent = stats.total;
+            document.getElementById('enabledRoutes').textContent = stats.enabled;
+            document.getElementById('disabledRoutes').textContent = stats.disabled;
+        }
+
+        // Render routes table
+        function renderRoutes() {
+            const tbody = document.getElementById('routesTableBody');
+            const filter = document.getElementById('filterStatus').value;
+            
+            let filteredRoutes = routes;
+            if (filter === 'enabled') {
+                filteredRoutes = routes.filter(route => route.enabled);
+            } else if (filter === 'disabled') {
+                filteredRoutes = routes.filter(route => !route.enabled);
+            }
+
+            if (filteredRoutes.length === 0) {
+                showEmpty();
+                return;
+            }
+
+            hideEmpty();
+            tbody.innerHTML = filteredRoutes.map(route => `
+                <tr class="sortable-item" data-key="${route.name}">
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        <i class="fas fa-grip-vertical text-gray-400"></i>
+                        ${route.order}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex items-center">
+                            <i class="${route.icon} mr-3 text-gray-400"></i>
+                            <div>
+                                <div class="text-sm font-medium text-gray-900">${route.name}</div>
+                                <div class="text-sm text-gray-500">${route.description || ''}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        <code class="bg-gray-100 px-2 py-1 rounded">${route.path}</code>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        <i class="${route.icon}"></i>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full ${route.enabled ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                            ${route.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <div class="flex space-x-2">
+                            <button onclick="editRoute('${route.name}')" class="text-blue-600 hover:text-blue-900">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button onclick="toggleRoute('${route.name}', ${!route.enabled})" class="text-yellow-600 hover:text-yellow-900">
+                                <i class="fas fa-${route.enabled ? 'eye-slash' : 'eye'}"></i>
+                            </button>
+                            <button onclick="deleteRoute('${route.name}')" class="text-red-600 hover:text-red-900">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // Filter routes
+        function filterRoutes() {
+            renderRoutes();
+        }
+
+        // Show create form
+        function showCreateForm() {
+            editingRoute = null;
+            document.getElementById('modalTitle').textContent = 'Create Route';
+            document.getElementById('routeForm').reset();
+            document.getElementById('routeEnabled').checked = true;
+            document.getElementById('routeModal').classList.remove('hidden');
+        }
+
+        // Hide create form
+        function hideCreateForm() {
+            document.getElementById('routeModal').classList.add('hidden');
+            editingRoute = null;
+        }
+
+        // Edit route
+        function editRoute(key) {
+            const route = routes.find(r => r.name === key);
+            if (!route) return;
+
+            editingRoute = route;
+            document.getElementById('modalTitle').textContent = 'Edit Route';
+            document.getElementById('routeKey').value = route.name;
+            document.getElementById('routeKey').disabled = true;
+            document.getElementById('routeName').value = route.name;
+            document.getElementById('routePath').value = route.path;
+            document.getElementById('routeIcon').value = route.icon;
+            document.getElementById('routeDescription').value = route.description || '';
+            document.getElementById('routeEnabled').checked = route.enabled;
+            document.getElementById('routeModal').classList.remove('hidden');
+        }
+
+        // Save route
+        async function saveRoute() {
+            const form = document.getElementById('routeForm');
+            const formData = new FormData(form);
+            const data = Object.fromEntries(formData.entries());
+            data.enabled = document.getElementById('routeEnabled').checked;
+
+            try {
+                const url = editingRoute ? `/admin/routes/${editingRoute.name}` : '/admin/routes';
+                const method = editingRoute ? 'PUT' : 'POST';
+                
+                const response = await fetch(url, {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    hideCreateForm();
+                    loadRoutes();
+                    showSuccess(result.message);
+                } else {
+                    showError('Failed to save route: ' + result.message);
+                }
+            } catch (error) {
+                showError('Error saving route: ' + error.message);
+            }
+        }
+
+        // Toggle route enabled/disabled
+        async function toggleRoute(key, enabled) {
+            try {
+                const response = await fetch(`/admin/routes/${key}/toggle`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ enabled })
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    loadRoutes();
+                    showSuccess(result.message);
+                } else {
+                    showError('Failed to toggle route: ' + result.message);
+                }
+            } catch (error) {
+                showError('Error toggling route: ' + error.message);
+            }
+        }
+
+        // Delete route
+        async function deleteRoute(key) {
+            if (!confirm(`Are you sure you want to delete the route "${key}"?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/admin/routes/${key}`, {
+                    method: 'DELETE'
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    loadRoutes();
+                    showSuccess(result.message);
+                } else {
+                    showError('Failed to delete route: ' + result.message);
+                }
+            } catch (error) {
+                showError('Error deleting route: ' + error.message);
+            }
+        }
+
+        // Show loading state
+        function showLoading() {
+            document.getElementById('loadingState').classList.remove('hidden');
+            document.getElementById('routesTableBody').innerHTML = '';
+        }
+
+        // Hide loading state
+        function hideLoading() {
+            document.getElementById('loadingState').classList.add('hidden');
+        }
+
+        // Show empty state
+        function showEmpty() {
+            document.getElementById('emptyState').classList.remove('hidden');
+        }
+
+        // Hide empty state
+        function hideEmpty() {
+            document.getElementById('emptyState').classList.add('hidden');
+        }
+
+        // Show success message
+        function showSuccess(message) {
+            // You can implement a toast notification here
+            alert('Success: ' + message);
+        }
+
+        // Show error message
+        function showError(message) {
+            // You can implement a toast notification here
+            alert('Error: ' + message);
+        }
+    </script>
+</body>
+</html>
+

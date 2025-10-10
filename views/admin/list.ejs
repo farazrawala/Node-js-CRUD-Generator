@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar.collapsed { transform: translateX(-100%); }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .main-content.expanded { margin-left: 0; }
+        
+        .sub-menu {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-in-out;
+        }
+        
+        .sub-menu.expanded {
+            max-height: 200px;
+        }
+        
+        .menu-item.has-submenu .chevron {
+            transition: transform 0.3s ease-in-out;
+        }
+        
+        .menu-item.has-submenu.expanded .chevron {
+            transform: rotate(180deg);
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b border-gray-200 fixed top-0 left-0 right-0 z-50">
+        <div class="flex items-center justify-between px-6 py-4">
+            <div class="flex items-center">
+                <button id="sidebarToggle" class="text-gray-500 hover:text-gray-700 mr-4">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+                <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                </a>
+                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white shadow-lg z-40">
+        <nav class="mt-8">
+            <div class="px-4 py-2">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+            </div>
+            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+                <% routes.forEach(route => { %>
+                    <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
+                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === route.path.replace('/admin/', '') ? 'bg-blue-50 text-blue-700' : '' %>" 
+                           <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
+                            <i class="<%= route.icon %> mr-3"></i>
+                            <span><%= route.name %></span>
+                            <% if (route.subMenus && route.subMenus.length > 0) { %>
+                                <i class="fas fa-chevron-down ml-auto text-xs chevron"></i>
+                            <% } %>
+                        </a>
+                        <% if (route.subMenus && route.subMenus.length > 0) { %>
+                            <div class="sub-menu ml-4">
+                                <% route.subMenus.forEach(subMenu => { %>
+                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800 <%= modelName === subMenu.path.replace('/admin/', '') ? 'bg-blue-25 text-blue-600' : '' %>">
+                                        <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
+                                        <span><%= subMenu.name %></span>
+                                    </a>
+                                <% }); %>
+                            </div>
+                        <% } %>
+                    </div>
+                <% }); %>
+            <% } else { %>
+                <!-- Fallback static routes if dynamic routes are not available -->
+                <a href="/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'users' ? 'bg-blue-50 text-blue-700' : '' %>">
+                    <i class="fas fa-users mr-3"></i>
+                    <span>Users</span>
+                </a>
+                <a href="/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'products' ? 'bg-blue-50 text-blue-700' : '' %>">
+                    <i class="fas fa-box mr-3"></i>
+                    <span>Products</span>
+                </a>
+                <a href="/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'blogs' ? 'bg-blue-50 text-blue-700' : '' %>">
+                    <i class="fas fa-blog mr-3"></i>
+                    <span>Blogs</span>
+                </a>
+                <a href="/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'orders' ? 'bg-blue-50 text-blue-700' : '' %>">
+                    <i class="fas fa-shopping-cart mr-3"></i>
+                    <span>Orders</span>
+                </a>
+                <a href="/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'categories' ? 'bg-blue-50 text-blue-700' : '' %>">
+                    <i class="fas fa-tags mr-3"></i>
+                    <span>Categories</span>
+                </a>
+                <a href="/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'complain' ? 'bg-blue-50 text-blue-700' : '' %>">
+                    <i class="fas fa-exclamation-triangle mr-3"></i>
+                    <span>Complaints</span>
+                </a>
+            <% } %>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main id="mainContent" class="main-content ml-64 mt-16 p-6">
+        <!-- Flash Messages -->
+        <% if (typeof success !== 'undefined' && success && success.length > 0) { %>
+            <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
+                <%= success %>
+            </div>
+        <% } %>
+        <% if (typeof error !== 'undefined' && error && error.length > 0) { %>
+            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+                <%= error %>
+            </div>
+        <% } %>
+
+        <!-- Page Header -->
+        <div class="flex justify-between items-center mb-6">
+            <div>
+                <h2 class="text-3xl font-bold text-gray-900"><%= title %></h2>
+                <p class="text-gray-600">Manage your <%= singularName.toLowerCase() %> records</p>
+            </div>
+            <a href="/admin/<%= modelName %>/create" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-medium transition duration-200">
+                <i class="fas fa-plus mr-2"></i>Create <%= titleCase %>
+            </a>
+        </div>
+
+        <!-- Tabs for Active and Deleted Records (only show if soft delete is enabled) -->
+        <% if (typeof softDelete !== 'undefined' && softDelete) { %>
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
+            <div class="border-b border-gray-200">
+                <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                    <a href="/admin/<%= modelName %>" 
+                       class="<%= typeof showDeleted === 'undefined' || !showDeleted ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300' %> whitespace-nowrap py-4 px-6 border-b-2 font-medium text-sm">
+                        <i class="fas fa-list mr-2"></i>Active Records
+                        <% 
+                        // Always show active records count on active records tab
+                        let activeCount = pagination.totalItems;
+                        if (typeof showDeleted !== 'undefined' && showDeleted) {
+                            // When viewing deleted records, use deletedPagination for active count
+                            activeCount = typeof deletedPagination !== 'undefined' && deletedPagination !== null ? '' : 0;
+                        } else {
+                            // When viewing active records, use pagination for active count
+                            activeCount = typeof pagination !== 'undefined' && pagination.totalItems !== undefined ? pagination.totalItems : 0;
+                        }
+                        %>
+                        <% if (activeCount > 0) { %>
+                            <span class="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full ml-2"><%= activeCount %></span>
+                        <% } %>
+                    </a>
+                    <a href="/admin/<%= modelName %>?deleted=true" 
+                       class="<%= typeof showDeleted !== 'undefined' && showDeleted ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300' %> whitespace-nowrap py-4 px-6 border-b-2 font-medium text-sm">
+                        <i class="fas fa-trash mr-2"></i>Deleted Records
+                        <% 
+                        // Always show deleted records count on deleted records tab
+                        let deletedCount = 0;
+                        if (typeof showDeleted !== 'undefined' && showDeleted) {
+                            // When viewing deleted records, use pagination for deleted count
+                            deletedCount = typeof pagination !== 'undefined' && pagination.totalItems !== undefined ? pagination.totalItems : 0;
+                        } else {
+                            // When viewing active records, use deletedPagination for deleted count
+                            deletedCount = typeof deletedPagination !== 'undefined' && deletedPagination !== null ? deletedPagination.totalItems : 0;
+                        }
+                        %>
+                        <% if (deletedCount > 0) { %>
+                            <span class="bg-red-100 text-red-800 text-xs font-medium px-2.5 py-0.5 rounded-full ml-2"><%= deletedCount %></span>
+                        <% } %>
+                    </a>
+                </nav>
+            </div>
+        </div>
+        <% } %>
+
+        <!-- Search and Filters -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+            <form method="GET" class="space-y-4">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <!-- Search -->
+                    <div>
+                        <label for="search" class="block text-sm font-medium text-gray-700 mb-2">Search</label>
+                        <input type="text" id="search" name="search" value="<%= filters.search || '' %>" 
+                               placeholder="Search <%= singularName.toLowerCase() %>s..." 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    
+                    <!-- Sort By -->
+                    <div>
+                        <label for="sortBy" class="block text-sm font-medium text-gray-700 mb-2">Sort By</label>
+                        <select id="sortBy" name="sortBy" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="createdAt" <%= pagination.sortBy === 'createdAt' ? 'selected' : '' %>>Created Date</option>
+                            <% if (filters.sortable && filters.sortable.includes('name')) { %>
+                                <option value="name" <%= pagination.sortBy === 'name' ? 'selected' : '' %>>Name</option>
+                            <% } %>
+                            <% if (filters.sortable && filters.sortable.includes('email')) { %>
+                                <option value="email" <%= pagination.sortBy === 'email' ? 'selected' : '' %>>Email</option>
+                            <% } %>
+                        </select>
+                    </div>
+                    
+                    <!-- Sort Order -->
+                    <div>
+                        <label for="sortOrder" class="block text-sm font-medium text-gray-700 mb-2">Sort Order</label>
+                        <select id="sortOrder" name="sortOrder" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="desc" <%= pagination.sortOrder === 'desc' ? 'selected' : '' %>>Newest First</option>
+                            <option value="asc" <%= pagination.sortOrder === 'asc' ? 'selected' : '' %>>Oldest First</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="flex justify-between items-center">
+                    <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-md transition duration-200">
+                        <i class="fas fa-search mr-2"></i>Apply Filters
+                    </button>
+                    <a href="/admin/<%= modelName %>" class="text-gray-600 hover:text-gray-800">
+                        <i class="fas fa-times mr-2"></i>Clear Filters
+                    </a>
+                </div>
+            </form>
+        </div>
+
+        <!-- Records Table -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-lg font-medium text-gray-900">
+                        <%= pagination.totalItems %> <%= singularName.toLowerCase() %>(s) found
+                    </h3>
+                    <div class="text-sm text-gray-500">
+                        Page <%= pagination.currentPage %> of <%= pagination.totalPages %>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <% Object.keys(fieldConfig).forEach(fieldName => { %>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                    <%= fieldConfig[fieldName].label %>
+                                </th>
+                            <% }); %>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Created
+                            </th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Actions
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        <% if (records && records.length > 0) { %>
+                            <% records.forEach(record => { %>
+                                <tr class="hover:bg-gray-50">
+                                    <% Object.keys(fieldConfig).forEach(fieldName => { %>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                            <% if (fieldConfig[fieldName].type === 'checkbox') { %>
+                                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium <%= record[fieldName] ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
+                                                    <%= record[fieldName] ? 'Yes' : 'No' %>
+                                                </span>
+                                            <% } else if (fieldConfig[fieldName].type === 'file' && record[fieldName]) { %>
+                                                <% 
+                                                // Handle both single images and multiple images
+                                                let images = record[fieldName];
+                                                if (typeof images === 'string') {
+                                                    images = [images]; // Convert single image to array
+                                                } else if (!Array.isArray(images)) {
+                                                    images = []; // Ensure it's an array
+                                                }
+                                                
+                                                // Clean up image paths
+                                                const cleanImagePath = (imagePath) => {
+                                                    if (!imagePath || typeof imagePath !== 'string') return '';
+                                                    
+                                                    // Clean up the path to avoid double /uploads/
+                                                    if (imagePath.startsWith('/uploads/uploads/')) {
+                                                        imagePath = imagePath.replace('/uploads/uploads/', '/uploads/');
+                                                    } else if (!imagePath.startsWith('/uploads/')) {
+                                                        if (imagePath.startsWith('/')) {
+                                                            imagePath = '/uploads' + imagePath;
+                                                        } else {
+                                                            imagePath = '/uploads/' + imagePath;
+                                                        }
+                                                    }
+                                                    
+                                                    // Use baseUrl if available
+                                                    if (typeof baseUrl !== 'undefined' && baseUrl) {
+                                                        if (imagePath.startsWith('/')) {
+                                                            imagePath = baseUrl + imagePath;
+                                                        } else {
+                                                            imagePath = baseUrl + '/' + imagePath;
+                                                        }
+                                                    }
+                                                    
+                                                    return imagePath;
+                                                };
+                                                
+                                                const cleanedImages = images.map(cleanImagePath).filter(img => img);
+                                                %>
+                                                <% if (cleanedImages.length > 0) { %>
+                                                    <div class="flex space-x-1">
+                                                        <% cleanedImages.slice(0, 3).forEach((imageSrc, index) => { %>
+                                                            <img src="<%= imageSrc %>" alt="<%= fieldConfig[fieldName].label %> <%= index + 1 %>" class="h-10 w-10 rounded object-cover border border-gray-200">
+                                                        <% }); %>
+                                                        <% if (cleanedImages.length > 3) { %>
+                                                            <div class="h-10 w-10 rounded bg-gray-100 flex items-center justify-center border border-gray-200">
+                                                                <span class="text-xs text-gray-500">+<%= cleanedImages.length - 3 %></span>
+                                                            </div>
+                                                        <% } %>
+                                                    </div>
+                                                <% } else { %>
+                                                    <span class="text-gray-400 text-xs">No image</span>
+                                                <% } %>
+                                            <% } else if (fieldConfig[fieldName].type === 'multiselect' && Array.isArray(record[fieldName])) { %>
+                                                <% if (record[fieldName].length > 0) { %>
+                                                    <div class="flex flex-wrap gap-1">
+                                                        <% record[fieldName].forEach(role => { %>
+                                                            <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                                                <%= role.charAt(0).toUpperCase() + role.slice(1) %>
+                                                            </span>
+                                                        <% }); %>
+                                                    </div>
+                                                <% } else { %>
+                                                    <span class="text-gray-400 text-xs">No roles</span>
+                                                <% } %>
+                                            <% } else if (fieldName === 'user_id' && record.user_id && typeof record.user_id === 'object' && record.user_id.name) { %>
+                                                <%= record.user_id.name %>
+                                            <% } else if (fieldName === 'company_id' && record.company_id && typeof record.company_id === 'object' && record.company_id.name) { %>
+                                                <%= record.company_id.name %>
+                                            <% } else { %>
+                                                <%= record[fieldName] || '-' %>
+                                            <% } %>
+                                        </td>
+                                    <% }); %>
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                        <%= new Date(record.createdAt).toLocaleDateString() %>
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                        <div class="flex justify-end space-x-2">
+                                            <% if (typeof softDelete !== 'undefined' && softDelete && typeof showDeleted !== 'undefined' && showDeleted) { %>
+                                                <!-- Actions for deleted records (only if soft delete is enabled) -->
+                                                <button onclick="restoreRecord('<%= record._id %>')" 
+                                                        class="text-green-600 hover:text-green-900 transition duration-200" 
+                                                        title="Restore Record">
+                                                    <i class="fas fa-undo"></i>
+                                                </button>
+                                                <button onclick="permanentDeleteRecord('<%= record._id %>')" 
+                                                        class="text-red-600 hover:text-red-900 transition duration-200" 
+                                                        title="Permanent Delete">
+                                                    <i class="fas fa-trash-alt"></i>
+                                                </button>
+                                            <% } else { %>
+                                                <!-- Actions for active records -->
+                                                <a href="/admin/<%= modelName %>/<%= record._id %>/edit" 
+                                                   class="text-blue-600 hover:text-blue-900 transition duration-200" 
+                                                   title="Edit Record">
+                                                    <i class="fas fa-edit"></i>
+                                                </a>
+                                                <button onclick="deleteRecord('<%= record._id %>')" 
+                                                        class="text-red-600 hover:text-red-900 transition duration-200" 
+                                                        title="Delete Record">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            <% } %>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <% }); %>
+                        <% } else { %>
+                            <tr>
+                                <td colspan="<%= Object.keys(fieldConfig).length + 2 %>" class="px-6 py-12 text-center text-gray-500">
+                                    <div class="flex flex-col items-center">
+                                        <i class="fas fa-inbox text-4xl mb-4 text-gray-300"></i>
+                                        <p class="text-lg font-medium">No <%= singularName.toLowerCase() %>s found</p>
+                                        <p class="text-sm">Get started by creating your first <%= singularName.toLowerCase() %></p>
+                                        <a href="/admin/<%= modelName %>/create" class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md transition duration-200">
+                                            Create <%= titleCase %>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        <% } %>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Pagination -->
+        <% if (pagination.totalPages > 1) { %>
+            <div class="bg-white rounded-lg shadow-sm border border-gray-200 px-6 py-4 mt-6">
+                <div class="flex items-center justify-between">
+                    <div class="text-sm text-gray-700">
+                        Showing <%= ((pagination.currentPage - 1) * pagination.itemsPerPage) + 1 %> 
+                        to <%= Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems) %> 
+                        of <%= pagination.totalItems %> results
+                    </div>
+                    
+                    <div class="flex space-x-2">
+                        <% if (pagination.hasPrevPage) { %>
+                            <a href="?page=<%= pagination.currentPage - 1 %>&limit=<%= pagination.itemsPerPage %>&sortBy=<%= pagination.sortBy %>&sortOrder=<%= pagination.sortOrder %>&search=<%= filters.search || '' %>" 
+                               class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
+                                Previous
+                            </a>
+                        <% } %>
+                        
+                        <% for (let i = 1; i <= pagination.totalPages; i++) { %>
+                            <% if (i === pagination.currentPage) { %>
+                                <span class="px-3 py-2 bg-blue-600 text-white rounded-md text-sm font-medium">
+                                    <%= i %>
+                                </span>
+                            <% } else { %>
+                                <a href="?page=<%= i %>&limit=<%= pagination.itemsPerPage %>&sortBy=<%= pagination.sortBy %>&sortOrder=<%= pagination.sortOrder %>&search=<%= filters.search || '' %>" 
+                                   class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
+                                    <%= i %>
+                                </a>
+                            <% } %>
+                        <% } %>
+                        
+                        <% if (pagination.hasNextPage) { %>
+                            <a href="?page=<%= pagination.currentPage + 1 %>&limit=<%= pagination.itemsPerPage %>&sortBy=<%= pagination.sortBy %>&sortOrder=<%= pagination.sortOrder %>&search=<%= filters.search || '' %>" 
+                               class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
+                                Next
+                            </a>
+                        <% } %>
+                    </div>
+                </div>
+            </div>
+        <% } %>
+    </main>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="deleteModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
+        <div class="flex items-center justify-center min-h-screen">
+            <div class="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
+                <div class="flex items-center mb-4">
+                    <div class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
+                        <i class="fas fa-exclamation-triangle text-red-600"></i>
+                    </div>
+                </div>
+                <div class="text-center">
+                    <h3 class="text-lg font-medium text-gray-900 mb-2">Delete <%= titleCase %></h3>
+                    <p class="text-sm text-gray-500 mb-6">
+                        Are you sure you want to delete this <%= singularName.toLowerCase() %>? This action cannot be undone.
+                    </p>
+                    <div class="flex space-x-3">
+                        <button onclick="closeDeleteModal()" class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded-md transition duration-200">
+                            Cancel
+                        </button>
+                        <button onclick="confirmDelete()" class="flex-1 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md transition duration-200">
+                            Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Restore Confirmation Modal (only if soft delete is enabled) -->
+    <% if (typeof softDelete !== 'undefined' && softDelete) { %>
+    <div id="restoreModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
+        <div class="flex items-center justify-center min-h-screen">
+            <div class="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
+                <div class="flex items-center mb-4">
+                    <div class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-green-100">
+                        <i class="fas fa-undo text-green-600"></i>
+                    </div>
+                </div>
+                <div class="text-center">
+                    <h3 class="text-lg font-medium text-gray-900 mb-2">Restore <%= titleCase %></h3>
+                    <p class="text-sm text-gray-500 mb-6">
+                        Are you sure you want to restore this <%= singularName.toLowerCase() %>?
+                    </p>
+                    <div class="flex space-x-3">
+                        <button onclick="closeRestoreModal()" class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded-md transition duration-200">
+                            Cancel
+                        </button>
+                        <button onclick="confirmRestore()" class="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md transition duration-200">
+                            Restore
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Permanent Delete Confirmation Modal (only if soft delete is enabled) -->
+    <div id="permanentDeleteModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
+        <div class="flex items-center justify-center min-h-screen">
+            <div class="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
+                <div class="flex items-center mb-4">
+                    <div class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
+                        <i class="fas fa-exclamation-triangle text-red-600"></i>
+                    </div>
+                </div>
+                <div class="text-center">
+                    <h3 class="text-lg font-medium text-gray-900 mb-2">Permanent Delete <%= titleCase %></h3>
+                    <p class="text-sm text-gray-500 mb-6">
+                        Are you sure you want to permanently delete this <%= singularName.toLowerCase() %>? This action cannot be undone and the record will be completely removed from the database.
+                    </p>
+                    <div class="flex space-x-3">
+                        <button onclick="closePermanentDeleteModal()" class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded-md transition duration-200">
+                            Cancel
+                        </button>
+                        <button onclick="confirmPermanentDelete()" class="flex-1 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md transition duration-200">
+                            Permanent Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <% } %>
+
+    <script>
+        // Sidebar toggle
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('mainContent');
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        
+        sidebarToggle.addEventListener('click', () => {
+            sidebar.classList.toggle('collapsed');
+            mainContent.classList.toggle('expanded');
+        });
+
+        // Delete functionality
+        let recordToDelete = null;
+        let recordToRestore = null;
+        let recordToPermanentDelete = null;
+        
+        function deleteRecord(id) {
+            recordToDelete = id;
+            document.getElementById('deleteModal').classList.remove('hidden');
+        }
+        
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').classList.add('hidden');
+            recordToDelete = null;
+        }
+        
+        function confirmDelete() {
+            if (recordToDelete) {
+                fetch(`/admin/<%= modelName %>/${recordToDelete}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('Error deleting record: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error deleting record');
+                });
+            }
+            closeDeleteModal();
+        }
+
+        // Restore functionality (only if soft delete is enabled)
+        <% if (typeof softDelete !== 'undefined' && softDelete) { %>
+        function restoreRecord(id) {
+            recordToRestore = id;
+            document.getElementById('restoreModal').classList.remove('hidden');
+        }
+        
+        function closeRestoreModal() {
+            document.getElementById('restoreModal').classList.add('hidden');
+            recordToRestore = null;
+        }
+        
+        function confirmRestore() {
+            if (recordToRestore) {
+                fetch(`/admin/<%= modelName %>/${recordToRestore}/restore`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('Error restoring record: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error restoring record');
+                });
+            }
+            closeRestoreModal();
+        }
+
+        // Permanent delete functionality (only if soft delete is enabled)
+        function permanentDeleteRecord(id) {
+            recordToPermanentDelete = id;
+            document.getElementById('permanentDeleteModal').classList.remove('hidden');
+        }
+        
+        function closePermanentDeleteModal() {
+            document.getElementById('permanentDeleteModal').classList.add('hidden');
+            recordToPermanentDelete = null;
+        }
+        
+        function confirmPermanentDelete() {
+            if (recordToPermanentDelete) {
+                fetch(`/admin/<%= modelName %>/${recordToPermanentDelete}/permanent-delete`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('Error permanently deleting record: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error permanently deleting record');
+                });
+            }
+            closePermanentDeleteModal();
+        }
+        <% } %>
+
+        // Close modals when clicking outside
+        document.getElementById('deleteModal').addEventListener('click', (e) => {
+            if (e.target.id === 'deleteModal') {
+                closeDeleteModal();
+            }
+        });
+
+        <% if (typeof softDelete !== 'undefined' && softDelete) { %>
+        document.getElementById('restoreModal').addEventListener('click', (e) => {
+            if (e.target.id === 'restoreModal') {
+                closeRestoreModal();
+            }
+        });
+
+        document.getElementById('permanentDeleteModal').addEventListener('click', (e) => {
+            if (e.target.id === 'permanentDeleteModal') {
+                closePermanentDeleteModal();
+            }
+        });
+        <% } %>
+
+        // Sub-menu toggle functionality
+        function toggleSubMenu(event, element) {
+            event.preventDefault();
+            const menuItem = element.closest('.menu-item');
+            const subMenu = menuItem.querySelector('.sub-menu');
+            
+            if (subMenu) {
+                const isExpanded = menuItem.classList.contains('expanded');
+                
+                if (isExpanded) {
+                    menuItem.classList.remove('expanded');
+                    subMenu.classList.remove('expanded');
+                } else {
+                    menuItem.classList.add('expanded');
+                    subMenu.classList.add('expanded');
+                }
+            }
+        }
+    </script>
+</body>
+</html>
+
