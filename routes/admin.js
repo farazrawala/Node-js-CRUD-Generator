@@ -378,10 +378,11 @@ const complainAdminCRUD = adminCrudGenerator(
 const categoryAdminCRUD = adminCrudGenerator(
   Category,
   "categories",
-  ["name", "description", "isActive", "icon", "color", "sort_order"],
+  ["parent_id", "name", "description", "isActive", "icon", "color", "sort_order"],
   {
     excludedFields: ["__v"],
     includedFields: [
+      "parent_id",
       "name",
       "description",
       "isActive",
@@ -399,6 +400,46 @@ const categoryAdminCRUD = adminCrudGenerator(
       isActive: "checkbox",
       sort_order: "number",
       description: "textarea",
+      parent_id: "select",
+    },
+    fieldLabels: {
+      parent_id: "Parent Category",
+    },
+    fieldOptions: {
+      isActive: [
+        { value: true, label: "Active" },
+        { value: false, label: "Inactive" },
+      ],
+    },
+    middleware: {
+      afterQuery: async (records, req) => {
+        const populatedRecords = await Category.populate(records, { path: 'parent_id', select: 'name' });
+        console.log('populatedRecords',populatedRecords);
+        if (req.fieldConfig?.parent_id) {
+          const categories = await Category.find({ deletedAt: null }, 'name').sort({ name: 1 });
+          req.fieldConfig.parent_id.options = [
+            { value: '', label: 'None (Top Level Category)' },
+            ...categories.map(category => ({ value: category._id.toString(), label: category.name }))
+          ];
+          req.fieldConfig.parent_id.placeholder = 'Select Parent Category';
+          req.fieldConfig.parent_id.helpText = 'Choose the parent category (optional)';
+        }
+        return populatedRecords;
+      }
+    },
+    responseFormatting: {
+      list: async (records) => records.map(record => {
+        const recordObj = record.toObject ? record.toObject() : record;
+        // If parent_id is populated, convert it to display the name
+        if (recordObj.parent_id) {
+          if (typeof recordObj.parent_id === 'object' && recordObj.parent_id.name) {
+            recordObj.parent_id = recordObj.parent_id.name;
+          }
+        } else {
+          recordObj.parent_id = 'Top Level';
+        }
+        return recordObj;
+      })
     },
     fieldOptions: {
       isActive: [

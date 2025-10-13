@@ -2,6 +2,18 @@ const mongoose = require('mongoose');
 
 const categorySchema = new mongoose.Schema(
   {
+    parent_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'category',
+      default: null,
+      set: function(value) {
+        // Convert empty strings, 'null', undefined to null
+        if (value === '' || value === 'null' || value === undefined || value === null) {
+          return null;
+        }
+        return value;
+      }
+    },
     name: {
       type: String,
       required: [true, 'Category name is required'],
@@ -30,7 +42,12 @@ const categorySchema = new mongoose.Schema(
     sort_order: {
       type: Number,
       default: 0
-    }
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
+      field_name: "Deleted At",
+    },
   },
   {
     timestamps: true,
@@ -64,6 +81,11 @@ categorySchema.pre('save', function(next) {
   // Ensure description is properly formatted
   if (this.description) {
     this.description = this.description.trim();
+  }
+  
+  // Handle empty parent_id - convert empty string to null
+  if (this.parent_id === '' || this.parent_id === 'null' || this.parent_id === undefined) {
+    this.parent_id = null;
   }
   
   next();

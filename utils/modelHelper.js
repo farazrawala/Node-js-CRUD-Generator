@@ -229,7 +229,20 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     const modelData = {};
     Object.keys(req.body).forEach((key) => {
       if (modelSchema[key]) {
-        modelData[key] = req.body[key].trim();
+        const fieldConfig = modelSchema[key];
+        let value = req.body[key];
+        
+        // Handle ObjectID fields - convert empty strings to null
+        if (fieldConfig.type && fieldConfig.type.name === 'ObjectId') {
+          if (value === '' || value === 'null' || value === undefined) {
+            modelData[key] = null;
+          } else {
+            modelData[key] = value;
+          }
+        } else {
+          // For non-ObjectID fields, trim as usual
+          modelData[key] = value.trim ? value.trim() : value;
+        }
       }
     });
 
@@ -563,14 +576,40 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     if (allowedFields.length > 0) {
       Object.keys(req.body).forEach((key) => {
         if (modelSchema[key] && allowedFields.includes(key)) {
-          updateData[key] = req.body[key].trim();
+          const fieldConfig = modelSchema[key];
+          let value = req.body[key];
+          
+          // Handle ObjectID fields - convert empty strings to null
+          if (fieldConfig.type && fieldConfig.type.name === 'ObjectId') {
+            if (value === '' || value === 'null' || value === undefined) {
+              updateData[key] = null;
+            } else {
+              updateData[key] = value;
+            }
+          } else {
+            // For non-ObjectID fields, trim as usual
+            updateData[key] = value.trim ? value.trim() : value;
+          }
         }
       });
     } else {
       // If no allowedFields specified, allow all fields except password for security
       Object.keys(req.body).forEach((key) => {
         if (modelSchema[key] && key !== 'password') {
-          updateData[key] = req.body[key].trim();
+          const fieldConfig = modelSchema[key];
+          let value = req.body[key];
+          
+          // Handle ObjectID fields - convert empty strings to null
+          if (fieldConfig.type && fieldConfig.type.name === 'ObjectId') {
+            if (value === '' || value === 'null' || value === undefined) {
+              updateData[key] = null;
+            } else {
+              updateData[key] = value;
+            }
+          } else {
+            // For non-ObjectID fields, trim as usual
+            updateData[key] = value.trim ? value.trim() : value;
+          }
         }
       });
     }

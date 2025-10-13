@@ -1,3 +1,6 @@
 //Backend admin
-//api=>login=>encryptpassword.
+// create user-withcompamy front
+// create category admin
+// create product with api.
+
     
