@@ -15,16 +15,6 @@ async function blogCreate(req, res) {
   return res.status(response.status).json(response);
 }
 
-// async function blogUpdate(req, res) {
-//   const response = await handleGenericUpdate(req, "", {
-//     afterUpdate: async (record, req, existingUser) => {
-//       console.log("✅ Record updated successfully:", record);
-//     },
-//   });
-//   return res.status(response.status).json(response);
-// }
-
-
 async function blogUpdate(req, res) {
   const response = await handleGenericUpdate(req, "blog", {
     excludeFields: ["password"], // Don't return password in response
@@ -108,14 +98,14 @@ async function findOneblog(req, res) {
 }
 
 // Example: Find blog by slug instead of ID
-// async function findBlogBySlug(req, res) {
-//   const response = await handleGenericFindOne(req, "blog", {
-//     searchCriteria: { slug: req.params.slug },
-//     excludeFields: ["internal_notes"], // Exclude sensitive fields
-//     populate: ["author"], // Populate author information
-//   });
-//   return res.status(response.status).json(response);
-// }
+async function findBlogBySlug(req, res) {
+  const response = await handleGenericFindOne(req, "blog", {
+    searchCriteria: { slug: req.params.slug },
+    excludeFields: ["internal_notes"], // Exclude sensitive fields
+    populate: ["author"], // Populate author information
+  });
+  return res.status(response.status).json(response);
+}
 
 // Example: Find active blog by title
 async function findActiveBlogByTitle(req, res) {
@@ -166,7 +156,6 @@ module.exports = {
   getAllBlog,
   getallblogactive,
   blogdelete,
-  // findBlogBySlug,
   findActiveBlogByTitle,
   findBlogByParams,
 };

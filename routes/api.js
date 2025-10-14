@@ -31,6 +31,17 @@ const {
 
 
 const {
+  warehouseCreate,
+  warehouseUpdate,
+  warehouseById,
+  getAllwarehouse,
+  getallwarehouseactive,
+  warehousedelete,
+} = require("../controllers/warehouse");
+
+
+
+const {
   companyCreate,
   companyUpdate,
   companyById,
@@ -86,7 +97,16 @@ router.get("/blog/get/:id", blogById);
 router.get("/blog/get-all", getAllBlog);
 router.get("/blog/get-all-active", getallblogactive);
 router.delete("/blog/delete/:id", blogdelete);
-// router.get("/blog/get-one/:id", findOneblog); //
+
+
+
+router.post("/warehouse/create", warehouseCreate);
+router.patch("/warehouse/update/:id", warehouseUpdate);
+router.get("/warehouse/get/:id", warehouseById);
+router.get("/warehouse/get-all", getAllwarehouse);
+router.get("/warehouse/get-all-active", getallwarehouseactive);
+router.delete("/warehouse/delete/:id", warehousedelete);
+// router.get("/warehhouse/get-one/:id", findOneblog); //
 
 router.post("/company/create", companyCreate);
 router.patch("/company/update/:id", companyUpdate);
