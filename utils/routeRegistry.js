@@ -150,7 +150,7 @@ class RouteRegistry {
     if (route) {
       Object.assign(route, updates);
       this.routeConfig[key] = route;
-      console.log(`📝 Updated route: ${key}`);
+      // console.log(`📝 Updated route: ${key}`);
       return route;
     }
     return null;

@@ -20,6 +20,17 @@ function checkHeaderAuthentication(req, res, next) {
   const authorizationHeaderValue = req.headers["authorization"];
   req.user = null;
 
+  console.log('req.path',req.path);
+
+  // Debug logging for this specific route
+  if (req.path === '/api/user/user_company') {
+    console.log('🔍 DEBUG: /api/user/user_company route hit');
+    console.log('📝 Method:', req.method);
+    console.log('📝 Path:', req.path);
+    console.log('📝 URL:', req.url);
+    console.log('📝 Authorization Header:', authorizationHeaderValue ? 'Present' : 'Missing');
+  }
+
   // Allow public routes that don't need authentication
   const publicRoutePatterns = [
     '/user/login',                     // Direct route access
@@ -30,8 +41,10 @@ function checkHeaderAuthentication(req, res, next) {
     '/api/login/admin',                // Admin login
     '/api/blog/get-all',               // Public blog routes
     '/api/blog/get-all-active',        // Public blog routes
-    '/api/product/get-all',            // Public product routes
-    '/api/user/get-all',               // Public user routes
+    // '/api/product/get-all',            // Public product routes
+    // '/api/user/get-all',               // Public user routes
+    '/user/user_company',               // Public user routes
+    // '/api/user/user_company',               // Public user routes
     /^\/api\/blog\/get\/.*/,          // /api/blog/get/:id
     /^\/api\/product\/get\/.*/,       // /api/product/get/:id
     /^\/api\/user\/get\/.*/,          // /api/user/get/:id
@@ -40,15 +53,27 @@ function checkHeaderAuthentication(req, res, next) {
 
   // Check if current route should be public
   const isPublicRoute = publicRoutePatterns.some(pattern => {
-    if (typeof pattern === 'string') {
-      return req.path === pattern;
-    } else if (pattern instanceof RegExp) {
-      return pattern.test(req.path);
+    const match = typeof pattern === 'string' 
+      ? req.path === pattern 
+      : pattern instanceof RegExp 
+        ? pattern.test(req.path) 
+        : false;
+    
+    // Debug logging for this specific route
+    if (req.path === '/api/user/user_company') {
+      console.log(`🔍 Checking pattern: ${pattern} -> Match: ${match}`);
     }
-    return false;
+    
+    return match;
   });
   
+  // Debug logging for this specific route
+  if (req.path === '/api/user/user_company') {
+    console.log('🔍 isPublicRoute:', isPublicRoute);
+  }
+  
   if (isPublicRoute) {
+    console.log('✅ Public route - skipping auth check');
     return next();
   }
 

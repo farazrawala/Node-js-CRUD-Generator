@@ -3,11 +3,13 @@ const router = express.Router();
 
 const {
   handleUserSignup,
+  handleUserSignupCompany,
   handleUserLogin,
   handleUserUpdate,
   getAllUser,
   userById,
   handleAdminLogin,
+  findUserByEmail,
 } = require("../controllers/user");
 
 const {
@@ -65,11 +67,13 @@ const {
 
 
 
+router.post("/user/user_company", handleUserSignupCompany);
 router.post("/user/create", handleUserSignup);
 router.patch("/user/update/:id", handleUserUpdate);
 router.post("/user/login", handleUserLogin);
 router.get("/user/get-all", getAllUser);
 router.get("/user/get/:id", userById);
+router.post("/user/get-one", findUserByEmail);
 
 router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
@@ -82,6 +86,7 @@ router.get("/blog/get/:id", blogById);
 router.get("/blog/get-all", getAllBlog);
 router.get("/blog/get-all-active", getallblogactive);
 router.delete("/blog/delete/:id", blogdelete);
+// router.get("/blog/get-one/:id", findOneblog); //
 
 router.post("/company/create", companyCreate);
 router.patch("/company/update/:id", companyUpdate);

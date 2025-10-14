@@ -3,6 +3,7 @@ const {
   handleGenericUpdate,
   handleGenericGetById,
   handleGenericGetAll,
+  handleGenericFindOne,
 } = require("../utils/modelHelper");
 
 async function blogCreate(req, res) {
@@ -89,8 +90,69 @@ async function blogdelete(req, res) {
   req.body = { deletedAt: new Date().toISOString() };
   const response = await handleGenericUpdate(req, "blog", {
     afterUpdate: async (record, req, existingRecord) => {
-      console.log("✅ Blog soft deleted successfully. DeletedAt:", record.deletedAt);
+      // console.log("✅ Blog soft deleted successfully. DeletedAt:", record.deletedAt);
     },
+  });
+  return res.status(response.status).json(response);
+}
+
+
+
+async function findOneblog(req, res) {
+  const response = await handleGenericFindOne(req, "blog", {
+    searchCriteria: { slug: req.params.slug },
+    excludeFields: ["internal_notes"], // Exclude sensitive fields
+    populate: ["author"], // Populate author information
+  });
+  return res.status(response.status).json(response);
+}
+
+// Example: Find blog by slug instead of ID
+// async function findBlogBySlug(req, res) {
+//   const response = await handleGenericFindOne(req, "blog", {
+//     searchCriteria: { slug: req.params.slug },
+//     excludeFields: ["internal_notes"], // Exclude sensitive fields
+//     populate: ["author"], // Populate author information
+//   });
+//   return res.status(response.status).json(response);
+// }
+
+// Example: Find active blog by title
+async function findActiveBlogByTitle(req, res) {
+  const response = await handleGenericFindOne(req, "blog", {
+    searchCriteria: { 
+      title: req.body.title,
+      active: true,
+      status: "published"
+    },
+    excludeFields: ["password"],
+    beforeFind: async (criteria, req) => {
+      console.log("🔍 Searching for active blog with criteria:", criteria);
+      return criteria;
+    },
+    afterFind: async (record, req) => {
+      console.log("✅ Found active blog:", record.title);
+    }
+  });
+  return res.status(response.status).json(response);
+}
+
+// Example: Find blog by custom parameters from request body
+async function findBlogByParams(req, res) {
+  const { category, author, tags, status } = req.body;
+  
+  // Build search criteria dynamically
+  const searchCriteria = {};
+  if (category) searchCriteria.category = category;
+  if (author) searchCriteria.author = author;
+  if (tags) searchCriteria.tags = { $in: tags }; // MongoDB operator for array contains
+  if (status) searchCriteria.status = status;
+  
+  const response = await handleGenericFindOne(req, "blog", {
+    searchCriteria,
+    includeFields: ["title", "slug", "createdAt", "author"], // Only return specific fields
+    populate: ["author", "category"],
+    sort: { createdAt: -1 }, // Get the most recent one if multiple match
   });
   return res.status(response.status).json(response);
 }
@@ -104,4 +166,7 @@ module.exports = {
   getAllBlog,
   getallblogactive,
   blogdelete,
+  // findBlogBySlug,
+  findActiveBlogByTitle,
+  findBlogByParams,
 };

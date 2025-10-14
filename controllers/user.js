@@ -4,7 +4,8 @@ const {
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericGetAll,
-  handleGenericGetById
+  handleGenericGetById,
+  handleGenericFindOne
 } = require("../utils/modelHelper");
 
 async function handleUserSignup(req, res) {
@@ -130,6 +131,56 @@ async function getAllUser(req, res) {
   return res.status(response.status).json(response);
 }
 
+async function handleUserSignupCompany(req, res) {
+  try {
+  
+    const find_email = await handleGenericFindOne(req, "user", {
+      searchCriteria: { 
+        email: req.body.email.toLowerCase() 
+      }
+    });
+
+    if(find_email.data.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Email already exists"
+      });
+    }
+    
+
+    const create_company = await handleGenericCreate(req, "company", {
+      beforeCreate: async (data, req) => {
+        // data.name = req.body.company_name;
+      },
+      afterCreate: async (record, req) => {
+        // console.log("✅ Record created successfully:", record._id);
+      },
+    });
+
+
+    const user_created = await handleGenericCreate(req, "user", {
+      beforeCreate: async (data, req) => {
+        data.email = Math.floor(Math.random()*1000000)+req.body.email;
+        data.company_id = create_company.data._id;
+      },
+      afterCreate: async (record, req) => {
+        // console.log("✅ Record created successfully:", record._id);
+      },
+    });
+
+
+    return res.status(200).json(user_created);
+
+  } catch (error) {
+    console.error("❌ Company user signup error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error during company signup"
+    });
+  }
+}
+
+
 async function handleAdminLogin(req, res) {
   try {
     console.log("🔐 Admin login attempt:", {
@@ -207,6 +258,53 @@ async function handleAdminLogin(req, res) {
   }
 }
 
+// Example: Find user by email using the new generic function
+async function findUserByEmail(req, res) {
+  // console.log("🔍 Searching for user with email:", req.body.email);
+  const response = await handleGenericFindOne(req, "user", {
+    searchCriteria: { 
+      email: req.body.email.toLowerCase() 
+    },
+    excludeFields: ["password"], // Never return password
+    beforeFind: async (criteria, req) => {
+      console.log("🔍 Searching for user with email:", criteria.email);
+      return criteria;
+    },
+    afterFind: async (record, req) => {
+      console.log("✅ Found user:", record.email);
+    }
+  });
+  return res.status(response.status).json(response);
+}
+
+// Example: Find user by company name
+async function findUserByCompany(req, res) {
+  const response = await handleGenericFindOne(req, "user", {
+    searchCriteria: { 
+      company_name: req.body.company_name 
+    },
+    excludeFields: ["password"],
+    includeFields: ["name", "email", "company_name", "phone", "createdAt"], // Only return specific fields
+  });
+  return res.status(response.status).json(response);
+}
+
+// Example: Find active user with specific role
+async function findActiveUserByRole(req, res) {
+  const { role, email } = req.body;
+  
+  const response = await handleGenericFindOne(req, "user", {
+    searchCriteria: { 
+      role: { $in: [role] }, // MongoDB array contains operator
+      email: email.toLowerCase(),
+      active: true // Assuming you have an active field
+    },
+    excludeFields: ["password"],
+    sort: { lastLoginAt: -1 }, // Get the most recently active user
+  });
+  return res.status(response.status).json(response);
+}
+
 
 module.exports = {
   handleUserSignup,
@@ -214,5 +312,9 @@ module.exports = {
   handleUserUpdate,
   userById,
   getAllUser,
-  handleAdminLogin
+  handleAdminLogin,
+  handleUserSignupCompany,
+  findUserByEmail,
+  findUserByCompany,
+  findActiveUserByRole,
 };

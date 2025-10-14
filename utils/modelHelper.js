@@ -1243,6 +1243,196 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
   }
 };
 
+/**
+ * Generic function to find one record based on custom parameters
+ * @param {Object} req - Express request object
+ * @param {string} controllerName - Name of the controller/model (optional, auto-detected if not provided)
+ * @param {Object} options - Configuration options
+ * @returns {Object} Response object with success status and data
+ * 
+ * Usage examples:
+ * - Find by email: handleGenericFindOne(req, "user", { searchCriteria: { email: req.body.email } })
+ * - Find by slug: handleGenericFindOne(req, "blog", { searchCriteria: { slug: req.params.slug } })
+ * - Find with custom criteria: handleGenericFindOne(req, "product", { 
+ *     searchCriteria: { category: "electronics", active: true },
+ *     populate: ["category", "reviews"],
+ *     excludeFields: ["internal_notes"]
+ *   })
+ */
+const handleGenericFindOne = async (req, controllerName = null, options = {}) => {
+  // Auto-detect controller name if not provided or empty
+  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
+  
+  if (!modelName) {
+    return {
+      success: false,
+      status: 500,
+      error: "Controller name is required",
+      details: "Please provide the controller name as the second parameter",
+      type: "configuration",
+    };
+  }
+
+  const {
+    searchCriteria = {}, // Object with search criteria (e.g., { email: "user@example.com" })
+    excludeFields = [], // Fields to exclude from response
+    includeFields = [], // Fields to include (if specified, only these will be returned)
+    populate = [], // Fields to populate (array of field names or objects)
+    sort = {}, // Sort criteria (e.g., { createdAt: -1 })
+    errorHandlers = {}, // Custom error handlers
+    beforeFind = null, // Function to execute before finding (async function(searchCriteria, req))
+    afterFind = null, // Function to execute after finding (async function(record, req))
+  } = options;
+
+  // Validate search criteria
+  if (!searchCriteria || Object.keys(searchCriteria).length === 0) {
+    return {
+      success: false,
+      status: 400,
+      error: "Search criteria required",
+      details: "Please provide searchCriteria in options to find a record",
+      type: "missing_criteria",
+    };
+  }
+
+  try {
+    // Dynamically get the model
+    const Model = getModelFromController(modelName);
+
+    console.log(`🔍 Finding one ${modelName} with criteria:`, searchCriteria);
+
+    // Execute beforeFind hook if provided
+    let finalCriteria = { ...searchCriteria };
+    if (beforeFind && typeof beforeFind === 'function') {
+      try {
+        const beforeResult = await beforeFind(finalCriteria, req);
+        if (beforeResult) {
+          finalCriteria = beforeResult;
+        }
+      } catch (hookError) {
+        console.warn("⚠️ beforeFind hook error:", hookError);
+      }
+    }
+
+    // Build query
+    let query = Model.findOne(finalCriteria);
+
+    // Add field selection if specified
+    if (includeFields && includeFields.length > 0) {
+      const fieldSelection = includeFields.join(' ');
+      query = query.select(fieldSelection);
+    } else if (excludeFields && excludeFields.length > 0) {
+      const fieldExclusion = excludeFields.map(field => `-${field}`).join(' ');
+      query = query.select(fieldExclusion);
+    }
+
+    // Add population if specified
+    if (populate && populate.length > 0) {
+      populate.forEach(field => {
+        if (typeof field === 'string') {
+          query = query.populate(field);
+        } else if (typeof field === 'object') {
+          // Support for complex population like { path: 'author', select: 'name email' }
+          query = query.populate(field);
+        }
+      });
+    }
+
+    // Add sorting if specified
+    if (sort && Object.keys(sort).length > 0) {
+      query = query.sort(sort);
+    }
+
+    // Execute query
+    const record = await query;
+
+    if (!record) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with criteria ${JSON.stringify(finalCriteria)} not found`,
+        type: "not_found",
+      };
+    }
+
+    // Execute afterFind hook if provided
+    if (afterFind && typeof afterFind === 'function') {
+      try {
+        await afterFind(record, req);
+      } catch (hookError) {
+        console.warn("⚠️ afterFind hook error:", hookError);
+      }
+    }
+
+    // Prepare response data
+    let responseData;
+    if (record.toObject) {
+      responseData = record.toObject();
+    } else {
+      responseData = { ...record };
+    }
+
+    // Additional field exclusion (in case select didn't work or for computed fields)
+    if (!includeFields || includeFields.length === 0) {
+      excludeFields.forEach((field) => {
+        delete responseData[field];
+      });
+    }
+
+    console.log(`✅ Successfully found ${modelName} with criteria:`, finalCriteria);
+
+    return {
+      success: true,
+      status: 200,
+      data: responseData,
+    };
+
+  } catch (error) {
+    console.error("❌ Find one error:", error);
+
+    // Handle custom error handlers first
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    // Handle specific error types
+    switch (error.name) {
+      case "CastError":
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data format",
+          details: `Invalid format for field: ${error.path}`,
+          type: "invalid_format",
+        };
+
+      case "ValidationError":
+        const validationErrors = Object.values(error.errors).map(err => ({
+          field: err.path,
+          message: err.message
+        }));
+        
+        return {
+          success: false,
+          status: 400,
+          error: "Validation failed",
+          details: validationErrors,
+          type: "validation",
+        };
+
+      default:
+        return {
+          success: false,
+          status: 500,
+          error: "Database error",
+          details: error.message,
+          type: "database",
+        };
+    }
+  }
+};
+
 module.exports = {
   getControllerName,
   getModelFromController,
@@ -1250,5 +1440,6 @@ module.exports = {
   handleGenericUpdate,
   handleGenericGetById,
   handleGenericGetAll,
+  handleGenericFindOne,
   handleImageUpload,
 };

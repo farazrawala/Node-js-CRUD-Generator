@@ -160,7 +160,7 @@ connectMonogodb("mongodb://localhost:27017/test");
 app.use(checkForAuthentication); // <--- This line must be enabled
 
 app.use("/url", restrictTo(["NORMAL"]), urlRouter);
-console.log("🔧 Mounting user routes at /user");
+// console.log("🔧 Mounting user routes at /user");
 app.use("/user", userRoute);
 // console.log("✅ User routes mounted successfully");
 app.use("/api", checkHeaderAuthentication, apiRoute);

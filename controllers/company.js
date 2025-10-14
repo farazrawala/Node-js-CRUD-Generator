@@ -89,7 +89,7 @@ const {
     req.body = { deletedAt: new Date().toISOString() };
     const response = await handleGenericUpdate(req, "company", {
       afterUpdate: async (record, req, existingRecord) => {
-        console.log("✅ company soft deleted successfully. DeletedAt:", record.deletedAt);
+        // console.log("✅ company soft deleted successfully. DeletedAt:", record.deletedAt);
       },
     });
     return res.status(response.status).json(response);

@@ -2,23 +2,23 @@ const mongoose = require("mongoose");
 
 const modelSchema = new mongoose.Schema(
   {
-    name: {
+    company_name: {
       type: String,
       required: true,
     },
-    phone: {
+    company_phone: {
       type: String,
-      required: true,
+      // required: true,
     },
-    email: {
+    company_email: {
       type: String,
-      required: true,
+      // required: true,
     },
-    address: {
+    company_address: {
       type: String,
-      required: true,
+      // required: true,
     },
-    logo: {
+    company_logo: {
       type: String,
       field_name: "Logo Image",
     },

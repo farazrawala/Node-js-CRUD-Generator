@@ -521,7 +521,7 @@ const enabledRoutes = routeRegistry.getEnabledRoutes();
 enabledRoutes.forEach(route => {
   if (route.crudController && route.crudController.routes) {
     const routePath = route.path.replace('/admin/', '');
-    console.log(`🔧 Mounting ${route.name} routes at /${routePath}`);
+    // console.log(`🔧 Mounting ${route.name} routes at /${routePath}`);
     router.use(`/${routePath}`, route.crudController.routes);
     // console.log(`✅ ${route.name} routes mounted successfully`);
   }

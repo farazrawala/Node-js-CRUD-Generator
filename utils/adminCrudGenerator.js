@@ -1325,7 +1325,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     if (softDelete) {
       router.post('/:id/restore', restoreRecord);    // RESTORE action
       router.delete('/:id/permanent-delete', permanentDeleteRecord); // PERMANENT DELETE action
-      console.log(`✅ Soft delete routes registered for ${modelName}: POST /:id/restore, DELETE /:id/permanent-delete`);
+      // console.log(`✅ Soft delete routes registered for ${modelName}: POST /:id/restore, DELETE /:id/permanent-delete`);
     }
     
     console.log(`✅ Routes registered for ${modelName}: GET /, GET /create, POST /, GET /:id/edit, PUT /:id, POST /:id, DELETE /:id`);
