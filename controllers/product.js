@@ -16,7 +16,82 @@ async function productCreate(req, res) {
 }
 
 async function productUpdate(req, res) {
-  const response = await handleGenericUpdate(req, "", {
+  const response = await handleGenericUpdate(req, "product", {
+    beforeUpdate: async (updateData, req, existingRecord) => {
+      console.log('🔧 Product update - beforeUpdate hook called');
+      console.log('🔧 Original updateData.warehouse_inventory:', updateData.warehouse_inventory);
+      
+      // Process warehouse inventory if present
+      if (req.body.warehouse_inventory) {
+        const warehouseInventory = [];
+        const inventoryData = req.body.warehouse_inventory;
+        
+        // Handle object format from form (e.g., warehouse_inventory[0][warehouse_id])
+        if (typeof inventoryData === 'object' && !Array.isArray(inventoryData)) {
+          // Convert object format to array
+          Object.keys(inventoryData).forEach(key => {
+            const item = inventoryData[key];
+            if (item.warehouse_id && item.quantity !== undefined) {
+              warehouseInventory.push({
+                warehouse_id: item.warehouse_id,
+                quantity: parseInt(item.quantity) || 0,
+                last_updated: new Date()
+              });
+            }
+          });
+        } else if (Array.isArray(inventoryData)) {
+          inventoryData.forEach(item => {
+            if (item.warehouse_id && item.quantity !== undefined) {
+              warehouseInventory.push({
+                warehouse_id: item.warehouse_id,
+                quantity: parseInt(item.quantity) || 0,
+                last_updated: new Date()
+              });
+            }
+          });
+        }
+        
+        // Update the updateData with processed inventory
+        updateData.warehouse_inventory = warehouseInventory;
+        console.log('✅ Processed warehouse inventory in controller:', warehouseInventory);
+      } else {
+        // Check for warehouse_inventory fields with different patterns
+        const warehouseFields = Object.keys(req.body).filter(key => key.includes('warehouse_inventory'));
+        
+        if (warehouseFields.length > 0) {
+          console.log('🔧 Found warehouse fields in controller:', warehouseFields);
+          const warehouseInventory = [];
+          
+          // Try to parse the warehouse_inventory data from the field names
+          const inventoryData = {};
+          warehouseFields.forEach(field => {
+            const match = field.match(/warehouse_inventory\[(\d+)\]\[(\w+)\]/);
+            if (match) {
+              const [, index, property] = match;
+              if (!inventoryData[index]) {
+                inventoryData[index] = {};
+              }
+              inventoryData[index][property] = req.body[field];
+            }
+          });
+          
+          // Convert to array format
+          Object.keys(inventoryData).forEach(key => {
+            const item = inventoryData[key];
+            if (item.warehouse_id && item.quantity !== undefined) {
+              warehouseInventory.push({
+                warehouse_id: item.warehouse_id,
+                quantity: parseInt(item.quantity) || 0,
+                last_updated: new Date()
+              });
+            }
+          });
+          
+          updateData.warehouse_inventory = warehouseInventory;
+          console.log('✅ Processed warehouse inventory from field names in controller:', warehouseInventory);
+        }
+      }
+    },
     afterUpdate: async (record, req, existingUser) => {
       console.log("✅ Record updated successfully:", record);
     },

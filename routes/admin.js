@@ -426,6 +426,9 @@ const productAdminCRUD = adminCrudGenerator(
       },
       // Process warehouse inventory before update
       beforeUpdate: async (req, res) => {
+        console.log('🔧 beforeUpdate middleware - Processing warehouse inventory');
+        console.log('🔧 Original req.body.warehouse_inventory:', req.body.warehouse_inventory);
+        
         // Parse warehouse_inventory from request
         if (req.body.warehouse_inventory) {
           const warehouseInventory = [];
@@ -458,6 +461,43 @@ const productAdminCRUD = adminCrudGenerator(
           
           // Update request body with processed inventory
           req.body.warehouse_inventory = warehouseInventory;
+          console.log('✅ Processed warehouse inventory:', warehouseInventory);
+        } else {
+          // Check for warehouse_inventory fields with different patterns
+          const warehouseFields = Object.keys(req.body).filter(key => key.includes('warehouse_inventory'));
+          
+          if (warehouseFields.length > 0) {
+            console.log('🔧 Found warehouse fields:', warehouseFields);
+            const warehouseInventory = [];
+            
+            // Try to parse the warehouse_inventory data from the field names
+            const inventoryData = {};
+            warehouseFields.forEach(field => {
+              const match = field.match(/warehouse_inventory\[(\d+)\]\[(\w+)\]/);
+              if (match) {
+                const [, index, property] = match;
+                if (!inventoryData[index]) {
+                  inventoryData[index] = {};
+                }
+                inventoryData[index][property] = req.body[field];
+              }
+            });
+            
+            // Convert to array format
+            Object.keys(inventoryData).forEach(key => {
+              const item = inventoryData[key];
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date()
+                });
+              }
+            });
+            
+            req.body.warehouse_inventory = warehouseInventory;
+            console.log('✅ Processed warehouse inventory from field names:', warehouseInventory);
+          }
         }
       },
       // Populate warehouse data after query
