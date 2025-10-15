@@ -1,5 +1,6 @@
 //Backend admin
-// create user-withcompamy front
+// add dropdown of parent Product
+// on edit product preselect dropdown warehouse and normal one.
 // create category admin
 // create product with api.
 
