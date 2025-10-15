@@ -21,9 +21,35 @@ const modelSchema = new mongoose.Schema(
         return null;
       }
     },
+    warehouse_inventory: {
+      type: [
+        {
+          warehouse_id: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "warehouse",
+            required: true,
+            field_name: "Warehouse"
+          },
+          quantity: {
+            type: Number,
+            required: true,
+            default: 0,
+            min: 0,
+            field_name: "Quantity"
+          },
+          last_updated: {
+            type: Date,
+            default: Date.now,
+            field_name: "Last Updated"
+          }
+        }
+      ],
+      default: [],
+      field_name: "Warehouse Inventory"
+    },
     product_price: {
       type: String,
-    required: true,
+      required: true,
       field_name: "Product Price",
     },
     product_description: {
@@ -78,6 +104,83 @@ modelSchema.pre('save', function(next) {
   console.log('🔧 Pre-save hook - product_slug after:', this.product_slug);
   next();
 });
+
+// Instance method to add or update warehouse inventory
+modelSchema.methods.setWarehouseQuantity = function(warehouseId, quantity) {
+  const existingIndex = this.warehouse_inventory.findIndex(
+    item => item.warehouse_id.toString() === warehouseId.toString()
+  );
+
+  if (existingIndex >= 0) {
+    // Update existing warehouse quantity
+    this.warehouse_inventory[existingIndex].quantity = quantity;
+    this.warehouse_inventory[existingIndex].last_updated = new Date();
+  } else {
+    // Add new warehouse inventory entry
+    this.warehouse_inventory.push({
+      warehouse_id: warehouseId,
+      quantity: quantity,
+      last_updated: new Date()
+    });
+  }
+  return this;
+};
+
+// Instance method to get quantity for a specific warehouse
+modelSchema.methods.getWarehouseQuantity = function(warehouseId) {
+  const inventory = this.warehouse_inventory.find(
+    item => item.warehouse_id.toString() === warehouseId.toString()
+  );
+  return inventory ? inventory.quantity : 0;
+};
+
+// Instance method to get total quantity across all warehouses
+modelSchema.methods.getTotalQuantity = function() {
+  return this.warehouse_inventory.reduce((total, item) => total + item.quantity, 0);
+};
+
+// Instance method to check if product is in stock at a specific warehouse
+modelSchema.methods.isInStock = function(warehouseId, requiredQuantity = 1) {
+  const availableQuantity = this.getWarehouseQuantity(warehouseId);
+  return availableQuantity >= requiredQuantity;
+};
+
+// Instance method to decrease quantity (for orders)
+modelSchema.methods.decreaseWarehouseQuantity = function(warehouseId, quantity) {
+  const existingIndex = this.warehouse_inventory.findIndex(
+    item => item.warehouse_id.toString() === warehouseId.toString()
+  );
+
+  if (existingIndex >= 0) {
+    const currentQty = this.warehouse_inventory[existingIndex].quantity;
+    if (currentQty >= quantity) {
+      this.warehouse_inventory[existingIndex].quantity -= quantity;
+      this.warehouse_inventory[existingIndex].last_updated = new Date();
+      return true;
+    }
+    throw new Error(`Insufficient quantity. Available: ${currentQty}, Requested: ${quantity}`);
+  }
+  throw new Error('Warehouse not found in inventory');
+};
+
+// Instance method to increase quantity (for restocking)
+modelSchema.methods.increaseWarehouseQuantity = function(warehouseId, quantity) {
+  const existingIndex = this.warehouse_inventory.findIndex(
+    item => item.warehouse_id.toString() === warehouseId.toString()
+  );
+
+  if (existingIndex >= 0) {
+    this.warehouse_inventory[existingIndex].quantity += quantity;
+    this.warehouse_inventory[existingIndex].last_updated = new Date();
+  } else {
+    this.warehouse_inventory.push({
+      warehouse_id: warehouseId,
+      quantity: quantity,
+      last_updated: new Date()
+    });
+  }
+  return this;
+};
 
 const MODEL = mongoose.model("product", modelSchema);
 

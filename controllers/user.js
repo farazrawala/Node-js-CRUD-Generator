@@ -133,43 +133,106 @@ async function getAllUser(req, res) {
 
 async function handleUserSignupCompany(req, res) {
   try {
-  
+    console.log("🚀 Starting handleUserSignupCompany function...");
+    console.log("📧 Request body:", JSON.stringify(req.body, null, 2));
+
+    // Check if email already exists
     const find_email = await handleGenericFindOne(req, "user", {
       searchCriteria: { 
         email: req.body.email.toLowerCase() 
       }
     });
 
-    if(find_email.data.length > 0) {
+    // Correct way to check if email exists
+    if(find_email.success && find_email.data) {
+      console.log("❌ Email already exists:", req.body.email);
       return res.status(400).json({
         success: false,
         message: "Email already exists"
       });
     }
-    
 
+    console.log("🏢 Creating company...");
     const create_company = await handleGenericCreate(req, "company", {
       beforeCreate: async (data, req) => {
-        // data.name = req.body.company_name;
-      },
-      afterCreate: async (record, req) => {
-        // console.log("✅ Record created successfully:", record._id);
-      },
+        console.log("🏢 Company beforeCreate hook called");
+        // Add required fields for company
+        data.company_name = req.body.company_name || 'Default Company Name';
+        data.company_email = req.body.company_email || req.body.email;
+        data.company_phone = req.body.company_phone || 'N/A';
+        data.company_address = req.body.company_address || 'Default Address';
+        data.status = 'active';
+        console.log("🏢 Company data after setting:", JSON.stringify(data, null, 2));
+      }
     });
 
+    if (!create_company.success) {
+      console.log("❌ Company creation failed:", create_company);
+      return res.status(500).json({
+        success: false,
+        message: "Company creation failed",
+        details: create_company
+      });
+    }
 
+    console.log("✅ Company created:", create_company.data._id);
+    console.log("🏪 About to create warehouse...");
+    
+    const create_warehouse = await handleGenericCreate(req, "warehouse", {
+      beforeCreate: async (data, req) => {
+        console.log("🏪 Warehouse beforeCreate hook called");
+        data.warehouse_name = req.body.warehouse_name || 'Current Store';
+        data.warehouse_address = req.body.warehouse_address || 'Default Address';
+        data.company_id = create_company.data._id;
+        data.status = 'active';
+        console.log("🏪 Warehouse data after setting:", JSON.stringify(data, null, 2));
+      }
+    });
+
+    if (!create_warehouse.success) {
+      console.log("❌ Warehouse creation failed:", create_warehouse);
+      return res.status(500).json({
+        success: false,
+        message: "Warehouse creation failed",
+        details: create_warehouse
+      });
+    }
+
+    console.log("✅ Warehouse created:", create_warehouse.data._id);
+    console.log("👤 About to create user...");
+    
     const user_created = await handleGenericCreate(req, "user", {
       beforeCreate: async (data, req) => {
-        data.email = Math.floor(Math.random()*1000000)+req.body.email;
+        console.log("👤 User beforeCreate hook called");
+        data.email = req.body.email;
+        data.name = req.body.name || 'User';
+        data.password = req.body.password;
         data.company_id = create_company.data._id;
-      },
-      afterCreate: async (record, req) => {
-        // console.log("✅ Record created successfully:", record._id);
-      },
+        data.role = ['USER'];
+        console.log("👤 User data:", JSON.stringify(data, null, 2));
+      }
     });
 
+    if (!user_created.success) {
+      console.log("❌ User creation failed:", user_created);
+      return res.status(500).json({
+        success: false,
+        message: "User creation failed",
+        details: user_created
+      });
+    }
 
-    return res.status(200).json(user_created);
+    console.log("✅ User created:", user_created.data._id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Company signup completed successfully",
+      data: {
+        company: create_company.data,
+        warehouse: create_warehouse.data,
+        user: user_created.data
+      }
+    });
 
   } catch (error) {
     console.error("❌ Company user signup error:", error);

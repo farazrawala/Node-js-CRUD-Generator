@@ -17,6 +17,10 @@ const {
   productUpdate,
   productById,
   getAllProducts,
+  updateWarehouseQuantity,
+  getProductWarehouseInventory,
+  checkWarehouseStock,
+  getProductsByWarehouse,
 } = require("../controllers/product");
 
 const {
@@ -90,6 +94,12 @@ router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
+
+// Warehouse inventory management routes
+router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
+router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
+router.get("/product/:id/check-stock", checkWarehouseStock);
+router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
 
 router.post("/blog/create", blogCreate);
 router.patch("/blog/update/:id", blogUpdate);

@@ -4,11 +4,11 @@ const modelSchema = new mongoose.Schema(
   {
     warehouse_name: {
       type: String,
-      required: true,
+      // required: true,
     },
     warehouse_address: {
       type: String,
-      required: true,
+      // required: true,
     },
     company_id: {
       type: mongoose.Schema.Types.ObjectId,

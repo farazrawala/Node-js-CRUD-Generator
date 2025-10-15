@@ -294,7 +294,7 @@ const orderAdminCRUD = adminCrudGenerator(
 const productAdminCRUD = adminCrudGenerator(
   Product,
   "products",
-  ["name", "description", "description_details", "price", "product_image", "multi_images"],
+  ["product_name", "product_slug", "product_description", "warehouse_inventory", "product_price", "product_image", "multi_images"],
   {
     excludedFields: ["__v"],
     includedFields: [],
