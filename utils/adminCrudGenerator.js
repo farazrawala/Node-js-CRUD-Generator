@@ -293,7 +293,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         cssClasses,
         customJS,
         routes: req.routes || [], // Add routes data for dynamic menu
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
+        warehouses: req.warehouses || [] // Pass warehouses from middleware
       });
 
     } catch (error) {
@@ -328,7 +329,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             errors: validationResult.errors,
             cssClasses,
             customJS,
-            baseUrl: getBaseUrl()
+            baseUrl: getBaseUrl(),
+            warehouses: req.warehouses || [] // Pass warehouses even on validation errors
           });
         }
       }
@@ -447,7 +449,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           cssClasses,
           customJS,
           routes: req.routes || [], // Add routes data for dynamic menu
-          baseUrl: getBaseUrl()
+          baseUrl: getBaseUrl(),
+          warehouses: req.warehouses || [] // Pass warehouses even on validation errors
         });
       }
 
@@ -537,7 +540,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         cssClasses,
         customJS,
         routes: req.routes || [], // Add routes data for dynamic menu
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
+        warehouses: req.warehouses || [] // Pass warehouses from middleware
       });
 
     } catch (error) {
@@ -592,7 +596,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             method: 'PUT',
             errors: validationResult.errors,
             cssClasses,
-            customJS
+            customJS,
+            routes: req.routes || [],
+            baseUrl: getBaseUrl(),
+            warehouses: req.warehouses || [] // Pass warehouses even on validation errors
           });
         }
       }
@@ -810,7 +817,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           cssClasses,
           customJS,
           routes: req.routes || [], // Add routes data for dynamic menu
-          baseUrl: getBaseUrl()
+          baseUrl: getBaseUrl(),
+          warehouses: req.warehouses || [] // Pass warehouses even on validation errors
         });
       }
 

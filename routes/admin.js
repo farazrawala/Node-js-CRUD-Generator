@@ -14,6 +14,7 @@ const Order = require("../models/order");
 const Category = require("../models/category");
 const Complain = require("../models/complain");
 const Company = require("../models/company");
+const Warehouse = require("../models/warehouse");
 
 
 
@@ -294,7 +295,7 @@ const orderAdminCRUD = adminCrudGenerator(
 const productAdminCRUD = adminCrudGenerator(
   Product,
   "products",
-  ["product_name", "product_slug", "product_description", "warehouse_inventory", "product_price", "product_image", "multi_images"],
+  ["product_name", "product_slug", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"],
   {
     excludedFields: ["__v"],
     includedFields: [],
@@ -308,10 +309,192 @@ const productAdminCRUD = adminCrudGenerator(
       product_image: "file",
       description: "textarea",
       multi_images: "file",
+      warehouse_inventory: "custom", // Custom field type for warehouse inventory
+      warehouse_inventory_display: "text", // Display only field
+      total_quantity: "number", // Display only field
     },
-    // fieldLabels: {
-    //   product_image: "Product Image",
-    // },
+    fieldLabels: {
+      product_image: "Product Image",
+      multi_images: "Multiple Product Images",
+      warehouse_inventory: "Warehouse Inventory",
+      warehouse_inventory_display: "Warehouse Inventory",
+      total_quantity: "Total Quantity",
+      product_price: "Product Price"
+    },
+    middleware: {
+      // Fetch warehouses before rendering create form
+      beforeCreateForm: async (req, res) => {
+        try {
+          // Fetch all active warehouses
+          const warehouses = await Warehouse.find({ 
+            status: 'active',
+            deletedAt: null 
+          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 });
+          
+          // Add warehouses to request object for view access
+          req.warehouses = warehouses;
+        } catch (error) {
+          console.error('Error fetching warehouses:', error);
+          req.warehouses = [];
+        }
+      },
+      // Fetch warehouses before rendering edit form
+      beforeEditForm: async (req, res) => {
+        try {
+          // Fetch all active warehouses
+          const warehouses = await Warehouse.find({ 
+            status: 'active',
+            deletedAt: null 
+          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 });
+          
+          // Add warehouses to request object for view access
+          req.warehouses = warehouses;
+        } catch (error) {
+          console.error('Error fetching warehouses:', error);
+          req.warehouses = [];
+        }
+      },
+      // Process warehouse inventory before insert
+      beforeInsert: async (req, res) => {
+        // Parse warehouse_inventory from request
+        if (req.body.warehouse_inventory) {
+          const warehouseInventory = [];
+          const inventoryData = req.body.warehouse_inventory;
+          
+          // Handle object format from form (e.g., warehouse_inventory[0][warehouse_id])
+          if (typeof inventoryData === 'object' && !Array.isArray(inventoryData)) {
+            // Convert object format to array
+            Object.keys(inventoryData).forEach(key => {
+              const item = inventoryData[key];
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date()
+                });
+              }
+            });
+          } else if (Array.isArray(inventoryData)) {
+            inventoryData.forEach(item => {
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date()
+                });
+              }
+            });
+          }
+          
+          // Update request body with processed inventory
+          req.body.warehouse_inventory = warehouseInventory;
+        } else {
+          // Check for warehouse_inventory fields with different patterns
+          const warehouseFields = Object.keys(req.body).filter(key => key.includes('warehouse_inventory'));
+          
+          if (warehouseFields.length > 0) {
+            const warehouseInventory = [];
+            
+            // Try to parse the warehouse_inventory data from the field names
+            const inventoryData = {};
+            warehouseFields.forEach(field => {
+              const match = field.match(/warehouse_inventory\[(\d+)\]\[(\w+)\]/);
+              if (match) {
+                const [, index, property] = match;
+                if (!inventoryData[index]) {
+                  inventoryData[index] = {};
+                }
+                inventoryData[index][property] = req.body[field];
+              }
+            });
+            
+            // Convert to array format
+            Object.keys(inventoryData).forEach(key => {
+              const item = inventoryData[key];
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date()
+                });
+              }
+            });
+            
+            req.body.warehouse_inventory = warehouseInventory;
+          }
+        }
+      },
+      // Process warehouse inventory before update
+      beforeUpdate: async (req, res) => {
+        // Parse warehouse_inventory from request
+        if (req.body.warehouse_inventory) {
+          const warehouseInventory = [];
+          const inventoryData = req.body.warehouse_inventory;
+          
+          // Handle object format from form (e.g., warehouse_inventory[0][warehouse_id])
+          if (typeof inventoryData === 'object' && !Array.isArray(inventoryData)) {
+            // Convert object format to array
+            Object.keys(inventoryData).forEach(key => {
+              const item = inventoryData[key];
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date()
+                });
+              }
+            });
+          } else if (Array.isArray(inventoryData)) {
+            inventoryData.forEach(item => {
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date()
+                });
+              }
+            });
+          }
+          
+          // Update request body with processed inventory
+          req.body.warehouse_inventory = warehouseInventory;
+        }
+      },
+      // Populate warehouse data after query
+      afterQuery: async (records, req) => {
+        const populatedRecords = await Product.populate(records, { 
+          path: 'warehouse_inventory.warehouse_id', 
+          select: 'warehouse_name warehouse_address status' 
+        });
+        return populatedRecords;
+      }
+    },
+    // Custom response formatting to show warehouse inventory nicely
+    responseFormatting: {
+      list: async (records) => records.map(record => {
+        const recordObj = record.toObject ? record.toObject() : record;
+        
+        // Format warehouse inventory for display
+        if (recordObj.warehouse_inventory && Array.isArray(recordObj.warehouse_inventory)) {
+          recordObj.warehouse_inventory_display = recordObj.warehouse_inventory.map(item => {
+            const warehouse = item.warehouse_id;
+            if (warehouse && warehouse.warehouse_name) {
+              return `${warehouse.warehouse_name}: ${item.quantity}`;
+            }
+            return `Unknown Warehouse: ${item.quantity}`;
+          }).join(', ');
+          
+          // Also add a summary
+          const totalQuantity = recordObj.warehouse_inventory.reduce((sum, item) => sum + (item.quantity || 0), 0);
+          recordObj.total_quantity = totalQuantity;
+        } else {
+          recordObj.warehouse_inventory_display = 'No inventory';
+          recordObj.total_quantity = 0;
+        }
+        
+        return recordObj;
+      })
+    }
   }
 );
 
