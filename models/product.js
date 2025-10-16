@@ -3,6 +3,11 @@ const { generateSlug } = require("../utils/modelHelper");
 
 const modelSchema = new mongoose.Schema(
   {
+    parent_product_id: {
+      type: String,
+      // required: true,
+      field_name: "Parent Product",
+    },
     product_name: {
       type: String,
       required: true,

@@ -295,11 +295,11 @@ const orderAdminCRUD = adminCrudGenerator(
 const productAdminCRUD = adminCrudGenerator(
   Product,
   "products",
-  ["product_name", "product_slug", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"],
+  ["parent_product_id", "product_name", "product_slug", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"],
   {
     excludedFields: ["__v"],
     includedFields: [],
-    searchableFields: ["name", "description", "description_details", "price"],
+    searchableFields: ["parent_product_id", "name", "description", "description_details", "price"],
     filterableFields: [],
     sortableFields: ["name", "price", "description", "description_details", "createdAt"],
     baseUrl: BASE_URL,
@@ -312,6 +312,7 @@ const productAdminCRUD = adminCrudGenerator(
       warehouse_inventory: "custom", // Custom field type for warehouse inventory
       warehouse_inventory_display: "text", // Display only field
       total_quantity: "number", // Display only field
+      parent_product_id: "select",
     },
     fieldLabels: {
       product_image: "Product Image",
