@@ -97,7 +97,12 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Apply filters
-      filterableFields.forEach(field => {
+      // If filterableFields is empty, use all fields that are displayed (excluding system fields)
+      const fieldsToFilter = filterableFields.length > 0 ? filterableFields : fields.filter(field => 
+        !['_id', '__v', 'createdAt', 'updatedAt', 'deletedAt'].includes(field)
+      );
+      
+      fieldsToFilter.forEach(field => {
         if (filters[field] !== undefined && filters[field] !== '') {
           if (typeof filters[field] === 'string' && filters[field].includes(',')) {
             query[field] = { $in: filters[field].split(',') };

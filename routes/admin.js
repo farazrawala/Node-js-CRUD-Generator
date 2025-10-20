@@ -293,34 +293,34 @@ const orderAdminCRUD = adminCrudGenerator(
  * Auto-generate Admin CRUD with UI Forms for Product model
  */
 const productAdminCRUD = adminCrudGenerator(
-  Product,
-  "products",
-  ["parent_product_id", "product_name", "product_slug", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"],
+  Product, // Mongoose model for products
+  "products", // Route prefix for product CRUD operations
+  ["parent_product_id", "product_name", "product_slug", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"], // Fields to include in CRUD operations
   {
-    excludedFields: ["__v"],
-    includedFields: [],
-    searchableFields: ["parent_product_id", "name", "description", "description_details", "price"],
-    filterableFields: [],
-    sortableFields: ["name", "price", "description", "description_details", "createdAt"],
-    baseUrl: BASE_URL,
+    excludedFields: ["__v"], // Fields to exclude from forms and display
+    includedFields: [], // Additional fields to include (empty means use all except excluded)
+    searchableFields: ["parent_product_id", "name", "description", "description_details", "price"], // Fields that can be searched
+    filterableFields: [], // Fields that can be filtered (empty means filter by all displayed fields)
+    sortableFields: ["name", "price", "description", "description_details", "createdAt"], // Fields that can be sorted
+    baseUrl: BASE_URL, // Base URL for the application
     softDelete: true, // Enable soft delete functionality
     fieldTypes: {
-      price: "number",
-      product_image: "file",
-      description: "textarea",
-      multi_images: "file",
+      price: "number", // Number input field
+      product_image: "file", // File upload field for single image
+      description: "textarea", // Multi-line text area
+      multi_images: "file", // File upload field for multiple images
       warehouse_inventory: "custom", // Custom field type for warehouse inventory
       warehouse_inventory_display: "text", // Display only field
       total_quantity: "number", // Display only field
-      parent_product_id: "select",
+      parent_product_id: "select", // Dropdown select field
     },
     fieldLabels: {
-      product_image: "Product Image",
-      multi_images: "Multiple Product Images",
-      warehouse_inventory: "Warehouse Inventory",
-      warehouse_inventory_display: "Warehouse Inventory",
-      total_quantity: "Total Quantity",
-      product_price: "Product Price"
+      product_image: "Product Image", // Human-readable label for product image
+      multi_images: "Multiple Product Images", // Human-readable label for multiple images
+      warehouse_inventory: "Warehouse Inventory", // Human-readable label for warehouse inventory
+      warehouse_inventory_display: "Warehouse Inventory", // Human-readable label for warehouse inventory display
+      total_quantity: "Total Quantity", // Human-readable label for total quantity
+      product_price: "Product Price" // Human-readable label for product price
     },
     middleware: {
       // Fetch warehouses before rendering create form
