@@ -299,7 +299,7 @@ const productAdminCRUD = adminCrudGenerator(
   {
     excludedFields: ["__v"], // Fields to exclude from forms and display
     includedFields: [], // Additional fields to include (empty means use all except excluded)
-    searchableFields: ["parent_product_id", "name", "description", "description_details", "price"], // Fields that can be searched
+    searchableFields: ["product_name", "product_description", "product_price"], // Fields that can be searched (excluded parent_product_id as it's ObjectId)
     filterableFields: [], // Fields that can be filtered (empty means filter by all displayed fields)
     sortableFields: ["name", "price", "description", "description_details", "createdAt"], // Fields that can be sorted
     baseUrl: BASE_URL, // Base URL for the application
@@ -323,36 +323,111 @@ const productAdminCRUD = adminCrudGenerator(
       product_price: "Product Price" // Human-readable label for product price
     },
     middleware: {
+      afterQuery: async (records, req) => {
+        // Filter out records with empty parent_product_id to avoid cast errors
+        const validRecords = records.filter(record => 
+          record.parent_product_id && 
+          record.parent_product_id !== '' && 
+          record.parent_product_id !== null
+        );
+        
+        // Only populate if there are valid records
+        let populatedRecords = records;
+        if (validRecords.length > 0) {
+          populatedRecords = await Product.populate(records, [
+            { 
+              path: 'parent_product_id', 
+              select: 'product_name' 
+            },
+            { 
+              path: 'warehouse_inventory.warehouse_id', 
+              select: 'warehouse_name warehouse_address status' 
+            }
+          ]);
+        }
+        
+        // Note: Dropdown options are set in beforeCreateForm/beforeEditForm middleware
+        // This afterQuery middleware is only for populating existing records in list views
+        
+        // console.log('🔍 Populated records:', populatedRecords); // Debug log of populated records
+        return populatedRecords; // Return populated records with both parent products and warehouse data
+      },
       // Fetch warehouses before rendering create form
       beforeCreateForm: async (req, res) => {
         try {
+          // Fetch all active products for parent_product_id dropdown
+          // Use aggregate to avoid ObjectId casting issues with legacy data
+          
+           const parent_products = await Product.find({ 
+               deletedAt: { $exists: true }, // Only non-deleted products
+               $and: [
+                 { parent_product_id: { $exists: true } }, // Products with parent_product_id field
+               ]
+           }).select('product_name').sort({ product_name: 1 }); // Select product name and sort alphabetically
+          
+           console.log('✅ Parent product options set:',parent_products);
+           console.log('🔍 Parent products count:', parent_products.length);
+           console.log('🔍 Field config exists:', !!req.fieldConfig);
+           console.log('🔍 Parent product field exists:', !!req.fieldConfig?.parent_product_id);
+           
+           // Add parent products to request object for view access
+           if (req.fieldConfig?.parent_product_id) { // Check if field config exists
+             req.fieldConfig.parent_product_id.options = parent_products.map(product => ({ value: product._id.toString(), label: product.product_name })); // Convert products to dropdown options
+             req.fieldConfig.parent_product_id.placeholder = 'Select Parent Product'; // Set dropdown placeholder
+             req.fieldConfig.parent_product_id.helpText = 'Choose the parent product for this product'; // Set dropdown help text
+             console.log('✅ Parent product options set:', req.fieldConfig.parent_product_id.options.length); // Log success with count
+             console.log('🔍 Options array:', req.fieldConfig.parent_product_id.options); // Log the actual options
+           } else {
+             console.log('❌ Parent product field config not found'); // Log error if config missing
+             console.log('🔍 Available field config keys:', Object.keys(req.fieldConfig || {})); // Log available fields
+           }
+
           // Fetch all active warehouses
           const warehouses = await Warehouse.find({ 
-            status: 'active',
-            deletedAt: null 
-          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 });
+            status: 'active', // Only active warehouses
+            deletedAt: null // Only non-deleted warehouses
+          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 }); // Select warehouse details and sort by name
           
           // Add warehouses to request object for view access
-          req.warehouses = warehouses;
+          req.warehouses = warehouses; // Store warehouses in request for form access
+          
+          // Debug: Final fieldConfig state
+          console.log('🔍 Final fieldConfig parent_product_id:', req.fieldConfig?.parent_product_id);
+          console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
         } catch (error) {
-          console.error('Error fetching warehouses:', error);
-          req.warehouses = [];
+          console.error('Error fetching data:', error); // Log any errors
+          req.warehouses = []; // Set empty array on error
         }
       },
       // Fetch warehouses before rendering edit form
       beforeEditForm: async (req, res) => {
         try {
+          // Fetch all active products for parent_product_id dropdown
+          const parent_products = await Product.find({ 
+            deletedAt: null, // Only non-deleted products
+          }).select('parent_product_id product_name').sort({ product_name: 1 }); // Select parent product ID and name, sort alphabetically
+
+          console.log('🔍 Parent products:', parent_products); // Debug log of fetched products
+          console.log('🔍 Parent products found:', parent_products.length); // Debug log of product count
+          console.log('🔍 Field config exists:', !!req.fieldConfig); // Debug log of field config existence
+          console.log('🔍 Parent product field exists:', !!req.fieldConfig?.parent_product_id); // Debug log of specific field existence
+          
+          // Add parent products to request object for view access
+          req.fieldConfig.parent_product_id.options = parent_products.map(product => ({ value: product._id.toString(), label: product.product_name })); // Convert products to dropdown options
+          req.fieldConfig.parent_product_id.placeholder = 'Select Parent Product'; // Set dropdown placeholder text
+          req.fieldConfig.parent_product_id.helpText = 'Choose the parent product for this product'; // Set dropdown help text
+
           // Fetch all active warehouses
           const warehouses = await Warehouse.find({ 
-            status: 'active',
-            deletedAt: null 
-          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 });
+            status: 'active', // Only active warehouses
+            deletedAt: null // Only non-deleted warehouses
+          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 }); // Select warehouse details and sort by name
           
           // Add warehouses to request object for view access
-          req.warehouses = warehouses;
+          req.warehouses = warehouses; // Store warehouses in request for form access
         } catch (error) {
-          console.error('Error fetching warehouses:', error);
-          req.warehouses = [];
+          console.error('Error fetching data:', error); // Log any errors that occur
+          req.warehouses = []; // Set empty array on error
         }
       },
       // Process warehouse inventory before insert
@@ -500,14 +575,6 @@ const productAdminCRUD = adminCrudGenerator(
             console.log('✅ Processed warehouse inventory from field names:', warehouseInventory);
           }
         }
-      },
-      // Populate warehouse data after query
-      afterQuery: async (records, req) => {
-        const populatedRecords = await Product.populate(records, { 
-          path: 'warehouse_inventory.warehouse_id', 
-          select: 'warehouse_name warehouse_address status' 
-        });
-        return populatedRecords;
       }
     },
     // Custom response formatting to show warehouse inventory nicely

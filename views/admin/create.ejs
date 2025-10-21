@@ -148,6 +148,11 @@
         <!-- Create Form -->
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <form method="POST" action="<%= action %>" enctype="multipart/form-data" class="space-y-6">
+                <!-- Debug: All fieldConfig keys: <%= JSON.stringify(Object.keys(fieldConfig)) %> -->
+                <!-- Debug: parent_product_id fieldConfig: <%= JSON.stringify(fieldConfig.parent_product_id) %> -->
+                <!-- Debug: Template - All fieldConfig keys: <%= JSON.stringify(Object.keys(fieldConfig)) %> -->
+                <!-- Debug: Template - parent_product_id fieldConfig: <%= JSON.stringify(fieldConfig.parent_product_id) %> -->
+                <!-- Debug: Template - parent_product_id options: <%= JSON.stringify(fieldConfig.parent_product_id?.options) %> -->
                 <!-- Dynamic Form Fields -->
                 <% Object.keys(fieldConfig).forEach(fieldName => { %>
                     <% const field = fieldConfig[fieldName]; %>
@@ -214,6 +219,12 @@
                                       class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>"><%= record[field.name] || '' %></textarea>
                         
                         <% } else if (field.type === 'select') { %>
+                            <!-- Debug: Field <%= field.name %> -->
+                            <!-- Debug: Field type: <%= field.type %> -->
+                            <!-- Debug: Options exist: <%= !!field.options %> -->
+                            <!-- Debug: Options length: <%= field.options ? field.options.length : 0 %> -->
+                            <!-- Debug: Options: <%= JSON.stringify(field.options) %> -->
+                            <!-- Debug: Field config for <%= field.name %>: <%= JSON.stringify(fieldConfig[field.name]) %> -->
                             <select id="<%= field.name %>" 
                                     name="<%= field.name  %>" 
                                     <% if (field.required) { %>required<% } %>
@@ -225,6 +236,9 @@
                                             <%= option.label %>
                                         </option>
                                     <% }); %>
+                                <% } else { %>
+                                    <!-- Debug: No options available -->
+                                    <option value="">No options available</option>
                                 <% } %>
                             </select>
                         

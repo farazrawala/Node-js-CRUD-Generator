@@ -159,7 +159,22 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Apply custom middleware
       if (middleware.afterQuery) {
         records = await middleware.afterQuery(records, req);
+        // Update fieldConfig with any changes made by middleware
+        if (req.fieldConfig) {
+          Object.assign(fieldConfig, req.fieldConfig);
+        }
       }
+
+      // Debug logging for fieldConfig options
+      console.log('🔍 FieldConfig debug:');
+      Object.keys(fieldConfig).forEach(fieldName => {
+        if (fieldConfig[fieldName].type === 'select') {
+          console.log(`🔍 Field: ${fieldName}`);
+          console.log(`🔍 Type: ${fieldConfig[fieldName].type}`);
+          console.log(`🔍 Options:`, fieldConfig[fieldName].options);
+          console.log(`🔍 Options length:`, fieldConfig[fieldName].options ? fieldConfig[fieldName].options.length : 'undefined');
+        }
+      });
 
       // Format response
       if (responseFormatting.list) {
@@ -270,20 +285,22 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    */
   async function createForm(req, res) {
     try {
+      // Set fieldConfig on req before middleware runs
+      req.fieldConfig = fieldConfig;
+      
       // Apply custom middleware
       if (middleware.beforeCreateForm) {
         await middleware.beforeCreateForm(req, res);
       }
 
-      // Apply afterQuery middleware to populate field options (like user dropdown)
-      if (middleware.afterQuery) {
-        // Pass fieldConfig to the middleware via req
-        req.fieldConfig = fieldConfig;
-        await middleware.afterQuery([], req);
-      }
-
       // Use the modified fieldConfig from req if available, otherwise use the original
       const finalFieldConfig = req.fieldConfig || fieldConfig;
+      
+      // Debug: Check fieldConfig state
+      // console.log('🔍 adminCrudGenerator - req.fieldConfig exists:', !!req.fieldConfig);
+      // console.log('🔍 adminCrudGenerator - parent_product_id options:', req.fieldConfig?.parent_product_id?.options?.length || 0);
+      // console.log('🔍 adminCrudGenerator - finalFieldConfig parent_product_id options:', finalFieldConfig?.parent_product_id?.options?.length || 0);
+      // console.log('🔍 adminCrudGenerator - finalFieldConfig parent_product_id:', finalFieldConfig?.parent_product_id);
 
       res.render('admin/create', {
         title: `Create ${titleCase}`,
@@ -495,6 +512,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         ];
       }
 
+      // Set fieldConfig on req before middleware runs
+      req.fieldConfig = fieldConfig;
+      
       // Apply custom middleware
       if (middleware.beforeEditForm) {
         await middleware.beforeEditForm(req, res);
@@ -518,8 +538,6 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Apply afterQuery middleware to populate field options (like user dropdown)
       if (middleware.afterQuery) {
-        // Pass fieldConfig to the middleware via req
-        req.fieldConfig = fieldConfig;
         await middleware.afterQuery([record], req);
       }
 

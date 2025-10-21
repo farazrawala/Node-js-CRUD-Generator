@@ -4,7 +4,8 @@ const { generateSlug } = require("../utils/modelHelper");
 const modelSchema = new mongoose.Schema(
   {
     parent_product_id: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "product",
       // required: true,
       field_name: "Parent Product",
     },
@@ -70,6 +71,12 @@ const modelSchema = new mongoose.Schema(
       type: [String],
       field_type: "image",
       field_name: "Multiple Images",
+    },
+    status: { 
+      type: String,
+      required: true,
+      enum: ["active", "nonactive"], 
+      default: "active"              
     },
     deletedAt: {
       type: Date,

@@ -265,7 +265,38 @@
                                 <tr class="hover:bg-gray-50">
                                     <% Object.keys(fieldConfig).forEach(fieldName => { %>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                            <% if (fieldConfig[fieldName].type === 'checkbox') { %>
+                                            <% if (fieldConfig[fieldName].type === 'select' && record[fieldName]) { %>
+                                                <% 
+                                                // Handle select field with options
+                                                let selectedValue = record[fieldName];
+                                                let displayText = selectedValue;
+                                                
+                                                // Check if the field is populated (contains an object with name/product_name)
+                                                if (typeof selectedValue === 'object' && selectedValue !== null) {
+                                                    // Field is populated - use the populated data
+                                                    if (selectedValue.product_name) {
+                                                        displayText = selectedValue.product_name;
+                                                    } else if (selectedValue.name) {
+                                                        displayText = selectedValue.name;
+                                                    } else if (selectedValue._id) {
+                                                        displayText = selectedValue._id.toString();
+                                                    }
+                                                } else if (fieldConfig[fieldName].options && Array.isArray(fieldConfig[fieldName].options)) {
+                                                    
+                                                    // Field is not populated - find the matching label from options
+                                                    const selectedOption = fieldConfig[fieldName].options.find(option => 
+                                                        option.value === selectedValue || option.value === selectedValue.toString()
+                                                    );
+                                                    if (selectedOption) {
+                                                        displayText = selectedOption.label;
+                                                    }
+                                                }
+                                                %>
+                                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                                    <%= displayText %>
+                                                    <!-- Debug: <%= typeof selectedValue %> | <%= selectedValue %> -->
+                                                </span>
+                                            <% } else if (fieldConfig[fieldName].type === 'checkbox') { %>
                                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium <%= record[fieldName] ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
                                                     <%= record[fieldName] ? 'Yes' : 'No' %>
                                                 </span>
