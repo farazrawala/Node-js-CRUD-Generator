@@ -99,8 +99,8 @@ afterQuery: async (records, req) => {
   // Filter out records with empty references to avoid cast errors
   const validRecords = records.filter(record => 
     record.parent_product_id && 
-    record.parent_product_id !== '' && 
-    record.parent_product_id !== null
+    record.parent_product_id !== null &&
+    record.parent_product_id !== ''
   );
   
   // Only populate if there are valid records
@@ -354,3 +354,4 @@ Look for these debug messages:
 - Use `$exists: false` instead of empty strings
 
 This guide should help you understand the correct order and usage of middleware functions in the Admin CRUD Generator.
+

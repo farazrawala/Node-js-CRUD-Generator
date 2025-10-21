@@ -327,8 +327,8 @@ const productAdminCRUD = adminCrudGenerator(
         // Filter out records with empty parent_product_id to avoid cast errors
         const validRecords = records.filter(record => 
           record.parent_product_id && 
-          record.parent_product_id !== '' && 
-          record.parent_product_id !== null
+          record.parent_product_id !== null &&
+          record.parent_product_id !== ''
         );
         
         // Only populate if there are valid records
@@ -358,12 +358,29 @@ const productAdminCRUD = adminCrudGenerator(
           // Fetch all active products for parent_product_id dropdown
           // Use aggregate to avoid ObjectId casting issues with legacy data
           
-           const parent_products = await Product.find({ 
-               deletedAt: { $exists: true }, // Only non-deleted products
-               $and: [
-                 { parent_product_id: { $exists: true } }, // Products with parent_product_id field
-               ]
-           }).select('product_name').sort({ product_name: 1 }); // Select product name and sort alphabetically
+           // Use aggregation pipeline to filter parent products efficiently
+           const parent_products = await Product.aggregate([
+             {
+               $match: {
+                 deletedAt: null, // Only non-deleted products
+                 $or: [
+                   { parent_product_id: null }, // Products with null parent
+                   { parent_product_id: { $exists: false } }, // Products without parent_product_id field
+                   { parent_product_id: "" }, // Products with empty string parent (legacy data)
+                   { parent_product_id: { $eq: "" } } // Alternative empty string check
+                 ]
+               }
+             },
+             {
+               $project: {
+                 _id: 1,
+                 product_name: 1
+               }
+             },
+             {
+               $sort: { product_name: 1 }
+             }
+           ]);
           
            console.log('✅ Parent product options set:',parent_products);
            console.log('🔍 Parent products count:', parent_products.length);
