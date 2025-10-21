@@ -626,6 +626,141 @@ const productAdminCRUD = adminCrudGenerator(
 
 
 
+/**
+ * Auto-generate Admin CRUD with UI Forms for warehouse model
+ */
+const warehouseAdminCRUD = adminCrudGenerator(
+  Warehouse, // Mongoose model for warehouse
+  "warehouse", // Route prefix for warehouse CRUD operations
+  ["warehouse_name", "warehouse_address", "company_id", "warehouse_image", "status"], // Fields to include in CRUD operations
+  {
+    excludedFields: ["__v"], // Fields to exclude from forms and display
+    includedFields: ["warehouse_name", "warehouse_address", "company_id", "warehouse_image", "status", "createdAt", "updatedAt"], // Fields to include in queries
+    searchableFields: ["warehouse_name", "warehouse_address", "company_id"], // Fields that can be searched (excluded parent_product_id as it's ObjectId)
+    filterableFields: [], // Fields that can be filtered (empty means filter by all displayed fields)
+    sortableFields: ["warehouse_name", "warehouse_address", "company_name", "status", "createdAt"], // Fields that can be sorted
+    baseUrl: BASE_URL, // Base URL for the application
+    softDelete: true, // Enable soft delete functionality
+    fieldTypes: {
+      warehouse_image: "file", // File upload field for single image
+      status: "select", // Dropdown select field
+    },
+    fieldLabels: {
+      warehouse_name: "Warehouse Name",
+      warehouse_address: "Address", 
+      company_name: "Company Name",
+      warehouse_image: "Warehouse Image",
+      status: "Status"
+    },
+    fieldOptions: {
+      company_name: {
+        name: 'company_name',
+        type: 'text',
+        label: 'Company Name',
+        required: false,
+        validation: {},
+        options: [],
+        placeholder: 'Company Name',
+        helpText: 'Company name'
+      }
+    },
+    middleware: {
+      afterQuery: async (records, req) => {
+        // Populate company_id for all records that have it
+        const populatedRecords = await Warehouse.populate(records, [
+          { 
+            path: 'company_id', 
+            select: 'company_name' 
+          }
+        ]);
+        
+        // Add company_name field to fieldConfig so it shows in the list view
+        if (req.fieldConfig) {
+          req.fieldConfig.company_name = {
+            name: 'company_name',
+            type: 'text',
+            label: 'Company Name',
+            required: false,
+            validation: {},
+            options: [],
+            placeholder: 'Company Name',
+            helpText: 'Company name'
+          };
+        }
+        
+        // Note: Dropdown options are set in beforeCreateForm/beforeEditForm middleware
+        // This afterQuery middleware is only for populating existing records in list views
+        
+        return populatedRecords; // Return populated records with company data
+      },
+      // Fetch warehouses before rendering create form
+      beforeCreateForm: async (req, res) => {
+        try {
+          // Fetch all active companies for company_id dropdown
+          const companies = await Company.find({ 
+            status: 'active', // Only active companies
+            deletedAt: null // Only non-deleted companies
+          }).select('name').sort({ name: 1 }); // Select company details and sort by name
+          
+          // Add companies to request object for view access
+          req.companies = companies; // Store companies in request for form access
+
+          // Debug: Final fieldConfig state
+          console.log('🔍 Final fieldConfig parent_product_id:', req.fieldConfig?.parent_product_id);
+          console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
+        } catch (error) {
+          console.error('Error fetching data:', error); // Log any errors
+          req.warehouses = []; // Set empty array on error
+        }
+      },
+      // Fetch warehouses before rendering edit form
+      beforeEditForm: async (req, res) => {
+        try {
+          // Fetch all active companies for company_id dropdown
+          const companies = await Company.find({ 
+            status: 'active', // Only active companies
+            deletedAt: null // Only non-deleted companies
+          }).select('name').sort({ name: 1 }); // Select company details and sort by name
+          
+          // Add companies to request object for view access
+          req.companies = companies; // Store companies in request for form access
+          
+          // Fetch all active warehouses
+          console.log('🔍 Field config exists:', !!req.fieldConfig); // Debug log of field config existence
+          console.log('🔍 Warehouse field exists:', !!req.fieldConfig?.warehouse_id); // Debug log of specific field existence
+          console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
+        } catch (error) {
+          console.error('Error fetching data:', error); // Log any errors
+          req.warehouses = []; // Set empty array on error
+        }
+      },
+      // Process warehouse inventory before insert
+      beforeInsert: async (req, res) => {
+        //
+      },
+      // Process warehouse inventory before update
+      beforeUpdate: async (req, res) => {
+        
+      }
+    },
+    // Custom response formatting to show company name instead of ObjectId
+    responseFormatting: {
+      list: async (records) => {
+        return records.map(record => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          if (recordObj.company_id?.company_name) {
+            recordObj.company_id = recordObj.company_id.company_name;
+          }
+          return recordObj;
+        });
+      }
+    }
+  }
+);
+
+
+
+
 const complainAdminCRUD = adminCrudGenerator(
   Complain,
   "complain",
@@ -780,6 +915,7 @@ routeRegistry.updateRoute('orders', { crudController: orderAdminCRUD });
 routeRegistry.updateRoute('categories', { crudController: categoryAdminCRUD });
 routeRegistry.updateRoute('complain', { crudController: complainAdminCRUD });
 routeRegistry.updateRoute('company', { crudController: companyAdminCRUD });
+routeRegistry.updateRoute('warehouse', { crudController: warehouseAdminCRUD });
 
 // Add routes data to all requests for dynamic menu rendering (after all routes are registered)
 router.use((req, res, next) => {
@@ -1156,6 +1292,7 @@ router.get("/crud-controllers", (req, res) => {
     categories: categoryAdminCRUD.controller,
     complain: complainAdminCRUD.controller,
     company: companyAdminCRUD.controller,
+    warehouse: warehouseAdminCRUD.controller,
   };
 
   res.status(200).json({
@@ -1171,6 +1308,7 @@ router.get("/crud-controllers", (req, res) => {
         categories: "/admin/categories",
         complain: "/admin/complain",
         company: "/admin/company",
+        warehouse: "/admin/warehouse",
       },
     },
   });

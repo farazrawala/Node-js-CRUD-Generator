@@ -80,10 +80,18 @@ class RouteRegistry {
       },
       company: {
         name: 'Company',
-        icon: 'fas fa-exclamation-triangle',
+        icon: 'fas fa-building',
         path: '/admin/company',
-        description: 'Manage Companys',
+        description: 'Manage Companies',
         order: 7,
+        enabled: true
+      },
+      warehouse: {
+        name: 'Warehouses',
+        icon: 'fas fa-warehouse',
+        path: '/admin/warehouse',
+        description: 'Manage warehouses and inventory',
+        order: 8,
         enabled: true
       }
     };
