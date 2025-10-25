@@ -183,6 +183,12 @@
                                       class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>"><%= record[field.name] || '' %></textarea>
                         
                         <% } else if (field.type === 'select') { %>
+                            <script>
+                                console.log('Field Name:', '<%= field.name %>');
+                                console.log('Field Options:', <%- JSON.stringify(field.options) %>);
+                                console.log('Select :', <%- JSON.stringify(record[field.name]._id) %>);
+                                
+                            </script>
                             <select id="<%= field.name %>" 
                                     name="<%= field.name %>" 
                                     <% if (field.required) { %>required<% } %>
@@ -190,7 +196,7 @@
                                 <option value="">Select <%= field.label %></option>
                                 <% if (field.options && field.options.length > 0) { %>
                                     <% field.options.forEach(option => { %>
-                                        <option value="<%= option.value %>" <%= (record[field.name] && record[field.name].toString() === option.value) ? 'selected' : '' %>>
+                                        <option value="<%= option.value %>" <%= (record[field.name] && record[field.name]._id.toString() === option.value) ? 'selected' : '' %>>
                                             <%= option.label %>
                                         </option>
                                     <% }); %>
