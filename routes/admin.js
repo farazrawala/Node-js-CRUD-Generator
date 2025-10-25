@@ -693,6 +693,7 @@ const warehouseAdminCRUD = adminCrudGenerator(
         
         return populatedRecords; // Return populated records with company data
       },
+       
       // Fetch warehouses before rendering create form
       beforeCreateForm: async (req, res) => {
         try {
@@ -700,14 +701,13 @@ const warehouseAdminCRUD = adminCrudGenerator(
           const companies = await Company.find({ 
             status: 'active', // Only active companies
             deletedAt: null // Only non-deleted companies
-          }).select('name').sort({ name: 1 }); // Select company details and sort by name
-          
+          }).select('company_name').sort({ company_name: 1 }); // Select company details and sort by name
+          console.log('companies_find',companies);
           // Add companies to request object for view access
           req.companies = companies; // Store companies in request for form access
-
-          // Debug: Final fieldConfig state
-          console.log('🔍 Final fieldConfig parent_product_id:', req.fieldConfig?.parent_product_id);
-          console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
+          req.fieldConfig.company_id.options = companies.map(company => ({ value: company._id.toString(), label: company.company_name }));
+          req.fieldConfig.company_id.placeholder = 'Select Company';
+          req.fieldConfig.company_id.helpText = 'Choose the company for this warehouse';
         } catch (error) {
           console.error('Error fetching data:', error); // Log any errors
           req.warehouses = []; // Set empty array on error
@@ -715,15 +715,23 @@ const warehouseAdminCRUD = adminCrudGenerator(
       },
       // Fetch warehouses before rendering edit form
       beforeEditForm: async (req, res) => {
+          // try {
+            
+          // } catch (error) {
+            
+          // }
         try {
           // Fetch all active companies for company_id dropdown
           const companies = await Company.find({ 
             status: 'active', // Only active companies
             deletedAt: null // Only non-deleted companies
-          }).select('name').sort({ name: 1 }); // Select company details and sort by name
+          }).select('company_name').sort({ company_name: 1 }); // Select company details and sort by name
           
           // Add companies to request object for view access
           req.companies = companies; // Store companies in request for form access
+          req.fieldConfig.company_id.options = companies.map(company => ({ value: company._id.toString(), label: company.company_name }));
+          req.fieldConfig.company_id.placeholder = 'Select Company';
+          req.fieldConfig.company_id.helpText = 'Choose the company for this warehouse';
           
           // Fetch all active warehouses
           console.log('🔍 Field config exists:', !!req.fieldConfig); // Debug log of field config existence
@@ -735,13 +743,7 @@ const warehouseAdminCRUD = adminCrudGenerator(
         }
       },
       // Process warehouse inventory before insert
-      beforeInsert: async (req, res) => {
-        //
-      },
-      // Process warehouse inventory before update
-      beforeUpdate: async (req, res) => {
-        
-      }
+      
     },
     // Custom response formatting to show company name instead of ObjectId
     responseFormatting: {

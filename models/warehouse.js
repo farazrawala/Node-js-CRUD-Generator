@@ -15,6 +15,7 @@ const modelSchema = new mongoose.Schema(
       ref: "company",
     //   required: true,
       field_name: "Company",
+      field_type: "select",
     },
     warehouse_image: {
       type: String,

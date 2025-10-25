@@ -184,10 +184,15 @@
                         
                         <% } else if (field.type === 'select') { %>
                             <script>
-                                console.log('Field Name:', '<%= field.name %>');
+                                console.log('Field Name2:', '<%= field.name %>');
                                 console.log('Field Options:', <%- JSON.stringify(field.options) %>);
-                                console.log('Select :', <%- JSON.stringify(record[field.name]._id) %>);
-                                
+                                console.log('Field Options Length:', <%= field.options ? field.options.length : 0 %>);
+                                console.log('Select :', <%- JSON.stringify(record[field.name] && record[field.name]._id ? record[field.name]._id : null) %>);
+                                <% if (field.options && field.options.length > 0) { %>
+                                    <% field.options.forEach((option, index) => { %>
+                                        console.log('Option <%= index %>:', <%- JSON.stringify(option) %>);
+                                    <% }); %>
+                                <% } %>
                             </script>
                             <select id="<%= field.name %>" 
                                     name="<%= field.name %>" 
@@ -196,7 +201,7 @@
                                 <option value="">Select <%= field.label %></option>
                                 <% if (field.options && field.options.length > 0) { %>
                                     <% field.options.forEach(option => { %>
-                                        <option value="<%= option.value %>" <%= (record[field.name] && record[field.name]._id.toString() === option.value) ? 'selected' : '' %>>
+                                        <option value="<%= option.value %>" <%= (record[field.name] && record[field.name]._id && record[field.name]._id.toString() === option.value) ? 'selected' : '' %>>
                                             <%= option.label %>
                                         </option>
                                     <% }); %>
