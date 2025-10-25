@@ -254,6 +254,20 @@
                             </select>
                         
                         <% } else if (field.type === 'multiselect') { %>
+                            <script>
+                                console.log('Create - Multiselect Field Name:', '<%= field.name %>');
+                                console.log('Create - Multiselect Field Options:', <%- JSON.stringify(field.options) %>);
+                                console.log('Create - Multiselect Options Length:', <%= field.options ? field.options.length : 0 %>);
+                                console.log('Create - Multiselect Current Value:', <%- JSON.stringify(record[field.name] || null) %>);
+                                console.log('Create - Multiselect Is Array:', <%= Array.isArray(record[field.name]) %>);
+                                console.log('Create - Multiselect Array Length:', <%= record[field.name] && Array.isArray(record[field.name]) ? record[field.name].length : 0 %>);
+                                <% if (field.options && field.options.length > 0) { %>
+                                    <% field.options.forEach((option, index) => { %>
+                                        console.log('Create - Multiselect Option <%= index %>:', <%- JSON.stringify(option) %>);
+                                        console.log('Create - Multiselect Option <%= index %> Selected:', <%= Array.isArray(record[field.name]) && record[field.name].includes(option.value) %>);
+                                    <% }); %>
+                                <% } %>
+                            </script>
                             <select id="<%= field.name %>" 
                                     name="<%= field.name %>[]" 
                                     multiple

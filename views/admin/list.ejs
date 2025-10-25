@@ -354,16 +354,28 @@
                                                     <span class="text-gray-400 text-xs">No image</span>
                                                 <% } %>
                                             <% } else if (fieldConfig[fieldName].type === 'multiselect' && Array.isArray(record[fieldName])) { %>
+                                                <script>
+                                                    console.log('List - Multiselect Field:', '<%= fieldName %>');
+                                                    console.log('List - Field Config:', <%- JSON.stringify(fieldConfig[fieldName]) %>);
+                                                    console.log('List - Record Value:', <%- JSON.stringify(record[fieldName]) %>);
+                                                    console.log('List - Is Array:', <%= Array.isArray(record[fieldName]) %>);
+                                                    console.log('List - Array Length:', <%= record[fieldName] ? record[fieldName].length : 0 %>);
+                                                    <% if (record[fieldName] && record[fieldName].length > 0) { %>
+                                                        <% record[fieldName].forEach((role, index) => { %>
+                                                            console.log('List - Item <%= index %>:', <%- JSON.stringify(role) %>);
+                                                        <% }); %>
+                                                    <% } %>
+                                                </script>
                                                 <% if (record[fieldName].length > 0) { %>
                                                     <div class="flex flex-wrap gap-1">
                                                         <% record[fieldName].forEach(role => { %>
                                                             <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                                                <%= role.charAt(0).toUpperCase() + role.slice(1) %>
+                                                                <%= typeof role === 'string' ? role.charAt(0).toUpperCase() + role.slice(1) : (role.label || role.name || role.toString()) %>
                                                             </span>
                                                         <% }); %>
                                                     </div>
                                                 <% } else { %>
-                                                    <span class="text-gray-400 text-xs">No roles</span>
+                                                    <span class="text-gray-400 text-xs">No Selection</span>
                                                 <% } %>
                                             <% } else if (fieldName === 'user_id' && record.user_id && typeof record.user_id === 'object' && record.user_id.name) { %>
                                                 <%= record.user_id.name %>

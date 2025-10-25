@@ -43,6 +43,12 @@ const categorySchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
+    status: { 
+      type: String,
+      required: true,
+      enum: ["active", "nonactive"], 
+      default: "active"              
+    },
     deletedAt: {
       type: Date,
       default: null,

@@ -209,6 +209,26 @@
                             </select>
                         
                         <% } else if (field.type === 'multiselect') { %>
+                            <script>
+                                console.log('Edit - Multiselect Field Name:', '<%= field.name %>');
+                                console.log('Edit - Multiselect Field Options:', <%- JSON.stringify(field.options) %>);
+                                console.log('Edit - Multiselect Options Length:', <%= field.options ? field.options.length : 0 %>);
+                                console.log('Edit - Multiselect Current Value:', <%- JSON.stringify(record[field.name] || null) %>);
+                                console.log('Edit - Multiselect Is Array:', <%= Array.isArray(record[field.name]) %>);
+                                console.log('Edit - Multiselect Array Length:', <%= record[field.name] && Array.isArray(record[field.name]) ? record[field.name].length : 0 %>);
+                                <% if (field.options && field.options.length > 0) { %>
+                                    <% field.options.forEach((option, index) => { %>
+                                        console.log('Edit - Multiselect Option <%= index %>:', <%- JSON.stringify(option) %>);
+                                        console.log('Edit - Multiselect Option <%= index %> Selected:', <%= Array.isArray(record[field.name]) && record[field.name].some(item => (typeof item === 'object' && item._id) ? item._id.toString() === option.value : item.toString() === option.value) %>);
+                                        console.log('Edit - Multiselect Option <%= index %> Value:', '<%= option.value %>');
+                                    <% }); %>
+                                <% } %>
+                                <% if (record[field.name] && Array.isArray(record[field.name])) { %>
+                                    <% record[field.name].forEach((item, index) => { %>
+                                        console.log('Edit - Multiselect Current Item <%= index %>:', <%- JSON.stringify(item) %>);
+                                    <% }); %>
+                                <% } %>
+                            </script>
                             <select id="<%= field.name %>" 
                                     name="<%= field.name %>[]" 
                                     multiple
@@ -216,7 +236,7 @@
                                     class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>">
                                 <% if (field.options && field.options.length > 0) { %>
                                     <% field.options.forEach(option => { %>
-                                        <option value="<%= option.value %>" <%= (Array.isArray(record[field.name]) && record[field.name].includes(option.value)) ? 'selected' : '' %>>
+                                        <option value="<%= option.value %>" <%= (Array.isArray(record[field.name]) && record[field.name].some(item => (typeof item === 'object' && item._id) ? item._id.toString() === option.value : item.toString() === option.value)) ? 'selected' : '' %>>
                                             <%= option.label %>
                                         </option>
                                     <% }); %>

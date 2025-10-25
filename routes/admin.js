@@ -295,7 +295,7 @@ const orderAdminCRUD = adminCrudGenerator(
 const productAdminCRUD = adminCrudGenerator(
   Product, // Mongoose model for products
   "products", // Route prefix for product CRUD operations
-  ["parent_product_id", "product_name", "product_slug", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"], // Fields to include in CRUD operations
+  ["parent_product_id", "product_name", "product_slug", "category_id", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"], // Fields to include in CRUD operations
   {
     excludedFields: ["__v"], // Fields to exclude from forms and display
     includedFields: [], // Additional fields to include (empty means use all except excluded)
@@ -312,7 +312,8 @@ const productAdminCRUD = adminCrudGenerator(
       warehouse_inventory: "custom", // Custom field type for warehouse inventory
       warehouse_inventory_display: "text", // Display only field
       total_quantity: "number", // Display only field
-      parent_product_id: "select", // Dropdown select field
+      parent_product_id: "select", // Dropdown select field+ 
+      category_id: "multiselect",
     },
     fieldLabels: {
       product_image: "Product Image", // Human-readable label for product image
@@ -330,11 +331,21 @@ const productAdminCRUD = adminCrudGenerator(
           record.parent_product_id !== null &&
           record.parent_product_id !== ''
         );
-        
+
+        if (req.fieldConfig?.category_id) {
+          const categories = await Category.find({ deletedAt: null }, 'name').sort({ name: 1 });
+          req.fieldConfig.category_id.options = categories.map(category => ({ value: category._id.toString(), label: category.name }));
+          req.fieldConfig.category_id.placeholder = 'Select Category';
+          req.fieldConfig.category_id.helpText = 'Choose the category for this product';
+        }
         // Only populate if there are valid records
         let populatedRecords = records;
         if (validRecords.length > 0) {
           populatedRecords = await Product.populate(records, [
+            {
+              path:'category_id',
+              select: 'name'
+            },
             { 
               path: 'parent_product_id', 
               select: 'product_name' 
@@ -354,10 +365,20 @@ const productAdminCRUD = adminCrudGenerator(
       },
       // Fetch warehouses before rendering create form
       beforeCreateForm: async (req, res) => {
+        
         try {
           // Fetch all active products for parent_product_id dropdown
           // Use aggregate to avoid ObjectId casting issues with legacy data
-          
+          const categories = await Category.find({ 
+            status: 'active', // Only active companies
+            deletedAt: null // Only non-deleted companies
+          }).select('name').sort({ name: 1 }); // Select company details and sort by name
+          console.log('categories___',categories);
+          // Add companies to request object for view access
+          req.categories = categories; // Store categories in request for form access
+          req.fieldConfig.category_id.options = categories.map(category => ({ value: category._id.toString(), label: category.name }));
+          req.fieldConfig.category_id.placeholder = 'Select Category';
+          req.fieldConfig.category_id.helpText = 'Choose the Category for this product';
            // Use aggregation pipeline to filter parent products efficiently
            const parent_products = await Product.aggregate([
              {
@@ -419,6 +440,9 @@ const productAdminCRUD = adminCrudGenerator(
       // Fetch warehouses before rendering edit form
       beforeEditForm: async (req, res) => {
         try {
+          
+          
+
           // Fetch all active products for parent_product_id dropdown
           const parent_products = await Product.find({ 
             deletedAt: null, // Only non-deleted products
@@ -823,7 +847,7 @@ const complainAdminCRUD = adminCrudGenerator(
 const categoryAdminCRUD = adminCrudGenerator(
   Category,
   "categories",
-  ["parent_id", "name", "description", "isActive", "icon", "color", "sort_order"],
+  ["parent_id", "name", "description", "isActive", "icon", "color", "sort_order", "status"],
   {
     excludedFields: ["__v"],
     includedFields: [
@@ -834,6 +858,7 @@ const categoryAdminCRUD = adminCrudGenerator(
       "icon",
       "color",
       "sort_order",
+      "status",
       "createdAt",
     ],
     searchableFields: ["name", "description"],

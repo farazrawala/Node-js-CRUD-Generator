@@ -14,6 +14,14 @@ const modelSchema = new mongoose.Schema(
       required: true,
       field_name: "Product Name",
     },
+    category_id: {
+      type: [mongoose.Schema.Types.ObjectId],
+      ref: "category",
+      default: [],
+      // required: true,
+      field_name: "Category",
+      field_type: "multiselect",
+    },
     product_slug: {
       type: String,
       field_name: "Product Slug",
