@@ -49,7 +49,7 @@ const {
   async function getAllwarehouse(req, res) {
     const response = await handleGenericGetAll(req, "warehouse", {
       excludeFields: [], // Don't exclude any fields
-      populate: ["user_id"],  
+      // populate: ["user_id"],  
       sort: { createdAt: -1 }, // Sort by newest first
       limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
       skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
@@ -61,7 +61,7 @@ const {
     const response = await handleGenericGetAll(req, "warehouse", {
       filter: { status: "active" , deletedAt: null },
       excludeFields: [], // Don't exclude any fields
-      populate: ["user_id"],  
+      // populate: ["user_id"],  
       sort: { createdAt: -1 }, // Sort by newest first
       limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
       skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
