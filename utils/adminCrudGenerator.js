@@ -64,7 +64,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
   // Auto-detect fields from model schema if not provided
   if (fields.length === 0) {
     fields = Object.keys(Model.schema.paths).filter(field => 
-      !['_id', '__v', 'createdAt', 'updatedAt'].includes(field)
+      !['_id', '__v', 'createdAt', 'updatedAt', 'created_by', 'updated_by'].includes(field)
     );
   }
 
@@ -99,7 +99,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Apply filters
       // If filterableFields is empty, use all fields that are displayed (excluding system fields)
       const fieldsToFilter = filterableFields.length > 0 ? filterableFields : fields.filter(field => 
-        !['_id', '__v', 'createdAt', 'updatedAt', 'deletedAt'].includes(field)
+        !['_id', '__v', 'createdAt', 'updatedAt', 'deletedAt', 'created_by', 'updated_by'].includes(field)
       );
       
       fieldsToFilter.forEach(field => {
@@ -302,13 +302,22 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // console.log('🔍 adminCrudGenerator - finalFieldConfig parent_product_id options:', finalFieldConfig?.parent_product_id?.options?.length || 0);
       // console.log('🔍 adminCrudGenerator - finalFieldConfig parent_product_id:', finalFieldConfig?.parent_product_id);
 
+      // Create record object with default values
+      const recordWithDefaults = {};
+      Object.keys(finalFieldConfig).forEach(fieldName => {
+        const field = finalFieldConfig[fieldName];
+        if (field.defaultValue !== null && field.defaultValue !== undefined) {
+          recordWithDefaults[fieldName] = field.defaultValue;
+        }
+      });
+
       res.render('admin/create', {
         title: `Create ${titleCase}`,
         modelName,
         singularName,
         titleCase,
         fieldConfig: finalFieldConfig,
-        record: {},
+        record: recordWithDefaults, // Record with default values
         action: `/admin/${modelName}`,
         method: 'POST',
         errors: [],
@@ -417,6 +426,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       
       if (fieldProcessing.beforeInsert) {
         data = await fieldProcessing.beforeInsert(data, req);
+      }
+
+      // Automatically set created_by if field exists and user is authenticated
+      if (req.user && req.user._id && Model.schema.paths.created_by) {
+        data.created_by = req.user._id;
       }
 
       // Create record
@@ -777,6 +791,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         updateData = await fieldProcessing.beforeUpdate(updateData, req, record);
       }
 
+      // Automatically set updated_by if field exists and user is authenticated
+      if (req.user && req.user._id && Model.schema.paths.updated_by) {
+        updateData.updated_by = req.user._id;
+      }
+
       // Apply custom hooks
       if (hooks.beforeUpdate) {
         await hooks.beforeUpdate(record, updateData, req);
@@ -1073,7 +1092,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         validation: fieldValidation[fieldName] || generateFieldValidation(schemaPath),
         options: fieldOptions[fieldName] || generateFieldOptions(schemaPath),
         placeholder: generateFieldPlaceholder(fieldName),
-        helpText: generateFieldHelpText(fieldName, schemaPath)
+        helpText: generateFieldHelpText(fieldName, schemaPath),
+        defaultValue: (() => {
+          // Handle Mongoose default values properly
+          if (schemaPath.defaultValue !== undefined) {
+            if (typeof schemaPath.defaultValue === 'function') {
+              return schemaPath.defaultValue();
+            }
+            return schemaPath.defaultValue;
+          }
+          if (schemaPath.default !== undefined) {
+            if (typeof schemaPath.default === 'function') {
+              return schemaPath.default();
+            }
+            return schemaPath.default;
+          }
+          return null;
+        })()
       };
 
       config[fieldName] = field;

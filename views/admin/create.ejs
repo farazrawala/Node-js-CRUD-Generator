@@ -229,10 +229,12 @@
                                 console.log('Create - Field Name:', '<%= field.name %>');
                                 console.log('Create - Field Options:', <%- JSON.stringify(field.options) %>);
                                 console.log('Create - Field Options Length:', <%= field.options ? field.options.length : 0 %>);
+                                console.log('Create - Field Default Value:', <%- JSON.stringify(field.defaultValue) %>);
                                 console.log('Create - Current Value:', <%- JSON.stringify(record[field.name] || null) %>);
                                 <% if (field.options && field.options.length > 0) { %>
                                     <% field.options.forEach((option, index) => { %>
-                                        console.log('Create - Option <%= index %>:', <%- JSON.stringify(option) %>);
+                                        console.log('Create - Option:', <%- JSON.stringify(option) %>);
+                                        console.log('Create - Option Selected:', <%= (record[field.name] && record[field.name].toString() === option.value) %>);
                                     <% }); %>
                                 <% } %>
                             </script>

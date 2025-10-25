@@ -295,13 +295,13 @@ const orderAdminCRUD = adminCrudGenerator(
 const productAdminCRUD = adminCrudGenerator(
   Product, // Mongoose model for products
   "products", // Route prefix for product CRUD operations
-  ["parent_product_id", "product_name", "product_slug", "category_id", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images"], // Fields to include in CRUD operations
+  ["parent_product_id", "product_name", "product_slug", "category_id", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields to include in CRUD operations
   {
     excludedFields: ["__v"], // Fields to exclude from forms and display
     includedFields: [], // Additional fields to include (empty means use all except excluded)
-    searchableFields: ["product_name", "product_description", "product_price"], // Fields that can be searched (excluded parent_product_id as it's ObjectId)
+    searchableFields: ["product_name", "product_description", "product_price", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields that can be searched (excluded parent_product_id as it's ObjectId)
     filterableFields: [], // Fields that can be filtered (empty means filter by all displayed fields)
-    sortableFields: ["name", "price", "description", "description_details", "createdAt"], // Fields that can be sorted
+    sortableFields: ["name", "price", "description", "description_details", "createdAt", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields that can be sorted
     baseUrl: BASE_URL, // Base URL for the application
     softDelete: true, // Enable soft delete functionality
     fieldTypes: {
@@ -758,9 +758,9 @@ const warehouseAdminCRUD = adminCrudGenerator(
           req.fieldConfig.company_id.helpText = 'Choose the company for this warehouse';
           
           // Fetch all active warehouses
-          console.log('🔍 Field config exists:', !!req.fieldConfig); // Debug log of field config existence
-          console.log('🔍 Warehouse field exists:', !!req.fieldConfig?.warehouse_id); // Debug log of specific field existence
-          console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
+          // console.log('🔍 Field config exists:', !!req.fieldConfig); // Debug log of field config existence
+          // console.log('🔍 Warehouse field exists:', !!req.fieldConfig?.warehouse_id); // Debug log of specific field existence
+          // console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
         } catch (error) {
           console.error('Error fetching data:', error); // Log any errors
           req.warehouses = []; // Set empty array on error

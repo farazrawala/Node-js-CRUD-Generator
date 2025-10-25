@@ -6,13 +6,61 @@ const modelSchema = new mongoose.Schema(
     parent_product_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "product",
-      // required: true,
       field_name: "Parent Product",
     },
     product_name: {
       type: String,
       required: true,
       field_name: "Product Name",
+    },
+    product_code: {
+      type: String,
+      field_name: "Product code",
+    },
+    alert_qty:{
+      type: Number,
+      field_name: "Alert Qty",
+    },
+    unit:{
+      type: String,
+      required: true,
+      field_type: "select",
+      enum: ["Piece","Ltr","Box","Meter","Feet","Yard","Inch","Centimeter","Millimeter","Others"], 
+      default: "Piece"  
+    },
+    weight:{
+      type :Number,
+      field_name: "Weight",
+    },
+    length:{
+      type :Number,
+      field_name: "Length",
+    },
+    width:{
+      type :Number,
+      field_name: "Width",
+    },
+    height:{
+      type :Number,
+      field_name: "Height",
+    },
+    dimension:{
+      type :String,
+      field_name: "Dimension",
+    },
+    tax_rate:{
+      type: Number,
+      field_name: "Tax Rate",
+    },
+    barcode:{
+      type:String,
+      field_name:'Product Barcode'
+    },
+    product_type:{
+      type: String,
+      required: true,
+      enum: ["Single", "Variant"], 
+      default: "Single"   
     },
     category_id: {
       type: [mongoose.Schema.Types.ObjectId],
@@ -61,6 +109,10 @@ const modelSchema = new mongoose.Schema(
       default: [],
       field_name: "Warehouse Inventory"
     },
+    wholesale_price:{
+      type: Number,
+      field_name: "Wholesale Price",
+    },
     product_price: {
       type: String,
       required: true,
@@ -79,6 +131,16 @@ const modelSchema = new mongoose.Schema(
       type: [String],
       field_type: "image",
       field_name: "Multiple Images",
+    },
+    created_by:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Created By",
+    },
+    updated_by:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Updated By",
     },
     status: { 
       type: String,
