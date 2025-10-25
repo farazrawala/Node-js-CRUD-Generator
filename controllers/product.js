@@ -5,8 +5,17 @@ const {
   handleGenericGetAll,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
+const { generateProductBarcode } = require("../utils/barcodeGenerator");
 
 async function productCreate(req, res) {
+  console.log("🔧 Product create - req.body:", req.body);
+  
+  // Generate unique EAN13 barcode if barcode is empty
+  if (!req.body.barcode || req.body.barcode.trim() === "") {
+    req.body.barcode = generateProductBarcode();
+    console.log("🏷️ Generated new EAN13 barcode:", req.body.barcode);
+  }
+  
   const response = await handleGenericCreate(req, "product", {
     afterCreate: async (record, req) => {
       console.log("✅ Product created successfully:", record);

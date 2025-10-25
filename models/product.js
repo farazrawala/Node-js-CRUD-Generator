@@ -20,6 +20,7 @@ const modelSchema = new mongoose.Schema(
     alert_qty:{
       type: Number,
       field_name: "Alert Qty",
+      default: 0,
     },
     unit:{
       type: String,
@@ -69,6 +70,12 @@ const modelSchema = new mongoose.Schema(
       // required: true,
       field_name: "Category",
       field_type: "multiselect",
+    },
+    company_id:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      // required: true,
+      field_name: "Company",
     },
     product_slug: {
       type: String,

@@ -64,7 +64,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
   // Auto-detect fields from model schema if not provided
   if (fields.length === 0) {
     fields = Object.keys(Model.schema.paths).filter(field => 
-      !['_id', '__v', 'createdAt', 'updatedAt', 'created_by', 'updated_by'].includes(field)
+      !['_id', '__v', 'createdAt', 'updatedAt', 'created_by', 'updated_by', 'company_id'].includes(field)
     );
   }
 
@@ -99,7 +99,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Apply filters
       // If filterableFields is empty, use all fields that are displayed (excluding system fields)
       const fieldsToFilter = filterableFields.length > 0 ? filterableFields : fields.filter(field => 
-        !['_id', '__v', 'createdAt', 'updatedAt', 'deletedAt', 'created_by', 'updated_by'].includes(field)
+        !['_id', '__v', 'createdAt', 'updatedAt', 'deletedAt', 'created_by', 'updated_by', 'company_id'].includes(field)
       );
       
       fieldsToFilter.forEach(field => {
@@ -431,6 +431,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Automatically set created_by if field exists and user is authenticated
       if (req.user && req.user._id && Model.schema.paths.created_by) {
         data.created_by = req.user._id;
+      }
+
+      // Automatically set company_id if field exists and user has company_id
+      if (req.user && req.user.company_id && Model.schema.paths.company_id) {
+        data.company_id = req.user.company_id;
+      }
+
+      // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
+      if (Model.schema.paths.barcode && (!data.barcode || data.barcode.trim() === "")) {
+        const { generateProductBarcode } = require('./barcodeGenerator');
+        data.barcode = generateProductBarcode();
+        console.log("🏷️ Generated new EAN13 barcode for admin form:", data.barcode);
       }
 
       // Create record
@@ -794,6 +806,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Automatically set updated_by if field exists and user is authenticated
       if (req.user && req.user._id && Model.schema.paths.updated_by) {
         updateData.updated_by = req.user._id;
+      }
+
+      // Automatically set company_id if field exists and user has company_id
+      if (req.user && req.user.company_id && Model.schema.paths.company_id) {
+        updateData.company_id = req.user.company_id;
       }
 
       // Apply custom hooks

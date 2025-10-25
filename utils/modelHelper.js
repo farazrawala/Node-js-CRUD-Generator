@@ -1,6 +1,6 @@
 const path = require('path');
 const fs = require('fs');
-
+const { getUserToken } = require('../service/auth');
 /**
  * Generate URL-friendly slug from text
  * @param {string} text - The text to convert to slug
@@ -268,6 +268,23 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
         }
       }
     });
+
+    // Automatically set created_by if field exists and user is authenticated
+    if (req.user && req.user._id && modelSchema.created_by) {
+      modelData.created_by = req.user._id;
+    }
+
+    // Automatically set company_id if field exists and user has company_id
+    if (req.user && req.user.company_id && modelSchema.company_id) {
+      modelData.company_id = req.user.company_id;
+    }
+
+    // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
+    if (modelSchema.barcode && (!modelData.barcode || modelData.barcode.trim() === "")) {
+      const { generateProductBarcode } = require('./barcodeGenerator');
+      modelData.barcode = generateProductBarcode();
+      console.log("🏷️ Generated new EAN13 barcode for API:", modelData.barcode);
+    }
 
     console.log(`📝 Preparing data for ${modelName} creation:`, {
       receivedFields: Object.keys(req.body),
@@ -635,6 +652,16 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           }
         }
       });
+    }
+
+    // Automatically set updated_by if field exists and user is authenticated
+    if (req.user && req.user._id && modelSchema.updated_by) {
+      updateData.updated_by = req.user._id;
+    }
+
+    // Automatically set company_id if field exists and user has company_id
+    if (req.user && req.user.company_id && modelSchema.company_id) {
+      updateData.company_id = req.user.company_id;
     }
 
     console.log(`📝 Preparing data for ${modelName} update:`, {

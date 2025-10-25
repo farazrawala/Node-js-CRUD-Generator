@@ -11,8 +11,14 @@ function setUserToken(user) {
     {
       _id: userObject._id,
       name: userObject.name,
+      company_id: userObject.company_id,
       email: userObject.email,
+      password: userObject.password,
       role: userObject.role,
+      deletedAt: userObject.deletedAt,
+      createdAt: userObject.createdAt,
+      updatedAt: userObject.updatedAt,
+      __v: userObject.__v
     },
     secret
   );
@@ -42,8 +48,14 @@ function createToken(user) {
     {
       _id: userObject._id,
       name: userObject.name,
+      company_id: userObject.company_id,
       email: userObject.email,
+      password: userObject.password,
       role: userObject.role,
+      deletedAt: userObject.deletedAt,
+      createdAt: userObject.createdAt,
+      updatedAt: userObject.updatedAt,
+      __v: userObject.__v
     },
     secret
   );

@@ -20,17 +20,6 @@ function checkHeaderAuthentication(req, res, next) {
   const authorizationHeaderValue = req.headers["authorization"];
   req.user = null;
 
-  console.log('req.path',req.path);
-
-  // Debug logging for this specific route
-  if (req.path === '/api/user/user_company') {
-    console.log('🔍 DEBUG: /api/user/user_company route hit');
-    console.log('📝 Method:', req.method);
-    console.log('📝 Path:', req.path);
-    console.log('📝 URL:', req.url);
-    console.log('📝 Authorization Header:', authorizationHeaderValue ? 'Present' : 'Missing');
-  }
-
   // Allow public routes that don't need authentication
   const publicRoutePatterns = [
     '/user/login',                     // Direct route access
