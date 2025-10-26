@@ -9,6 +9,7 @@ const { generateProductBarcode } = require("../utils/barcodeGenerator");
 
 async function productCreate(req, res) {
   console.log("🔧 Product create - req.body:", req.body);
+  console.log("🔧 Product create - req.body keys:", Object.keys(req.body));
   
   // Generate unique EAN13 barcode if barcode is empty
   if (!req.body.barcode || req.body.barcode.trim() === "") {

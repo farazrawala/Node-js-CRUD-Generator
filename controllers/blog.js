@@ -46,7 +46,7 @@ async function blogById(req, res) {
   return res.status(response.status).json(response);
 }
 
-async function getAllBlog(req, res) {
+async function getAllblog(req, res) {
   const response = await handleGenericGetAll(req, "blog", {
     excludeFields: [], // Don't exclude any fields
     populate: ["user_id"],  
@@ -153,7 +153,7 @@ module.exports = {
   blogCreate,
   blogUpdate,
   blogById,
-  getAllBlog,
+  getAllblog,
   getallblogactive,
   blogdelete,
   findActiveBlogByTitle,

@@ -6,20 +6,37 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    email: {
+      type: String,
+      // required: true,
+    },
+    number: {
+      type: String,
+      // required: true,
+    },
+    url: {
+      type: String,
+      // required: true,
+    },
+    secret_key: {
+      type: String,
+      // required: true,
+    },
+    api_key: {
+      type: String,
+      // required: true,
+    },
+
     description: {
       type: String,
       required: true,
     },
-    user_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "user",
-      required: true,
-      field_name: "Posted User",
-    },
+   
     image: {
       type: String,
       field_name: "Blog Image",
     },
+    
     company_id:{
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
@@ -51,6 +68,6 @@ const modelSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const MODEL = mongoose.model("blog", modelSchema);
+const MODEL = mongoose.model("integration", modelSchema);
 
 module.exports = MODEL;

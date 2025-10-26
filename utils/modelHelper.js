@@ -215,6 +215,11 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     const Model = getModelFromController(modelName);
     const modelSchema = Model.schema.obj;
     
+    // Debug: Log the incoming request data
+    console.log("🔍 handleGenericCreate - Raw req.body:", req.body);
+    console.log("🔍 handleGenericCreate - req.body keys:", Object.keys(req.body));
+    console.log("🔍 handleGenericCreate - modelSchema keys:", Object.keys(modelSchema));
+    
     const requiredFields = Object.keys(modelSchema).filter((field) => {
       const fieldConfig = modelSchema[field];
       return fieldConfig.required === true && !fieldConfig.default;
@@ -250,6 +255,8 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
 
     // Prepare data for creation (only include fields that exist in schema)
     const modelData = {};
+    
+    // Process regular fields
     Object.keys(req.body).forEach((key) => {
       if (modelSchema[key]) {
         const fieldConfig = modelSchema[key];
@@ -268,6 +275,73 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
         }
       }
     });
+
+    console.log("🔧 About to start nested array processing...");
+    
+    // Process nested array fields (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity], warehouse_inventory[0][warehouse_id])
+    console.log("🚀 Starting nested array processing...");
+    console.log("🚀 req.body keys:", Object.keys(req.body));
+    console.log("🚀 modelData before nested processing:", JSON.stringify(modelData, null, 2));
+    
+    Object.keys(req.body).forEach((key) => {
+      console.log(`🔍 Checking key: ${key}`);
+      
+      // Handle both indexed and non-indexed arrays
+      // Pattern 2: field[index][subfield] (e.g., warehouse_inventory[0][warehouse_id]) - Check this FIRST
+      // Pattern 1: field[subfield] (e.g., warehouse_inventory[warehouse_id])
+      let arrayMatch = key.match(/^(.+)\[(\d+)\]\[(\w+)\]$/);
+      let arrayFieldName, arrayItemField, index;
+      
+      if (arrayMatch) {
+        // Pattern 2: field[index][subfield]
+        arrayFieldName = arrayMatch[1];
+        index = parseInt(arrayMatch[2]);
+        arrayItemField = arrayMatch[3];
+        console.log(`🔍 Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+      } else {
+        // Pattern 1: field[subfield]
+        arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
+        if (arrayMatch) {
+          arrayFieldName = arrayMatch[1];
+          arrayItemField = arrayMatch[2];
+          index = 0; // Default to index 0
+          console.log(`🔍 Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+        }
+      }
+      
+      if (arrayMatch) {
+        // Check if this is a valid array field in the schema
+        console.log(`🔍 Checking schema for ${arrayFieldName}:`, modelSchema[arrayFieldName]);
+        console.log(`🔍 Is array:`, Array.isArray(modelSchema[arrayFieldName]));
+        console.log(`🔍 Is type array:`, Array.isArray(modelSchema[arrayFieldName]?.type));
+        
+        if (modelSchema[arrayFieldName] && Array.isArray(modelSchema[arrayFieldName].type)) {
+          console.log(`🔍 Processing array field: ${arrayFieldName}`);
+          if (!modelData[arrayFieldName]) {
+            modelData[arrayFieldName] = [];
+          }
+          
+          const value = req.body[key];
+          
+          // Ensure we have an object at this index
+          if (!modelData[arrayFieldName][index]) {
+            modelData[arrayFieldName][index] = {};
+          }
+          
+          // Set the field value
+          modelData[arrayFieldName][index][arrayItemField] = value;
+          console.log(`🏭 Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`);
+        } else {
+          console.log(`🔍 Schema field not found or not array: ${arrayFieldName}`);
+        }
+      } else {
+        console.log(`🔍 No array match for key: ${key}`);
+      }
+    });
+
+    // Debug: Log the final processed data
+    console.log("🔍 handleGenericCreate - Final modelData:", JSON.stringify(modelData, null, 2));
+    console.log("🔍 handleGenericCreate - modelData keys:", Object.keys(modelData));
 
     // Automatically set created_by if field exists and user is authenticated
     if (req.user && req.user._id && modelSchema.created_by) {
@@ -653,6 +727,33 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         }
       });
     }
+
+    // Process nested array fields for updates (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity])
+    Object.keys(req.body).forEach((key) => {
+      const arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
+      if (arrayMatch) {
+        const arrayFieldName = arrayMatch[1]; // e.g., "warehouse_inventory"
+        const arrayItemField = arrayMatch[2]; // e.g., "warehouse_id" or "quantity"
+        
+        // Check if this is a valid array field in the schema
+        if (modelSchema[arrayFieldName] && Array.isArray(modelSchema[arrayFieldName])) {
+          if (!updateData[arrayFieldName]) {
+            updateData[arrayFieldName] = [];
+          }
+          
+          const value = req.body[key];
+          const index = parseInt(key.match(/\[(\d+)\]/)?.[1]) || 0; // Default to index 0
+          
+          // Ensure we have an object at this index
+          if (!updateData[arrayFieldName][index]) {
+            updateData[arrayFieldName][index] = {};
+          }
+          
+          // Set the field value
+          updateData[arrayFieldName][index][arrayItemField] = value;
+        }
+      }
+    });
 
     // Automatically set updated_by if field exists and user is authenticated
     if (req.user && req.user._id && modelSchema.updated_by) {

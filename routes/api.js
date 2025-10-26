@@ -27,10 +27,11 @@ const {
   blogCreate,
   blogUpdate,
   blogById,
-  getAllBlog,
+  getAllblog,
   getallblogactive,
   blogdelete,
 } = require("../controllers/blog");
+
 
 
 
@@ -104,9 +105,29 @@ router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
 router.post("/blog/create", blogCreate);
 router.patch("/blog/update/:id", blogUpdate);
 router.get("/blog/get/:id", blogById);
-router.get("/blog/get-all", getAllBlog);
+router.get("/blog/get-all", getAllblog);
 router.get("/blog/get-all-active", getallblogactive);
 router.delete("/blog/delete/:id", blogdelete);
+
+
+
+const {
+  integrationCreate,
+  integrationUpdate,
+  integrationById,
+  getAllintegration,
+  getallintegrationactive,
+  integrationdelete,
+} = require("../controllers/integration");
+
+router.post("/integration/create", integrationCreate);
+router.patch("/integration/update/:id", integrationUpdate);
+router.get("/integration/get/:id", integrationById);
+router.get("/integration/get-all", getAllintegration);
+router.get("/integration/get-all-active", getallintegrationactive);
+router.delete("/integration/delete/:id", integrationdelete);
+
+
 
 
 
