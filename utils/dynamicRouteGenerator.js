@@ -39,35 +39,66 @@ function generateControllerFunctions(modelName) {
 
     // Update
     update: async (req, res) => {
+      const filter = {};
+      
+      // Always filter by company_id if user has one
+      if (req.user && req.user.company_id) {
+        filter.company_id = req.user.company_id;
+      }
+      
       const response = await handleGenericUpdate(req, modelName, {
         excludeFields: ['password'], // Don't return password in response
+        filter: filter,
       });
       return res.status(response.status).json(response);
     },
 
     // Get by ID
     getById: async (req, res) => {
+      const filter = {};
+      
+      // Always filter by company_id if user has one
+      if (req.user && req.user.company_id) {
+        filter.company_id = req.user.company_id;
+      }
+      
       const response = await handleGenericGetById(req, modelName, {
         excludeFields: ['password'], // Don't exclude any fields except password
+        filter: filter,
       });
       return res.status(response.status).json(response);
     },
 
     // Get all
     getAll: async (req, res) => {
+      const filter = {};
+      
+      // Always filter by company_id if user has one
+      if (req.user && req.user.company_id) {
+        filter.company_id = req.user.company_id;
+      }
+      
       const response = await handleGenericGetAll(req, modelName, {
         excludeFields: ['password'], // Don't exclude any fields except password
         sort: { createdAt: -1 }, // Sort by newest first
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
+        filter: filter,
       });
       return res.status(response.status).json(response);
     },
 
     // Get all active (if status field exists)
     getAllActive: async (req, res) => {
+      const filter = { status: 'active', deletedAt: null };
+      
+      // Always filter by company_id if user has one
+      if (req.user && req.user.company_id) {
+        filter.company_id = req.user.company_id;
+      }
+      
       const response = await handleGenericGetAll(req, modelName, {
-        filter: { status: 'active', deletedAt: null },
+        filter: filter,
         excludeFields: ['password'],
         sort: { createdAt: -1 },
         limit: req.query.limit ? parseInt(req.query.limit) : null,
@@ -83,9 +114,17 @@ function generateControllerFunctions(modelName) {
         time: new Date().toISOString(),
       });
       
+      const filter = {};
+      
+      // Always filter by company_id if user has one
+      if (req.user && req.user.company_id) {
+        filter.company_id = req.user.company_id;
+      }
+      
       // Manually set the request body with deletedAt data
       req.body = { deletedAt: new Date().toISOString() };
       const response = await handleGenericUpdate(req, modelName, {
+        filter: filter,
         afterUpdate: async (record, req, existingRecord) => {
           console.log(`✅ ${modelName} soft deleted successfully.`);
         },

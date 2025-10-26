@@ -93,6 +93,14 @@ class RouteRegistry {
         description: 'Manage warehouses and inventory',
         order: 8,
         enabled: true
+      },
+      integration: {
+        name: 'Integrations',
+        icon: 'fas fa-cog',
+        path: '/admin/integration',
+        description: 'Manage integrations',
+        order: 9,
+        enabled: true
       }
     };
     

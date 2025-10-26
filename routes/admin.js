@@ -15,6 +15,7 @@ const Category = require("../models/category");
 const Complain = require("../models/complain");
 const Company = require("../models/company");
 const Warehouse = require("../models/warehouse");
+const Integration = require("../models/integration");
 
 
 
@@ -838,8 +839,99 @@ const complainAdminCRUD = adminCrudGenerator(
     }
   }
   );
-  
 
+/**
+ * Auto-generate Admin CRUD with UI Forms for integration model
+ */
+const integrationAdminCRUD = adminCrudGenerator(
+  Integration,
+  "integration",
+  ["store_type", "name", "address", "city", "state", "email", "phone", "url", "secret_key", "api_key", "description", "image", "company_id", "company_name", "status"],
+  {
+    excludedFields: ["__v"],
+    includedFields: ["store_type", "name", "address", "city", "state", "email", "phone", "url", "secret_key", "api_key", "description", "image", "company_id", "company_name", "status", "createdAt"],
+    searchableFields: ["name", "store_type", "email", "url"],
+    filterableFields: ["store_type", "status"],
+    sortableFields: ["name", "store_type", "status", "createdAt"],
+    baseUrl: BASE_URL,
+    softDelete: true,
+    fieldTypes: {
+      store_type: "select",
+      description: "textarea",
+      image: "file",
+      company_id: "select",
+      status: "select",
+      company_name: "text", // Display field for company name
+    },
+    fieldLabels: {
+      company_name: "Company",
+    },
+    fieldOptions: {
+      store_type: [
+        { value: "shopify", label: "Shopify" },
+        { value: "woocommerce", label: "WooCommerce" },
+        { value: "daraz", label: "Daraz" },
+      ],
+      status: [
+        { value: "active", label: "Active" },
+        { value: "nonactive", label: "Non Active" },
+      ],
+    },
+   
+     middleware: {
+      afterQuery: async (records, req) => {
+        // Populate company_id with company_name
+        const populatedRecords = await Integration.populate(records, { 
+          path: 'company_id', 
+          select: 'company_name' 
+        });
+        // Add company_name field for display in list view
+        const recordsWithCompany = populatedRecords.map(record => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          if (record.company_id) {
+            recordObj.company_id = record.company_id.company_name || 'No Company';
+          } else {
+            recordObj.company_id = 'No Company';
+          }
+          return recordObj;
+        });
+        
+        // Set options for company_id dropdown
+        if (req.fieldConfig?.company_id) {
+          const companies = await Company.find({ status: 'active', deletedAt: null })
+            .select('company_name')
+            .sort({ company_name: 1 });
+          req.fieldConfig.company_id.options = companies.map(company => ({ 
+            value: company._id.toString(), 
+            label: company.company_name 
+          }));
+          req.fieldConfig.company_id.placeholder = 'Select Company';
+          req.fieldConfig.company_id.helpText = 'Choose the company for this integration';
+        }
+        
+        return recordsWithCompany;
+      },
+      beforeCreateForm: async (req, res) => {
+        const companies = await Company.find({ status: 'active', deletedAt: null })
+          .select('company_name')
+          .sort({ company_name: 1 });
+        req.fieldConfig.company_id.options = companies.map(company => ({ 
+          value: company._id.toString(), 
+          label: company.company_name 
+        }));
+      },
+      beforeEditForm: async (req, res) => {
+        const companies = await Company.find({ status: 'active', deletedAt: null })
+          .select('company_name')
+          .sort({ company_name: 1 });
+        req.fieldConfig.company_id.options = companies.map(company => ({ 
+          value: company._id.toString(), 
+          label: company.company_name 
+        }));
+      },
+    },
+  }
+);
 
 /**
  * Auto-generate Admin CRUD with UI Forms for Category model (Minimal Setup Example)
@@ -943,6 +1035,7 @@ routeRegistry.updateRoute('categories', { crudController: categoryAdminCRUD });
 routeRegistry.updateRoute('complain', { crudController: complainAdminCRUD });
 routeRegistry.updateRoute('company', { crudController: companyAdminCRUD });
 routeRegistry.updateRoute('warehouse', { crudController: warehouseAdminCRUD });
+routeRegistry.updateRoute('integration', { crudController: integrationAdminCRUD });
 
 // Add routes data to all requests for dynamic menu rendering (after all routes are registered)
 router.use((req, res, next) => {

@@ -271,7 +271,13 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           }
         } else {
           // For non-ObjectID fields, trim as usual
-          modelData[key] = value.trim ? value.trim() : value;
+          // Only trim if value exists and has a trim method (strings)
+          if (value && typeof value === 'string') {
+            modelData[key] = value.trim();
+          } else if (value !== undefined && value !== null) {
+            // For non-string values (numbers, booleans, objects, arrays), keep as is
+            modelData[key] = value;
+          }
         }
       }
     });
@@ -642,6 +648,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     afterUpdate = null, // Function to run after updating
     errorHandlers = {}, // Custom error handlers
     allowedFields = [], // Fields that can be updated (empty = all fields)
+    filter = {}, // Additional filters (e.g., { company_id: req.user.company_id })
   } = options;
 
   // Get ID from URL parameters
@@ -672,7 +679,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     const modelSchema = Model.schema.obj;
 
     // Find the existing record
-    const existingRecord = await Model.findById(recordId);
+    const existingRecord = await Model.findOne({ _id: recordId, ...filter });
     if (!existingRecord) {
       return {
         success: false,
@@ -702,7 +709,13 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             }
           } else {
             // For non-ObjectID fields, trim as usual
-            updateData[key] = value.trim ? value.trim() : value;
+            // Only trim if value exists and has a trim method (strings)
+            if (value && typeof value === 'string') {
+              updateData[key] = value.trim();
+            } else if (value !== undefined && value !== null) {
+              // For non-string values (numbers, booleans, objects, arrays), keep as is
+              updateData[key] = value;
+            }
           }
         }
       });
@@ -722,7 +735,13 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             }
           } else {
             // For non-ObjectID fields, trim as usual
-            updateData[key] = value.trim ? value.trim() : value;
+            // Only trim if value exists and has a trim method (strings)
+            if (value && typeof value === 'string') {
+              updateData[key] = value.trim();
+            } else if (value !== undefined && value !== null) {
+              // For non-string values (numbers, booleans, objects, arrays), keep as is
+              updateData[key] = value;
+            }
           }
         }
       });
@@ -1241,6 +1260,7 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
     idParam = "id", // URL parameter name for ID (default: 'id')
     excludeFields = [], // Fields to exclude from response
     populate = [], // Fields to populate (array of field names)
+    filter = {}, // Additional filters (e.g., { company_id: req.user.company_id })
     errorHandlers = {}, // Custom error handlers
   } = options;
 
@@ -1263,7 +1283,7 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
     console.log(`🔍 Fetching ${modelName} with ID: ${recordId}`);
 
     // Build query
-    let query = Model.findById(recordId);
+    let query = Model.findOne({ _id: recordId, ...filter });
 
     // Add population if specified
     if (populate && populate.length > 0) {

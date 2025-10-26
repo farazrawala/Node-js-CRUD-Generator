@@ -29,21 +29,21 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
-    number: {
+    phone: {
       type: String,
       // required: true,
     },
     url: {
       type: String,
-      // required: true,
+      required: true,
     },
     secret_key: {
       type: String,
-      // required: true,
+      required: true,
     },
     api_key: {
       type: String,
-      // required: true,
+      required: true,
     },
 
     description: {
