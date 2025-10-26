@@ -846,13 +846,13 @@ const complainAdminCRUD = adminCrudGenerator(
 const integrationAdminCRUD = adminCrudGenerator(
   Integration,
   "integration",
-  ["store_type", "name", "address", "city", "state", "email", "phone", "url", "secret_key", "api_key", "description", "image", "company_id", "company_name", "status"],
+  ["store_type", "name", "address", "city", "state", "email", "phone", "url", "secret_key", "api_key", "description", "image", "created_by", "company_id", "company_name", "status"],
   {
     excludedFields: ["__v"],
-    includedFields: ["store_type", "name", "address", "city", "state", "email", "phone", "url", "secret_key", "api_key", "description", "image", "company_id", "company_name", "status", "createdAt"],
+    includedFields: ["store_type", "created_by", "name", "address", "city", "state", "email", "phone", "url", "secret_key", "api_key", "description", "image", "company_id", "company_name", "status", "createdAt"],
     searchableFields: ["name", "store_type", "email", "url"],
     filterableFields: ["store_type", "status"],
-    sortableFields: ["name", "store_type", "status", "createdAt"],
+    sortableFields: ["name", "store_type", "created_by", "status", "createdAt"],
     baseUrl: BASE_URL,
     softDelete: true,
     fieldTypes: {
@@ -880,36 +880,37 @@ const integrationAdminCRUD = adminCrudGenerator(
    
      middleware: {
       afterQuery: async (records, req) => {
-        // Populate company_id with company_name
-        const populatedRecords = await Integration.populate(records, { 
-          path: 'company_id', 
-          select: 'company_name' 
-        });
-        // Add company_name field for display in list view
-        const recordsWithCompany = populatedRecords.map(record => {
+
+        // Populate both company_id and created_by
+        const populatedRecords = await Integration.populate(records, [
+          { path: 'company_id', select: 'company_name' },
+          { path: 'created_by', select: 'name email' }
+        ]);
+
+        
+        // Add both User name and Company name fields for display in list view
+        const recordsWithPopulatedFields = populatedRecords.map(record => {
           const recordObj = record.toObject ? record.toObject() : record;
+          
+          // Handle created_by field
+          if (record.created_by) {
+            recordObj.created_by = record.created_by.name || 'No User';
+          } else {
+            recordObj.created_by = 'No User';
+          }
+          
+          // Handle company_id field
           if (record.company_id) {
             recordObj.company_id = record.company_id.company_name || 'No Company';
           } else {
             recordObj.company_id = 'No Company';
           }
+          
           return recordObj;
+          
         });
         
-        // Set options for company_id dropdown
-        if (req.fieldConfig?.company_id) {
-          const companies = await Company.find({ status: 'active', deletedAt: null })
-            .select('company_name')
-            .sort({ company_name: 1 });
-          req.fieldConfig.company_id.options = companies.map(company => ({ 
-            value: company._id.toString(), 
-            label: company.company_name 
-          }));
-          req.fieldConfig.company_id.placeholder = 'Select Company';
-          req.fieldConfig.company_id.helpText = 'Choose the company for this integration';
-        }
-        
-        return recordsWithCompany;
+        return recordsWithPopulatedFields;
       },
       beforeCreateForm: async (req, res) => {
         const companies = await Company.find({ status: 'active', deletedAt: null })
