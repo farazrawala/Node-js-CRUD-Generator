@@ -123,6 +123,7 @@ registerAllModelRoutes(router, {
     'product',   // Product has custom warehouse inventory routes
     'order',     // Keep custom routes if needed
     'order_item',// Keep custom routes if needed
+    'url',       // URL has custom routes
   ],
   modelConfigs: {
     // You can configure specific models here if needed
@@ -146,6 +147,14 @@ registerAllModelRoutes(router, {
     complain: {
       enabled: true,
       excludedRoutes: ['delete'] // Complain doesn't have delete route
+    },
+    purchase_order: {
+      enabled: true,
+      excludedRoutes: []
+    },
+    purchase_order_item: {
+      enabled: true,
+      excludedRoutes: []
     }
   }
 });
