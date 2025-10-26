@@ -20,6 +20,7 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Blog Image",
     },
+    // default fields
     company_id:{
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",

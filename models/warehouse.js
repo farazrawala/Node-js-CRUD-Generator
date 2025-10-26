@@ -10,16 +10,27 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
-    company_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "company",
-    //   required: true,
-      field_name: "Company",
-      field_type: "select",
-    },
+    
     warehouse_image: {
       type: String,
       field_name: "WareHouse Image",
+    },
+    // default fields
+    company_id:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      // required: true,
+      field_name: "Company",
+    },
+    created_by:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Created By",
+    },
+    updated_by:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Updated By",
     },
     status: { 
       type: String,

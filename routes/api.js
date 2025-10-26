@@ -1,6 +1,9 @@
 const express = require("express");
 const router = express.Router();
 
+// Dynamic route generator
+const { registerAllModelRoutes } = require("../utils/dynamicRouteGenerator");
+
 const {
   handleUserSignup,
   handleUserSignupCompany,
@@ -23,66 +26,64 @@ const {
   getProductsByWarehouse,
 } = require("../controllers/product");
 
-const {
-  blogCreate,
-  blogUpdate,
-  blogById,
-  getAllblog,
-  getallblogactive,
-  blogdelete,
-} = require("../controllers/blog");
+// Note: Blog routes are now handled dynamically by registerAllModelRoutes
+// Uncomment these if you need custom routes
+// const {
+//   blogCreate,
+//   blogUpdate,
+//   blogById,
+//   getAllblog,
+//   getallblogactive,
+//   blogdelete,
+// } = require("../controllers/blog");
+
+// Note: Warehouse routes are now handled dynamically
+// const {
+//   warehouseCreate,
+//   warehouseUpdate,
+//   warehouseById,
+//   getAllwarehouse,
+//   getallwarehouseactive,
+//   warehousedelete,
+// } = require("../controllers/warehouse");
+
+// Note: Company routes are now handled dynamically
+// const {
+//   companyCreate,
+//   companyUpdate,
+//   companyById,
+//   getAllcompany,
+//   getallcompanyactive,
+//   companydelete,
+// } = require("../controllers/company");
+
+// Note: Complain routes are now handled dynamically
+// const {
+//   complainCreate,
+//   complainUpdate,
+//   complainById,
+//   getAllcomplain,
+// } = require("../controllers/complain");
+
+// Note: Order and Order Item routes are now handled dynamically
+// const {
+//   orderCreate,
+//   orderUpdate,
+//   orderById,
+//   getAllorder,
+// } = require("../controllers/order");
+
+// const {
+//   order_itemCreate,
+//   order_itemUpdate,
+//   order_itemById,
+//   getAllorder_item,
+// } = require("../controllers/order_item");
 
 
 
 
-const {
-  warehouseCreate,
-  warehouseUpdate,
-  warehouseById,
-  getAllwarehouse,
-  getallwarehouseactive,
-  warehousedelete,
-} = require("../controllers/warehouse");
-
-
-
-const {
-  companyCreate,
-  companyUpdate,
-  companyById,
-  getAllcompany,
-  getallcompanyactive,
-  companydelete,
-} = require("../controllers/company");
-
-
-
-const {
-  complainCreate,
-  complainUpdate,
-  complainById,
-  getAllcomplain,
-} = require("../controllers/complain");
-
-
-
-const {
-  orderCreate,
-  orderUpdate,
-  orderById,
-  getAllorder,
-} = require("../controllers/order");
-
-const {
-  order_itemCreate,
-  order_itemUpdate,
-  order_itemById,
-  getAllorder_item,
-} = require("../controllers/order_item");
-
-
-
-
+// User routes - Custom auth and management
 router.post("/user/user_company", handleUserSignupCompany);
 router.post("/user/create", handleUserSignup);
 router.patch("/user/update/:id", handleUserUpdate);
@@ -91,75 +92,20 @@ router.get("/user/get-all", getAllUser);
 router.get("/user/get/:id", userById);
 router.post("/user/get-one", findUserByEmail);
 
+// Product routes - Custom CRUD + warehouse inventory management
 router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 
-// Warehouse inventory management routes
+// Product warehouse inventory management routes
 router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
 router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
 router.get("/product/:id/check-stock", checkWarehouseStock);
 router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
 
-router.post("/blog/create", blogCreate);
-router.patch("/blog/update/:id", blogUpdate);
-router.get("/blog/get/:id", blogById);
-router.get("/blog/get-all", getAllblog);
-router.get("/blog/get-all-active", getallblogactive);
-router.delete("/blog/delete/:id", blogdelete);
-
-
-
-const {
-  integrationCreate,
-  integrationUpdate,
-  integrationById,
-  getAllintegration,
-  getallintegrationactive,
-  integrationdelete,
-} = require("../controllers/integration");
-
-router.post("/integration/create", integrationCreate);
-router.patch("/integration/update/:id", integrationUpdate);
-router.get("/integration/get/:id", integrationById);
-router.get("/integration/get-all", getAllintegration);
-router.get("/integration/get-all-active", getallintegrationactive);
-router.delete("/integration/delete/:id", integrationdelete);
-
-
-
-
-
-router.post("/warehouse/create", warehouseCreate);
-router.patch("/warehouse/update/:id", warehouseUpdate);
-router.get("/warehouse/get/:id", warehouseById);
-router.get("/warehouse/get-all", getAllwarehouse);
-router.get("/warehouse/get-all-active", getallwarehouseactive);
-router.delete("/warehouse/delete/:id", warehousedelete);
-// router.get("/warehhouse/get-one/:id", findOneblog); //
-
-router.post("/company/create", companyCreate);
-router.patch("/company/update/:id", companyUpdate);
-router.get("/company/get/:id", companyById);
-router.get("/company/get-all", getAllcompany);
-router.get("/company/get-all-active", getallcompanyactive);
-router.delete("/company/delete/:id", companydelete);
-
-router.post("/complain/create", complainCreate);
-router.patch("/complain/update/:id", complainUpdate);
-router.get("/complain/get/:id", complainById);
-router.get("/complain/get-all", getAllcomplain);
-
-router.post("/order/create", orderCreate);
-router.patch("/order/update/:id", orderUpdate);
-router.get("/order/get/:id", orderById);
-router.get("/order/get-all", getAllorder);
-
-router.post("/order_item/create", order_itemCreate);
-router.patch("/order_item/update/:id", order_itemUpdate);
-router.get("/order_item/get/:id", order_itemById);
-router.get("/order_item/get-all", getAllorder_item);
+// Blog, Integration, Warehouse, Company, Complain, Order, and Order_item routes
+// are now automatically generated by registerAllModelRoutes() at the bottom of this file
 
 router.post("/test", (req, res) => {
   console.log("Test route hit");
@@ -168,5 +114,40 @@ router.post("/test", (req, res) => {
 
 // Admin routes
 router.post("/login/admin", handleAdminLogin);
+
+// Register dynamic CRUD routes for all models
+// This automatically creates routes like: /{model}/create, /{model}/update/:id, /{model}/get/:id, etc.
+registerAllModelRoutes(router, {
+  excludedModels: [
+    'user',      // User has custom auth routes
+    'product',   // Product has custom warehouse inventory routes
+    'order',     // Keep custom routes if needed
+    'order_item',// Keep custom routes if needed
+  ],
+  modelConfigs: {
+    // You can configure specific models here if needed
+    blog: {
+      enabled: true,
+      excludedRoutes: [],
+      customRoutes: []
+    },
+    integration: {
+      enabled: true,
+      excludedRoutes: []
+    },
+    warehouse: {
+      enabled: true,
+      excludedRoutes: []
+    },
+    company: {
+      enabled: true,
+      excludedRoutes: []
+    },
+    complain: {
+      enabled: true,
+      excludedRoutes: ['delete'] // Complain doesn't have delete route
+    }
+  }
+});
 
 module.exports = router;

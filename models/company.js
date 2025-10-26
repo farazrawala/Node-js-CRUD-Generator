@@ -22,6 +22,17 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Logo Image",
     },
+    // default fields
+    created_by:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Created By",
+    },
+    updated_by:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Updated By",
+    },
     status: { 
       type: String,
       required: true,

@@ -2,9 +2,28 @@ const mongoose = require("mongoose");
 
 const modelSchema = new mongoose.Schema(
   {
+    
+    store_type: {
+        type: String,
+        required: true,
+        enum: ["shopify", "woocommerce", "daraz"], 
+        default: "shopify"        
+    },
     name: {
-      type: String,
-      required: true,
+        type: String,
+        required: true,
+    },
+    address: {
+        type: String,
+        required: true,
+    },
+    city: {
+        type: String,
+        required: true,
+    },
+    state: {
+        type: String,
+        required: true,
     },
     email: {
       type: String,
@@ -43,6 +62,8 @@ const modelSchema = new mongoose.Schema(
       // required: true,
       field_name: "Company",
     },
+
+    // default fields
     created_by:{
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
