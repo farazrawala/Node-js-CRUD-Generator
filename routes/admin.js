@@ -94,17 +94,36 @@ const userAdminCRUD = adminCrudGenerator(
 
     middleware: {
       afterQuery: async (records, req) => {
-        const populatedRecords = await User.populate(records, { path: 'company_id', select: 'name' });
+         // Populate both company_id and created_by
+         const populatedRecords = await Integration.populate(records, [
+          { path: 'company_id', select: 'company_name' },
+          { path: 'created_by', select: 'name email' }
+        ]);
 
-        // console.log(populatedRecords,'populatedRecords');
-        if (req.fieldConfig?.company_id) {
-          const results = await Company.find({ deletedAt: null }, 'name').sort({ name: 1 });
-          req.fieldConfig.company_id.options = results.map(result => ({ value: result._id.toString(), label: result.name }));
-          req.fieldConfig.company_id.placeholder = 'Select Company';
-          req.fieldConfig.company_id.helpText = 'Choose the company for this user';
-        }
         
-        return populatedRecords;
+        // Add both User name and Company name fields for display in list view
+        const recordsWithPopulatedFields = populatedRecords.map(record => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          
+          // Handle created_by field
+          if (record.created_by) {
+            recordObj.created_by = record.created_by.name || 'No User';
+          } else {
+            recordObj.created_by = 'No User';
+          }
+          
+          // Handle company_id field
+          if (record.company_id) {
+            recordObj.company_id = record.company_id.company_name || 'No Company';
+          } else {
+            recordObj.company_id = 'No Company';
+          }
+          
+          return recordObj;
+          
+        });
+        
+        return recordsWithPopulatedFields;
       }
     },
     // Custom response formatting to show user name

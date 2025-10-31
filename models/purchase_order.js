@@ -36,9 +36,9 @@ const modelSchema = new mongoose.Schema(
         field_name: "Stock Update", 
         default: "yes"  
     },
-    order_data:{
+    order_date:{
         type: String,
-        required: true,
+        // required: true,
     },
 
     // default fields

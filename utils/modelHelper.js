@@ -355,9 +355,20 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     }
 
     // Automatically set company_id if field exists and user has company_id
+    console.log(`🔍 Checking company_id assignment:`, {
+      hasUser: !!req.user,
+      hasCompanyId: !!(req.user && req.user.company_id),
+      hasSchemaField: !!modelSchema.company_id,
+      userCompanyId: req.user?.company_id,
+      modelName: controllerName
+    });
+    
     if (req.user && req.user.company_id && modelSchema.company_id) {
       modelData.company_id = req.user.company_id;
+      console.log(`✅ Automatically set company_id to:`, req.user.company_id);
+      
     }
+    
 
     // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
     if (modelSchema.barcode && (!modelData.barcode || modelData.barcode.trim() === "")) {

@@ -29,6 +29,16 @@ function generateControllerFunctions(modelName) {
   return {
     // Create
     create: async (req, res) => {
+      console.log(`🚀 ${modelName} create called with req.user:`, req.user ? { _id: req.user._id, email: req.user.email, company_id: req.user.company_id } : 'NO USER');
+      
+      // Always add company_id to req.body if user has one
+      if (req.user && req.user.company_id) {
+        req.body.company_id = req.user.company_id;
+        console.log(`🔍 Adding company_id to ${modelName} create:`, req.user.company_id);
+      } else {
+        console.log(`⚠️  No company_id found in req.user for ${modelName} create`);
+      }
+      
       const response = await handleGenericCreate(req, modelName, {
         afterCreate: async (record, req) => {
           console.log(`✅ ${modelName} created successfully:`, record._id);
@@ -44,6 +54,7 @@ function generateControllerFunctions(modelName) {
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
+        console.log(`🔍 Filtering ${modelName} update by company_id:`, req.user.company_id);
       }
       
       const response = await handleGenericUpdate(req, modelName, {
@@ -60,6 +71,7 @@ function generateControllerFunctions(modelName) {
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
+        console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
       
       const response = await handleGenericGetById(req, modelName, {
@@ -76,7 +88,18 @@ function generateControllerFunctions(modelName) {
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
+        console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
+
+      // console.log("filter", filter);
+      // console.log("req.query.limit", req.query.limit);
+      // console.log("req.query.skip", req.query.skip);
+      // console.log("req.query.sort", req.query.sort);
+      // console.log("req.query.populate", req.query.populate);
+      // console.log("req.query.select", req.query.select);
+      // console.log("req.query.populate", req.query.populate);
+      // console.log("req.query.populate", req.query.populate);
+      // exit();
       
       const response = await handleGenericGetAll(req, modelName, {
         excludeFields: ['password'], // Don't exclude any fields except password
@@ -95,8 +118,9 @@ function generateControllerFunctions(modelName) {
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
+        console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
-      
+
       const response = await handleGenericGetAll(req, modelName, {
         filter: filter,
         excludeFields: ['password'],
@@ -119,6 +143,7 @@ function generateControllerFunctions(modelName) {
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
+        console.log(`🔍 Filtering ${modelName} delete by company_id:`, req.user.company_id);
       }
       
       // Manually set the request body with deletedAt data

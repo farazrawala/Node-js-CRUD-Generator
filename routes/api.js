@@ -5,14 +5,17 @@ const router = express.Router();
 const { registerAllModelRoutes } = require("../utils/dynamicRouteGenerator");
 
 const {
-  handleUserSignup,
-  handleUserSignupCompany,
+  // handleUserSignup,
+
+  // handleUserUpdate,
+  // getAllUser,
+  // userById,
+ 
+  // findUserByEmail,
+  
   handleUserLogin,
-  handleUserUpdate,
-  getAllUser,
-  userById,
   handleAdminLogin,
-  findUserByEmail,
+  handleUserSignupCompany,
 } = require("../controllers/user");
 
 const {
@@ -25,6 +28,11 @@ const {
   checkWarehouseStock,
   getProductsByWarehouse,
 } = require("../controllers/product");
+
+
+const {
+  purchaseOrderCreate
+} = require("../controllers/purchase_order");
 
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
@@ -85,12 +93,17 @@ const {
 
 // User routes - Custom auth and management
 router.post("/user/user_company", handleUserSignupCompany);
-router.post("/user/create", handleUserSignup);
-router.patch("/user/update/:id", handleUserUpdate);
+// router.post("/user/create", handleUserSignup);
+// router.patch("/user/update/:id", handleUserUpdate);
 router.post("/user/login", handleUserLogin);
-router.get("/user/get-all", getAllUser);
-router.get("/user/get/:id", userById);
-router.post("/user/get-one", findUserByEmail);
+// router.get("/user/get-all", getAllUser);
+// router.get("/user/get/:id", userById);
+// router.post("/user/get-one", findUserByEmail);
+
+
+
+
+router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
 
 // Product routes - Custom CRUD + warehouse inventory management
 router.post("/product/create", productCreate);
@@ -119,14 +132,20 @@ router.post("/login/admin", handleAdminLogin);
 // This automatically creates routes like: /{model}/create, /{model}/update/:id, /{model}/get/:id, etc.
 registerAllModelRoutes(router, {
   excludedModels: [
-    'user',      // User has custom auth routes
+      // User has custom auth routes
     'product',   // Product has custom warehouse inventory routes
     'order',     // Keep custom routes if needed
     'order_item',// Keep custom routes if needed
     'url',       // URL has custom routes
+    // 'purchase_order' removed - we want BOTH dynamic routes AND custom routes
   ],
   modelConfigs: {
     // You can configure specific models here if needed
+    user: {
+      enabled: true,
+      excludedRoutes: [],
+      customRoutes: []
+    },
     blog: {
       enabled: true,
       excludedRoutes: [],

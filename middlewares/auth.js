@@ -17,15 +17,16 @@ function checkForAuthentication(req, res, next) {
 
 
 function checkHeaderAuthentication(req, res, next) {
+  console.log(`🔐 checkHeaderAuthentication called for:`, req.path);
   const authorizationHeaderValue = req.headers["authorization"];
   req.user = null;
 
   // Allow public routes that don't need authentication
   const publicRoutePatterns = [
     '/user/login',                     // Direct route access
-    '/user/create',                    // Direct route access
+    // '/user/create',                    // Direct route access
     '/api/user/login',                 // API route access
-    '/api/user/create',                // API route access
+    // '/api/user/create',                // API route access - REMOVED: Now requires auth to auto-add company_id
     '/login/admin',                // Admin login
     '/api/login/admin',                // Admin login
     '/api/blog/get-all',               // Public blog routes
@@ -57,12 +58,12 @@ function checkHeaderAuthentication(req, res, next) {
   });
   
   // Debug logging for this specific route
-  if (req.path === '/api/user/user_company') {
-    console.log('🔍 isPublicRoute:', isPublicRoute);
+  if (req.path === '/api/user/user_company' || req.path === '/api/user/create') {
+    console.log('🔍 Route check:', req.path, 'isPublicRoute:', isPublicRoute);
   }
   
   if (isPublicRoute) {
-    console.log('✅ Public route - skipping auth check');
+    console.log('✅ Public route - skipping auth check:', req.path);
     return next();
   }
 
