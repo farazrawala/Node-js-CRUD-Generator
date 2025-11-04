@@ -719,13 +719,23 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
               updateData[key] = value;
             }
           } else {
-            // For non-ObjectID fields, trim as usual
-            // Only trim if value exists and has a trim method (strings)
-            if (value && typeof value === 'string') {
-              updateData[key] = value.trim();
-            } else if (value !== undefined && value !== null) {
-              // For non-string values (numbers, booleans, objects, arrays), keep as is
-              updateData[key] = value;
+            // Handle multiselect fields - ensure they are arrays
+            if (fieldConfig.field_type === "multiselect") {
+              if (Array.isArray(value)) {
+                updateData[key] = value;
+              } else if (value !== undefined && value !== null) {
+                // Convert single value to array
+                updateData[key] = [value];
+              }
+            } else {
+              // For non-ObjectID fields, trim as usual
+              // Only trim if value exists and has a trim method (strings)
+              if (value && typeof value === 'string') {
+                updateData[key] = value.trim();
+              } else if (value !== undefined && value !== null) {
+                // For non-string values (numbers, booleans, objects, arrays), keep as is
+                updateData[key] = value;
+              }
             }
           }
         }
@@ -745,21 +755,57 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
               updateData[key] = value;
             }
           } else {
-            // For non-ObjectID fields, trim as usual
-            // Only trim if value exists and has a trim method (strings)
-            if (value && typeof value === 'string') {
-              updateData[key] = value.trim();
-            } else if (value !== undefined && value !== null) {
-              // For non-string values (numbers, booleans, objects, arrays), keep as is
-              updateData[key] = value;
+            // Handle multiselect fields - ensure they are arrays
+            if (fieldConfig.field_type === "multiselect") {
+              if (Array.isArray(value)) {
+                updateData[key] = value;
+              } else if (value !== undefined && value !== null) {
+                // Convert single value to array
+                updateData[key] = [value];
+              }
+            } else {
+              // For non-ObjectID fields, trim as usual
+              // Only trim if value exists and has a trim method (strings)
+              if (value && typeof value === 'string') {
+                updateData[key] = value.trim();
+              } else if (value !== undefined && value !== null) {
+                // For non-string values (numbers, booleans, objects, arrays), keep as is
+                updateData[key] = value;
+              }
             }
           }
         }
       });
     }
 
+    // Handle multiselect fields (fields with field_type: "multiselect" that come as fieldName[] from forms)
+    Object.keys(modelSchema).forEach((fieldName) => {
+      const fieldConfig = modelSchema[fieldName];
+      // Check if field has field_type: "multiselect" and if request has fieldName[] format
+      if (fieldConfig && fieldConfig.field_type === "multiselect" && req.body[`${fieldName}[]`] !== undefined) {
+        console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
+        console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
+        
+        // Convert array field to proper format
+        const multiselectValue = req.body[`${fieldName}[]`];
+        updateData[fieldName] = Array.isArray(multiselectValue) 
+          ? multiselectValue 
+          : [multiselectValue];
+        
+        console.log(`🔍 Processed data:`, updateData[fieldName]);
+        
+        // Remove the original array field key if it exists in updateData
+        delete updateData[`${fieldName}[]`];
+      }
+    });
+
     // Process nested array fields for updates (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity])
     Object.keys(req.body).forEach((key) => {
+      // Skip multiselect fields that are already handled (format: fieldName[])
+      if (key.endsWith('[]') && modelSchema[key.slice(0, -2)] && modelSchema[key.slice(0, -2)].field_type === "multiselect") {
+        return;
+      }
+      
       const arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
       if (arrayMatch) {
         const arrayFieldName = arrayMatch[1]; // e.g., "warehouse_inventory"
