@@ -83,7 +83,7 @@ function generateControllerFunctions(modelName) {
 
     // Get all
     getAll: async (req, res) => {
-      const filter = {};
+      const filter = { deletedAt: null };
       
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
