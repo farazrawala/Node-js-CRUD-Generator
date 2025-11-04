@@ -55,7 +55,7 @@ const modelSchema = new mongoose.Schema(
     status: { 
       type: String,
       required: true,
-      enum: ["active", "nonactive"], 
+      enum: ["active", "inactive"], 
       default: "active"              
     },
     deletedAt: {

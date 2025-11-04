@@ -10,7 +10,30 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
-    
+    code:{
+      type: String,
+      field_name: "Warehouse Code",
+    },
+    city:{
+      type: String,
+      field_name: "City",
+    },
+    state:{
+      type: String,
+      field_name: "State",
+    },
+    zip_code:{
+      type: String,
+      field_name: "Zip Code",
+    },
+    phone:{
+      type: String,
+      field_name: "Phone",
+    },
+    email:{
+      type: String,
+      field_name: "Email",
+    }, 
     warehouse_image: {
       type: String,
       field_name: "WareHouse Image",
