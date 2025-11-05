@@ -22,6 +22,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Logo Image",
     },
+    warehouse_id:{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "warehouse",
+      field_name: "Default Store",
+    },
     // default fields
     created_by:{
       type: mongoose.Schema.Types.ObjectId,

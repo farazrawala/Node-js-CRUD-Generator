@@ -7,6 +7,23 @@ const {
 const Product = require("../models/product");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
 
+async function productCreateVariation(req, res) {
+  try {
+    console.log("🔧 Product create variation - req.body:", req.body);
+    console.log("🔧 Product create variation - req.body keys:", Object.keys(req.body));
+    
+    const response = await handleGenericCreate(req, "product", {
+      afterCreate: async (record, req) => {
+        console.log("✅ Product variation created successfully:", record);
+      },
+    });
+    return res.status(response.status).json(response);
+  } catch (error) {
+    console.error("❌ Product create variation error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
 async function productCreate(req, res) {
   console.log("🔧 Product create - req.body:", req.body);
   console.log("🔧 Product create - req.body keys:", Object.keys(req.body));
@@ -339,4 +356,5 @@ module.exports = {
   getProductWarehouseInventory,
   checkWarehouseStock,
   getProductsByWarehouse,
+  productCreateVariation
 };

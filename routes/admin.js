@@ -147,54 +147,216 @@ const userAdminCRUD = adminCrudGenerator(
 const companyAdminCRUD = adminCrudGenerator(
   Company,
   "company",
-  [], // Headings.
+  ["company_name", "company_phone", "company_email", "company_address", "company_logo", "warehouse_id", "status"], // Headings.
   {
     excludedFields: ["__v"],
-    includedFields: ["name", "phone", "email", "address", "logo", "status"],
-    searchableFields: ["name", "email", "phone"],
+    includedFields: ["company_name", "company_phone", "company_email", "company_address", "company_logo", "warehouse_id"],
+    searchableFields: ["company_name", "company_email", "company_phone"],
     filterableFields: ["status"],
-    sortableFields: ["name", "email", "status", "createdAt"],
+    sortableFields: ["company_name", "company_email", "status", "createdAt"],
     baseUrl: BASE_URL,
     softDelete: true, // Enable soft delete functionality
     fieldTypes: {
-      logo: "file",
+      company_logo: "file",
       status: "select",
       deletedAt: 'hidden',
+      warehouse_id: "select",
     },
     fieldLabels: {
-      logo: "Logo Image",
+      company_logo: "Logo Image",
+      company_name: "Company Name",
+      company_phone: "Phone",
+      company_email: "Email",
+      company_address: "Address",
+      warehouse_id: "Default Store",
     },
     fieldOptions: {
       status: [
         { value: "active", label: "Active" },
-        { value: "nonactive", label: "Non-Active" }
+        { value: "inactive", label: "Inactive" }
       ],
     },
-    // middleware: {
-    //   afterQuery: async (records, req) => {
-    //     const populatedRecords = await Blog.populate(records, { path: 'user_id', select: 'name email' });
+    middleware: {
+      afterQuery: async (records, req) => {
+        // Populate warehouse_id for all records that have it
+        const populatedRecords = await Warehouse.populate(records, [
+          { 
+            path: 'warehouse_id', 
+            select: 'warehouse_name' 
+          },
+          { path: 'company_id', select: 'company_name' },
+          { path: 'created_by', select: 'name email' },
+        ]);
         
-    //     if (req.fieldConfig?.user_id) {
-    //       const users = await User.find({ deletedAt: { $exists: false } }, 'name email').sort({ name: 1 });
-    //       req.fieldConfig.user_id.options = users.map(user => ({ value: user._id.toString(), label: user.name }));
-    //       req.fieldConfig.user_id.placeholder = 'Select User';
-    //       req.fieldConfig.user_id.helpText = 'Choose the user who posted this blog';
-    //     }
+        // Add warehouse_id field to fieldConfig so it shows in the list view
+        // BUT don't overwrite options if they were already set (e.g., in beforeEditForm)
+        if (req.fieldConfig) {
+          // Only set/update if it doesn't exist or if options weren't already populated
+          if (!req.fieldConfig.warehouse_id || !req.fieldConfig.warehouse_id.options || req.fieldConfig.warehouse_id.options.length === 0) {
+            req.fieldConfig.warehouse_id = {
+              name: 'warehouse_id',
+              type: 'select',
+              label: 'Warehouse',
+              required: false,
+              validation: {},
+              options: [], 
+              placeholder: 'Warehouse',
+              helpText: 'Warehouse'
+            };
+          }
+        }
+
+
+        const recordsWithPopulatedFields = populatedRecords.map(record => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          
+          // Handle created_by field
+          if (record.created_by) {
+            recordObj.created_by = record.created_by.name || 'No User';
+          } else {
+            recordObj.created_by = 'No User';
+          }
+          
+          // Handle company_id field
+          if (record.company_id) {
+            recordObj.company_id = record.company_id.company_name || 'No Company';
+          } else {
+            recordObj.company_id = 'No Company';
+          }
+          
+          // Handle warehouse_id field
+          if (record.warehouse_id) {
+            recordObj.warehouse_id = record.warehouse_id.warehouse_name || 'No Warehouse';
+          } else {
+            recordObj.warehouse_id = 'No Warehouse';
+          }
+          return recordObj;
+          
+        });
         
-    //     return populatedRecords;
-    //   }
-    // },
-    // // Custom response formatting to show user name
-    // responseFormatting: {
-    //   list: async (records) => records.map(record => {
-    //     const recordObj = record.toObject ? record.toObject() : record;
-    //     if (recordObj.user_id?.name) {
-    //       recordObj.user_name = recordObj.user_id.name;
-    //       recordObj.user_email = recordObj.user_id.email;
-    //     }
-    //     return recordObj;
-    //   })
-    // }
+        return recordsWithPopulatedFields;
+
+
+        // console.log('afterquery called.')
+        
+        // Note: Dropdown options are set in beforeCreateForm/beforeEditForm middleware
+        // This afterQuery middleware is only for populating existing records in list views
+        
+        // return populatedRecords; // Return populated records with company data
+      },
+      beforeCreateForm: async (req, res) => {
+        try {
+          console.log('🔍 beforeCreateForm - req.fieldConfig exists:', !!req.fieldConfig);
+          console.log('🔍 beforeCreateForm - fieldConfig keys:', req.fieldConfig ? Object.keys(req.fieldConfig) : 'N/A');
+          console.log('🔍 beforeCreateForm - warehouse_id in fieldConfig:', req.fieldConfig ? !!req.fieldConfig.warehouse_id : 'N/A');
+          
+          const warehouses = await Warehouse.find({ 
+            status: 'active',
+            $or: [
+              { deletedAt: { $exists: false } },
+              { deletedAt: null }
+            ]
+          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 });
+          
+          console.log('🔍 beforeCreateForm - warehouses found:', warehouses.length);
+          console.log('🔍 beforeCreateForm - warehouse data:', warehouses.map(w => ({ id: w._id.toString(), name: w.warehouse_name })));
+          
+          // Ensure warehouse_id field exists in fieldConfig
+          if (!req.fieldConfig.warehouse_id) {
+            console.log('⚠️ warehouse_id not in fieldConfig, creating it...');
+            req.fieldConfig.warehouse_id = {
+              name: 'warehouse_id',
+              type: 'select',
+              label: 'Default Store',
+              required: false,
+              validation: {},
+              options: [],
+              placeholder: 'Select Warehouse',
+              helpText: 'Choose the warehouse for this company'
+            };
+          }
+          
+          req.fieldConfig.warehouse_id.options = warehouses.map(warehouse => ({ value: warehouse._id.toString(), label: warehouse.warehouse_name }));
+          req.fieldConfig.warehouse_id.placeholder = 'Select Warehouse';
+          req.fieldConfig.warehouse_id.helpText = 'Choose the warehouse for this company';
+          req.warehouses = warehouses;
+          
+          console.log('✅ beforeCreateForm - warehouse_id options set:', req.fieldConfig.warehouse_id.options.length);
+          console.log('✅ beforeCreateForm - final warehouse_id config:', JSON.stringify(req.fieldConfig.warehouse_id, null, 2));
+        } catch (error) {
+          console.error('❌ Error in beforeCreateForm for company:', error);
+          // Ensure fieldConfig.warehouse_id exists even on error
+          if (!req.fieldConfig.warehouse_id) {
+            req.fieldConfig.warehouse_id = {
+              name: 'warehouse_id',
+              type: 'select',
+              label: 'Default Store',
+              required: false,
+              validation: {},
+              options: [],
+              placeholder: 'Select Warehouse',
+              helpText: 'Choose the warehouse for this company'
+            };
+          }
+        }
+      },
+      beforeEditForm: async (req, res) => {
+        try {
+          console.log('🔍 beforeEditForm called for company');
+          console.log('🔍 beforeEditForm - req.fieldConfig exists:', !!req.fieldConfig);
+          console.log('🔍 beforeEditForm - fieldConfig keys:', req.fieldConfig ? Object.keys(req.fieldConfig) : 'N/A');
+          
+          const warehouses = await Warehouse.find({ 
+            status: 'active',
+            $or: [
+              { deletedAt: { $exists: false } },
+              { deletedAt: null }
+            ]
+          }).select('warehouse_name warehouse_address').sort({ warehouse_name: 1 });
+          
+          console.log('🔍 beforeEditForm - warehouses found:', warehouses.length);
+          console.log('🔍 beforeEditForm - warehouse data:', warehouses.map(w => ({ id: w._id.toString(), name: w.warehouse_name })));
+          
+          // Ensure warehouse_id field exists in fieldConfig
+          if (!req.fieldConfig.warehouse_id) {
+            console.log('⚠️ warehouse_id not in fieldConfig, creating it...');
+            req.fieldConfig.warehouse_id = {
+              name: 'warehouse_id',
+              type: 'select',
+              label: 'Default Store',
+              required: false,
+              validation: {},
+              options: [],
+              placeholder: 'Select Warehouse',
+              helpText: 'Choose the warehouse for this company'
+            };
+          }
+          
+          req.warehouses = warehouses;
+          req.fieldConfig.warehouse_id.options = warehouses.map(warehouse => ({ value: warehouse._id.toString(), label: warehouse.warehouse_name }));
+          req.fieldConfig.warehouse_id.placeholder = 'Select Warehouse';  
+          req.fieldConfig.warehouse_id.helpText = 'Choose the warehouse for this company';
+          
+          console.log('✅ beforeEditForm - warehouse_id options set:', req.fieldConfig.warehouse_id.options.length);
+          console.log('✅ beforeEditForm - final warehouse_id config:', JSON.stringify(req.fieldConfig.warehouse_id, null, 2));
+        } catch (error) {
+          console.error('❌ Error in beforeEditForm for company:', error);
+          // Ensure fieldConfig.warehouse_id exists even on error
+          if (!req.fieldConfig.warehouse_id) {
+            req.fieldConfig.warehouse_id = {
+              name: 'warehouse_id',
+              type: 'select',
+              label: 'Default Store',
+              required: false,
+              validation: {},
+              options: [],
+              placeholder: 'Select Warehouse',
+              helpText: 'Choose the warehouse for this company'
+            };
+          }
+        }
+      },
+    },
   }
   );
 
@@ -893,7 +1055,7 @@ const integrationAdminCRUD = adminCrudGenerator(
       ],
       status: [
         { value: "active", label: "Active" },
-        { value: "nonactive", label: "Non Active" },
+        { value: "inactive", label: "Inactive" },
       ],
     },
    
@@ -1102,12 +1264,24 @@ router.get("/products/complaints", (req, res) => {
 
 // Mount all registered CRUD routes dynamically
 const enabledRoutes = routeRegistry.getEnabledRoutes();
+console.log('🔧 Mounting CRUD routes. Enabled routes:', enabledRoutes.map(r => ({ key: r.key || r.name, path: r.path })));
 enabledRoutes.forEach(route => {
   if (route.crudController && route.crudController.routes) {
     const routePath = route.path.replace('/admin/', '');
-    // console.log(`🔧 Mounting ${route.name} routes at /${routePath}`);
+    console.log(`🔧 Mounting ${route.name || route.key} routes at /${routePath}`);
     router.use(`/${routePath}`, route.crudController.routes);
-    // console.log(`✅ ${route.name} routes mounted successfully`);
+    console.log(`✅ ${route.name || route.key} routes mounted successfully at /${routePath}`);
+    
+    // Add a test route to verify company routes are accessible
+    if (routePath === 'company') {
+      router.get(`/${routePath}/test`, (req, res) => {
+        console.log('✅ Test route hit for company!');
+        res.json({ message: 'Company routes are working!', path: routePath });
+      });
+      console.log(`✅ Test route added for company at /admin/${routePath}/test`);
+    }
+  } else {
+    console.log(`⚠️ Skipping ${route.name || route.key} - no crudController or routes`);
   }
 });
 

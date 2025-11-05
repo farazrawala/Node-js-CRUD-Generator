@@ -124,10 +124,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           query.deletedAt = { $exists: true, $ne: null };
         } else {
           // Show only active records (default) - check for null or non-existent
-          query.$or = [
-            { deletedAt: { $exists: false } },
-            { deletedAt: null }
-          ];
+          // Merge with existing $or query if search is active
+          if (query.$or) {
+            // If there's already a $or query (from search), combine them using $and
+            const deletedAtCondition = {
+              $or: [
+                { deletedAt: { $exists: false } },
+                { deletedAt: null }
+              ]
+            };
+            query = { $and: [query, deletedAtCondition] };
+          } else {
+            // No existing $or, just set the deletedAt condition
+            query.$or = [
+              { deletedAt: { $exists: false } },
+              { deletedAt: null }
+            ];
+          }
         }
       }
 
@@ -285,22 +298,34 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    */
   async function createForm(req, res) {
     try {
+      console.log(`🚀 createForm called for model: ${modelName}`);
+      console.log(`🚀 createForm URL: ${req.url}`);
+      console.log(`🚀 createForm middleware.beforeCreateForm exists:`, !!middleware.beforeCreateForm);
+      
       // Set fieldConfig on req before middleware runs
       req.fieldConfig = fieldConfig;
+      console.log(`🚀 createForm - fieldConfig keys:`, Object.keys(fieldConfig));
       
       // Apply custom middleware
       if (middleware.beforeCreateForm) {
+        console.log(`🚀 createForm - calling beforeCreateForm middleware...`);
         await middleware.beforeCreateForm(req, res);
+        console.log(`✅ createForm - beforeCreateForm middleware completed`);
+      } else {
+        console.log(`⚠️ createForm - no beforeCreateForm middleware defined`);
       }
 
       // Use the modified fieldConfig from req if available, otherwise use the original
       const finalFieldConfig = req.fieldConfig || fieldConfig;
       
       // Debug: Check fieldConfig state
-      // console.log('🔍 adminCrudGenerator - req.fieldConfig exists:', !!req.fieldConfig);
-      // console.log('🔍 adminCrudGenerator - parent_product_id options:', req.fieldConfig?.parent_product_id?.options?.length || 0);
-      // console.log('🔍 adminCrudGenerator - finalFieldConfig parent_product_id options:', finalFieldConfig?.parent_product_id?.options?.length || 0);
-      // console.log('🔍 adminCrudGenerator - finalFieldConfig parent_product_id:', finalFieldConfig?.parent_product_id);
+      console.log(`🔍 adminCrudGenerator [${modelName}] - finalFieldConfig keys:`, Object.keys(finalFieldConfig));
+      if (finalFieldConfig.warehouse_id) {
+        console.log(`🔍 adminCrudGenerator [${modelName}] - warehouse_id exists in finalFieldConfig`);
+        console.log(`🔍 adminCrudGenerator [${modelName}] - warehouse_id options:`, finalFieldConfig.warehouse_id.options?.length || 0);
+      } else {
+        console.log(`⚠️ adminCrudGenerator [${modelName}] - warehouse_id NOT in finalFieldConfig`);
+      }
 
       // Create record object with default values
       const recordWithDefaults = {};
@@ -516,6 +541,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    */
   async function editForm(req, res) {
     try {
+      console.log(`🚀 editForm called for model: ${modelName}`);
+      console.log(`🚀 editForm URL: ${req.url}`);
+      console.log(`🚀 editForm middleware.beforeEditForm exists:`, !!middleware.beforeEditForm);
+      
       const { id } = req.params;
 
       // Validate ObjectId
@@ -540,10 +569,15 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Set fieldConfig on req before middleware runs
       req.fieldConfig = fieldConfig;
+      console.log(`🚀 editForm - fieldConfig keys:`, Object.keys(fieldConfig));
       
       // Apply custom middleware
       if (middleware.beforeEditForm) {
+        console.log(`🚀 editForm - calling beforeEditForm middleware...`);
         await middleware.beforeEditForm(req, res);
+        console.log(`✅ editForm - beforeEditForm middleware completed`);
+      } else {
+        console.log(`⚠️ editForm - no beforeEditForm middleware defined`);
       }
 
       const record = await Model.findOne(query)
@@ -563,12 +597,30 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Apply afterQuery middleware to populate field options (like user dropdown)
+      // BUT preserve options that were set in beforeEditForm
       if (middleware.afterQuery) {
+        console.log(`🚀 editForm - calling afterQuery middleware...`);
+        const existingOptions = req.fieldConfig?.warehouse_id?.options || [];
         await middleware.afterQuery([record], req);
+        // Restore options if afterQuery overwrote them
+        if (req.fieldConfig?.warehouse_id && existingOptions.length > 0 && (!req.fieldConfig.warehouse_id.options || req.fieldConfig.warehouse_id.options.length === 0)) {
+          req.fieldConfig.warehouse_id.options = existingOptions;
+          console.log(`✅ editForm - restored warehouse_id options after afterQuery`);
+        }
+        console.log(`✅ editForm - afterQuery middleware completed`);
       }
 
       // Use the modified fieldConfig from req if available, otherwise use the original
       const finalFieldConfig = req.fieldConfig || fieldConfig;
+      
+      // Debug: Check fieldConfig state
+      console.log(`🔍 adminCrudGenerator [${modelName}] editForm - finalFieldConfig keys:`, Object.keys(finalFieldConfig));
+      if (finalFieldConfig.warehouse_id) {
+        console.log(`🔍 adminCrudGenerator [${modelName}] editForm - warehouse_id exists in finalFieldConfig`);
+        console.log(`🔍 adminCrudGenerator [${modelName}] editForm - warehouse_id options:`, finalFieldConfig.warehouse_id.options?.length || 0);
+      } else {
+        console.log(`⚠️ adminCrudGenerator [${modelName}] editForm - warehouse_id NOT in finalFieldConfig`);
+      }
 
       // Format response
       let responseData = record.toObject();
@@ -1395,7 +1447,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     const router = express.Router();
 
     // CRUD routes
-    console.log(`🔧 Registering routes for model: ${modelName}`);
+    // console.log(`🔧 Registering routes for model: ${modelName}`);
     router.get('/', list);                           // LIST view
     router.get('/create', createForm);               // CREATE form
     router.post('/', insert);                        // INSERT action
@@ -1411,7 +1463,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // console.log(`✅ Soft delete routes registered for ${modelName}: POST /:id/restore, DELETE /:id/permanent-delete`);
     }
     
-    console.log(`✅ Routes registered for ${modelName}: GET /, GET /create, POST /, GET /:id/edit, PUT /:id, POST /:id, DELETE /:id`);
+    // console.log(`✅ Routes registered for ${modelName}: GET /, GET /create, POST /, GET /:id/edit, PUT /:id, POST /:id, DELETE /:id`);
 
     return router;
   }
