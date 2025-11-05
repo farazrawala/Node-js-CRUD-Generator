@@ -315,16 +315,9 @@
                                                     if (!imagePath || typeof imagePath !== 'string') return '';
                                                     
                                                     // Clean up the path to avoid double /uploads/
-                                                    if (imagePath.startsWith('/uploads/uploads/')) {
+                                                    if (imagePath.includes('/uploads/uploads/')) {
                                                         imagePath = imagePath.replace('/uploads/uploads/', '/uploads/');
-                                                    } else if (!imagePath.startsWith('/uploads/')) {
-                                                        if (imagePath.startsWith('/')) {
-                                                            imagePath = '/uploads' + imagePath;
-                                                        } else {
-                                                            imagePath = '/uploads/' + imagePath;
-                                                        }
                                                     }
-                                                    
                                                     // Use baseUrl if available
                                                     if (typeof baseUrl !== 'undefined' && baseUrl) {
                                                         if (imagePath.startsWith('/')) {
@@ -342,7 +335,13 @@
                                                 <% if (cleanedImages.length > 0) { %>
                                                     <div class="flex space-x-1">
                                                         <% cleanedImages.slice(0, 3).forEach((imageSrc, index) => { %>
-                                                            <img src="<%= imageSrc %>" alt="<%= fieldConfig[fieldName].label %> <%= index + 1 %>" class="h-10 w-10 rounded object-cover border border-gray-200">
+                                                            <img src="<%= imageSrc %>"  alt="<%= fieldConfig[fieldName].label %> <%= index + 1 %>" class="h-10 w-10 rounded object-cover border border-gray-200">
+                                                            <script>
+                                                                console.log('🔍 Image src:', '<%= imageSrc %>');
+                                                                console.log('🔍 Image data src:', '<%= imageSrc %>');
+                                                                console.log('🔍 Image alt:', '<%= fieldConfig[fieldName].label %> <%= index + 1 %>');
+                                                                console.log('🔍 Image class:', 'h-10 w-10 rounded object-cover border border-gray-200');
+                                                            </script>
                                                         <% }); %>
                                                         <% if (cleanedImages.length > 3) { %>
                                                             <div class="h-10 w-10 rounded bg-gray-100 flex items-center justify-center border border-gray-200">

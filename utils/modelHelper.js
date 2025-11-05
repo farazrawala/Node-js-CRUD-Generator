@@ -345,6 +345,158 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
       }
     });
 
+    // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
+    // These fields come as indexed format or already parsed into arrays/objects
+    const mongoose = require('mongoose');
+    Object.keys(modelSchema).forEach((fieldName) => {
+      const fieldConfig = modelSchema[fieldName];
+      
+      // Check if this is an array of ObjectIds using Model schema paths
+      const schemaPath = Model.schema.paths[fieldName];
+      const isObjectIdArray = schemaPath && 
+        schemaPath.instance === 'Array' && 
+        (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+      
+      // Also check field_type for multiselect
+      const isMultiselect = fieldConfig.field_type === 'multiselect';
+      
+      if (isObjectIdArray || (isMultiselect && Array.isArray(fieldConfig.type))) {
+        console.log(`🔍 Processing multiselect ObjectId array field: ${fieldName}`);
+        
+        // FIRST: Check if field already exists in req.body (parsed from indexed format)
+        if (req.body[fieldName] && (Array.isArray(req.body[fieldName]) || typeof req.body[fieldName] === 'object')) {
+          console.log(`🔍 Found ${fieldName} directly in req.body:`, req.body[fieldName]);
+          let values = req.body[fieldName];
+          
+          // Extract values from objects if array contains objects
+          const extractedValues = [];
+          if (Array.isArray(values)) {
+            values.forEach((val, idx) => {
+              if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+                // Extract value from object like { '0': 'id' }
+                const objValue = Object.values(val)[0];
+                if (objValue) {
+                  extractedValues.push(objValue);
+                  console.log(`✅ Extracted from object at index ${idx}:`, objValue);
+                }
+              } else {
+                extractedValues.push(val);
+              }
+            });
+          } else if (typeof values === 'object' && values !== null) {
+            // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
+            const sortedKeys = Object.keys(values).sort((a, b) => parseInt(a) - parseInt(b));
+            sortedKeys.forEach(key => {
+              extractedValues.push(values[key]);
+            });
+          }
+          
+          values = extractedValues.length > 0 ? extractedValues : (Array.isArray(values) ? values : [values]);
+          
+          // Convert to ObjectIds
+          const processedValues = [];
+          values.forEach((val, idx) => {
+            if (!val || val === '' || val === null || val === undefined) return;
+            
+            if (val instanceof mongoose.Types.ObjectId) {
+              processedValues.push(val);
+            } else if (typeof val === 'string') {
+              const trimmedVal = val.trim();
+              // Handle stringified JSON arrays
+              if ((trimmedVal.startsWith('[') || trimmedVal.startsWith('{')) && trimmedVal.length > 1) {
+                try {
+                  let jsonString = trimmedVal.replace(/'/g, '"');
+                  const parsed = JSON.parse(jsonString);
+                  if (Array.isArray(parsed)) {
+                    parsed.forEach(item => {
+                      if (typeof item === 'object' && item !== null) {
+                        const objVal = Object.values(item)[0];
+                        if (objVal && mongoose.Types.ObjectId.isValid(objVal)) {
+                          processedValues.push(new mongoose.Types.ObjectId(objVal));
+                        }
+                      } else if (mongoose.Types.ObjectId.isValid(item)) {
+                        processedValues.push(new mongoose.Types.ObjectId(item));
+                      }
+                    });
+                    return;
+                  }
+                } catch (e) {
+                  // Not valid JSON, continue
+                }
+              }
+              
+              if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
+                processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
+              }
+            }
+          });
+          
+          modelData[fieldName] = processedValues;
+          console.log(`✅ Processed multiselect field ${fieldName}:`, modelData[fieldName]);
+          delete req.body[fieldName]; // Remove to prevent re-processing
+          return;
+        }
+        
+        // SECOND: Check for indexed format (category_id[0], category_id[1], etc.)
+        const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
+        const indexedValues = [];
+        Object.keys(req.body).forEach(key => {
+          if (indexedPattern.test(key)) {
+            const index = parseInt(key.match(/\[(\d+)\]/)[1]);
+            let value = req.body[key];
+            
+            // Handle stringified values
+            if (typeof value === 'string') {
+              value = value.trim();
+              if ((value.startsWith('[') || value.startsWith('{')) && value.length > 1) {
+                try {
+                  let jsonString = value.replace(/'/g, '"');
+                  const parsed = JSON.parse(jsonString);
+                  if (Array.isArray(parsed)) {
+                    parsed.forEach((item, i) => {
+                      if (typeof item === 'object' && item !== null) {
+                        const objValue = Object.values(item)[0];
+                        if (objValue) {
+                          indexedValues[index + i] = objValue;
+                        }
+                      } else {
+                        indexedValues[index + i] = item;
+                      }
+                    });
+                    return;
+                  }
+                } catch (e) {
+                  // Not valid JSON
+                }
+              }
+            }
+            
+            indexedValues[index] = value;
+          }
+        });
+        
+        if (indexedValues.length > 0) {
+          const processedValues = [];
+          indexedValues.filter(v => v !== undefined && v !== null).forEach(val => {
+            if (val instanceof mongoose.Types.ObjectId) {
+              processedValues.push(val);
+            } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+              processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+            }
+          });
+          modelData[fieldName] = processedValues;
+          console.log(`✅ Processed indexed multiselect field ${fieldName}:`, modelData[fieldName]);
+          
+          // Remove indexed fields from req.body
+          Object.keys(req.body).forEach(key => {
+            if (indexedPattern.test(key)) {
+              delete req.body[key];
+            }
+          });
+        }
+      }
+    });
+
     // Debug: Log the final processed data
     console.log("🔍 handleGenericCreate - Final modelData:", JSON.stringify(modelData, null, 2));
     console.log("🔍 handleGenericCreate - modelData keys:", Object.keys(modelData));

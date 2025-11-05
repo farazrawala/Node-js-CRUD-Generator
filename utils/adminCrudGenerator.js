@@ -149,6 +149,12 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         query = await middleware.applyFilters(query, req);
       }
 
+      // Handle company_id from URL query parameter (for filtering by company)
+      if (req.query.company_id && mongoose.Types.ObjectId.isValid(req.query.company_id)) {
+        query.company_id = new mongoose.Types.ObjectId(req.query.company_id);
+        console.log(`🔍 list - Filtering by company_id from URL: ${req.query.company_id}`);
+      }
+
       // Build sort object
       const sort = {};
       if (sortableFields.includes(sortBy)) {
@@ -399,52 +405,506 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Process fields
       let data = { ...req.body };
       
-      // Handle array fields (multiselect fields with [] in name)
+      // Debug: Log all req.body keys related to multiselect fields
+      console.log(`🔍 All req.body keys:`, Object.keys(req.body));
       Object.keys(fieldConfig).forEach(fieldName => {
         const field = fieldConfig[fieldName];
-        if (field.type === 'multiselect' && req.body[`${fieldName}[]`]) {
-          console.log(`🔍 Processing multiselect field: ${fieldName}[]`);
-          console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
-          // Convert array field to proper format
-          data[fieldName] = Array.isArray(req.body[`${fieldName}[]`]) 
-            ? req.body[`${fieldName}[]`] 
-            : [req.body[`${fieldName}[]`]];
-          console.log(`🔍 Processed data:`, data[fieldName]);
-          // Remove the original array field
-          delete data[`${fieldName}[]`];
+        if (field.type === 'multiselect') {
+          console.log(`🔍 Checking multiselect field: ${fieldName}`);
+          console.log(`🔍 req.body[${fieldName}]:`, req.body[fieldName]);
+          console.log(`🔍 req.body[${fieldName}[]]:`, req.body[`${fieldName}[]`]);
+          // Check for indexed format
+          Object.keys(req.body).forEach(key => {
+            if (key.startsWith(`${fieldName}[`) && key.includes(']')) {
+              console.log(`🔍 Found indexed key: ${key} =`, req.body[key]);
+            }
+          });
         }
       });
       
-      // Handle file uploads for file fields
+      // Handle array fields (multiselect fields with [] in name or indexed format like category_id[0])
+      Object.keys(fieldConfig).forEach(fieldName => {
+        const field = fieldConfig[fieldName];
+        if (field.type === 'multiselect') {
+          // FIRST: Check if the field already exists in req.body (might be parsed from indexed format)
+          // This handles cases where express-fileupload/body-parser already parsed category_id[0] into category_id
+          if (req.body[fieldName] && (Array.isArray(req.body[fieldName]) || typeof req.body[fieldName] === 'object')) {
+            console.log(`🔍 Found ${fieldName} directly in req.body (likely parsed from indexed format):`, req.body[fieldName]);
+            let values = req.body[fieldName];
+            
+            // Extract values from objects if array contains objects
+            // e.g., [ { '0': 'id' } ] -> [ 'id' ]
+            const extractedValues = [];
+            if (Array.isArray(values)) {
+              values.forEach((val, idx) => {
+                if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+                  // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
+                  const objValue = Object.values(val)[0];
+                  if (objValue) {
+                    extractedValues.push(objValue);
+                    console.log(`✅ Extracted from object at index ${idx}:`, objValue);
+                  }
+                } else {
+                  extractedValues.push(val);
+                }
+              });
+            } else if (typeof values === 'object' && values !== null) {
+              // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
+              const sortedKeys = Object.keys(values).sort((a, b) => parseInt(a) - parseInt(b));
+              sortedKeys.forEach(key => {
+                extractedValues.push(values[key]);
+              });
+            }
+            
+            values = extractedValues.length > 0 ? extractedValues : (Array.isArray(values) ? values : [values]);
+            
+            // Process as ObjectId array
+            const schemaPath = Model.schema.paths[fieldName];
+            const isObjectIdArray = schemaPath && 
+              schemaPath.instance === 'Array' && 
+              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            
+            if (isObjectIdArray) {
+              const processedValues = [];
+              values.forEach((val, idx) => {
+                if (!val || val === '' || val === null || val === undefined) return;
+                
+                if (val instanceof mongoose.Types.ObjectId) {
+                  processedValues.push(val);
+                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                  processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+                }
+              });
+              data[fieldName] = processedValues;
+              console.log(`✅ Processed direct field ${fieldName} (from parsed format):`, data[fieldName]);
+              
+              // Remove from req.body to prevent re-processing
+              delete req.body[fieldName];
+              return; // Skip other checks
+            }
+          }
+          
+          // SECOND: Check for indexed array format (category_id[0], category_id[1], etc.)
+          const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
+          const indexedValues = [];
+          Object.keys(req.body).forEach(key => {
+            if (indexedPattern.test(key)) {
+              const index = parseInt(key.match(/\[(\d+)\]/)[1]);
+              let value = req.body[key];
+              
+              // Handle stringified values
+              if (typeof value === 'string') {
+                value = value.trim();
+                console.log(`🔍 Processing indexed field ${key}:`, value, `(type: ${typeof value})`);
+                
+                // Try to parse if it looks like JSON
+                if ((value.startsWith('[') || value.startsWith('{')) && value.length > 1) {
+                  try {
+                    // Replace single quotes with double quotes for JSON parsing
+                    let jsonString = value.replace(/'/g, '"');
+                    const parsed = JSON.parse(jsonString);
+                    console.log(`✅ Parsed JSON from ${key}:`, parsed);
+                    
+                    // If parsed is an array, extract values
+                    if (Array.isArray(parsed)) {
+                      parsed.forEach((item, i) => {
+                        if (typeof item === 'object' && item !== null) {
+                          // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
+                          const objValue = Object.values(item)[0];
+                          if (objValue) {
+                            indexedValues[index + i] = objValue;
+                            console.log(`✅ Extracted from array item ${i}:`, objValue);
+                          }
+                        } else {
+                          indexedValues[index + i] = item;
+                          console.log(`✅ Using array item ${i} directly:`, item);
+                        }
+                      });
+                      // Skip adding the original value since we processed the array
+                      return;
+                    }
+                    // If parsed is an object, extract the value
+                    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+                      const objValue = Object.values(parsed)[0];
+                      if (objValue) {
+                        value = objValue;
+                        console.log(`✅ Extracted from object:`, value);
+                      }
+                    }
+                  } catch (e) {
+                    console.log(`⚠️ Failed to parse JSON from ${key}:`, e.message);
+                    // If it's a valid ObjectId string, use it directly
+                    if (mongoose.Types.ObjectId.isValid(value)) {
+                      indexedValues[index] = value;
+                      return;
+                    }
+                    // Not valid JSON, use as is
+                  }
+                } else if (mongoose.Types.ObjectId.isValid(value)) {
+                  // Direct ObjectId string
+                  indexedValues[index] = value;
+                  return;
+                }
+              }
+              
+              indexedValues[index] = value;
+            }
+          });
+          
+          // Check for array format (category_id[] or category_id) or indexed format
+          if (indexedValues.length > 0) {
+            console.log(`🔍 Processing multiselect field: ${fieldName} (indexed format)`);
+            console.log(`🔍 Found indexed values:`, indexedValues);
+            
+            // Use indexed values
+            let values = indexedValues.filter(v => v !== undefined && v !== null);
+            
+            // Process the values
+            const schemaPath = Model.schema.paths[fieldName];
+            const isObjectIdArray = schemaPath && 
+              schemaPath.instance === 'Array' && 
+              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            
+            if (isObjectIdArray) {
+              const processedValues = [];
+              values.forEach((val, idx) => {
+                if (!val || val === '' || val === null || val === undefined) return;
+                
+                if (val instanceof mongoose.Types.ObjectId) {
+                  processedValues.push(val);
+                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                  processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+                }
+              });
+              data[fieldName] = processedValues;
+              console.log(`✅ Processed indexed multiselect data:`, data[fieldName]);
+            } else {
+              data[fieldName] = values.filter(val => val && val !== '' && val !== null && val !== undefined);
+            }
+            
+            // Remove indexed fields from both req.body and data
+            Object.keys(req.body).forEach(key => {
+              if (indexedPattern.test(key)) {
+                delete req.body[key];
+                delete data[key]; // Also remove from data object
+              }
+            });
+            
+            // Also remove any direct fieldName entry that might be in wrong format
+            if (data[fieldName] && typeof data[fieldName] === 'object' && !Array.isArray(data[fieldName])) {
+              console.log(`⚠️ Removing incorrectly formatted ${fieldName} from data:`, data[fieldName]);
+              delete data[fieldName];
+            }
+          } else if (req.body[`${fieldName}[]`]) {
+            console.log(`🔍 Processing multiselect field: ${fieldName}[]`);
+            console.log(`🔍 Raw form data type:`, typeof req.body[`${fieldName}[]`]);
+            console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
+            
+            // Handle different input formats
+            let values = req.body[`${fieldName}[]`];
+            
+            // If it's a string, try to parse it
+            if (typeof values === 'string') {
+              // Remove any leading/trailing whitespace
+              values = values.trim();
+              
+              // Check if it looks like a JSON string (starts with [ or {)
+              if (values.startsWith('[') || values.startsWith('{')) {
+                try {
+                  // Try to parse as JSON
+                  values = JSON.parse(values);
+                  console.log(`🔍 Parsed JSON string:`, values);
+                } catch (e) {
+                  console.log(`⚠️ Failed to parse JSON, treating as single value:`, e.message);
+                  // If not valid JSON, treat as single value
+                  values = [values];
+                }
+              } else {
+                // Not JSON, treat as single value
+                values = [values];
+              }
+            }
+            
+            // If values is still a string, it might be a stringified array
+            if (typeof values === 'string') {
+              try {
+                values = JSON.parse(values);
+              } catch (e) {
+                values = [values];
+              }
+            }
+            
+            // Ensure it's an array
+            if (!Array.isArray(values)) {
+              // If it's an object, try to extract values
+              if (typeof values === 'object' && values !== null) {
+                values = Object.values(values);
+              } else {
+                values = [values];
+              }
+            }
+            
+            console.log(`🔍 After parsing, values:`, values);
+            console.log(`🔍 Is array:`, Array.isArray(values));
+            
+            // Filter out empty values and convert to ObjectIds if needed
+            const schemaPath = Model.schema.paths[fieldName];
+            
+            // Check if this is an array of ObjectIds
+            // For type: [mongoose.Schema.Types.ObjectId], check if it's an Array and the caster is ObjectId
+            const isObjectIdArray = schemaPath && 
+              schemaPath.instance === 'Array' && 
+              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            
+            if (isObjectIdArray) {
+              // It's an array of ObjectIds - process each value
+              const processedValues = [];
+              
+              values.forEach((val, idx) => {
+                console.log(`🔍 Processing value ${idx}:`, val, `(type: ${typeof val})`);
+                
+                if (!val || val === '' || val === null || val === undefined) {
+                  console.log(`⏭️ Skipping empty value at index ${idx}`);
+                  return; // Skip empty values
+                }
+                
+                // If it's already an ObjectId, use it
+                if (val instanceof mongoose.Types.ObjectId) {
+                  console.log(`✅ Value ${idx} is already ObjectId:`, val);
+                  processedValues.push(val);
+                  return;
+                }
+                
+                // If it's a string that looks like an ObjectId, convert it
+                if (typeof val === 'string') {
+                  const trimmedVal = val.trim();
+                  if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
+                    console.log(`✅ Converting string to ObjectId at index ${idx}:`, trimmedVal);
+                    processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
+                    return;
+                  }
+                }
+                
+                // If it's an object, extract the value
+                if (typeof val === 'object' && val !== null) {
+                  console.log(`🔍 Value ${idx} is object, extracting values:`, val);
+                  
+                  // Handle objects like { '0': 'id' } or { 'id': 'value' }
+                  const objValues = Object.values(val);
+                  console.log(`🔍 Object values:`, objValues);
+                  
+                  for (const objValue of objValues) {
+                    if (!objValue) continue;
+                    
+                    // If the object value is a string ObjectId
+                    if (typeof objValue === 'string') {
+                      const trimmedObjVal = objValue.trim();
+                      if (mongoose.Types.ObjectId.isValid(trimmedObjVal)) {
+                        console.log(`✅ Extracted ObjectId from object at index ${idx}:`, trimmedObjVal);
+                        processedValues.push(new mongoose.Types.ObjectId(trimmedObjVal));
+                        return;
+                      }
+                    }
+                    
+                    // If the object value is itself an ObjectId
+                    if (objValue instanceof mongoose.Types.ObjectId) {
+                      console.log(`✅ Extracted ObjectId from object at index ${idx}:`, objValue);
+                      processedValues.push(objValue);
+                      return;
+                    }
+                    
+                    // Handle nested objects
+                    if (typeof objValue === 'object' && objValue !== null) {
+                      const nestedValues = Object.values(objValue);
+                      for (const nestedValue of nestedValues) {
+                        if (typeof nestedValue === 'string' && mongoose.Types.ObjectId.isValid(nestedValue.trim())) {
+                          console.log(`✅ Extracted ObjectId from nested object at index ${idx}:`, nestedValue);
+                          processedValues.push(new mongoose.Types.ObjectId(nestedValue.trim()));
+                          return;
+                        }
+                      }
+                    }
+                  }
+                }
+                
+                // Last resort: try to convert if it's valid
+                if (typeof val === 'string' || typeof val === 'number') {
+                  const strVal = String(val).trim();
+                  if (mongoose.Types.ObjectId.isValid(strVal)) {
+                    console.log(`✅ Last resort conversion at index ${idx}:`, strVal);
+                    processedValues.push(new mongoose.Types.ObjectId(strVal));
+                  } else {
+                    console.log(`⚠️ Could not convert value at index ${idx} to ObjectId:`, val);
+                  }
+                } else {
+                  console.log(`⚠️ Unhandled value type at index ${idx}:`, typeof val, val);
+                }
+              });
+              
+              console.log(`✅ Final processed values for ${fieldName}:`, processedValues);
+              data[fieldName] = processedValues;
+            } else {
+              // Regular array
+              data[fieldName] = values.filter(val => val && val !== '' && val !== null && val !== undefined);
+            }
+            
+            console.log(`🔍 Processed multiselect data:`, data[fieldName]);
+            // Remove the original array field
+            delete data[`${fieldName}[]`];
+          } else if (req.body[fieldName]) {
+            // Handle case where field is sent without [] suffix
+            console.log(`🔍 Processing multiselect field: ${fieldName} (direct field)`);
+            let values = req.body[fieldName];
+            
+            // Handle string input
+            if (typeof values === 'string') {
+              values = values.trim();
+              // Try to parse if it looks like JSON
+              if ((values.startsWith('[') || values.startsWith('{')) && values.length > 1) {
+                try {
+                  // Replace single quotes with double quotes for JSON parsing
+                  let jsonString = values.replace(/'/g, '"');
+                  values = JSON.parse(jsonString);
+                  console.log(`✅ Parsed JSON from ${fieldName}:`, values);
+                } catch (e) {
+                  console.log(`⚠️ Failed to parse JSON from ${fieldName}:`, e.message);
+                  values = [values];
+                }
+              } else {
+                values = [values];
+              }
+            }
+            
+            // Ensure it's an array
+            if (!Array.isArray(values)) {
+              values = [values];
+            }
+            
+            // Extract values from objects if array contains objects
+            // e.g., [ { '0': 'id' } ] -> [ 'id' ]
+            const extractedValues = [];
+            values.forEach((val, idx) => {
+              if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+                // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
+                const objValue = Object.values(val)[0];
+                if (objValue) {
+                  extractedValues.push(objValue);
+                  console.log(`✅ Extracted from object at index ${idx}:`, objValue);
+                }
+              } else {
+                extractedValues.push(val);
+              }
+            });
+            values = extractedValues;
+            
+            const schemaPath = Model.schema.paths[fieldName];
+            // Check if this is an array of ObjectIds
+            // For type: [mongoose.Schema.Types.ObjectId], check if it's an Array and the caster is ObjectId
+            const isObjectIdArray = schemaPath && 
+              schemaPath.instance === 'Array' && 
+              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            
+            if (isObjectIdArray) {
+              // It's an array of ObjectIds - process each value
+              const processedValues = [];
+              
+              values.forEach((val, idx) => {
+                console.log(`🔍 Processing value ${idx}:`, val, `(type: ${typeof val})`);
+                
+                if (!val || val === '' || val === null || val === undefined) {
+                  console.log(`⏭️ Skipping empty value at index ${idx}`);
+                  return; // Skip empty values
+                }
+                
+                // If it's already an ObjectId, use it
+                if (val instanceof mongoose.Types.ObjectId) {
+                  console.log(`✅ Value ${idx} is already ObjectId:`, val);
+                  processedValues.push(val);
+                  return;
+                }
+                
+                // If it's a string that looks like an ObjectId, convert it
+                if (typeof val === 'string') {
+                  const trimmedVal = val.trim();
+                  if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
+                    console.log(`✅ Converting string to ObjectId at index ${idx}:`, trimmedVal);
+                    processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
+                    return;
+                  }
+                }
+                
+                // If it's an object, extract the value
+                if (typeof val === 'object' && val !== null) {
+                  console.log(`🔍 Value ${idx} is object, extracting values:`, val);
+                  
+                  // Handle objects like { '0': 'id' } or { 'id': 'value' }
+                  const objValues = Object.values(val);
+                  console.log(`🔍 Object values:`, objValues);
+                  
+                  for (const objValue of objValues) {
+                    if (!objValue) continue;
+                    
+                    // If the object value is a string ObjectId
+                    if (typeof objValue === 'string') {
+                      const trimmedObjVal = objValue.trim();
+                      if (mongoose.Types.ObjectId.isValid(trimmedObjVal)) {
+                        console.log(`✅ Extracted ObjectId from object at index ${idx}:`, trimmedObjVal);
+                        processedValues.push(new mongoose.Types.ObjectId(trimmedObjVal));
+                        return;
+                      }
+                    }
+                    
+                    // If the object value is itself an ObjectId
+                    if (objValue instanceof mongoose.Types.ObjectId) {
+                      console.log(`✅ Extracted ObjectId from object at index ${idx}:`, objValue);
+                      processedValues.push(objValue);
+                      return;
+                    }
+                    
+                    // Handle nested objects
+                    if (typeof objValue === 'object' && objValue !== null) {
+                      const nestedValues = Object.values(objValue);
+                      for (const nestedValue of nestedValues) {
+                        if (typeof nestedValue === 'string' && mongoose.Types.ObjectId.isValid(nestedValue.trim())) {
+                          console.log(`✅ Extracted ObjectId from nested object at index ${idx}:`, nestedValue);
+                          processedValues.push(new mongoose.Types.ObjectId(nestedValue.trim()));
+                          return;
+                        }
+                      }
+                    }
+                  }
+                }
+                
+                // Last resort: try to convert if it's valid
+                if (typeof val === 'string' || typeof val === 'number') {
+                  const strVal = String(val).trim();
+                  if (mongoose.Types.ObjectId.isValid(strVal)) {
+                    console.log(`✅ Last resort conversion at index ${idx}:`, strVal);
+                    processedValues.push(new mongoose.Types.ObjectId(strVal));
+                  } else {
+                    console.log(`⚠️ Could not convert value at index ${idx} to ObjectId:`, val);
+                  }
+                } else {
+                  console.log(`⚠️ Unhandled value type at index ${idx}:`, typeof val, val);
+                }
+              });
+              
+              console.log(`✅ Final processed values for ${fieldName}:`, processedValues);
+              data[fieldName] = processedValues;
+            }
+          }
+        }
+      });
+      
+      // Don't handle file uploads here - we'll do it after creating the record to get the ID
+      // Store file references for later processing
+      const filesToUpload = {};
       if (req.files) {
         Object.keys(fieldConfig).forEach(fieldName => {
           const field = fieldConfig[fieldName];
           if (field.type === 'file' && req.files[fieldName]) {
-            const file = req.files[fieldName];
-            
-            // Create upload directory if it doesn't exist
-            const uploadDir = path.join(__dirname, '..', 'uploads', modelName);
-            if (!require('fs').existsSync(uploadDir)) {
-              require('fs').mkdirSync(uploadDir, { recursive: true });
-            }
-            
-            // Support multiple files if input is multiple
-            const filesArray = Array.isArray(file) ? file : [file];
-            const storedPaths = [];
-            filesArray.forEach((f) => {
-              const timestamp = Date.now();
-              const fileName = `${fieldName}_${timestamp}_${Math.random().toString(36).substring(2)}.${f.mimetype.split('/')[1]}`;
-              const filePath = path.join(uploadDir, fileName);
-              f.mv(filePath, (err) => {
-                if (err) {
-                  console.error('File upload error:', err);
-                }
-              });
-              storedPaths.push(cleanImagePath(`/${modelName}/${fileName}`));
-            });
-            // If schema expects array store array else single string
-            const expectsArray = Array.isArray(Model.schema.obj[fieldName]?.type) || Model.schema.paths[fieldName]?.instance === 'Array';
-            data[fieldName] = expectsArray ? storedPaths : storedPaths[0];
+            filesToUpload[fieldName] = req.files[fieldName];
+            // Don't set data[fieldName] yet - we'll do it after record creation
           }
         });
       }
@@ -470,7 +930,39 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         console.log("🏷️ Generated new EAN13 barcode for admin form:", data.barcode);
       }
 
-      // Create record
+      // Final cleanup: Ensure multiselect fields are arrays and clean up any incorrectly formatted entries
+      Object.keys(fieldConfig).forEach(fieldName => {
+        const field = fieldConfig[fieldName];
+        if (field.type === 'multiselect') {
+          // Check if the field exists but is not an array (might be an object with numeric keys)
+          if (data[fieldName] && typeof data[fieldName] === 'object' && !Array.isArray(data[fieldName])) {
+            console.log(`⚠️ Found incorrectly formatted ${fieldName} before save:`, data[fieldName]);
+            // Try to extract values from object like { 0: "value", 1: "value" }
+            const extractedValues = Object.values(data[fieldName]).filter(v => v && v !== '');
+            if (extractedValues.length > 0) {
+              const schemaPath = Model.schema.paths[fieldName];
+              const isObjectIdArray = schemaPath && 
+                schemaPath.instance === 'Array' && 
+                (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+              
+              if (isObjectIdArray) {
+                data[fieldName] = extractedValues
+                  .filter(val => mongoose.Types.ObjectId.isValid(val))
+                  .map(val => new mongoose.Types.ObjectId(val));
+              } else {
+                data[fieldName] = extractedValues;
+              }
+              console.log(`✅ Cleaned up ${fieldName}:`, data[fieldName]);
+            } else {
+              delete data[fieldName];
+            }
+          }
+        }
+      });
+      
+      console.log(`📝 Final data.category_id before save:`, data.category_id);
+      
+      // Create record first to get the ID
       const record = new Model(data);
       
       // Apply custom hooks
@@ -479,6 +971,66 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       const savedRecord = await record.save();
+
+      // Now handle file uploads with the record ID (using same structure as API: uploads/singularName/recordId/)
+      if (Object.keys(filesToUpload).length > 0) {
+        const recordId = savedRecord._id.toString();
+        const fs = require('fs');
+        
+        // Process all file uploads
+        for (const fieldName of Object.keys(filesToUpload)) {
+          const file = filesToUpload[fieldName];
+          const field = fieldConfig[fieldName];
+          
+          // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
+          const uploadDir = path.join(__dirname, '..', 'uploads', singularName, recordId);
+          if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+          }
+          
+          // Support multiple files if input is multiple
+          const filesArray = Array.isArray(file) ? file : [file];
+          const storedPaths = [];
+          
+          // Upload files one by one (await each upload)
+          for (let index = 0; index < filesArray.length; index++) {
+            const f = filesArray[index];
+            const timestamp = Date.now();
+            const fileExtension = path.extname(f.name) || `.${f.mimetype.split('/')[1]}`;
+            const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
+            const filePath = path.join(uploadDir, fileName);
+            
+            try {
+              // Use promise-based file move
+              await new Promise((resolve, reject) => {
+                f.mv(filePath, (err) => {
+                  if (err) {
+                    console.error(`Error uploading file ${fileName}:`, err);
+                    reject(err);
+                  } else {
+                    resolve();
+                  }
+                });
+              });
+              
+              // Store relative path: uploads/singularName/recordId/filename (e.g., uploads/product/recordId/filename)
+              const relativePath = `uploads/${singularName}/${recordId}/${fileName}`;
+              storedPaths.push(relativePath);
+              console.log(`✅ File uploaded: ${relativePath}`);
+            } catch (error) {
+              console.error(`❌ Error uploading file ${fileName}:`, error);
+            }
+          }
+          
+          // If schema expects array store array else single string
+          const expectsArray = Array.isArray(Model.schema.obj[fieldName]?.type) || Model.schema.paths[fieldName]?.instance === 'Array';
+          savedRecord[fieldName] = expectsArray ? storedPaths : storedPaths[0];
+        }
+        
+        // Save the record again with image paths
+        await savedRecord.save();
+        console.log(`✅ All files uploaded to: uploads/${singularName}/${recordId}/`);
+      }
 
       // Apply custom hooks
       if (hooks.afterInsert) {
@@ -731,19 +1283,183 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Process fields
       let updateData = { ...req.body };
       
-      // Handle array fields (multiselect fields with [] in name)
+      // Handle array fields (multiselect fields with [] in name or indexed format like category_id[0])
       Object.keys(fieldConfig).forEach(fieldName => {
         const field = fieldConfig[fieldName];
-        if (field.type === 'multiselect' && req.body[`${fieldName}[]`]) {
-          console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
-          console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
-          // Convert array field to proper format
-          updateData[fieldName] = Array.isArray(req.body[`${fieldName}[]`]) 
-            ? req.body[`${fieldName}[]`] 
-            : [req.body[`${fieldName}[]`]];
-          console.log(`🔍 Processed data:`, updateData[fieldName]);
-          // Remove the original array field
-          delete updateData[`${fieldName}[]`];
+        if (field.type === 'multiselect') {
+          // FIRST: Check if the field already exists in req.body (might be parsed from indexed format)
+          // This handles cases where express-fileupload/body-parser already parsed category_id[0] into category_id
+          if (req.body[fieldName] && (Array.isArray(req.body[fieldName]) || typeof req.body[fieldName] === 'object')) {
+            console.log(`🔍 Found ${fieldName} directly in req.body (UPDATE - likely parsed from indexed format):`, req.body[fieldName]);
+            let values = req.body[fieldName];
+            
+            // Extract values from objects if array contains objects
+            // e.g., [ { '0': 'id' } ] -> [ 'id' ]
+            const extractedValues = [];
+            if (Array.isArray(values)) {
+              values.forEach((val, idx) => {
+                if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+                  // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
+                  const objValue = Object.values(val)[0];
+                  if (objValue) {
+                    extractedValues.push(objValue);
+                    console.log(`✅ Extracted from object at index ${idx} (UPDATE):`, objValue);
+                  }
+                } else {
+                  extractedValues.push(val);
+                }
+              });
+            } else if (typeof values === 'object' && values !== null) {
+              // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
+              const sortedKeys = Object.keys(values).sort((a, b) => parseInt(a) - parseInt(b));
+              sortedKeys.forEach(key => {
+                extractedValues.push(values[key]);
+              });
+            }
+            
+            values = extractedValues.length > 0 ? extractedValues : (Array.isArray(values) ? values : [values]);
+            
+            // Process as ObjectId array
+            const schemaPath = Model.schema.paths[fieldName];
+            const isObjectIdArray = schemaPath && 
+              schemaPath.instance === 'Array' && 
+              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            
+            if (isObjectIdArray) {
+              const processedValues = [];
+              values.forEach((val, idx) => {
+                if (!val || val === '' || val === null || val === undefined) return;
+                
+                if (val instanceof mongoose.Types.ObjectId) {
+                  processedValues.push(val);
+                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                  processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+                }
+              });
+              updateData[fieldName] = processedValues;
+              console.log(`✅ Processed direct field ${fieldName} (UPDATE - from parsed format):`, updateData[fieldName]);
+              
+              // Remove from req.body to prevent re-processing
+              delete req.body[fieldName];
+              return; // Skip other checks
+            }
+          }
+          
+          // SECOND: Check for indexed array format (category_id[0], category_id[1], etc.)
+          const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
+          const indexedValues = [];
+          Object.keys(req.body).forEach(key => {
+            if (indexedPattern.test(key)) {
+              const index = parseInt(key.match(/\[(\d+)\]/)[1]);
+              let value = req.body[key];
+              
+              // Handle stringified values
+              if (typeof value === 'string') {
+                value = value.trim();
+                console.log(`🔍 Processing indexed field (UPDATE) ${key}:`, value, `(type: ${typeof value})`);
+                
+                // Try to parse if it looks like JSON
+                if ((value.startsWith('[') || value.startsWith('{')) && value.length > 1) {
+                  try {
+                    // Replace single quotes with double quotes for JSON parsing
+                    let jsonString = value.replace(/'/g, '"');
+                    const parsed = JSON.parse(jsonString);
+                    console.log(`✅ Parsed JSON from ${key}:`, parsed);
+                    
+                    // If parsed is an array, extract values
+                    if (Array.isArray(parsed)) {
+                      parsed.forEach((item, i) => {
+                        if (typeof item === 'object' && item !== null) {
+                          // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
+                          const objValue = Object.values(item)[0];
+                          if (objValue) {
+                            indexedValues[index + i] = objValue;
+                            console.log(`✅ Extracted from array item ${i}:`, objValue);
+                          }
+                        } else {
+                          indexedValues[index + i] = item;
+                          console.log(`✅ Using array item ${i} directly:`, item);
+                        }
+                      });
+                      // Skip adding the original value since we processed the array
+                      return;
+                    }
+                    // If parsed is an object, extract the value
+                    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+                      const objValue = Object.values(parsed)[0];
+                      if (objValue) {
+                        value = objValue;
+                        console.log(`✅ Extracted from object:`, value);
+                      }
+                    }
+                  } catch (e) {
+                    console.log(`⚠️ Failed to parse JSON from ${key}:`, e.message);
+                    // If it's a valid ObjectId string, use it directly
+                    if (mongoose.Types.ObjectId.isValid(value)) {
+                      indexedValues[index] = value;
+                      return;
+                    }
+                    // Not valid JSON, use as is
+                  }
+                } else if (mongoose.Types.ObjectId.isValid(value)) {
+                  // Direct ObjectId string
+                  indexedValues[index] = value;
+                  return;
+                }
+              }
+              
+              indexedValues[index] = value;
+            }
+          });
+          
+          // Check for indexed format first
+          if (indexedValues.length > 0) {
+            console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName} (indexed format)`);
+            console.log(`🔍 Found indexed values:`, indexedValues);
+            
+            // Use indexed values
+            let values = indexedValues.filter(v => v !== undefined && v !== null);
+            
+            // Process the values
+            const schemaPath = Model.schema.paths[fieldName];
+            const isObjectIdArray = schemaPath && 
+              schemaPath.instance === 'Array' && 
+              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            
+            if (isObjectIdArray) {
+              const processedValues = [];
+              values.forEach((val, idx) => {
+                if (!val || val === '' || val === null || val === undefined) return;
+                
+                if (val instanceof mongoose.Types.ObjectId) {
+                  processedValues.push(val);
+                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                  processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+                }
+              });
+              updateData[fieldName] = processedValues;
+              console.log(`✅ Processed indexed multiselect data (UPDATE):`, updateData[fieldName]);
+            } else {
+              updateData[fieldName] = values.filter(val => val && val !== '' && val !== null && val !== undefined);
+            }
+            
+            // Remove indexed fields from updateData
+            Object.keys(updateData).forEach(key => {
+              if (indexedPattern.test(key)) {
+                delete updateData[key];
+              }
+            });
+          } else if (req.body[`${fieldName}[]`]) {
+            console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
+            console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
+            // Convert array field to proper format
+            updateData[fieldName] = Array.isArray(req.body[`${fieldName}[]`]) 
+              ? req.body[`${fieldName}[]`] 
+              : [req.body[`${fieldName}[]`]];
+            console.log(`🔍 Processed data:`, updateData[fieldName]);
+            // Remove the original array field
+            delete updateData[`${fieldName}[]`];
+          }
         }
       });
       
@@ -800,15 +1516,16 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       });
       
-      // Handle file uploads for file fields
+      // Handle file uploads for file fields (using same structure as API: uploads/singularName/recordId/)
       if (req.files) {
+        const recordId = record._id.toString();
         Object.keys(fieldConfig).forEach(fieldName => {
           const field = fieldConfig[fieldName];
           if (field.type === 'file' && req.files[fieldName]) {
             const file = req.files[fieldName];
             
-            // Create upload directory if it doesn't exist
-            const uploadDir = path.join(__dirname, '..', 'uploads', modelName);
+            // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
+            const uploadDir = path.join(__dirname, '..', 'uploads', singularName, recordId);
             if (!require('fs').existsSync(uploadDir)) {
               require('fs').mkdirSync(uploadDir, { recursive: true });
             }
@@ -816,16 +1533,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             // Support multiple files if input is multiple
             const filesArray = Array.isArray(file) ? file : [file];
             const storedPaths = [];
-            filesArray.forEach((f) => {
+            filesArray.forEach((f, index) => {
               const timestamp = Date.now();
-              const fileName = `${fieldName}_${timestamp}_${Math.random().toString(36).substring(2)}.${f.mimetype.split('/')[1]}`;
+              const fileExtension = path.extname(f.name) || `.${f.mimetype.split('/')[1]}`;
+              const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
               const filePath = path.join(uploadDir, fileName);
+              
               f.mv(filePath, (err) => {
                 if (err) {
                   console.error('File upload error:', err);
                 }
               });
-              storedPaths.push(cleanImagePath(`/${modelName}/${fileName}`));
+              // Store relative path: uploads/singularName/recordId/filename (e.g., uploads/product/recordId/filename)
+              const relativePath = `uploads/${singularName}/${recordId}/${fileName}`;
+              storedPaths.push(relativePath);
             });
             const expectsArray = Array.isArray(Model.schema.obj[fieldName]?.type) || Model.schema.paths[fieldName]?.instance === 'Array';
             

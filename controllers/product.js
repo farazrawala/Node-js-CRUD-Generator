@@ -3,21 +3,118 @@ const {
   handleGenericUpdate,
   handleGenericGetById,
   handleGenericGetAll,
+  handleGenericFindOne,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
 
 async function productCreateVariation(req, res) {
   try {
-    console.log("🔧 Product create variation - req.body:", req.body);
-    console.log("🔧 Product create variation - req.body keys:", Object.keys(req.body));
-    
-    const response = await handleGenericCreate(req, "product", {
+    // console.log("🔧 Product create variation - req.body keys:", Object.keys(req.body));
+  // cconsole.log("🔧 Product create variation - req.user.company_id:", req.user.company_id);
+      const company = await handleGenericFindOne(req, "company", {
+        searchCriteria: { 
+          _id: req.user.company_id,
+          deletedAt: null 
+        },
+        excludeFields: []
+      });
+
+      if (!company.success || !company.data) {
+        return res.status(404).json({
+          success: false,
+          message: "Company not found"
+        });
+      }
+  
+      // Initialize warehouse_inventory array if it doesn't exist
+      if (!req.body.warehouse_inventory) {
+        req.body.warehouse_inventory = [];
+      }
+      
+      // Ensure it's an array
+      if (!Array.isArray(req.body.warehouse_inventory)) {
+        req.body.warehouse_inventory = [req.body.warehouse_inventory];
+      }
+      
+      // Initialize first element if it doesn't exist
+      if (!req.body.warehouse_inventory[0]) {
+        req.body.warehouse_inventory[0] = {};
+      }
+      
+      // Set warehouse_id and quantity
+      req.body.warehouse_inventory[0].warehouse_id = company.data.warehouse_id;
+      req.body.warehouse_inventory[0].quantity = req.body.quantity || 0;
+      req.body.warehouse_inventory[0].last_updated = new Date();
+      
+      // Set company_id if not already set
+      if (!req.body.company_id && company.data._id) {
+        req.body.company_id = company.data._id.toString();
+      }
+
+      console.log("🔧 Product create variation - req.body:", req.body);
+      const variations = [];
+
+      for (const key in req.body) {
+        const match = key.match(/^variations\[(\d+)\]\[(.+)\]$/);
+        if (match) {
+          const index = parseInt(match[1]);
+          const field = match[2];
+
+          // ensure object exists at that index
+          if (!variations[index]) variations[index] = {};
+
+          variations[index][field] = req.body[key];
+        }
+      }
+
+
+
+    const parentProductResponse = await handleGenericCreate(req, "product", {
       afterCreate: async (record, req) => {
-        console.log("✅ Product variation created successfully:", record);
+        console.log("✅ Parent product created successfully:", record);
       },
     });
-    return res.status(response.status).json(response);
+
+    // Check if parent product was created successfully
+    if (!parentProductResponse.success || !parentProductResponse.data || !parentProductResponse.data._id) {
+      console.error("❌ Failed to create parent product:", parentProductResponse);
+      return res.status(parentProductResponse.status || 500).json({
+        success: false,
+        message: "Failed to create parent product",
+        error: parentProductResponse.error || parentProductResponse
+      });
+    }
+
+    console.log("✅ Parent product created with ID:", parentProductResponse.data._id);
+
+    if (variations.length > 0) {
+      for (const variation of variations) {
+        const variant = {};
+        variant.body = { ...variation }; 
+        variant.body.company_id = company.data._id.toString();
+        variant.body.warehouse_inventory = [
+          {
+            warehouse_id: company.data.warehouse_id,
+            quantity: variation.quantity || 0,
+            last_updated: new Date()
+          }
+        ];
+        variant.body.product_name = variation.product_name;
+        variant.body.parent_product_id = parentProductResponse.data._id.toString();
+        variant.body.product_price = variation.product_price;
+        variant.body.product_description = variation.product_description;
+        const variationResponse = await handleGenericCreate(variant, "product", {
+          afterCreate: async (record, req) => {
+            console.log("✅ Product variation created successfully:", record);
+          },
+        });
+        console.log("🔧 Product create variation - response:", variationResponse);
+        // return res.status(variationResponse.status).json(variationResponse);
+      }
+    }
+    return res.status(parentProductResponse.status || 200).json(parentProductResponse);
+
   } catch (error) {
     console.error("❌ Product create variation error:", error);
     return res.status(500).json({ error: "Internal server error" });
