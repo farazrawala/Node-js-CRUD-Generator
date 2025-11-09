@@ -31,6 +31,11 @@ const {
 } = require("../controllers/product");
 
 const {
+  checkIntegrationActive
+} = require("../controllers/integration");
+
+
+const {
   apiCreateStockTransfer,
   apiGetStockTransfers
 } = require("../controllers/stockTransfer");
@@ -117,6 +122,10 @@ router.patch("/product/update/:id", productUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 
+
+// Integration routes
+router.get("/integration/check-active/:id", checkIntegrationActive);
+
 // Product warehouse inventory management routes
 router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
 router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
@@ -193,6 +202,10 @@ registerAllModelRoutes(router, {
       excludedRoutes: []
     },
     attribute: {
+      enabled: true,
+      excludedRoutes: []
+    },
+    process: {
       enabled: true,
       excludedRoutes: []
     }

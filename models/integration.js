@@ -37,15 +37,18 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    secret_key: {
+    key: {
       type: String,
       required: true,
     },
-    api_key: {
+    secret: {
       type: String,
       required: true,
     },
-
+    token: {
+      type: String,
+      // required: true,
+    },  
     description: {
       type: String,
       required: true,

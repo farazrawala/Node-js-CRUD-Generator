@@ -110,6 +110,15 @@ class RouteRegistry {
         order: 9,
         enabled: true,
         customTabs: []
+      },
+      process: {
+        name: 'Processes',
+        icon: 'fas fa-cog',
+        path: '/admin/process',
+        description: 'Manage processes',
+        order: 10,
+        enabled: true,
+        customTabs: []
       }
     };
     
