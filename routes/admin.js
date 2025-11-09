@@ -1105,6 +1105,7 @@ const integrationAdminCRUD = adminCrudGenerator(
         req.fieldConfig.created_by.options = users.map(user => ({ value: user._id.toString(), label: user.name }));
         req.fieldConfig.created_by.placeholder = 'Select User';
         req.fieldConfig.created_by.helpText = 'Choose the user who created this integration';
+        
       },
       beforeEditForm: async (req, res) => {
         const companies = await Company.find({ status: 'active', deletedAt: null })

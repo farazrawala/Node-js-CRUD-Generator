@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const path = require('path');
 const routeRegistry = require('./routeRegistry');
+const Company = require('../models/company');
 
 /**
  * Generic Admin CRUD Generator
@@ -256,6 +257,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       const routeTabs = routeRegistry.getCustomTabs(modelName) || [];
       const activePath = `${req.baseUrl || ''}${req.path === '/' ? '' : req.path}`;
 
+      // Fetch company options for filters (only if the model uses company_id)
+      let companyOptions = [];
+      if (Model.schema.paths.company_id) {
+        try {
+          companyOptions = await Company.find({ deletedAt: null })
+            .select('_id company_name')
+            .sort({ company_name: 1 })
+            .lean();
+          companyOptions = companyOptions.map(company => ({
+            _id: company._id.toString(),
+            company_name: company.company_name
+          }));
+        } catch (error) {
+          console.error('Error fetching company options:', error);
+        }
+      }
+
       // Render the list view
       res.render('admin/list', {
         title: `${titleCase}s`,
@@ -282,8 +300,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           applied: Object.keys(filters),
           searchable: searchableFields,
           filterable: filterableFields,
-          sortable: sortableFields
+          sortable: sortableFields,
+          company_id: filters.company_id || ''
         },
+        companies: companyOptions,
         cssClasses,
         customJS,
         baseUrl: getBaseUrl(),
