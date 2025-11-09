@@ -11,6 +11,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@shopify/shopify-api": "^12.1.1",
+    "@woocommerce/woocommerce-rest-api": "^1.0.2",
     "bcrypt": "^6.0.0",
     "connect-flash": "^0.1.1",
     "cookie-parser": "^1.4.7",
