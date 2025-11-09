@@ -1,7 +1,7 @@
-//Backend admin
-// add dropdown of parent Product
-// on edit product preselect dropdown warehouse and normal one.
-// create category admin
-// create product with api.
+// Backend admin
+// process crud
+// process api.
+// process fetch product
+// process update product 
 
     

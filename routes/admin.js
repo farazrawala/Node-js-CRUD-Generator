@@ -1040,6 +1040,7 @@ const integrationAdminCRUD = adminCrudGenerator(
       description: "textarea",
       image: "file",
       company_id: "select",
+      created_by: "select",
       status: "select",
       company_name: "text", // Display field for company name
     },
@@ -1100,6 +1101,10 @@ const integrationAdminCRUD = adminCrudGenerator(
           value: company._id.toString(), 
           label: company.company_name 
         }));
+        const users = await User.find({ deletedAt: null }, 'name email').sort({ name: 1 });
+        req.fieldConfig.created_by.options = users.map(user => ({ value: user._id.toString(), label: user.name }));
+        req.fieldConfig.created_by.placeholder = 'Select User';
+        req.fieldConfig.created_by.helpText = 'Choose the user who created this integration';
       },
       beforeEditForm: async (req, res) => {
         const companies = await Company.find({ status: 'active', deletedAt: null })

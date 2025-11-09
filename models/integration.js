@@ -56,14 +56,15 @@ const modelSchema = new mongoose.Schema(
       field_name: "Blog Image",
     },
     
+    
+
+    // default fields
     company_id:{
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
       // required: true,
       field_name: "Company",
     },
-
-    // default fields
     created_by:{
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
