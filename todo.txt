@@ -4,7 +4,8 @@ Backend admin
 // process crud
 
 
-// check integration active.
-// process fetch product
+// check integration active.(wordpress done/shopify remaing.)
+// brand crud.
+// process fetch product/insert into db.
 // process update product 
     
