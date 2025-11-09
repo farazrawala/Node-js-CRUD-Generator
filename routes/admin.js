@@ -16,8 +16,7 @@ const Complain = require("../models/complain");
 const Company = require("../models/company");
 const Warehouse = require("../models/warehouse");
 const Integration = require("../models/integration");
-
-
+const stockTransferController = require("../controllers/stockTransfer");
 
 // Import CRUD generators
 const adminCrudGenerator = require("../utils/adminCrudGenerator");
@@ -1219,6 +1218,13 @@ routeRegistry.updateRoute('company', { crudController: companyAdminCRUD });
 routeRegistry.updateRoute('warehouse', { crudController: warehouseAdminCRUD });
 routeRegistry.updateRoute('integration', { crudController: integrationAdminCRUD });
 
+routeRegistry.addCustomTab('products', {
+  name: 'Stock Transfer',
+  path: '/admin/products/stock-transfer',
+  icon: 'fas fa-exchange-alt',
+  description: 'Move stock between warehouses'
+});
+
 // Add routes data to all requests for dynamic menu rendering (after all routes are registered)
 router.use((req, res, next) => {
   req.routes = routeRegistry.getEnabledRoutes();
@@ -1229,6 +1235,7 @@ router.use((req, res, next) => {
 // Product complaints route
 router.get("/products/complaints", (req, res) => {
   try {
+    const customTabs = routeRegistry.getCustomTabs('products');
     res.render("admin/list", {
       title: "Product Complaints",
       modelName: "products/complaints",
@@ -1236,6 +1243,8 @@ router.get("/products/complaints", (req, res) => {
       fieldConfig: {},
       routes: req.routes || [],
       baseUrl: req.baseUrl || BASE_URL,
+       customTabs,
+       customTabsActivePath: '/admin/products/complaints',
       pagination: {
         currentPage: 1,
         totalPages: 1,
@@ -1261,6 +1270,10 @@ router.get("/products/complaints", (req, res) => {
     });
   }
 });
+
+// Product stock transfer routes
+router.get("/products/stock-transfer", stockTransferController.renderStockTransfer);
+router.post("/products/stock-transfer", stockTransferController.handleStockTransfer);
 
 // Mount all registered CRUD routes dynamically
 const enabledRoutes = routeRegistry.getEnabledRoutes();

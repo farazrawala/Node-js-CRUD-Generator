@@ -30,6 +30,11 @@ const {
   productCreateVariation,
 } = require("../controllers/product");
 
+const {
+  apiCreateStockTransfer,
+  apiGetStockTransfers
+} = require("../controllers/stockTransfer");
+
 
 const {
   purchaseOrderCreate
@@ -117,6 +122,10 @@ router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
 router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
 router.get("/product/:id/check-stock", checkWarehouseStock);
 router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
+
+// Stock transfer routes
+router.get("/stock-transfer", apiGetStockTransfers);
+router.post("/stock-transfer", apiCreateStockTransfer);
 
 
 // Category routes - Custom CRUD

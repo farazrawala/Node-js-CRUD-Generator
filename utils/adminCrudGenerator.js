@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const path = require('path');
+const routeRegistry = require('./routeRegistry');
 
 /**
  * Generic Admin CRUD Generator
@@ -251,6 +252,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       }
 
+      // Resolve custom tabs for the current module
+      const routeTabs = routeRegistry.getCustomTabs(modelName) || [];
+      const activePath = `${req.baseUrl || ''}${req.path === '/' ? '' : req.path}`;
+
       // Render the list view
       res.render('admin/list', {
         title: `${titleCase}s`,
@@ -281,7 +286,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         },
         cssClasses,
         customJS,
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
+        customTabs: routeTabs,
+        customTabsActivePath: activePath || undefined
       });
 
     } catch (error) {

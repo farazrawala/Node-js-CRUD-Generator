@@ -16,7 +16,8 @@ class RouteRegistry {
         path: '/admin/users',
         description: 'Manage user accounts',
         order: 1,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       products: {
         name: 'Products',
@@ -44,7 +45,8 @@ class RouteRegistry {
             path: '/admin/products/create',
             description: 'Add new product'
           }
-        ]
+        ],
+        customTabs: []
       },
       blogs: {
         name: 'Blogs',
@@ -52,7 +54,8 @@ class RouteRegistry {
         path: '/admin/blogs',
         description: 'Manage blog posts',
         order: 3,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       orders: {
         name: 'Orders',
@@ -60,7 +63,8 @@ class RouteRegistry {
         path: '/admin/orders',
         description: 'Manage customer orders',
         order: 4,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       categories: {
         name: 'Categories',
@@ -68,7 +72,8 @@ class RouteRegistry {
         path: '/admin/categories',
         description: 'Manage product categories',
         order: 5,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       complain: {
         name: 'Complaints',
@@ -76,7 +81,8 @@ class RouteRegistry {
         path: '/admin/complain',
         description: 'Manage customer complaints',
         order: 6,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       company: {
         name: 'Company',
@@ -84,7 +90,8 @@ class RouteRegistry {
         path: '/admin/company',
         description: 'Manage Companies',
         order: 7,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       warehouse: {
         name: 'Warehouses',
@@ -92,7 +99,8 @@ class RouteRegistry {
         path: '/admin/warehouse',
         description: 'Manage warehouses and inventory',
         order: 8,
-        enabled: true
+        enabled: true,
+        customTabs: []
       },
       integration: {
         name: 'Integrations',
@@ -100,7 +108,8 @@ class RouteRegistry {
         path: '/admin/integration',
         description: 'Manage integrations',
         order: 9,
-        enabled: true
+        enabled: true,
+        customTabs: []
       }
     };
     
@@ -124,7 +133,8 @@ class RouteRegistry {
       enabled: config.enabled !== false,
       crudController: config.crudController,
       customRoutes: config.customRoutes || [],
-      subMenus: config.subMenus || []
+      subMenus: config.subMenus || [],
+      customTabs: config.customTabs || []
     };
 
     this.routes.set(key, routeConfig);
@@ -239,6 +249,54 @@ class RouteRegistry {
       return route;
     }
     return null;
+  }
+
+  /**
+   * Add or update a custom tab for a route
+   */
+  addCustomTab(routeKey, tabConfig) {
+    const route = this.routes.get(routeKey);
+    if (!route) {
+      return null;
+    }
+
+    if (!route.customTabs) {
+      route.customTabs = [];
+    }
+
+    const existingIndex = route.customTabs.findIndex(tab => tab.path === tabConfig.path);
+    if (existingIndex >= 0) {
+      route.customTabs[existingIndex] = { ...route.customTabs[existingIndex], ...tabConfig };
+    } else {
+      route.customTabs.push(tabConfig);
+    }
+
+    console.log(`📝 Added custom tab "${tabConfig.name}" to route "${routeKey}"`);
+    return route;
+  }
+
+  /**
+   * Remove a custom tab from a route
+   */
+  removeCustomTab(routeKey, tabPath) {
+    const route = this.routes.get(routeKey);
+    if (route && route.customTabs) {
+      const originalLength = route.customTabs.length;
+      route.customTabs = route.customTabs.filter(tab => tab.path !== tabPath);
+      if (route.customTabs.length !== originalLength) {
+        console.log(`📝 Removed custom tab "${tabPath}" from route "${routeKey}"`);
+      }
+      return route;
+    }
+    return null;
+  }
+
+  /**
+   * Get custom tabs for a route
+   */
+  getCustomTabs(routeKey) {
+    const route = this.routes.get(routeKey);
+    return route && Array.isArray(route.customTabs) ? route.customTabs : [];
   }
 
   /**
