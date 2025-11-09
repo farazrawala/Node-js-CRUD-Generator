@@ -179,9 +179,12 @@ modelSchema.pre('validate', function(next) {
 });
 
 // Pre-save hook to ensure slug is always generated from product_name if empty (backup)
+// Also ensure parent_product_id always exists
 modelSchema.pre('save', function(next) {
   console.log('🔧 Pre-save hook - product_name:', this.product_name);
   console.log('🔧 Pre-save hook - product_slug before:', this.product_slug);
+  console.log('🔧 Pre-save hook - parent_product_id before:', this.parent_product_id);
+  console.log('🔧 Pre-save hook - product_type:', this.product_type);
   
   // If slug is still empty, null, or undefined, generate it from product_name
   if ((!this.product_slug || this.product_slug === '' || this.product_slug === null) && this.product_name) {
@@ -190,7 +193,45 @@ modelSchema.pre('save', function(next) {
     this.product_slug = newSlug;
   }
   
+  // Ensure parent_product_id always exists
+  // For single products, set to product's own ID (will be set after save if new)
+  // For variant products, parent_product_id should already be set
+  if (!this.parent_product_id || this.parent_product_id === '' || this.parent_product_id === null) {
+    if (this.product_type === 'Single' || !this.product_type) {
+      // For single products, set to own ID (if exists) or null (will be updated in post-save)
+      if (this._id) {
+        this.parent_product_id = this._id;
+        console.log('✅ Set parent_product_id to own ID for single product:', this._id);
+      } else {
+        // Will be set in post-save hook
+        console.log('⏳ Will set parent_product_id to own ID after save (new product)');
+      }
+    }
+  }
+  
   console.log('🔧 Pre-save hook - product_slug after:', this.product_slug);
+  console.log('🔧 Pre-save hook - parent_product_id after:', this.parent_product_id);
+  next();
+});
+
+// Post-save hook to ensure parent_product_id is set to own ID for single products
+modelSchema.post('save', function(doc, next) {
+  // If parent_product_id is still null/empty and it's a single product, set it to own ID
+  // Skip if _id is not yet available or if parent_product_id is already set
+  if (doc._id && 
+      (!doc.parent_product_id || doc.parent_product_id === '' || doc.parent_product_id === null) && 
+      (doc.product_type === 'Single' || !doc.product_type) &&
+      !doc._settingParentId) { // Prevent infinite loop
+    doc._settingParentId = true; // Flag to prevent recursive saves
+    doc.parent_product_id = doc._id;
+    doc.save({ validateBeforeSave: false }).then(() => {
+      console.log('✅ Set parent_product_id to own ID for single product in post-save:', doc._id);
+      doc._settingParentId = false;
+    }).catch(err => {
+      console.error('❌ Error setting parent_product_id in post-save:', err);
+      doc._settingParentId = false;
+    });
+  }
   next();
 });
 

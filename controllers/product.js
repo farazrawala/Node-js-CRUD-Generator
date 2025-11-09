@@ -131,6 +131,10 @@ async function productCreate(req, res) {
     console.log("🏷️ Generated new EAN13 barcode:", req.body.barcode);
   }
   
+  // Ensure parent_product_id is set for single products
+  // If product_type is Single and parent_product_id is not provided, it will be set in the model hook
+  // For variant products, parent_product_id should be explicitly provided
+  
   const response = await handleGenericCreate(req, "product", {
     afterCreate: async (record, req) => {
       console.log("✅ Product created successfully:", record);
@@ -233,9 +237,29 @@ async function productById(req, res) {
 async function getAllProducts(req, res) {
   const response = await handleGenericGetAll(req, "product", {
     excludeFields: [], // Don't exclude any fields
+    populate: [
+      {
+        path: "parent_product_id",
+        select: "product_name",
+      },
+      {
+        path: "warehouse_inventory.warehouse_id",
+        select: "warehouse_name",
+      },
+      {
+        path: "category_id",
+        select: "name",
+      },
+    ],
     sort: { createdAt: -1 }, // Sort by newest first
     limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
     skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
+    filter: {
+      $or: [
+        { parent_product_id: { $exists: false } },
+        { parent_product_id: null }
+      ]
+    },
   });
   return res.status(response.status).json(response);
 }

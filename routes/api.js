@@ -182,6 +182,10 @@ registerAllModelRoutes(router, {
     purchase_order_item: {
       enabled: true,
       excludedRoutes: []
+    },
+    attribute: {
+      enabled: true,
+      excludedRoutes: []
     }
   }
 });

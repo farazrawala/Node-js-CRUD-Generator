@@ -951,26 +951,47 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
       }
     });
 
-    // Process nested array fields for updates (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity])
+    // Process nested array fields for updates
+    // Handle both indexed format (attribute_values[0][name]) and non-indexed format (attribute_values[name])
     Object.keys(req.body).forEach((key) => {
       // Skip multiselect fields that are already handled (format: fieldName[])
       if (key.endsWith('[]') && modelSchema[key.slice(0, -2)] && modelSchema[key.slice(0, -2)].field_type === "multiselect") {
         return;
       }
       
-      const arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
+      // Pattern 2: field[index][subfield] (e.g., attribute_values[0][name]) - Check this FIRST
+      let arrayMatch = key.match(/^(.+)\[(\d+)\]\[(\w+)\]$/);
+      let arrayFieldName, arrayItemField, index;
+      
       if (arrayMatch) {
-        const arrayFieldName = arrayMatch[1]; // e.g., "warehouse_inventory"
-        const arrayItemField = arrayMatch[2]; // e.g., "warehouse_id" or "quantity"
-        
+        // Pattern 2: field[index][subfield]
+        arrayFieldName = arrayMatch[1];
+        index = parseInt(arrayMatch[2]);
+        arrayItemField = arrayMatch[3];
+        console.log(`🔍 Update - Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+      } else {
+        // Pattern 1: field[subfield] (e.g., warehouse_inventory[warehouse_id])
+        arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
+        if (arrayMatch) {
+          arrayFieldName = arrayMatch[1];
+          arrayItemField = arrayMatch[2];
+          index = 0; // Default to index 0
+          console.log(`🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+        }
+      }
+      
+      if (arrayMatch) {
         // Check if this is a valid array field in the schema
-        if (modelSchema[arrayFieldName] && Array.isArray(modelSchema[arrayFieldName])) {
+        // Check if it's an array type (Array.isArray(modelSchema[arrayFieldName].type))
+        console.log(`🔍 Update - Checking schema for ${arrayFieldName}:`, modelSchema[arrayFieldName]);
+        console.log(`🔍 Update - Is array type:`, Array.isArray(modelSchema[arrayFieldName]?.type));
+        
+        if (modelSchema[arrayFieldName] && Array.isArray(modelSchema[arrayFieldName].type)) {
           if (!updateData[arrayFieldName]) {
             updateData[arrayFieldName] = [];
           }
           
           const value = req.body[key];
-          const index = parseInt(key.match(/\[(\d+)\]/)?.[1]) || 0; // Default to index 0
           
           // Ensure we have an object at this index
           if (!updateData[arrayFieldName][index]) {
@@ -979,6 +1000,19 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           
           // Set the field value
           updateData[arrayFieldName][index][arrayItemField] = value;
+          
+          // If updating a nested array field, set last_updated if it exists in schema
+          if (modelSchema[arrayFieldName].type[0] && modelSchema[arrayFieldName].type[0].last_updated) {
+            updateData[arrayFieldName][index].last_updated = new Date();
+          }
+          
+          console.log(`✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`);
+          console.log(`🔍 Update - Current ${arrayFieldName} array:`, JSON.stringify(updateData[arrayFieldName], null, 2));
+          
+          // Remove the original key from req.body to prevent duplicate processing
+          delete req.body[key];
+        } else {
+          console.log(`⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`);
         }
       }
     });
