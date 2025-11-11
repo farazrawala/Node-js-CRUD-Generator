@@ -477,13 +477,13 @@ const orderAdminCRUD = adminCrudGenerator(
 const productAdminCRUD = adminCrudGenerator(
   Product, // Mongoose model for products
   "products", // Route prefix for product CRUD operations
-  ["parent_product_id", "product_name", "product_slug", "category_id", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields to include in CRUD operations
+  ["parent_product_id", "brand_id", "product_name", "product_slug", "category_id", "product_description", "warehouse_inventory", "warehouse_inventory_display", "total_quantity", "product_price", "product_image", "multi_images", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields to include in CRUD operations
   {
     excludedFields: ["__v"], // Fields to exclude from forms and display
     includedFields: [], // Additional fields to include (empty means use all except excluded)
-    searchableFields: ["product_name", "product_description", "product_price", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields that can be searched (excluded parent_product_id as it's ObjectId)
+    searchableFields: ["product_name","brand_id", "product_description", "product_price", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields that can be searched (excluded parent_product_id as it's ObjectId)
     filterableFields: [], // Fields that can be filtered (empty means filter by all displayed fields)
-    sortableFields: ["name", "price", "description", "description_details", "createdAt", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields that can be sorted
+    sortableFields: ["product_name", "brand_id", "price", "description", "description_details", "createdAt", "product_type", "unit", "weight", "length", "width", "height", "dimension", "tax_rate", "barcode"], // Fields that can be sorted
     baseUrl: BASE_URL, // Base URL for the application
     softDelete: true, // Enable soft delete functionality
     fieldTypes: {
@@ -496,6 +496,7 @@ const productAdminCRUD = adminCrudGenerator(
       total_quantity: "number", // Display only field
       parent_product_id: "select", // Dropdown select field+ 
       category_id: "multiselect",
+      brand_id: "select",
     },
     fieldLabels: {
       product_image: "Product Image", // Human-readable label for product image
@@ -520,6 +521,13 @@ const productAdminCRUD = adminCrudGenerator(
           req.fieldConfig.category_id.placeholder = 'Select Category';
           req.fieldConfig.category_id.helpText = 'Choose the category for this product';
         }
+        // console.log('req.fieldConfig', req.fieldConfig);
+        if (req.fieldConfig?.brand_id) {
+          const brands = await Brands.find({ deletedAt: null }, 'name').sort({ name: 1 });
+          req.fieldConfig.brand_id.options = brands.map(brand => ({ value: brand._id.toString(), label: brand.name }));
+          req.fieldConfig.brand_id.placeholder = 'Select Brand';
+          req.fieldConfig.brand_id.helpText = 'Choose the brand for this product';
+        }
         // Only populate if there are valid records
         let populatedRecords = records;
         if (validRecords.length > 0) {
@@ -535,6 +543,10 @@ const productAdminCRUD = adminCrudGenerator(
             { 
               path: 'warehouse_inventory.warehouse_id', 
               select: 'warehouse_name warehouse_address status' 
+            },
+            { 
+              path: 'brand_id', 
+              select: 'name' 
             }
           ]);
         }
@@ -561,6 +573,12 @@ const productAdminCRUD = adminCrudGenerator(
           req.fieldConfig.category_id.options = categories.map(category => ({ value: category._id.toString(), label: category.name }));
           req.fieldConfig.category_id.placeholder = 'Select Category';
           req.fieldConfig.category_id.helpText = 'Choose the Category for this product';
+
+          const brands = await Brands.find({ deletedAt: null }, 'name').sort({ name: 1 });
+          req.fieldConfig.brand_id.options = brands.map(brand => ({ value: brand._id.toString(), label: brand.name }));
+          req.fieldConfig.brand_id.placeholder = 'Select Brand';
+          req.fieldConfig.brand_id.helpText = 'Choose the brand for this product';
+          
            // Use aggregation pipeline to filter parent products efficiently
            const parent_products = await Product.aggregate([
              {
@@ -611,9 +629,6 @@ const productAdminCRUD = adminCrudGenerator(
           // Add warehouses to request object for view access
           req.warehouses = warehouses; // Store warehouses in request for form access
           
-          // Debug: Final fieldConfig state
-          console.log('🔍 Final fieldConfig parent_product_id:', req.fieldConfig?.parent_product_id);
-          console.log('🔍 Final fieldConfig keys:', Object.keys(req.fieldConfig || {}));
         } catch (error) {
           console.error('Error fetching data:', error); // Log any errors
           req.warehouses = []; // Set empty array on error
@@ -623,18 +638,19 @@ const productAdminCRUD = adminCrudGenerator(
       beforeEditForm: async (req, res) => {
         try {
           
-          
+          const brands = await Brands.find({ deletedAt: null }, 'name').sort({ name: 1 });
+          if (req.fieldConfig?.brand_id) {
+            req.fieldConfig.brand_id.options = brands.map(brand => ({ value: brand._id.toString(), label: brand.name }));
+            req.fieldConfig.brand_id.placeholder = 'Select Brand';
+            req.fieldConfig.brand_id.helpText = 'Choose the brand for this product';
+          }
 
           // Fetch all active products for parent_product_id dropdown
           const parent_products = await Product.find({ 
             deletedAt: null, // Only non-deleted products
           }).select('parent_product_id product_name').sort({ product_name: 1 }); // Select parent product ID and name, sort alphabetically
 
-          console.log('🔍 Parent products:', parent_products); // Debug log of fetched products
-          console.log('🔍 Parent products found:', parent_products.length); // Debug log of product count
-          console.log('🔍 Field config exists:', !!req.fieldConfig); // Debug log of field config existence
-          console.log('🔍 Parent product field exists:', !!req.fieldConfig?.parent_product_id); // Debug log of specific field existence
-          
+      
           // Add parent products to request object for view access
           req.fieldConfig.parent_product_id.options = parent_products.map(product => ({ value: product._id.toString(), label: product.product_name })); // Convert products to dropdown options
           req.fieldConfig.parent_product_id.placeholder = 'Select Parent Product'; // Set dropdown placeholder text

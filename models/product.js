@@ -22,6 +22,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "Alert Qty",
       default: 0,
     },
+    brand_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "brands",
+      field_name: "Brand Name",
+    },
     unit:{
       type: String,
       required: true,
