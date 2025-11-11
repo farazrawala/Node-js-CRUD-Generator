@@ -1,11 +1,17 @@
-Backend admin
+
 // filter by company in listings //done
 // process crud api // done.
-// process crud
+// process crud done. 
+// check integration active.(done)
 
 
-// check integration active.(wordpress done/shopify remaing.)
+Backend admin
+
 // brand crud.
-// process fetch product/insert into db.
-// process update product 
-    
+// process brand fetch 
+// process category fetch 
+// process fetch product_fetch/insert into db
+// process update product by_id.
+
+// user permissions.
+
