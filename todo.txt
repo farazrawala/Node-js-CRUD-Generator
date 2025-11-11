@@ -3,11 +3,9 @@
 // process crud api // done.
 // process crud done. 
 // check integration active.(done)
-
+// brand crud done.
 
 Backend admin
-
-// brand crud.
 // process brand fetch 
 // process category fetch 
 // process fetch product_fetch/insert into db

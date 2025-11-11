@@ -18,6 +18,7 @@ const Warehouse = require("../models/warehouse");
 const Integration = require("../models/integration");
 const stockTransferController = require("../controllers/stockTransfer");
 const Process = require("../models/process");
+const Brands = require("../models/brands");
 // Import CRUD generators
 const adminCrudGenerator = require("../utils/adminCrudGenerator");
 
@@ -1239,6 +1240,117 @@ const integrationAdminCRUD = adminCrudGenerator(
   }
 );
 
+
+
+
+/**
+ * Auto-generate Admin CRUD with UI Forms for integration model
+ */
+const brandsAdminCRUD = adminCrudGenerator(
+  Brands,
+  "brands",
+  ["name", "description", "slug", "image", "company_id", "created_by", "status"],
+  {
+    excludedFields: ["__v"],
+    includedFields: ["name", "description", "slug", "image", "createdAt", "company_id", "created_by", "status"],
+    searchableFields: ["name", "description", "slug", "company_id", "created_by", "status"],
+    filterableFields: ["status", "company_id", "created_by"],
+    sortableFields: ["name", "description", "slug", "createdAt", "company_id", "created_by", "status"],
+    baseUrl: BASE_URL,
+    softDelete: true,
+    fieldTypes: {
+      description: "textarea",
+      image: "file",
+      company_id: "select",
+      created_by: "select",
+      status: "select",
+    },
+    fieldLabels: {
+      image: "Brand Image",
+      company_id: "Company",
+      created_by: "Created By",
+      status: "Status",
+    },
+    fieldOptions: {
+      status: [
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" }
+      ],
+    },
+   
+     middleware: {
+      afterQuery: async (records, req) => {
+
+
+        // Populate both company_id and created_by
+        const populatedRecords = await Integration.populate(records, [
+          { path: 'company_id', select: 'company_name' },
+          { path: 'created_by', select: 'name email' }
+        ]);
+
+        
+        // Add both User name and Company name fields for display in list view
+        const recordsWithPopulatedFields = populatedRecords.map(record => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          
+          // Handle created_by field
+          if (record.created_by) {
+            recordObj.created_by = record.created_by.name || 'No User';
+          } else {
+            recordObj.created_by = 'No User';
+          }
+          
+          // Handle company_id field
+          if (record.company_id) {
+            recordObj.company_id = record.company_id.company_name || 'No Company';
+          } else {
+            recordObj.company_id = 'No Company';
+          }
+          
+          return recordObj;
+          
+        });
+        
+        return recordsWithPopulatedFields;
+      },
+      beforeCreateForm: async (req, res) => {
+        
+        const companies = await Company.find({ status: 'active', deletedAt: null })
+          .select('company_name')
+          .sort({ company_name: 1 });
+        // console.log('companies', companies);
+        req.fieldConfig.company_id.options = companies.map(company => ({ 
+          value: company._id.toString(), 
+          label: company.company_name 
+        }));
+        const users = await User.find({ deletedAt: null }, 'name email').sort({ name: 1 });
+        req.fieldConfig.created_by.options = users.map(user => ({ value: user._id.toString(), label: user.name }));
+        req.fieldConfig.created_by.placeholder = 'Select User';
+        req.fieldConfig.created_by.helpText = 'Choose the user who created this integration';
+        
+        
+      },
+      beforeEditForm: async (req, res) => {
+        const companies = await Company.find({ status: 'active', deletedAt: null })
+          .select('company_name')
+          .sort({ company_name: 1 });
+        req.fieldConfig.company_id.options = companies.map(company => ({ 
+          value: company._id.toString(), 
+          label: company.company_name 
+        }));
+
+        const users = await User.find({ deletedAt: null }, 'name email').sort({ name: 1 });
+        req.fieldConfig.created_by.options = users.map(user => ({ value: user._id.toString(), label: user.name }));
+        req.fieldConfig.created_by.placeholder = 'Select User';
+        req.fieldConfig.created_by.helpText = 'Choose the user who created this integration';
+
+
+      },
+    },
+  }
+);
+
+
 /**
  * Auto-generate Admin CRUD with UI Forms for Category model (Minimal Setup Example)
  */
@@ -1343,6 +1455,7 @@ routeRegistry.updateRoute('company', { crudController: companyAdminCRUD });
 routeRegistry.updateRoute('warehouse', { crudController: warehouseAdminCRUD });
 routeRegistry.updateRoute('integration', { crudController: integrationAdminCRUD });
 routeRegistry.updateRoute('process', { crudController: processAdminCRUD });
+routeRegistry.updateRoute('brands', { crudController: brandsAdminCRUD });
 
 routeRegistry.addCustomTab('products', {
   name: 'Stock Transfer',
@@ -1748,6 +1861,7 @@ router.get("/crud-controllers", (req, res) => {
     warehouse: warehouseAdminCRUD.controller,
     integration: integrationAdminCRUD.controller,
     process: processAdminCRUD.controller,
+    brands: brandsAdminCRUD.controller,
   };
 
   res.status(200).json({
@@ -1766,6 +1880,7 @@ router.get("/crud-controllers", (req, res) => {
         warehouse: "/admin/warehouse",
         integration: "/admin/integration",
         process: "/admin/process",
+        brands: "/admin/brands",
       },
     },
   });

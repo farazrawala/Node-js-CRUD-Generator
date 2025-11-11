@@ -119,6 +119,15 @@ class RouteRegistry {
         order: 10,
         enabled: true,
         customTabs: []
+      },
+      brands: {
+        name: 'Brands',
+        icon: 'fas fa-brands',
+        path: '/admin/brands',
+        description: 'Manage brands',
+        order: 11,
+        enabled: true,
+        customTabs: []
       }
     };
     

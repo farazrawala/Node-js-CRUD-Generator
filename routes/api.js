@@ -208,6 +208,10 @@ registerAllModelRoutes(router, {
     process: {
       enabled: true,
       excludedRoutes: []
+    },
+    brands: {
+      enabled: true,
+      excludedRoutes: []
     }
   }
 });
