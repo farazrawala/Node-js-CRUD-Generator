@@ -22,6 +22,15 @@ const categorySchema = new mongoose.Schema(
       minlength: [2, 'Category name must be at least 2 characters long'],
       maxlength: [50, 'Category name cannot exceed 50 characters']
     },
+    slug: {
+      type: String,
+      field_name: "Slug",
+      trim: true,
+      unique: true,
+      default: function() {
+        return this.name.toLowerCase().replace(/ /g, '-');
+      }
+    },
     description: {
       type: String,
       trim: true,

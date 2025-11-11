@@ -31,7 +31,8 @@ const {
 } = require("../controllers/product");
 
 const {
-  checkIntegrationActive
+  checkIntegrationActive,
+  syncStoreCategory
 } = require("../controllers/integration");
 
 
@@ -125,6 +126,7 @@ router.get("/product/get-all", getAllProducts);
 
 // Integration routes
 router.get("/integration/check-active/:id", checkIntegrationActive);
+router.get("/integration/sync-store-category/:id", syncStoreCategory);
 
 // Product warehouse inventory management routes
 router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
