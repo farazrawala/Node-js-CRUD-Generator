@@ -76,7 +76,6 @@ const blogSchema = new mongoose.Schema({
   },
   slug: {
     type: String,
-    unique: true,
   }
 });
 
@@ -143,7 +142,6 @@ const categorySchema = new mongoose.Schema({
   },
   slug: {
     type: String,
-    unique: true,
     set: function(value) {
       return value ? generateSlug(value) : generateSlug(this.name);
     }
@@ -174,7 +172,6 @@ const articleSchema = new mongoose.Schema({
   },
   slug: {
     type: String,
-    unique: true,
   }
 });
 
@@ -264,7 +261,7 @@ if (existingSlug) {
 ### 3. Index Slug Fields
 ```javascript
 // Make slug searchable and unique
-modelSchema.index({ slug: 1 }, { unique: true });
+modelSchema.index({ slug: 1 });
 ```
 
 ### 4. Handle Empty Values

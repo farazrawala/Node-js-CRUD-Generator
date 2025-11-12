@@ -177,6 +177,9 @@ const modelSchema = new mongoose.Schema(
 modelSchema.pre('validate', function(next) {
   console.log('🔧 Pre-validate hook - product_name:', this.product_name);
   console.log('🔧 Pre-validate hook - product_slug before:', this.product_slug);
+  if (!this.product_type || this.product_type === '' || this.product_type === null) {
+    this.product_type = 'Single';
+  }
   
   // If slug is empty, null, or undefined, generate it from product_name
   if ((!this.product_slug || this.product_slug === '' || this.product_slug === null) && this.product_name) {
@@ -194,6 +197,9 @@ modelSchema.pre('save', function(next) {
   console.log('🔧 Pre-save hook - product_slug before:', this.product_slug);
   console.log('🔧 Pre-save hook - parent_product_id before:', this.parent_product_id);
   console.log('🔧 Pre-save hook - product_type:', this.product_type);
+  if (!this.product_type || this.product_type === '' || this.product_type === null) {
+    this.product_type = 'Single';
+  }
   
   // If slug is still empty, null, or undefined, generate it from product_name
   if ((!this.product_slug || this.product_slug === '' || this.product_slug === null) && this.product_name) {

@@ -20,14 +20,14 @@ Backend admin
 
 
 
-
+// sync categories sh (done)
 // process fetch product_fetch sh single  
 // process fetch product_fetch sh variant
 
 
 /insert into db
-// process update product by id wp 
-// process update product by id shp 
+// process sync(insert/update) product by id wp 
+// process sync(insert/update) product by id shp 
 
 // check if all categories/products are going in correct company...
 // process brand fetch 

@@ -18,23 +18,17 @@ const categorySchema = new mongoose.Schema(
       type: String,
       required: [true, 'Category name is required'],
       trim: true,
-      unique: true,
       minlength: [2, 'Category name must be at least 2 characters long'],
-      maxlength: [50, 'Category name cannot exceed 50 characters']
+      maxlength: [100, 'Category name cannot exceed 50 characters']
     },
     slug: {
       type: String,
       field_name: "Slug",
       trim: true,
-      unique: true,
-      default: function() {
-        return this.name.toLowerCase().replace(/ /g, '-');
-      }
     },
     description: {
       type: String,
       trim: true,
-      maxlength: [200, 'Description cannot exceed 200 characters']
     },
     isActive: {
       type: Boolean,

@@ -240,6 +240,99 @@ function extractWooImageEntries(product = {}) {
   return entries;
 }
 
+function collectShopifyCategoryNames(product = {}) {
+  const names = new Set();
+
+  if (typeof product?.product_type === "string") {
+    const normalized = product.product_type.trim();
+    if (normalized) {
+      names.add(normalized);
+    }
+  }
+
+  if (Array.isArray(product?.tags)) {
+    product.tags
+      .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+      .filter(Boolean)
+      .forEach((tag) => names.add(tag));
+  } else if (typeof product?.tags === "string") {
+    product.tags
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+      .forEach((tag) => names.add(tag));
+  }
+
+  return Array.from(names);
+}
+
+function extractShopifyImageEntries(product = {}) {
+  const entries = [];
+
+  if (Array.isArray(product?.images)) {
+    product.images.forEach((image) => {
+      const src = typeof image?.src === "string" ? image.src.trim() : "";
+      if (src) {
+        entries.push({
+          src,
+          name:
+            (typeof image?.alt === "string" && image.alt.trim()) ||
+            (typeof image?.alt_text === "string" && image.alt_text.trim()) ||
+            null,
+        });
+      }
+    });
+  }
+
+  if (
+    entries.length === 0 &&
+    typeof product?.image === "object" &&
+    typeof product.image?.src === "string" &&
+    product.image.src.trim() !== ""
+  ) {
+    entries.push({
+      src: product.image.src.trim(),
+      name:
+        (typeof product.image?.alt === "string" && product.image.alt.trim()) ||
+        (typeof product.image?.alt_text === "string" && product.image.alt_text.trim()) ||
+        null,
+    });
+  }
+
+  return entries;
+}
+
+function buildShopifyVariantAttributes(product = {}, variant = {}) {
+  const attributes = [];
+  const options = Array.isArray(product?.options) ? product.options : [];
+
+  options.forEach((option, index) => {
+    const optionKey = `option${index + 1}`;
+    const rawValue = variant?.[optionKey];
+    const value = sanitizeWooText(rawValue);
+    if (value) {
+      const name =
+        sanitizeWooText(option?.name) || `Option ${index + 1}`;
+      attributes.push({ name, value });
+    }
+  });
+
+  return attributes;
+}
+
+function deriveShopifyVariantName(baseName, attributes = [], variant = {}) {
+  const suffix =
+    attributes
+      .map((attribute) => attribute.value)
+      .filter(Boolean)
+      .join(" / ") ||
+    (variant?.title && variant.title !== "Default Title"
+      ? sanitizeWooText(variant.title)
+      : "");
+
+  return suffix ? `${baseName} - ${suffix}` : `${baseName} - Variant`;
+}
+
 function sanitizeWooText(value, fallback = "") {
   if (value === undefined || value === null) return fallback;
   const text = String(value).trim();
@@ -679,6 +772,8 @@ function buildVariantDescription(baseDescription, attributes = []) {
           searchCriteria,
         });
 
+        console.log("existingCategory__",existingCategory);
+
         if (existingCategory.success) {
           syncResults.skipped.push({
             shopifyCollectionId: collection.id,
@@ -823,8 +918,6 @@ function buildVariantDescription(baseDescription, attributes = []) {
         details: shopDomain,
       });
     }
-    
-    
       
     const STATIC_SHOPIFY_API_KEY = store.key;
     const STATIC_SHOPIFY_SECRET = store.secret;
@@ -853,22 +946,504 @@ function buildVariantDescription(baseDescription, attributes = []) {
     const originalBody = req.body;
     try {
       const client = new shopify.clients.Rest({ session });
-      const productsResponse = await client.get({ path: "products" });
-      const products = productsResponse?.body?.products || productsResponse?.body || [];
+
+      const { limit: limitParam, page_info: pageInfoParam, since_id: sinceIdParam } = req.query || {};
+      const parsedLimit = Number.parseInt(limitParam, 10);
+      const limit =
+        Number.isFinite(parsedLimit) && parsedLimit > 0
+          ? Math.min(parsedLimit, 200)
+          : 10;
+
+      const requestOptions = {
+        path: "products",
+        query: {
+          limit,
+        },
+      };
+
+      if (pageInfoParam) {
+        requestOptions.query.page_info = pageInfoParam;
+      } else if (sinceIdParam) {
+        requestOptions.query.since_id = sinceIdParam;
+      }
+
+      const productsResponse = await client.get(requestOptions);
+      const products =
+        (Array.isArray(productsResponse?.body?.products) && productsResponse.body.products) ||
+        (Array.isArray(productsResponse?.body) && productsResponse.body) ||
+        [];
+
+      const pagination = {
+        limit,
+        page_info: pageInfoParam || null,
+      };
+
+      const linkHeader = productsResponse?.headers?.link || productsResponse?.headers?.Link;
+      if (linkHeader) {
+        const nextPart = linkHeader
+          .split(",")
+          .map((part) => part.trim())
+          .find((part) => /rel="?next"?/i.test(part));
+
+        if (nextPart) {
+          const urlMatch = nextPart.match(/<([^>]+)>/);
+          if (urlMatch && urlMatch[1]) {
+            try {
+              const parsedUrl = new URL(urlMatch[1]);
+              const nextPageInfo = parsedUrl.searchParams.get("page_info");
+              if (nextPageInfo) {
+                pagination.next_page_info = nextPageInfo;
+              }
+            } catch (parseError) {
+              console.warn("⚠️ Failed to parse Shopify Link header:", parseError?.message || parseError);
+            }
+          }
+        }
+      }
+
+      if (products.length === 0) {
       return res.status(200).json({
         success: true,
-        message: "Products fetched successfully",
+          message: "No products found in Shopify store",
+          data: [],
+          pagination,
+          synced_products: [],
+          meta: productsResponse?.headers ? { headers: productsResponse.headers } : undefined,
+        });
+      }
+
+      let syncedCount = 0;
+      let existingCount = 0;
+      const syncResults = [];
+
+      for (const product of products) {
+        const baseProductName = sanitizeWooText(product?.title);
+        if (!baseProductName) {
+          console.warn("⚠️ Skipping Shopify product without a title:", product?.id);
+          continue;
+        }
+
+        const variants = Array.isArray(product?.variants) ? product.variants : [];
+        const primaryVariant = variants[0] || {};
+        const primarySku = sanitizeWooText(primaryVariant?.sku, `SHOP-${product?.id || Date.now()}`);
+
+        const resolvedPrice =
+          primaryVariant?.price !== undefined &&
+          primaryVariant?.price !== null &&
+          String(primaryVariant.price).trim() !== ""
+            ? String(primaryVariant.price)
+            : "0";
+
+        const resolvedQuantity =
+          typeof primaryVariant?.inventory_quantity === "number" &&
+          !Number.isNaN(primaryVariant.inventory_quantity)
+            ? primaryVariant.inventory_quantity
+            : 0;
+
+        const categoryIds = [];
+        const categoryNames = collectShopifyCategoryNames(product);
+
+        for (const categoryName of categoryNames) {
+          const normalizedName = sanitizeWooText(categoryName);
+          if (!normalizedName) {
+            continue;
+          }
+
+          const categoryResponse = await handleGenericFindOne(req, "category", {
+            searchCriteria: {
+              name: normalizedName,
+              company_id: store.company_id,
+              deletedAt: null,
+            },
+          });
+
+          if (categoryResponse.success && categoryResponse.data?._id) {
+            categoryIds.push(categoryResponse.data._id);
+            continue;
+          }
+
+          const generatedSlug = generateSlug(normalizedName);
+          const slugLookup = await handleGenericFindOne(req, "category", {
+            searchCriteria: {
+              // slug: generatedSlug,
+              name: normalizedName,
+              company_id: store.company_id,
+              deletedAt: null,
+            },
+          });
+
+          if (slugLookup.success && slugLookup.data?._id) {
+            categoryIds.push(slugLookup.data._id);
+            continue;
+          }
+
+          const fallbackNameLookup = await handleGenericFindOne(req, "category", {
+            searchCriteria: {
+              name: normalizedName,
+              deletedAt: null,
+            },
+          });
+
+          if (fallbackNameLookup.success && fallbackNameLookup.data?._id) {
+            categoryIds.push(fallbackNameLookup.data._id);
+            continue;
+          }
+
+          const categoryReq = Object.create(req);
+          categoryReq.body = {
+            name: normalizedName,
+            company_id: store.company_id,
+            slug: generatedSlug,
+            parent_id: null,
+            deletedAt: null,
+          };
+
+          const newCategoryResult = await handleGenericCreate(categoryReq, "category");
+
+          if (newCategoryResult.success && newCategoryResult.data?._id) {
+            categoryIds.push(newCategoryResult.data._id);
+            continue;
+          }
+
+          if (newCategoryResult.status === 409) {
+            const retryLookup = await handleGenericFindOne(req, "category", {
+              searchCriteria: {
+                slug: generatedSlug,
+                deletedAt: null,
+              },
+            });
+            if (retryLookup.success && retryLookup.data?._id) {
+              categoryIds.push(retryLookup.data._id);
+              continue;
+            }
+
+            const retryNameLookup = await handleGenericFindOne(req, "category", {
+              searchCriteria: {
+                name: normalizedName,
+                deletedAt: null,
+              },
+            });
+            if (retryNameLookup.success && retryNameLookup.data?._id) {
+              categoryIds.push(retryNameLookup.data._id);
+              continue;
+            }
+          }
+
+          return res.status(500).json({
+            success: false,
+            message: "Failed to create category",
+            error: newCategoryResult.error || "unknown_error",
+          });
+        }
+
+        const imageEntries = extractShopifyImageEntries(product);
+        const featuredImage = imageEntries.length > 0 ? imageEntries[0].src : null;
+        const galleryImages = imageEntries.slice(1).map((entry) => entry.src).filter(Boolean);
+
+        let baseProductId = null;
+        let baseProductImage = null;
+        let baseProductGallery = [];
+        let baseProductRecord = null;
+
+        const existingBaseProduct = await handleGenericFindOne(req, "product", {
+          searchCriteria: {
+            product_name: baseProductName,
+            company_id: store.company_id,
+            deletedAt: null,
+          },
+        });
+
+        if (existingBaseProduct.success && existingBaseProduct.data?._id) {
+          baseProductId = existingBaseProduct.data._id;
+          baseProductImage = existingBaseProduct.data?.product_image || featuredImage;
+          baseProductGallery = Array.isArray(existingBaseProduct.data?.multi_images)
+            ? existingBaseProduct.data.multi_images
+            : galleryImages;
+          baseProductRecord = existingBaseProduct.data;
+          existingCount += 1;
+        } else {
+          const baseProductReq = Object.create(req);
+          baseProductReq.body = {
+            product_name: baseProductName,
+            product_code: primarySku,
+            company_id: store.company_id,
+            product_price: resolvedPrice,
+            quantity: resolvedQuantity,
+            product_description: product?.body_html || "",
+            product_image: featuredImage,
+            multi_images: galleryImages,
+            deletedAt: null,
+            product_type: variants.length > 1 ? "Variable" : "Single",
+            weight: primaryVariant?.grams,
+            category_id: categoryIds,
+            sku: primarySku,
+            status: "active",
+          };
+
+          const baseCreationResult = await handleGenericCreate(baseProductReq, "product");
+          if (!baseCreationResult.success) {
+            return res.status(500).json({
+              success: false,
+              message: "Failed to create base product from Shopify",
+              error: baseCreationResult.error,
+            });
+          }
+
+          const createdProductId =
+            baseCreationResult.data?._id ||
+            baseCreationResult.data?.id ||
+            baseCreationResult.data?._doc?._id;
+          baseProductId =
+            createdProductId && typeof createdProductId.toString === "function"
+              ? createdProductId.toString()
+              : createdProductId
+              ? String(createdProductId)
+              : null;
+
+          baseProductImage =
+            baseCreationResult.data?.product_image || featuredImage || null;
+          baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
+            ? baseCreationResult.data.multi_images
+            : galleryImages;
+          baseProductRecord = baseCreationResult.data;
+
+          syncedCount += 1;
+        }
+
+        const baseProductIdString =
+          baseProductId && typeof baseProductId.toString === "function"
+            ? baseProductId.toString()
+            : baseProductId
+            ? String(baseProductId)
+            : null;
+
+        if (baseProductIdString && imageEntries.length > 0) {
+          const normalizedGallery = Array.isArray(baseProductGallery)
+            ? baseProductGallery.filter(Boolean)
+            : [];
+          const hasLocalFeatured = isLocalProductAssetPath(
+            baseProductImage,
+            baseProductIdString
+          );
+          const hasLocalGallery =
+            normalizedGallery.length > 0 &&
+            normalizedGallery.every((imgPath) =>
+              isLocalProductAssetPath(imgPath, baseProductIdString)
+            );
+          const expectedGalleryCount = Math.max(imageEntries.length - 1, 0);
+          const galleryCountMatches =
+            normalizedGallery.length === expectedGalleryCount;
+          const shouldDownloadImages =
+            !hasLocalFeatured ||
+            (!hasLocalGallery && expectedGalleryCount > 0) ||
+            (!galleryCountMatches && expectedGalleryCount >= 0);
+
+          if (shouldDownloadImages) {
+            if (existingBaseProduct.success) {
+              await resetProductImageDirectory(baseProductIdString);
+            }
+
+            const savedImages = await saveProductImagesLocally(
+              baseProductIdString,
+              imageEntries
+            );
+
+            if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
+              const imageUpdateReq = Object.create(req);
+              imageUpdateReq.params = {
+                ...(req.params || {}),
+                id: baseProductIdString,
+              };
+              imageUpdateReq.body = {};
+
+              if (savedImages.featured) {
+                imageUpdateReq.body.product_image = savedImages.featured;
+                baseProductImage = savedImages.featured;
+              }
+
+              if (Array.isArray(savedImages.gallery) && savedImages.gallery.length > 0) {
+                imageUpdateReq.body.multi_images = savedImages.gallery;
+                baseProductGallery = savedImages.gallery;
+              } else {
+                if (normalizedGallery.length > 0) {
+                  imageUpdateReq.body.multi_images = [];
+                }
+                baseProductGallery = [];
+              }
+
+              if (Object.keys(imageUpdateReq.body).length > 0) {
+                const updateResult = await handleGenericUpdate(
+                  imageUpdateReq,
+                  "product",
+                  {
+                    allowedFields: ["product_image", "multi_images"],
+                  }
+                );
+
+                if (!updateResult.success) {
+                  console.warn(
+                    "⚠️ Failed to update saved Shopify product images:",
+                    baseProductIdString,
+                    updateResult.error || updateResult.message
+                  );
+                }
+              }
+            }
+          }
+        }
+
+        const isParentProduct =
+          variants.length > 1 ||
+          (variants.length === 1 &&
+            variants[0]?.title &&
+            variants[0].title !== "Default Title");
+
+        if (isParentProduct && baseProductIdString) {
+          const parentHasValue =
+            baseProductRecord &&
+            baseProductRecord.parent_product_id &&
+            String(baseProductRecord.parent_product_id).trim() !== "";
+
+          if (parentHasValue) {
+            const parentResetReq = Object.create(req);
+            parentResetReq.params = {
+              ...(req.params || {}),
+              id: baseProductIdString,
+            };
+            parentResetReq.body = {
+              parent_product_id: null,
+            };
+
+            await handleGenericUpdate(parentResetReq, "product", {
+              allowedFields: ["parent_product_id"],
+            });
+          }
+        }
+
+        const hasVariants =
+          variants.length > 1 ||
+          (variants.length === 1 &&
+            variants[0]?.title &&
+            variants[0].title !== "Default Title");
+
+        if (hasVariants && baseProductIdString) {
+          for (const variant of variants) {
+            const variantSku = sanitizeWooText(
+              variant?.sku,
+              `SHOP-${product?.id || Date.now()}-${variant?.id || Date.now()}`
+            );
+            const variantAttributes = buildShopifyVariantAttributes(product, variant);
+            const variantName = deriveShopifyVariantName(
+              baseProductName,
+              variantAttributes,
+              variant
+            );
+            const variantPrice =
+              variant?.price !== undefined &&
+              variant?.price !== null &&
+              String(variant.price).trim() !== ""
+                ? String(variant.price)
+                : resolvedPrice;
+            const variantQuantity =
+              typeof variant?.inventory_quantity === "number" &&
+              !Number.isNaN(variant.inventory_quantity)
+                ? variant.inventory_quantity
+                : 0;
+
+            let variantAlreadyExists = null;
+            if (variantSku) {
+              variantAlreadyExists = await handleGenericFindOne(req, "product", {
+                searchCriteria: {
+                  sku: variantSku,
+                  company_id: store.company_id,
+                  deletedAt: null,
+                },
+              });
+            }
+
+            if (variantAlreadyExists?.success && variantAlreadyExists.data?._id) {
+              existingCount += 1;
+              continue;
+            }
+
+            const variantReq = Object.create(req);
+            variantReq.body = {
+              product_name: variantName,
+              product_code: variantSku,
+              company_id: store.company_id,
+              product_price: variantPrice,
+              quantity: variantQuantity,
+              product_description: buildVariantDescription(
+                product?.body_html,
+                variantAttributes
+              ),
+              product_image: baseProductImage,
+              multi_images: baseProductGallery,
+              deletedAt: null,
+              product_type: "Single",
+              sku: variantSku,
+              parent_product_id: baseProductIdString,
+              category_id: categoryIds,
+              status: "active",
+            };
+
+            const variantCreationResult = await handleGenericCreate(variantReq, "product");
+            if (!variantCreationResult.success) {
+              return res.status(500).json({
+                success: false,
+                message: "Failed to create Shopify variant product",
+                error: variantCreationResult.error,
+              });
+            }
+
+            syncedCount += 1;
+          }
+        }
+
+        if (baseProductIdString) {
+          syncResults.push({
+            remote_product_id: product?.id,
+            product_id: baseProductIdString,
+            product_image: baseProductImage,
+            multi_images: baseProductGallery,
+            created: !(
+              existingBaseProduct.success && existingBaseProduct.data?._id
+            ),
+            existing: !!(
+              existingBaseProduct.success && existingBaseProduct.data?._id
+            ),
+          });
+        }
+      }
+
+
+      // db.product.updateMany(
+      //   {
+      //     parent_product_id: { $exists: true, $ne: null },
+      //     $expr: { $eq: ["$_id", "$parent_product_id"] }
+      //   },
+      //   { $set: { parent_product_id: null } }
+      // );
+      
+
+      return res.status(200).json({
+        success: true,
+        message: "Products synced successfully",
         data: products,
+        synced_count: syncedCount,
+        existing_count: existingCount,
+        pagination,
+        synced_products: syncResults,
         meta: productsResponse?.headers ? { headers: productsResponse.headers } : undefined,
       });
     } catch (error) {
       const errorPayload =
         error?.response?.body ??
         error?.response?.data ??
-        (typeof error?.message === "string" ? error.message : "Failed to fetch products from Shopify");
+        (typeof error?.message === "string" ? error.message : "Failed to sync products from Shopify");
       return res.status(500).json({
         success: false,
-        message: "Failed to fetch products from Shopify",
+        message: "Failed to sync products from Shopify",
         error: errorPayload,
       });
     } finally {
@@ -996,6 +1571,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
               success: false,
               message: "Failed to create category",
               error: newCategoryResult.error || "unknown_error",
+
             });
           }
         }
@@ -1076,16 +1652,16 @@ function buildVariantDescription(baseDescription, attributes = []) {
             });
           }
 
-          const createdProductId =
-            baseCreationResult.data?._id ||
-            baseCreationResult.data?.id ||
-            baseCreationResult.data?._doc?._id;
-          baseProductId =
-            createdProductId && typeof createdProductId.toString === "function"
-              ? createdProductId.toString()
-              : createdProductId
-              ? String(createdProductId)
-              : null;
+            const createdProductId =
+              baseCreationResult.data?._id ||
+              baseCreationResult.data?.id ||
+              baseCreationResult.data?._doc?._id;
+            baseProductId =
+              createdProductId && typeof createdProductId.toString === "function"
+                ? createdProductId.toString()
+                : createdProductId
+                ? String(createdProductId)
+                : null;
           baseProductImage =
             baseCreationResult.data?.product_image || featuredImage || null;
           baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
@@ -1133,30 +1709,30 @@ function buildVariantDescription(baseDescription, attributes = []) {
               imageEntries
             );
 
-            if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
-              const imageUpdateReq = Object.create(req);
-              imageUpdateReq.params = {
-                ...(req.params || {}),
+              if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
+                const imageUpdateReq = Object.create(req);
+                imageUpdateReq.params = {
+                  ...(req.params || {}),
                 id: baseProductIdString,
-              };
-              imageUpdateReq.body = {};
+                };
+                imageUpdateReq.body = {};
 
-              if (savedImages.featured) {
-                imageUpdateReq.body.product_image = savedImages.featured;
-                baseProductImage = savedImages.featured;
-              }
+                if (savedImages.featured) {
+                  imageUpdateReq.body.product_image = savedImages.featured;
+                  baseProductImage = savedImages.featured;
+                }
 
               if (Array.isArray(savedImages.gallery) && savedImages.gallery.length > 0) {
-                imageUpdateReq.body.multi_images = savedImages.gallery;
-                baseProductGallery = savedImages.gallery;
+                  imageUpdateReq.body.multi_images = savedImages.gallery;
+                  baseProductGallery = savedImages.gallery;
               } else {
                 if (normalizedGallery.length > 0) {
                   imageUpdateReq.body.multi_images = [];
                 }
                 baseProductGallery = [];
-              }
+                }
 
-              if (Object.keys(imageUpdateReq.body).length > 0) {
+                if (Object.keys(imageUpdateReq.body).length > 0) {
                 const updateResult = await handleGenericUpdate(
                   imageUpdateReq,
                   "product",
@@ -1166,12 +1742,12 @@ function buildVariantDescription(baseDescription, attributes = []) {
                 );
 
                 if (!updateResult.success) {
-                  console.warn(
+            console.warn(
                     "⚠️ Failed to update saved WooCommerce product images:",
                     baseProductIdString,
                     updateResult.error || updateResult.message
-                  );
-                }
+            );
+          }
               }
             }
           }
