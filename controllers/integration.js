@@ -7,7 +7,7 @@ const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
-
+const Product = require("../models/product");
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -1416,15 +1416,15 @@ function buildVariantDescription(baseDescription, attributes = []) {
         }
       }
 
+      const parenttUpdateResult = await Product.updateMany(
+        {
+          parent_product_id: { $exists: true, $ne: null },
+          $expr: { $eq: ["$_id", "$parent_product_id"] },
+        },
+        { $set: { parent_product_id: null , product_type: "Variable"} }
+      );
 
-      // db.product.updateMany(
-      //   {
-      //     parent_product_id: { $exists: true, $ne: null },
-      //     $expr: { $eq: ["$_id", "$parent_product_id"] }
-      //   },
-      //   { $set: { parent_product_id: null } }
-      // );
-      
+
 
       return res.status(200).json({
         success: true,
@@ -1433,6 +1433,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
         synced_count: syncedCount,
         existing_count: existingCount,
         pagination,
+        parenttUpdateResult,
         synced_products: syncResults,
         meta: productsResponse?.headers ? { headers: productsResponse.headers } : undefined,
       });
