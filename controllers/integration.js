@@ -2,6 +2,11 @@ const WooCommerceRestApi =
   require("@woocommerce/woocommerce-rest-api").default;
 require("@shopify/shopify-api/adapters/node");
 const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
+const path = require("path");
+const fs = require("fs");
+const http = require("http");
+const https = require("https");
+const crypto = require("crypto");
 
 const {
   handleGenericCreate,
@@ -12,6 +17,186 @@ const {
   generateSlug,
 } = require("../utils/modelHelper");
 
+function sanitizeFileName(baseName, fallbackExt = ".jpg") {
+  if (!baseName || typeof baseName !== "string") {
+    return `${Date.now()}-${crypto.randomBytes(6).toString("hex")}${fallbackExt}`;
+  }
+
+  const nameWithoutQuery = baseName.split("?")[0].split("#")[0];
+  const extension = path.extname(nameWithoutQuery) || fallbackExt;
+  const rawName = path.basename(nameWithoutQuery, extension);
+  const sanitized =
+    rawName.replace(/[^a-z0-9_-]+/gi, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") ||
+    `image-${crypto.randomBytes(4).toString("hex")}`;
+
+  return `${sanitized}-${crypto.randomBytes(4).toString("hex")}${extension.toLowerCase()}`;
+}
+
+function ensureUniqueFileName(directory, fileName) {
+  let candidate = fileName;
+  let counter = 1;
+
+  while (fs.existsSync(path.join(directory, candidate))) {
+    const extension = path.extname(fileName);
+    const nameWithoutExt = path.basename(fileName, extension);
+    candidate = `${nameWithoutExt}-${counter}${extension}`;
+    counter += 1;
+  }
+
+  return candidate;
+}
+
+function resolveRedirectUrl(currentUrl, redirectLocation) {
+  if (!redirectLocation) return null;
+  try {
+    const redirectUrl = new URL(redirectLocation, currentUrl);
+    return redirectUrl.toString();
+  } catch (error) {
+    console.warn("⚠️ Failed to resolve redirect URL:", redirectLocation, error.message);
+    return null;
+  }
+}
+
+function downloadImageToFile(imageUrl, destinationPath, redirectCount = 0) {
+  const MAX_REDIRECTS = 5;
+
+  return new Promise((resolve, reject) => {
+    if (!imageUrl) {
+      return reject(new Error("Image URL is required"));
+    }
+
+    if (redirectCount > MAX_REDIRECTS) {
+      return reject(new Error("Too many redirects while downloading image"));
+    }
+
+    let urlObject;
+    try {
+      urlObject = new URL(imageUrl);
+    } catch (error) {
+      return reject(new Error(`Invalid image URL: ${imageUrl}`));
+    }
+
+    const httpModule = urlObject.protocol === "https:" ? https : http;
+
+    const request = httpModule.get(urlObject, (response) => {
+      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        const redirectUrl = resolveRedirectUrl(urlObject, response.headers.location);
+        response.resume();
+        if (!redirectUrl) {
+          return reject(new Error("Failed to resolve redirect URL for image download"));
+        }
+        return resolve(downloadImageToFile(redirectUrl, destinationPath, redirectCount + 1));
+      }
+
+      if (response.statusCode !== 200) {
+        response.resume();
+        return reject(new Error(`Failed to download image. Status code: ${response.statusCode}`));
+      }
+
+      const fileStream = fs.createWriteStream(destinationPath);
+      response.pipe(fileStream);
+
+      fileStream.on("finish", () => {
+        fileStream.close(() => resolve(destinationPath));
+      });
+
+      fileStream.on("error", (error) => {
+        fileStream.close(() => {
+          fs.unlink(destinationPath, () => reject(error));
+        });
+      });
+    });
+
+    request.on("error", (error) => reject(error));
+  });
+}
+
+async function saveProductImagesLocally(productId, imageEntries = []) {
+  if (!productId || !Array.isArray(imageEntries) || imageEntries.length === 0) {
+    return null;
+  }
+
+  const normalizedEntries = imageEntries.filter(
+    (entry) => entry && typeof entry.src === "string" && entry.src.trim() !== ""
+  );
+
+  if (normalizedEntries.length === 0) {
+    return null;
+  }
+
+  const uploadsDirectory = path.join(__dirname, "..", "uploads", "product", productId.toString());
+  await fs.promises.mkdir(uploadsDirectory, { recursive: true });
+
+  const savedPaths = [];
+
+  for (const entry of normalizedEntries) {
+    const sourceUrl = entry.src.trim();
+    const preferredName =
+      (typeof entry.name === "string" && entry.name.trim().length > 0 && entry.name.trim()) || null;
+
+    let candidateName = preferredName;
+    if (!candidateName) {
+      try {
+        const urlObject = new URL(sourceUrl);
+        candidateName = path.basename(urlObject.pathname);
+      } catch (error) {
+        candidateName = null;
+      }
+    }
+
+    const fallbackExtension = candidateName && path.extname(candidateName) ? path.extname(candidateName) : ".jpg";
+    const sanitizedName = sanitizeFileName(candidateName, fallbackExtension);
+    const uniqueFileName = ensureUniqueFileName(uploadsDirectory, sanitizedName);
+    const targetPath = path.join(uploadsDirectory, uniqueFileName);
+
+    try {
+      await downloadImageToFile(sourceUrl, targetPath);
+      const relativePath = path
+        .join("uploads", "product", productId.toString(), uniqueFileName)
+        .replace(/\\/g, "/");
+      savedPaths.push(relativePath);
+    } catch (error) {
+      console.warn("⚠️ Failed to download WooCommerce product image:", sourceUrl, error.message);
+    }
+  }
+
+  if (savedPaths.length === 0) {
+    return null;
+  }
+
+  return {
+    featured: savedPaths[0],
+    gallery: savedPaths.slice(1),
+  };
+}
+
+function extractWooImageEntries(product = {}) {
+  const entries = [];
+
+  if (Array.isArray(product?.images)) {
+    product.images.forEach((image) => {
+      if (image && typeof image.src === "string" && image.src.trim() !== "") {
+        entries.push({
+          src: image.src.trim(),
+          name: typeof image.name === "string" ? image.name.trim() : null,
+        });
+      }
+    });
+  }
+
+  if (
+    entries.length === 0 &&
+    typeof product?.image === "string" &&
+    product.image.trim() !== ""
+  ) {
+    entries.push({
+      src: product.image.trim(),
+      name: null,
+    });
+  }
+
+  return entries;
+}
 
   ///////////////Sync  Categories///////////////
 
@@ -440,7 +625,7 @@ const {
   }
 
   ///////////////Sync  Categories///////////////
-  ///////////////Sync  Brand///////////////    
+  ///////////////Sync  Brand////////////////////////
 
   async function syncStoreBrand(req, res) {
     const integrationResponse = await handleGenericGetById(
@@ -687,14 +872,6 @@ const {
 
   async function syncWordpressProduct(req, res, store = {}) {
     
-    const syncStoreCategoryResponse = await syncStoreCategory(req, res, store);
-    if (!syncStoreCategoryResponse.success) {
-      return res.status(500).json({
-        success: false,
-        message: "Failed to sync categories",
-        error: syncStoreCategoryResponse.error,
-      });
-    }
 
     // const categories = syncStoreCategoryResponse.data;
     const woocommerce = new WooCommerceRestApi({
@@ -748,8 +925,9 @@ const {
                 deletedAt: null,
               },
             });
-            console.log("🔍 categoryResponse:", categoryResponse);
 
+            console.log("🔍 categoryResponse:", categoryResponse);
+            
             if (categoryResponse.success && categoryResponse.data?._id) {
               categoryIds.push(categoryResponse.data._id);
               continue;
@@ -779,6 +957,10 @@ const {
         }
 
         const productReq = Object.create(req);
+        const imageEntries = extractWooImageEntries(product);
+        const featuredImage = imageEntries.length > 0 ? imageEntries[0].src : null;
+        const galleryImages = imageEntries.slice(1).map((entry) => entry.src).filter(Boolean);
+
         productReq.body = {
           product_name: product.name.trim(),
           product_code: product.sku,
@@ -786,8 +968,9 @@ const {
           brand_id: product.brand_id,
           product_price: product.price,
           quantity: product.quantity,
-          description: product.description,
-          image: product.image,
+          product_description: product.description,
+          product_image: featuredImage,
+          multi_images: galleryImages,
           deletedAt: null,
           product_type: product.type === "variable" ? "Variable" : "Single",
           weight: product.weight,
@@ -799,6 +982,46 @@ const {
         const creationResult = await handleGenericCreate(productReq, "product");
         console.log("🔍 creationResult:", creationResult);
         if (creationResult.success) {
+          try {
+            const createdProductId =
+              creationResult.data?._id || creationResult.data?.id || creationResult.data?._doc?._id;
+            const productIdString =
+              createdProductId && typeof createdProductId.toString === "function"
+                ? createdProductId.toString()
+                : createdProductId
+                ? String(createdProductId)
+                : null;
+
+            if (productIdString) {
+              const savedImages = await saveProductImagesLocally(productIdString, imageEntries);
+              if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
+                const imageUpdateReq = Object.create(req);
+                imageUpdateReq.params = {
+                  ...(req.params || {}),
+                  id: productIdString,
+                };
+                imageUpdateReq.body = {};
+                if (savedImages.featured) {
+                  imageUpdateReq.body.product_image = savedImages.featured;
+                }
+                if (savedImages.gallery && savedImages.gallery.length > 0) {
+                  imageUpdateReq.body.multi_images = savedImages.gallery;
+                }
+
+                if (Object.keys(imageUpdateReq.body).length > 0) {
+                  await handleGenericUpdate(imageUpdateReq, "product", {
+                    allowedFields: ["product_image", "multi_images"],
+                  });
+                }
+              }
+            }
+          } catch (imageError) {
+            console.warn(
+              "⚠️ Failed to persist WooCommerce product images locally:",
+              imageError?.message || imageError
+            );
+          }
+
           syncedCount += 1;
           continue;
         }
@@ -815,7 +1038,6 @@ const {
         success: true,
         message: "Products synced successfully",
         data: products,
-        categories: syncStoreCategoryResponse,
         synced_count: syncedCount,
         existing_count: existingCount,
       });

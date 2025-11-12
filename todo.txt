@@ -6,13 +6,32 @@
 11.11.25
 // brand crud done.
 // product brand done
+12.11.2025
+// process category fetch  done
 
 
 Backend admin 
 // process brand fetch 
-// process category fetch 
-// process fetch product_fetch/insert into db
-// process update product by_id.
+
+// sync categories (done)
+// process fetch product_fetch wp single (done)
+// process fetch product_fetch wp variant
+
+
+// process fetch product_fetch sh single  
+// process fetch product_fetch sh variant
+
+
+/insert into db
+// process update product by id wp 
+// process update product by id shp 
+
 
 // user permissions.
+
+// pos 
+create order with order_items
+fetch_order wp
+fetch_order shopify
+
 
