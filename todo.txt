@@ -13,11 +13,12 @@ curl "https://example-store.com/wp-json/wc/store/v1/products/brands"
 
 
 Backend admin 
-// process brand fetch 
 
 // sync categories (done)
 // process fetch product_fetch wp single (done)
-// process fetch product_fetch wp variant
+// process fetch product_fetch wp variant (done)
+
+
 
 
 // process fetch product_fetch sh single  
@@ -28,6 +29,8 @@ Backend admin
 // process update product by id wp 
 // process update product by id shp 
 
+// check if all categories/products are going in correct company...
+// process brand fetch 
 
 // user permissions.
 

@@ -170,6 +170,48 @@ async function saveProductImagesLocally(productId, imageEntries = []) {
   };
 }
 
+async function resetProductImageDirectory(productId) {
+  if (!productId) {
+    return;
+  }
+
+  const directoryPath = path.join(
+    __dirname,
+    "..",
+    "uploads",
+    "product",
+    productId.toString()
+  );
+
+  try {
+    if (fs.promises.rm) {
+      await fs.promises.rm(directoryPath, { recursive: true, force: true });
+    } else {
+      await fs.promises.rmdir(directoryPath, { recursive: true });
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(
+        "⚠️ Failed to reset product image directory:",
+        directoryPath,
+        error.message || error
+      );
+    }
+  }
+}
+
+function isLocalProductAssetPath(value, productId) {
+  if (!value || typeof value !== "string" || !productId) {
+    return false;
+  }
+
+  const normalizedValue = value.replace(/\\/g, "/");
+  const productIdString =
+    typeof productId === "string" ? productId : productId.toString();
+
+  return normalizedValue.startsWith(`uploads/product/${productIdString}/`);
+}
+
 function extractWooImageEntries(product = {}) {
   const entries = [];
 
@@ -725,140 +767,6 @@ function buildVariantDescription(baseDescription, attributes = []) {
   ///////////////Sync  Categories///////////////
   ///////////////Sync  Brand////////////////////////
 
-  async function syncStoreBrand(req, res) {
-    const integrationResponse = await handleGenericGetById(
-      req,
-      "integration",
-      {
-        excludeFields: [],
-      }
-    );
-    if (integrationResponse.data.store_type === "shopify") {
-      return syncShopifyBrand(req, res, integrationResponse.data);
-    } else if (integrationResponse.data.store_type === "woocommerce") {
-      return syncWordpressBrand(req, res, integrationResponse.data);
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid store type",
-      }); 
-    }
-  }
-
-  async function syncShopifyBrand(req, res, store = {}) {
-    const shopDomain = (store?.url || "")
-      .trim()
-      .replace(/^https?:\/\//i, "")
-      .replace(/\/$/, "");
-      
-      
-    if (!shopDomain) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing Shopify shop URL",
-      });
-    }
-    
-    if (!/^[a-z0-9][a-z0-9-]*\.[a-z0-9.-]+$/i.test(shopDomain) && shopDomain !== "myshopify.com") {
-      if (/^[a-z0-9][a-z0-9-]*$/i.test(shopDomain)) {
-        shopDomain = `${shopDomain}.myshopify.com`;
-      } else {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid Shopify shop domain",
-          details: shopDomain,
-        });
-      }
-    }
-    
-    if (!/\.myshopify\.com$/i.test(shopDomain)) {
-      return res.status(400).json({
-        success: false,
-        message: "Shopify domain must end with .myshopify.com. Please provide the myshopify domain.",
-        details: shopDomain,
-      });
-    }
-
-    const STATIC_SHOPIFY_API_KEY = store.key;
-    const STATIC_SHOPIFY_SECRET = store.secret;
-    const adminApiAccessToken = store.token;
-
-    if (!adminApiAccessToken) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing Shopify access token. Please provide a valid token in the integration record.",
-      });
-    }
-
-    const shopify = shopifyApi({
-      apiKey: STATIC_SHOPIFY_API_KEY,
-      apiSecretKey: STATIC_SHOPIFY_SECRET,
-      adminApiAccessToken,
-      scopes: ["read_products", "read_product_listings"],
-      hostName: shopDomain,
-      apiVersion: ApiVersion.October24,
-      isCustomStoreApp: true,
-    });
-
-    const session = shopify.session.customAppSession(shopDomain);
-    session.accessToken = adminApiAccessToken;
-
-    const originalBody = req.body;
-    try {
-      const client = new shopify.clients.Rest({ session });
-      const brandsResponse = await client.get({ path: "brands" });
-      const brands = brandsResponse?.body?.brands || brandsResponse?.body || [];
-      
-      return res.status(200).json({
-        success: true,
-        message: "Shopify brands synced",
-        data: brands,
-      });
-    } catch (error) {
-      const errorPayload =
-        error?.response?.body ??
-        error?.response?.data ??
-        (typeof error?.message === "string" ? error.message : "Failed to fetch brands from Shopify");
-      return res.status(500).json({
-        success: false,
-        message: "Failed to fetch brands from Shopify",
-        error: errorPayload,
-      });
-    } finally {
-      req.body = originalBody;
-    }
-  }
-
-  async function syncWordpressBrand(req, res, store = {}) {
-    const woocommerce = new WooCommerceRestApi({
-      url: store.url,
-      consumerKey: store.key,
-      consumerSecret: store.secret,
-      version: "wc/v3",
-    });
-
-    const originalBody = req.body;
-    try {
-      const response = await woocommerce.get("products/brands");
-      const brands = response?.data || [];
-      return res.status(200).json({
-        success: true,
-        message: "WooCommerce brands synced",
-        data: brands,
-      });
-    } catch (error) {
-      const errorPayload =
-        error?.response?.data ??
-        (typeof error?.message === "string" ? error.message : "Failed to fetch brands from WooCommerce");
-      return res.status(500).json({
-        success: false,
-        message: "Failed to fetch brands from WooCommerce",
-        error: errorPayload,
-      });
-    } finally {
-      req.body = originalBody;
-    }
-  }
 
     ///////////////Sync  Brand///////////////
 
@@ -981,14 +889,39 @@ function buildVariantDescription(baseDescription, attributes = []) {
 
     const originalBody = req.body;
     try {
-      const response = await woocommerce.get("products", );
-      const products = (response?.data || []).slice(0, 1);
+      const { limit: limitParam, offset: offsetParam } = req.query || {};
+      const parsedLimit = Number.parseInt(limitParam, 10);
+      const parsedOffset = Number.parseInt(offsetParam, 10);
+
+      const limit =
+        Number.isFinite(parsedLimit) && parsedLimit > 0
+          ? Math.min(parsedLimit, 100)
+          : 10;
+      const offset =
+        Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+
+      const response = await woocommerce.get("products", {
+        per_page: limit,
+        offset,
+      });
+      const products = Array.isArray(response?.data) ? [...response.data] : [];
+      const totalHeader =
+        response?.headers?.["x-wp-total"] ?? response?.headers?.["X-WP-Total"];
+      const totalItems = Number.isFinite(Number(totalHeader))
+        ? Number(totalHeader)
+        : undefined;
 
       if (products.length === 0) {
         return res.status(200).json({
           success: true,
           message: "No products found in WooCommerce store",
+          pagination: {
+            limit,
+            offset,
+            total: totalItems ?? 0,
+          },
           data: [],
+          synced_products: [],
         });
       }
 
@@ -1005,6 +938,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
       
       let syncedCount = 0;
       let existingCount = 0;
+      const syncResults = [];
 
       for (const product of products) {
         // ===== Start WooCommerce variant combination processing =====
@@ -1142,66 +1076,119 @@ function buildVariantDescription(baseDescription, attributes = []) {
             });
           }
 
-          try {
-            const createdProductId =
-              baseCreationResult.data?._id ||
-              baseCreationResult.data?.id ||
-              baseCreationResult.data?._doc?._id;
-            baseProductId =
-              createdProductId && typeof createdProductId.toString === "function"
-                ? createdProductId.toString()
-                : createdProductId
-                ? String(createdProductId)
-                : null;
-
-            if (baseProductId) {
-              const savedImages = await saveProductImagesLocally(baseProductId, imageEntries);
-              if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
-                const imageUpdateReq = Object.create(req);
-                imageUpdateReq.params = {
-                  ...(req.params || {}),
-                  id: baseProductId,
-                };
-                imageUpdateReq.body = {};
-                if (savedImages.featured) {
-                  imageUpdateReq.body.product_image = savedImages.featured;
-                  baseProductImage = savedImages.featured;
-                }
-                if (savedImages.gallery && savedImages.gallery.length > 0) {
-                  imageUpdateReq.body.multi_images = savedImages.gallery;
-                  baseProductGallery = savedImages.gallery;
-                }
-
-                if (Object.keys(imageUpdateReq.body).length > 0) {
-                  await handleGenericUpdate(imageUpdateReq, "product", {
-                    allowedFields: ["product_image", "multi_images"],
-                  });
-                }
-              } else {
-                baseProductImage =
-                  baseCreationResult.data?.product_image || featuredImage || null;
-                baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
-                  ? baseCreationResult.data.multi_images
-                  : galleryImages;
-              }
-            }
-          } catch (baseImageError) {
-            console.warn(
-              "⚠️ Failed to persist images for base WooCommerce product:",
-              baseImageError?.message || baseImageError
-            );
-            baseProductImage =
-              baseCreationResult.data?.product_image || featuredImage || null;
-            baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
-              ? baseCreationResult.data.multi_images
-              : galleryImages;
-          }
+          const createdProductId =
+            baseCreationResult.data?._id ||
+            baseCreationResult.data?.id ||
+            baseCreationResult.data?._doc?._id;
+          baseProductId =
+            createdProductId && typeof createdProductId.toString === "function"
+              ? createdProductId.toString()
+              : createdProductId
+              ? String(createdProductId)
+              : null;
+          baseProductImage =
+            baseCreationResult.data?.product_image || featuredImage || null;
+          baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
+            ? baseCreationResult.data.multi_images
+            : galleryImages;
 
           syncedCount += 1;
         }
 
+        const baseProductIdString =
+          baseProductId && typeof baseProductId.toString === "function"
+            ? baseProductId.toString()
+            : baseProductId
+            ? String(baseProductId)
+            : null;
+
+        if (baseProductIdString && imageEntries.length > 0) {
+          const normalizedGallery = Array.isArray(baseProductGallery)
+            ? baseProductGallery.filter(Boolean)
+            : [];
+          const hasLocalFeatured = isLocalProductAssetPath(
+            baseProductImage,
+            baseProductIdString
+          );
+          const hasLocalGallery =
+            normalizedGallery.length > 0 &&
+            normalizedGallery.every((imgPath) =>
+              isLocalProductAssetPath(imgPath, baseProductIdString)
+            );
+          const expectedGalleryCount = Math.max(imageEntries.length - 1, 0);
+          const galleryCountMatches =
+            normalizedGallery.length === expectedGalleryCount;
+          const shouldDownloadImages =
+            !hasLocalFeatured ||
+            (!hasLocalGallery && expectedGalleryCount > 0) ||
+            (!galleryCountMatches && expectedGalleryCount >= 0);
+
+          if (shouldDownloadImages) {
+            if (existingBaseProduct.success) {
+              await resetProductImageDirectory(baseProductIdString);
+            }
+
+            const savedImages = await saveProductImagesLocally(
+              baseProductIdString,
+              imageEntries
+            );
+
+            if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
+              const imageUpdateReq = Object.create(req);
+              imageUpdateReq.params = {
+                ...(req.params || {}),
+                id: baseProductIdString,
+              };
+              imageUpdateReq.body = {};
+
+              if (savedImages.featured) {
+                imageUpdateReq.body.product_image = savedImages.featured;
+                baseProductImage = savedImages.featured;
+              }
+
+              if (Array.isArray(savedImages.gallery) && savedImages.gallery.length > 0) {
+                imageUpdateReq.body.multi_images = savedImages.gallery;
+                baseProductGallery = savedImages.gallery;
+              } else {
+                if (normalizedGallery.length > 0) {
+                  imageUpdateReq.body.multi_images = [];
+                }
+                baseProductGallery = [];
+              }
+
+              if (Object.keys(imageUpdateReq.body).length > 0) {
+                const updateResult = await handleGenericUpdate(
+                  imageUpdateReq,
+                  "product",
+                  {
+                    allowedFields: ["product_image", "multi_images"],
+                  }
+                );
+
+                if (!updateResult.success) {
+                  console.warn(
+                    "⚠️ Failed to update saved WooCommerce product images:",
+                    baseProductIdString,
+                    updateResult.error || updateResult.message
+                  );
+                }
+              }
+            }
+          }
+        }
+
         // If no variants, base product is sufficient
         if (!hasVariants) {
+          if (baseProductIdString) {
+            syncResults.push({
+              remote_product_id: product?.id,
+              product_id: baseProductIdString,
+              product_image: baseProductImage,
+              multi_images: baseProductGallery,
+              created: !existingBaseProduct.success,
+              existing: !!existingBaseProduct.success,
+            });
+          }
           continue;
         }
 
@@ -1261,6 +1248,17 @@ function buildVariantDescription(baseDescription, attributes = []) {
           });
         }
         // ===== End WooCommerce variant combination processing =====
+
+        if (baseProductIdString) {
+          syncResults.push({
+            remote_product_id: product?.id,
+            product_id: baseProductIdString,
+            product_image: baseProductImage,
+            multi_images: baseProductGallery,
+            created: !existingBaseProduct.success,
+            existing: !!existingBaseProduct.success,
+          });
+        }
       }
 
       return res.status(200).json({
@@ -1269,6 +1267,12 @@ function buildVariantDescription(baseDescription, attributes = []) {
         data: products,
         synced_count: syncedCount,
         existing_count: existingCount,
+        pagination: {
+          limit,
+          offset,
+          total: totalItems,
+        },
+        synced_products: syncResults,
       });
       
     } catch (error) {
@@ -1417,7 +1421,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
   
     checkIntegrationActive,
     syncStoreCategory,
-    syncStoreBrand,
+    // syncStoreBrand,
     syncStoreProduct
   };
   

@@ -1373,7 +1373,7 @@ const brandsAdminCRUD = adminCrudGenerator(
 const categoryAdminCRUD = adminCrudGenerator(
   Category,
   "categories",
-  ["parent_id", "name", "description", "isActive", "icon", "color", "sort_order", "status"],
+  ["parent_id", "name", "description", "isActive", "icon", "color", "sort_order", "status", "company_id","created_by"],
   {
     excludedFields: ["__v"],
     includedFields: [
@@ -1386,6 +1386,8 @@ const categoryAdminCRUD = adminCrudGenerator(
       "sort_order",
       "status",
       "createdAt",
+      "company_id",
+      "created_by"
     ],
     searchableFields: ["name", "description"],
     filterableFields: ["isActive"],
@@ -1409,8 +1411,13 @@ const categoryAdminCRUD = adminCrudGenerator(
     },
     middleware: {
       afterQuery: async (records, req) => {
-        const populatedRecords = await Category.populate(records, { path: 'parent_id', select: 'name' });
-        console.log('populatedRecords',populatedRecords);
+
+        const populatedRecords = await Integration.populate(records, [
+          { path: 'company_id', select: 'company_name' },
+          { path: 'created_by', select: 'name email' },
+          { path: 'parent_id', select: 'name'}
+        ]);
+
         if (req.fieldConfig?.parent_id) {
           const categories = await Category.find({ deletedAt: null }, 'name').sort({ name: 1 });
           req.fieldConfig.parent_id.options = [
@@ -1420,7 +1427,38 @@ const categoryAdminCRUD = adminCrudGenerator(
           req.fieldConfig.parent_id.placeholder = 'Select Parent Category';
           req.fieldConfig.parent_id.helpText = 'Choose the parent category (optional)';
         }
-        return populatedRecords;
+        // Add both User name and Company name fields for display in list view
+        const recordsWithPopulatedFields = populatedRecords.map(record => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          
+          // Handle created_by field
+          if (record.created_by) {
+            recordObj.created_by = record.created_by.name || 'No User';
+          } else {
+            recordObj.created_by = 'No User';
+          }
+          
+          // Handle company_id field
+          if (record.company_id) {
+            recordObj.company_id = record.company_id.company_name || 'No Company';
+          } else {
+            recordObj.company_id = 'No Company';
+          }
+          
+          if (record.parent_id) {
+            recordObj.parent_id = record.parent_id.name || 'No Parent Category';
+          } else {
+            recordObj.parent_id = 'No Parent Category';
+          }
+          
+          return recordObj;
+          
+        });
+
+        // const populatedRecords = await Category.populate(records, {  });
+        console.log('populatedRecords', populatedRecords);
+
+        return recordsWithPopulatedFields;
       }
     },
     responseFormatting: {

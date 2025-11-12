@@ -66,7 +66,6 @@ const modelSchema = new mongoose.Schema(
       type:String,
       field_name:'SKU'
     },
-    
     product_type:{
       type: String,
       required: true,
