@@ -8,6 +8,8 @@
 // product brand done
 12.11.2025
 // process category fetch  done
+curl "https://example-store.com/wp-json/wc/store/v1/products/brands"
+
 
 
 Backend admin 

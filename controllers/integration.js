@@ -198,6 +198,104 @@ function extractWooImageEntries(product = {}) {
   return entries;
 }
 
+function sanitizeWooText(value, fallback = "") {
+  if (value === undefined || value === null) return fallback;
+  const text = String(value).trim();
+  return text.length > 0 ? text : fallback;
+}
+
+function generateAttributeCombinations(attributes = []) {
+  if (!Array.isArray(attributes)) {
+    return [];
+  }
+
+  const normalized = attributes
+    .map((attribute, index) => {
+      const options = Array.isArray(attribute?.options)
+        ? attribute.options.map((option) => sanitizeWooText(option)).filter(Boolean)
+        : [];
+
+      if (options.length === 0) {
+        return null;
+      }
+
+      const name =
+        sanitizeWooText(attribute?.name) ||
+        sanitizeWooText(attribute?.slug) ||
+        `Attribute ${index + 1}`;
+
+      return {
+        name,
+        options,
+      };
+    })
+    .filter(Boolean);
+
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  const combinations = [];
+
+  const buildCombinations = (attributeIndex, currentCombination) => {
+    if (attributeIndex === normalized.length) {
+      combinations.push([...currentCombination]);
+      return;
+    }
+
+    const attribute = normalized[attributeIndex];
+    attribute.options.forEach((option) => {
+      currentCombination.push({ name: attribute.name, value: option });
+      buildCombinations(attributeIndex + 1, currentCombination);
+      currentCombination.pop();
+    });
+  };
+
+  buildCombinations(0, []);
+  return combinations;
+}
+
+function createVariantSku(baseSku, attributes = []) {
+  const normalizedBase = sanitizeWooText(baseSku, "WC-PRODUCT");
+  if (!Array.isArray(attributes) || attributes.length === 0) {
+    return normalizedBase;
+  }
+
+  const suffix = attributes
+    .map((attribute) =>
+      sanitizeWooText(attribute?.value)
+        .replace(/\s+/g, "-")
+        .replace(/[^a-z0-9-]/gi, "")
+        .toUpperCase()
+    )
+    .filter(Boolean)
+    .join("-");
+
+  if (!suffix) {
+    return normalizedBase;
+  }
+
+  const candidate = `${normalizedBase}-${suffix}`;
+  return candidate.length > 120 ? candidate.slice(0, 120) : candidate;
+}
+
+function buildVariantDescription(baseDescription, attributes = []) {
+  const normalizedBase = sanitizeWooText(baseDescription);
+  if (!Array.isArray(attributes) || attributes.length === 0) {
+    return normalizedBase;
+  }
+
+  const attributeSummary = attributes
+    .map((attribute) => `- ${attribute.name}: ${attribute.value}`)
+    .join("\n");
+
+  if (!normalizedBase) {
+    return `Attributes:\n${attributeSummary}`;
+  }
+
+  return `${normalizedBase}\n\nAttributes:\n${attributeSummary}`;
+}
+
   ///////////////Sync  Categories///////////////
 
   async function syncWordpressCategory(req,res, store = "") {
@@ -883,8 +981,8 @@ function extractWooImageEntries(product = {}) {
 
     const originalBody = req.body;
     try {
-      const response = await woocommerce.get("products");
-      const products = response?.data || [];
+      const response = await woocommerce.get("products", );
+      const products = (response?.data || []).slice(0, 1);
 
       if (products.length === 0) {
         return res.status(200).json({
@@ -893,27 +991,42 @@ function extractWooImageEntries(product = {}) {
           data: [],
         });
       }
+
+      // console.log("🔍 products:", products);
+      // console.log("🔍 store:", store);
+      // return res.status(200).json({
+      //   success: true,
+      //   message: "Products fetched successfully",
+      //   data: products,
+      //   meta: response?.headers ? { headers: response.headers } : undefined,
+      // });
+
+
+      
       let syncedCount = 0;
       let existingCount = 0;
 
       for (const product of products) {
-        const existingProduct = await handleGenericFindOne(req, "product", {
-          searchCriteria: {
-            product_name: product.name.trim(),
-            company_id: store.company_id,
-            deletedAt: null,
-          },
-        }); 
-        if (existingProduct.success) {
-          existingCount += 1;
+        // ===== Start WooCommerce variant combination processing =====
+        const baseProductName = sanitizeWooText(product?.name);
+        if (!baseProductName) {
+          console.warn("⚠️ Skipping WooCommerce product without a name:", product?.id);
           continue;
         }
-        console.log("🔍 product.categories:", product.categories);
+
+        const attributeCombinations = generateAttributeCombinations(product?.attributes);
+        const hasVariants = attributeCombinations.length > 0;
+        const variantEntries = hasVariants
+          ? attributeCombinations.map((attributes) => ({
+              attributes,
+              nameSuffix: attributes.map((attribute) => attribute.value).join(" / "),
+            }))
+          : [];
+
         const categoryIds = [];
         if (Array.isArray(product.categories)) {
           for (const category of product.categories) {
-            console.log("🔍 category name:", category?.name);
-            const categoryName = category?.name?.trim();
+            const categoryName = sanitizeWooText(category?.name);
             if (!categoryName) {
               continue;
             }
@@ -926,8 +1039,6 @@ function extractWooImageEntries(product = {}) {
               },
             });
 
-            console.log("🔍 categoryResponse:", categoryResponse);
-            
             if (categoryResponse.success && categoryResponse.data?._id) {
               categoryIds.push(categoryResponse.data._id);
               continue;
@@ -941,7 +1052,6 @@ function extractWooImageEntries(product = {}) {
               deletedAt: null,
             };
             const newCategoryResult = await handleGenericCreate(categoryReq, "category");
-            console.log("🔍 newCategoryResult:", newCategoryResult);
 
             if (newCategoryResult.success && newCategoryResult.data?._id) {
               categoryIds.push(newCategoryResult.data._id);
@@ -956,56 +1066,110 @@ function extractWooImageEntries(product = {}) {
           }
         }
 
-        const productReq = Object.create(req);
         const imageEntries = extractWooImageEntries(product);
         const featuredImage = imageEntries.length > 0 ? imageEntries[0].src : null;
         const galleryImages = imageEntries.slice(1).map((entry) => entry.src).filter(Boolean);
 
-        productReq.body = {
-          product_name: product.name.trim(),
-          product_code: product.sku,
-          company_id: store.company_id,
-          brand_id: product.brand_id,
-          product_price: product.price,
-          quantity: product.quantity,
-          product_description: product.description,
-          product_image: featuredImage,
-          multi_images: galleryImages,
-          deletedAt: null,
-          product_type: product.type === "variable" ? "Variable" : "Single",
-          weight: product.weight,
-          unit: product.unit,
-          category_id: categoryIds,
+        const resolvedPrice =
+          product?.price ??
+          product?.regular_price ??
+          product?.sale_price ??
+          (Array.isArray(product?.variants)
+            ? product.variants.find((variant) => variant?.price)?.price
+            : null);
 
-        };
+        const productPrice =
+          resolvedPrice !== undefined &&
+          resolvedPrice !== null &&
+          String(resolvedPrice).trim() !== ""
+            ? String(resolvedPrice)
+            : "0";
 
-        const creationResult = await handleGenericCreate(productReq, "product");
-        console.log("🔍 creationResult:", creationResult);
-        if (creationResult.success) {
+        const resolvedQuantity =
+          typeof product?.quantity === "number" && !Number.isNaN(product.quantity)
+            ? product.quantity
+            : typeof product?.stock_quantity === "number"
+            ? product.stock_quantity
+            : 0;
+
+        // ----- Ensure base (parent) product exists -----
+        let baseProductId = null;
+        let baseProductImage = null;
+        let baseProductGallery = [];
+
+        const existingBaseProduct = await handleGenericFindOne(req, "product", {
+          searchCriteria: {
+            product_name: baseProductName,
+            company_id: store.company_id,
+            deletedAt: null,
+          },
+        });
+
+        if (existingBaseProduct.success && existingBaseProduct.data?._id) {
+          baseProductId = existingBaseProduct.data._id;
+          baseProductImage = existingBaseProduct.data?.product_image || featuredImage;
+          baseProductGallery = Array.isArray(existingBaseProduct.data?.multi_images)
+            ? existingBaseProduct.data.multi_images
+            : galleryImages;
+          existingCount += 1;
+        } else {
+          const baseProductReq = Object.create(req);
+          baseProductReq.body = {
+            product_name: baseProductName,
+            product_code: sanitizeWooText(product?.sku, `WC-${product?.id || Date.now()}`),
+            company_id: store.company_id,
+            brand_id: product.brand_id,
+            product_price: productPrice,
+            quantity: resolvedQuantity,
+            product_description: sanitizeWooText(product?.description),
+            product_image: featuredImage,
+            multi_images: galleryImages,
+            deletedAt: null,
+            product_type:
+              hasVariants || product.type === "variable" ? "Variable" : "Single",
+            weight: product.weight,
+            unit: product.unit,
+            category_id: categoryIds,
+            sku: sanitizeWooText(product?.sku, `WC-${product?.id || Date.now()}`),
+          };
+
+          const baseCreationResult = await handleGenericCreate(baseProductReq, "product");
+          if (!baseCreationResult.success) {
+            return res.status(500).json({
+              success: false,
+              message: "Failed to create base product from WooCommerce",
+              error: baseCreationResult.error,
+            });
+          }
+
           try {
             const createdProductId =
-              creationResult.data?._id || creationResult.data?.id || creationResult.data?._doc?._id;
-            const productIdString =
+              baseCreationResult.data?._id ||
+              baseCreationResult.data?.id ||
+              baseCreationResult.data?._doc?._id;
+            baseProductId =
               createdProductId && typeof createdProductId.toString === "function"
                 ? createdProductId.toString()
                 : createdProductId
                 ? String(createdProductId)
                 : null;
 
-            if (productIdString) {
-              const savedImages = await saveProductImagesLocally(productIdString, imageEntries);
+            if (baseProductId) {
+              const savedImages = await saveProductImagesLocally(baseProductId, imageEntries);
               if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
                 const imageUpdateReq = Object.create(req);
                 imageUpdateReq.params = {
                   ...(req.params || {}),
-                  id: productIdString,
+                  id: baseProductId,
                 };
                 imageUpdateReq.body = {};
                 if (savedImages.featured) {
                   imageUpdateReq.body.product_image = savedImages.featured;
+                  baseProductImage = savedImages.featured;
                 }
                 if (savedImages.gallery && savedImages.gallery.length > 0) {
                   imageUpdateReq.body.multi_images = savedImages.gallery;
+                  baseProductGallery = savedImages.gallery;
                 }
 
                 if (Object.keys(imageUpdateReq.body).length > 0) {
@@ -1013,25 +1177,90 @@ function extractWooImageEntries(product = {}) {
                     allowedFields: ["product_image", "multi_images"],
                   });
                 }
+              } else {
+                baseProductImage =
+                  baseCreationResult.data?.product_image || featuredImage || null;
+                baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
+                  ? baseCreationResult.data.multi_images
+                  : galleryImages;
               }
             }
-          } catch (imageError) {
+          } catch (baseImageError) {
             console.warn(
-              "⚠️ Failed to persist WooCommerce product images locally:",
-              imageError?.message || imageError
+              "⚠️ Failed to persist images for base WooCommerce product:",
+              baseImageError?.message || baseImageError
             );
+            baseProductImage =
+              baseCreationResult.data?.product_image || featuredImage || null;
+            baseProductGallery = Array.isArray(baseCreationResult.data?.multi_images)
+              ? baseCreationResult.data.multi_images
+              : galleryImages;
           }
 
           syncedCount += 1;
+        }
+
+        // If no variants, base product is sufficient
+        if (!hasVariants) {
           continue;
         }
-        else {
+
+        // ----- Create variant (child) products -----
+        for (const variantEntry of variantEntries) {
+          const variantName = `${baseProductName} - ${variantEntry.nameSuffix}`;
+
+          const existingVariant = await handleGenericFindOne(req, "product", {
+            searchCriteria: {
+              product_name: variantName,
+              company_id: store.company_id,
+              deletedAt: null,
+            },
+          });
+
+          if (existingVariant.success) {
+            existingCount += 1;
+            continue;
+          }
+
+          const variantSku = createVariantSku(product?.sku, variantEntry.attributes);
+          const variantDescription = buildVariantDescription(
+            product?.description,
+            variantEntry.attributes
+          );
+
+          const variantReq = Object.create(req);
+          variantReq.body = {
+            product_name: variantName,
+            product_code: variantSku,
+            company_id: store.company_id,
+            brand_id: product.brand_id,
+            product_price: productPrice,
+            quantity: resolvedQuantity,
+            product_description: variantDescription,
+            product_image: baseProductImage,
+            multi_images: baseProductGallery,
+            deletedAt: null,
+            product_type: "Single",
+            weight: product.weight,
+            unit: product.unit,
+            category_id: categoryIds,
+            sku: variantSku,
+            parent_product_id: baseProductId,
+          };
+
+          const creationResult = await handleGenericCreate(variantReq, "product");
+          if (creationResult.success) {
+            syncedCount += 1;
+            continue;
+          }
+
           return res.status(500).json({
             success: false,
             message: "Failed to sync product from WooCommerce",
             error: creationResult.error,
           });
         }
+        // ===== End WooCommerce variant combination processing =====
       }
 
       return res.status(200).json({

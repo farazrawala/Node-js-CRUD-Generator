@@ -1,0 +1,52 @@
+Type,SKU,Name,Published,Visibility in catalog,Short description,Description,Tax status,In stock?,Stock,Backorders allowed?,Sold individually?,Weight (kg),Length (cm),Width (cm),Height (cm),Allow customer reviews?,Regular price,Categories,Tags,Images,Parent,Attribute 1 name,Attribute 1 value(s),Attribute 1 visible,Attribute 1 global
+simple,SIMP-001,Everyday Ceramic Mug,1,visible,"Classic 350ml mug for daily coffee.","Durable ceramic mug with ergonomic handle, dishwasher safe.",taxable,1,120,no,no,0.35,10,8,9,1,14.99,"Kitchen > Drinkware","coffee,home","",,,,
+simple,SIMP-002,Organic Cotton T-Shirt,1,visible,"Soft breathable tee made from 100% organic cotton.","Minimalist crewneck t-shirt available in several colors.",taxable,1,85,no,no,0.22,32,25,2,1,24.95,"Apparel > Tops","organic,casual","",,,,
+simple,SIMP-003,Bamboo Cutting Board,1,visible,"Sustainable bamboo cutting board with juice groove.","Naturally antibacterial cutting board treated with food-safe oil.",taxable,1,64,no,no,1.1,38,28,2,1,29.5,"Kitchen > Prep Tools","bamboo,cooking","",,,,
+simple,SIMP-004,Travel Stainless Bottle,1,visible,"Insulated bottle keeps beverages hot or cold for hours.","Double-wall vacuum insulated bottle with leak-proof cap.",taxable,1,200,no,no,0.42,26,7,7,1,32,"Outdoors > Hydration","travel,water bottle","",,,,
+simple,SIMP-005,Wireless Bluetooth Speaker,1,visible,"Compact speaker with 12-hour battery life.","IPX5 water-resistant speaker with deep bass and hands-free calling.",taxable,1,48,no,no,0.6,18,8,8,1,59.99,"Electronics > Audio","bluetooth,portable","",,,,
+simple,SIMP-006,Desk Plant Set,1,visible,"Pair of low-maintenance succulents in ceramic pots.","Includes two succulents with drainage trays and care guide.",taxable,1,150,no,no,1.4,15,15,18,1,34.5,"Home & Living > Decor","plants,greenery","",,,,
+simple,SIMP-007,Premium Yoga Mat,1,visible,"Non-slip yoga mat with eco-friendly materials.","6mm thick mat with alignment lines and carrying strap.",taxable,1,90,no,no,1.8,180,66,0.6,1,54,"Sports & Fitness > Yoga","fitness,yoga","",,,,
+simple,SIMP-008,USB-C Hub 6-in-1,1,visible,"Expand your laptop connectivity instantly.","Features HDMI, SD, microSD, USB-A x3, and Power Delivery.",taxable,1,70,no,no,0.08,10,4,1.5,1,44.9,"Electronics > Accessories","usb-c,adapter","",,,,
+simple,SIMP-009,Aromatic Soy Candle,1,visible,"Hand-poured soy candle with calming lavender scent.","40-hour burn time with cotton wick in reusable glass jar.",taxable,1,110,no,no,0.5,9,9,10,1,21.5,"Home & Living > Fragrance","candle,lavender","",,,,
+simple,SIMP-010,Chef's Santoku Knife,1,visible,"Japanese stainless steel santoku knife 7-inch.","Razor-sharp blade with pakkawood handle and sheath.",taxable,1,80,no,no,0.32,31,4.5,2.5,1,68,"Kitchen > Cutlery","knife,chef","",,,,
+variable,VAR-001,Heritage Hoodie,1,visible,"Cozy fleece hoodie with front pocket.","Unisex pullover hoodie crafted from heavyweight fleece.",taxable,1,,no,no,0.75,70,55,5,1,,,"Apparel > Outerwear","hoodie,winter","",,Size,"S, M, L",1,1
+variation,VAR-001-S,Heritage Hoodie - Small,1,visible,"","",taxable,1,50,no,no,0.7,68,54,4.5,1,59,"Apparel > Outerwear","","","VAR-001",Size,S,1,1
+variation,VAR-001-M,Heritage Hoodie - Medium,1,visible,"","",taxable,1,60,no,no,0.75,70,55,5,1,59,"Apparel > Outerwear","","","VAR-001",Size,M,1,1
+variation,VAR-001-L,Heritage Hoodie - Large,1,visible,"","",taxable,1,55,no,no,0.8,72,56,5.5,1,59,"Apparel > Outerwear","","","VAR-001",Size,L,1,1
+variable,VAR-002,Trail Running Shoes,1,visible,"Lightweight trail shoes with rugged outsole.","Engineered mesh upper and responsive cushioning for all terrains.",taxable,1,,no,no,0.9,32,12,11,1,,,"Footwear > Running",,"",,Size,"8, 9, 10",1,1
+variation,VAR-002-8,Trail Running Shoes - Size 8,1,visible,"","",taxable,1,40,no,no,0.85,31,11.5,10.5,1,89,"Footwear > Running","","","VAR-002",Size,8,1,1
+variation,VAR-002-9,Trail Running Shoes - Size 9,1,visible,"","",taxable,1,38,no,no,0.9,32,12,11,1,89,"Footwear > Running","","","VAR-002",Size,9,1,1
+variation,VAR-002-10,Trail Running Shoes - Size 10,1,visible,"","",taxable,1,42,no,no,0.92,33,12.5,11.5,1,89,"Footwear > Running","","","VAR-002",Size,10,1,1
+variable,VAR-003,Signature Polo Shirt,1,visible,"Smart casual polo with moisture-wicking fabric.","Classic 3-button placket with embroidered chest logo.",taxable,1,,no,no,0.3,72,50,1.5,1,,,"Apparel > Tops","polo,casual","",,Size,"S, M, XL",1,1
+variation,VAR-003-S,Signature Polo Shirt - Small,1,visible,"","",taxable,1,70,no,no,0.28,70,48,1.4,1,39,"Apparel > Tops","","","VAR-003",Size,S,1,1
+variation,VAR-003-M,Signature Polo Shirt - Medium,1,visible,"","",taxable,1,65,no,no,0.3,72,50,1.5,1,39,"Apparel > Tops","","","VAR-003",Size,M,1,1
+variation,VAR-003-XL,Signature Polo Shirt - XL,1,visible,"","",taxable,1,60,no,no,0.34,74,52,1.6,1,39,"Apparel > Tops","","","VAR-003",Size,XL,1,1
+variable,VAR-004,Canvas Sneakers,1,visible,"Classic lace-up sneakers with vulcanized sole.","Breathable canvas upper with padded collar for comfort.",taxable,1,,no,no,0.68,30,11,10,1,,,"Footwear > Casual",,"",,Size,"7, 8, 9",1,1
+variation,VAR-004-7,Canvas Sneakers - Size 7,1,visible,"","",taxable,1,35,no,no,0.65,29,10.8,9.8,1,54,"Footwear > Casual","","","VAR-004",Size,7,1,1
+variation,VAR-004-8,Canvas Sneakers - Size 8,1,visible,"","",taxable,1,37,no,no,0.68,30,11,10,1,54,"Footwear > Casual","","","VAR-004",Size,8,1,1
+variation,VAR-004-9,Canvas Sneakers - Size 9,1,visible,"","",taxable,1,33,no,no,0.7,31,11.2,10.2,1,54,"Footwear > Casual","","","VAR-004",Size,9,1,1
+variable,VAR-005,Fitness Leggings,1,visible,"High-waist leggings with compression fit.","Four-way stretch fabric with hidden phone pocket.",taxable,1,,no,no,0.28,90,32,1,1,,,"Sports & Fitness > Apparel",,"",,Size,"XS, S, M",1,1
+variation,VAR-005-XS,Fitness Leggings - XS,1,visible,"","",taxable,1,55,no,no,0.25,88,31,0.9,1,49,"Sports & Fitness > Apparel","","","VAR-005",Size,XS,1,1
+variation,VAR-005-S,Fitness Leggings - S,1,visible,"","",taxable,1,58,no,no,0.27,90,32,1,1,49,"Sports & Fitness > Apparel","","","VAR-005",Size,S,1,1
+variation,VAR-005-M,Fitness Leggings - M,1,visible,"","",taxable,1,60,no,no,0.29,92,33,1.1,1,49,"Sports & Fitness > Apparel","","","VAR-005",Size,M,1,1
+variable,VAR-006,Smart LED Bulb,1,visible,"Wi-Fi enabled RGB smart bulb.","Works with voice assistants and mobile app for scheduling.",taxable,1,,no,no,0.1,12,6,6,1,,,"Electronics > Smart Home",,"",,Pack Size,"Single, Double, Quad",1,1
+variation,VAR-006-1P,Smart LED Bulb - Single Pack,1,visible,"","",taxable,1,120,no,no,0.1,12,6,6,1,18,"Electronics > Smart Home","","","VAR-006",Pack Size,Single,1,1
+variation,VAR-006-2P,Smart LED Bulb - Double Pack,1,visible,"","",taxable,1,80,no,no,0.18,12,6,6,1,32,"Electronics > Smart Home","","","VAR-006",Pack Size,Double,1,1
+variation,VAR-006-4P,Smart LED Bulb - Quad Pack,1,visible,"","",taxable,1,50,no,no,0.32,12,6,6,1,54,"Electronics > Smart Home","","","VAR-006",Pack Size,Quad,1,1
+variable,VAR-007,Luxe Bath Towel,1,visible,"Ultra-soft Turkish cotton bath towel.","600 GSM towel with double-stitched hems.",taxable,1,,no,no,0.55,140,70,1.5,1,,,"Home & Living > Bath",,"",,Color,"White, Ocean Blue, Charcoal",1,1
+variation,VAR-007-W,Luxe Bath Towel - White,1,visible,"","",taxable,1,90,no,no,0.55,140,70,1.5,1,29,"Home & Living > Bath","","","VAR-007",Color,"White",1,1
+variation,VAR-007-B,Luxe Bath Towel - Ocean Blue,1,visible,"","",taxable,1,95,no,no,0.55,140,70,1.5,1,29,"Home & Living > Bath","","","VAR-007",Color,"Ocean Blue",1,1
+variation,VAR-007-C,Luxe Bath Towel - Charcoal,1,visible,"","",taxable,1,88,no,no,0.55,140,70,1.5,1,29,"Home & Living > Bath","","","VAR-007",Color,"Charcoal",1,1
+variable,VAR-008,Gourmet Spice Kit,1,visible,"Collection of premium spices for global cuisine.","Includes 6 glass jars with labels and recipe booklet.",taxable,1,,no,no,1.2,25,18,10,1,,,"Grocery > Pantry",,"",,Blend,"Classic, Smoky BBQ, Mediterranean",1,1
+variation,VAR-008-CL,Gourmet Spice Kit - Classic,1,visible,"","",taxable,1,75,no,no,1.2,25,18,10,1,39,"Grocery > Pantry","","","VAR-008",Blend,Classic,1,1
+variation,VAR-008-BB,Gourmet Spice Kit - Smoky BBQ,1,visible,"","",taxable,1,68,no,no,1.2,25,18,10,1,39,"Grocery > Pantry","","","VAR-008",Blend,"Smoky BBQ",1,1
+variation,VAR-008-MD,Gourmet Spice Kit - Mediterranean,1,visible,"","",taxable,1,72,no,no,1.2,25,18,10,1,39,"Grocery > Pantry","","","VAR-008",Blend,Mediterranean,1,1
+variable,VAR-009,Urban Backpack,1,visible,"Water-resistant backpack with padded laptop sleeve.","18L capacity with multiple organizer pockets.",taxable,1,,no,no,1.1,47,30,14,1,,,"Outdoors > Gear",,"",,Color,"Black, Slate Grey, Forest Green",1,1
+variation,VAR-009-BK,Urban Backpack - Black,1,visible,"","",taxable,1,65,no,no,1.1,47,30,14,1,74,"Outdoors > Gear","","","VAR-009",Color,Black,1,1
+variation,VAR-009-SG,Urban Backpack - Slate Grey,1,visible,"","",taxable,1,62,no,no,1.1,47,30,14,1,74,"Outdoors > Gear","","","VAR-009",Color,"Slate Grey",1,1
+variation,VAR-009-FG,Urban Backpack - Forest Green,1,visible,"","",taxable,1,58,no,no,1.1,47,30,14,1,74,"Outdoors > Gear","","","VAR-009",Color,"Forest Green",1,1
+variable,VAR-010,Artisan Coffee Beans,1,visible,"Small-batch roasted coffee beans.","Single-origin beans with tasting notes on each bag.",taxable,1,,no,no,1,12,8,20,1,,,"Grocery > Beverages",,"",,Roast,"Light, Medium, Dark",1,1
+variation,VAR-010-LT,Artisan Coffee Beans - Light Roast,1,visible,"","",taxable,1,90,no,no,1,12,8,20,1,18,"Grocery > Beverages","","","VAR-010",Roast,Light,1,1
+variation,VAR-010-MD,Artisan Coffee Beans - Medium Roast,1,visible,"","",taxable,1,85,no,no,1,12,8,20,1,18,"Grocery > Beverages","","","VAR-010",Roast,Medium,1,1
+variation,VAR-010-DK,Artisan Coffee Beans - Dark Roast,1,visible,"","",taxable,1,82,no,no,1,12,8,20,1,18,"Grocery > Beverages","","","VAR-010",Roast,Dark,1,1
+
