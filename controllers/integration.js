@@ -1042,7 +1042,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
 
         const categoryIds = [];
         const categoryNames = collectShopifyCategoryNames(product);
-
+        // Ensure each Shopify taxonomy value exists locally before we proceed.
         for (const categoryName of categoryNames) {
           const normalizedName = sanitizeWooText(categoryName);
           if (!normalizedName) {
@@ -1063,6 +1063,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
           }
 
           const generatedSlug = generateSlug(normalizedName);
+          // Try to locate an existing category by slug (global) first.
           const slugLookup = await handleGenericFindOne(req, "category", {
             searchCriteria: {
               // slug: generatedSlug,
@@ -1077,6 +1078,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
             continue;
           }
 
+          // Fall back to a global name match in case slug data is legacy.
           const fallbackNameLookup = await handleGenericFindOne(req, "category", {
             searchCriteria: {
               name: normalizedName,
@@ -1105,6 +1107,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
             continue;
           }
 
+          // Duplicate insert? Retry by slug and name without company filters.
           if (newCategoryResult.status === 409) {
             const retryLookup = await handleGenericFindOne(req, "category", {
               searchCriteria: {
@@ -1416,15 +1419,14 @@ function buildVariantDescription(baseDescription, attributes = []) {
         }
       }
 
-      const parenttUpdateResult = await Product.updateMany(
+      // As a final pass, ensure legacy single products no longer point to themselves.
+      const parentUpdateResult = await Product.updateMany(
         {
           parent_product_id: { $exists: true, $ne: null },
           $expr: { $eq: ["$_id", "$parent_product_id"] },
         },
         { $set: { parent_product_id: null , product_type: "Variable"} }
       );
-
-
 
       return res.status(200).json({
         success: true,

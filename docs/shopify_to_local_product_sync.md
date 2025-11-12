@@ -99,7 +99,7 @@ GET /api/integration/sync-store-product/6520abe1234567890fedcba0
    ```
 2. If missing, create with `handleGenericCreate`.
 3. Download images with `saveProductImagesLocally(baseProductId, imageEntries)` (same helper as WooCommerce).
-4. Walk each variant (`product.variants`) and create/update child products with `parent_product_id`.
+4. Walk each variant (`product.variants`) and create/update child products with `parent_product_id`. When variants exist, the base product is updated so `product_type` is `"Variable"`, while each child remains `"Single"`.
 
 ## Static Files
 
