@@ -9,6 +9,7 @@ const {
   handleGenericGetById,
   handleGenericGetAll,
   handleGenericFindOne,
+  generateSlug,
 } = require("../utils/modelHelper");
 
 
@@ -36,8 +37,18 @@ const {
         per_page: 100,
       });
       const remoteCategories = Array.isArray(response?.data)
-        ? response.data
+        ? [...response.data]
         : [];
+
+      remoteCategories.sort((a, b) => {
+        const parentA = typeof a?.parent === "number" ? a.parent : 0;
+        const parentB = typeof b?.parent === "number" ? b.parent : 0;
+        if (parentA !== parentB) return parentA - parentB;
+        return (typeof a?.id === "number" ? a.id : 0) - (typeof b?.id === "number" ? b.id : 0);
+      });
+      
+      // console.log("🔍 remoteCategories:", remoteCategories);
+      // return false;
 
       if (remoteCategories.length === 0) {
         return res.status(200).json({
@@ -90,13 +101,14 @@ const {
           continue;
         }
 
-        const searchCriteria = {
-          name: trimmedName,
-        };
+        const companyId =
+          store?.company_id ?? req.user?.company_id ?? null;
 
-        if (req.user?.company_id) {
-          searchCriteria.company_id = req.user.company_id;
-        }
+        const categorySlug = generateSlug(trimmedName);
+        const searchCriteria = {
+          ...(companyId ? { company_id: companyId } : {}),
+          $or: [{ name: trimmedName }, { slug: categorySlug }],
+        };
 
         const findReq = Object.create(req);
         findReq.body = searchCriteria;
@@ -105,8 +117,22 @@ const {
           searchCriteria,
         });
 
-        if (existingCategory.success) {
+        if (existingCategory.success && existingCategory.data) {
           wooToLocalCategoryIds.set(category.id, existingCategory.data._id);
+          if (existingCategory.data.deletedAt) {
+            const restoreReq = Object.create(req);
+            restoreReq.params = {
+              ...(restoreReq.params || {}),
+              id: existingCategory.data._id,
+            };
+            restoreReq.body = {
+              deletedAt: null,
+              status: "active",
+              isActive: true,
+            };
+
+            await handleGenericUpdate(restoreReq, "category");
+          }
           syncResults.skipped.push({
             wooCategoryId: category.id,
             name: trimmedName,
@@ -117,6 +143,7 @@ const {
 
         const categoryReq = Object.create(req);
         categoryReq.body = {
+          slug: categorySlug,
           name: trimmedName,
           description: category?.description || "",
           isActive: category?.display !== "hidden",
@@ -124,6 +151,9 @@ const {
             typeof category?.menu_order === "number" ? category.menu_order : 0,
           parent_id: parentId ?? null,
         };
+        if (companyId) {
+          categoryReq.body.company_id = companyId;
+        }
 
         const creationResult = await handleGenericCreate(categoryReq, "category");
 
@@ -409,8 +439,9 @@ const {
     }
   }
 
-    ///////////////Sync  Categories///////////////
-    ///////////////Sync  Brand///////////////    
+  ///////////////Sync  Categories///////////////
+  ///////////////Sync  Brand///////////////    
+
   async function syncStoreBrand(req, res) {
     const integrationResponse = await handleGenericGetById(
       req,
@@ -445,7 +476,7 @@ const {
       });
     }
     
-    if (!/^[a-z0-9][a-z0-9-]*\.[a-z0-9.-]+$/i.test(shopDomain)) && shopDomain !== "myshopify.com" {
+    if (!/^[a-z0-9][a-z0-9-]*\.[a-z0-9.-]+$/i.test(shopDomain) && shopDomain !== "myshopify.com") {
       if (/^[a-z0-9][a-z0-9-]*$/i.test(shopDomain)) {
         shopDomain = `${shopDomain}.myshopify.com`;
       } else {
@@ -545,10 +576,258 @@ const {
       req.body = originalBody;
     }
   }
-  
+
     ///////////////Sync  Brand///////////////
 
   ///////////////Sync  Products///////////////
+  async function syncStoreProduct(req, res) {
+    const integrationResponse = await handleGenericGetById(
+      req,
+      "integration",
+      {
+        excludeFields: [],
+      }
+    );
+    if (integrationResponse.data.store_type === "shopify") {
+      return syncShopifyProduct(req, res, integrationResponse.data);
+    } else if (integrationResponse.data.store_type === "woocommerce") {
+      return syncWordpressProduct(req, res, integrationResponse.data);
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid store type",
+      });
+    }
+  }
+
+  async function syncShopifyProduct(req, res, store = {}) {
+    let shopDomain = (store?.url || "")
+      .trim()
+      .replace(/^https?:\/\//i, "")
+      .replace(/\/$/, "");
+      
+    if (!shopDomain) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing Shopify shop URL",
+      });
+    }
+    
+    if (!/^[a-z0-9][a-z0-9-]*\.[a-z0-9.-]+$/i.test(shopDomain) && shopDomain !== "myshopify.com") {
+      if (/^[a-z0-9][a-z0-9-]*$/i.test(shopDomain)) {
+        shopDomain = `${shopDomain}.myshopify.com`;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid Shopify shop domain",
+          details: shopDomain,
+        });
+      }
+    }
+      
+    if (!/\.myshopify\.com$/i.test(shopDomain)) {
+      return res.status(400).json({
+        success: false,
+        message: "Shopify domain must end with .myshopify.com. Please provide the myshopify domain.",
+        details: shopDomain,
+      });
+    }
+    
+    
+      
+    const STATIC_SHOPIFY_API_KEY = store.key;
+    const STATIC_SHOPIFY_SECRET = store.secret;
+    const adminApiAccessToken = store.token;
+
+    if (!adminApiAccessToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing Shopify access token. Please provide a valid token in the integration record.",
+      });
+    }
+
+    const shopify = shopifyApi({
+      apiKey: STATIC_SHOPIFY_API_KEY,
+      apiSecretKey: STATIC_SHOPIFY_SECRET,
+      adminApiAccessToken,
+      scopes: ["read_products"],
+      hostName: shopDomain,
+      apiVersion: ApiVersion.October24,
+      isCustomStoreApp: true,
+    });
+
+    const session = shopify.session.customAppSession(shopDomain);
+    session.accessToken = adminApiAccessToken;
+
+    const originalBody = req.body;
+    try {
+      const client = new shopify.clients.Rest({ session });
+      const productsResponse = await client.get({ path: "products" });
+      const products = productsResponse?.body?.products || productsResponse?.body || [];
+      return res.status(200).json({
+        success: true,
+        message: "Products fetched successfully",
+        data: products,
+        meta: productsResponse?.headers ? { headers: productsResponse.headers } : undefined,
+      });
+    } catch (error) {
+      const errorPayload =
+        error?.response?.body ??
+        error?.response?.data ??
+        (typeof error?.message === "string" ? error.message : "Failed to fetch products from Shopify");
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch products from Shopify",
+        error: errorPayload,
+      });
+    } finally {
+      req.body = originalBody;
+    }
+  }   
+
+  async function syncWordpressProduct(req, res, store = {}) {
+    
+    const syncStoreCategoryResponse = await syncStoreCategory(req, res, store);
+    if (!syncStoreCategoryResponse.success) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to sync categories",
+        error: syncStoreCategoryResponse.error,
+      });
+    }
+
+    // const categories = syncStoreCategoryResponse.data;
+    const woocommerce = new WooCommerceRestApi({
+      url: store.url,
+      consumerKey: store.key,
+      consumerSecret: store.secret,
+      version: "wc/v3",
+    });
+
+    const originalBody = req.body;
+    try {
+      const response = await woocommerce.get("products");
+      const products = response?.data || [];
+
+      if (products.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "No products found in WooCommerce store",
+          data: [],
+        });
+      }
+      let syncedCount = 0;
+      let existingCount = 0;
+
+      for (const product of products) {
+        const existingProduct = await handleGenericFindOne(req, "product", {
+          searchCriteria: {
+            product_name: product.name.trim(),
+            company_id: store.company_id,
+            deletedAt: null,
+          },
+        }); 
+        if (existingProduct.success) {
+          existingCount += 1;
+          continue;
+        }
+        console.log("🔍 product.categories:", product.categories);
+        const categoryIds = [];
+        if (Array.isArray(product.categories)) {
+          for (const category of product.categories) {
+            console.log("🔍 category name:", category?.name);
+            const categoryName = category?.name?.trim();
+            if (!categoryName) {
+              continue;
+            }
+
+            const categoryResponse = await handleGenericFindOne(req, "category", {
+              searchCriteria: {
+                name: categoryName,
+                company_id: store.company_id,
+                deletedAt: null,
+              },
+            });
+            console.log("🔍 categoryResponse:", categoryResponse);
+
+            if (categoryResponse.success && categoryResponse.data?._id) {
+              categoryIds.push(categoryResponse.data._id);
+              continue;
+            }
+
+            const categoryReq = Object.create(req);
+            categoryReq.body = {
+              name: categoryName,
+              company_id: store.company_id,
+              parent_id: null,
+              deletedAt: null,
+            };
+            const newCategoryResult = await handleGenericCreate(categoryReq, "category");
+            console.log("🔍 newCategoryResult:", newCategoryResult);
+
+            if (newCategoryResult.success && newCategoryResult.data?._id) {
+              categoryIds.push(newCategoryResult.data._id);
+              continue;
+            }
+
+            return res.status(500).json({
+              success: false,
+              message: "Failed to create category",
+              error: newCategoryResult.error || "unknown_error",
+            });
+          }
+        }
+
+        const productReq = Object.create(req);
+        productReq.body = {
+          product_name: product.name.trim(),
+          product_code: product.sku,
+          company_id: store.company_id,
+          brand_id: product.brand_id,
+          product_price: product.price,
+          quantity: product.quantity,
+          description: product.description,
+          image: product.image,
+          deletedAt: null,
+          product_type: product.type === "variable" ? "Variable" : "Single",
+          weight: product.weight,
+          unit: product.unit,
+          category_id: categoryIds,
+
+        };
+
+        const creationResult = await handleGenericCreate(productReq, "product");
+        console.log("🔍 creationResult:", creationResult);
+        if (creationResult.success) {
+          syncedCount += 1;
+          continue;
+        }
+        else {
+          return res.status(500).json({
+            success: false,
+            message: "Failed to sync product from WooCommerce",
+            error: creationResult.error,
+          });
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Products synced successfully",
+        data: products,
+        categories: syncStoreCategoryResponse,
+        synced_count: syncedCount,
+        existing_count: existingCount,
+      });
+      
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to sync products from WooCommerce",
+        error: error.message,
+      });
+    }
+  }
 
 
   ///////////////Sync  Orders///////////////
@@ -686,6 +965,8 @@ const {
   module.exports = {
   
     checkIntegrationActive,
-    syncStoreCategory
+    syncStoreCategory,
+    syncStoreBrand,
+    syncStoreProduct
   };
   

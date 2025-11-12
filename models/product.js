@@ -65,7 +65,7 @@ const modelSchema = new mongoose.Schema(
     product_type:{
       type: String,
       required: true,
-      enum: ["Single", "Variant"], 
+      enum: ["Single", "Variable"], 
       default: "Single"   
     },
     category_id: {
