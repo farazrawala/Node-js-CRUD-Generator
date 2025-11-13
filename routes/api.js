@@ -38,6 +38,10 @@ const {
   syncStoreProduct
 } = require("../controllers/integration");
 
+const {
+  execute_process
+} = require("../controllers/process");
+
 
 const {
   apiCreateStockTransfer,
@@ -134,6 +138,9 @@ router.get("/integration/sync-store-category/:id", syncStoreCategory);
 router.get("/integration/sync-store-product/:id", syncStoreProduct);
 router.get("/integration/find-product-relations/:id", syncProductRelations);
 
+
+// Process routes
+router.get("/process/execute-process", execute_process);
 
 // Product warehouse inventory management routes
 router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);

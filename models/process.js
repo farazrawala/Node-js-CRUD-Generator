@@ -16,6 +16,7 @@ const modelSchema = new mongoose.Schema(
     action:{
         type: String,
         required: true,
+        enum: ["fetch_products", "sync_product", "delete_product","fetch_category","sync_category","delete_category"],
         field_name: "Action",
     },
     count:{ 
@@ -45,7 +46,6 @@ const modelSchema = new mongoose.Schema(
     },
     remarks:{
         type: String,
-        required: true,
         field_name: "Remarks",
     },
     
