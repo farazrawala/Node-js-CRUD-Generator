@@ -10,10 +10,6 @@
 // process category fetch  done
 curl "https://example-store.com/wp-json/wc/store/v1/products/brands"
 
-
-
-Backend admin 
-
 // sync categories (done)
 // process fetch product_fetch wp single (done)
 // process fetch product_fetch wp variant (done)
@@ -23,6 +19,10 @@ Backend admin
 // sync categories sh (done)
 // process fetch product_fetch sh single  
 // process fetch product_fetch sh variant
+
+
+
+Backend admin 
 
 
 /insert into db

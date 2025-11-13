@@ -1435,7 +1435,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
         synced_count: syncedCount,
         existing_count: existingCount,
         pagination,
-        parenttUpdateResult,
+        // parenttUpdateResult,
         synced_products: syncResults,
         meta: productsResponse?.headers ? { headers: productsResponse.headers } : undefined,
       });
@@ -1864,6 +1864,28 @@ function buildVariantDescription(baseDescription, attributes = []) {
   }
 
 
+
+  // test api to find product relations
+  async function syncProductRelations(req, res) {
+   
+
+    const productRelation = await handleGenericFindOne(req, "product", {
+      searchCriteria: {
+        _id: req.params.id,
+      },
+      populate: ["product_relations"],
+    });
+    return res.status(200).json({
+      success: true,
+      message: "Product exists in the system",
+      data: productRelation,
+    });
+  }
+  // test api to find product relations
+
+
+  
+
   ///////////////Sync  Orders///////////////
 
   ///////////////Sync  Customers///////////////
@@ -2001,6 +2023,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
     checkIntegrationActive,
     syncStoreCategory,
     // syncStoreBrand,
+    syncProductRelations,
     syncStoreProduct
   };
   

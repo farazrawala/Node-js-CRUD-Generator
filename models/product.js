@@ -80,6 +80,13 @@ const modelSchema = new mongoose.Schema(
       field_name: "Category",
       field_type: "multiselect",
     },
+    product_relations: {
+      type: [mongoose.Schema.Types.ObjectId],
+      ref: "product_relations",
+      default: [],
+      field_name: "Product Relations",
+    },
+    
     company_id:{
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
