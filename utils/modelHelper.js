@@ -345,6 +345,55 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
       }
     });
 
+    // Process map fields (e.g., permissions[integration][view])
+    Object.keys(req.body).forEach((key) => {
+      const mapMatch = key.match(/^(.+)\[([^\]]+)\]\[([^\]]+)\]$/);
+      if (!mapMatch) {
+        return;
+      }
+
+      const mapFieldName = mapMatch[1];
+      const mapKey = mapMatch[2];
+      const mapSubField = mapMatch[3];
+
+      const schemaPath = Model.schema.paths[mapFieldName];
+      const isMapField =
+        schemaPath &&
+        typeof schemaPath.instance === 'string' &&
+        schemaPath.instance.toLowerCase().startsWith('map');
+
+      if (!isMapField) {
+        console.log(`🔍 ${mapFieldName} is not a Map field, skipping map processing`);
+        return;
+      }
+
+      if (!modelData[mapFieldName]) {
+        modelData[mapFieldName] = {};
+      }
+
+      if (!modelData[mapFieldName][mapKey]) {
+        modelData[mapFieldName][mapKey] = {};
+      }
+
+      const rawValue = req.body[key];
+      let value = rawValue;
+
+      if (typeof rawValue === 'string') {
+        const lower = rawValue.toLowerCase();
+        if (lower === 'true') {
+          value = true;
+        } else if (lower === 'false') {
+          value = false;
+        }
+      }
+
+      modelData[mapFieldName][mapKey][mapSubField] = value;
+      console.log(
+        `🗺️ Processed map field: ${mapFieldName}[${mapKey}].${mapSubField} =`,
+        value
+      );
+    });
+
     // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
     // These fields come as indexed format or already parsed into arrays/objects
     const mongoose = require('mongoose');

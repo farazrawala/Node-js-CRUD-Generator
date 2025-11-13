@@ -1,6 +1,24 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcrypt");
 
+const permissionSetSchema = new mongoose.Schema(
+  {
+    view: {
+      type: Boolean,
+      default: false,
+    },
+    edit: {
+      type: Boolean,
+      default: false,
+    },
+    delete: {
+      type: Boolean,
+      default: false,
+    },
+  },
+  { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -25,6 +43,12 @@ const userSchema = new mongoose.Schema(
       required: true,
       default: ["USER"], //  ADMIN, SUPERADMIN, VENDOR, USER ,CUSTOMER
       field_type: "multiselect",
+    },
+    permissions: {
+      type: Map,
+      of: permissionSetSchema,
+      default: {},
+      field_name: "Permissions",
     },
     // default fields
       company_id:{
