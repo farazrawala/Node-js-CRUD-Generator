@@ -118,14 +118,6 @@ async function handleUserLogin(req, res) {
       user: userWithToken,
     };
 
-    // // If company data was populated, ensure it's in the response
-    // if (companyData) {
-    //   responseData.user.company_id = companyData;
-    //   console.log("✅ Company data added to response:", companyData);
-    // } else {
-    //   console.log("⚠️ No company data found for user");
-    // }
-
     return res.status(200).json(responseData);
   } catch (error) {
     console.error("❌ User login error:", error);

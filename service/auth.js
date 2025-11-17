@@ -5,7 +5,10 @@ function setUserToken(user) {
   console.log("🚀 setUserToken function called with user:", user);
 
   // Convert Mongoose document to plain object
-  const userObject = user.toObject ? user.toObject() : { ...user };
+  // Use toObject with options to ensure Map fields (like permissions) are converted properly
+  const userObject = user.toObject
+    ? user.toObject({ flattenMaps: true })
+    : { ...user };
 
   const token = jwt.sign(
     {
@@ -15,10 +18,11 @@ function setUserToken(user) {
       email: userObject.email,
       password: userObject.password,
       role: userObject.role,
+      permissions: userObject.permissions,
       deletedAt: userObject.deletedAt,
       createdAt: userObject.createdAt,
       updatedAt: userObject.updatedAt,
-      __v: userObject.__v
+      __v: userObject.__v,
     },
     secret
   );
@@ -29,7 +33,7 @@ function setUserToken(user) {
 
 function getUserToken(token) {
   if (!token) return null;
-  
+
   try {
     const user = jwt.verify(token, secret);
     // console.log("getUser", user);
@@ -55,7 +59,7 @@ function createToken(user) {
       deletedAt: userObject.deletedAt,
       createdAt: userObject.createdAt,
       updatedAt: userObject.updatedAt,
-      __v: userObject.__v
+      __v: userObject.__v,
     },
     secret
   );
