@@ -1,0 +1,96 @@
+<%
+  // Build a permissions grid using the config supplied from routes/admin.js.
+  const options = field.options || {};
+  const modules = options.modules || [];
+  const actions = options.actions || [
+    { key: 'view', label: 'View' },
+    { key: 'edit', label: 'Edit' },
+    { key: 'delete', label: 'Delete' },
+  ];
+
+  const normalizeKey = (item) => {
+    if (!item) return '';
+    if (typeof item === 'string') return item;
+    return item.key || item.value || item.name || '';
+  };
+
+  const normalizeLabel = (item, fallback) => {
+    if (!item) return fallback;
+    if (typeof item === 'string') return item.charAt(0).toUpperCase() + item.slice(1);
+    return item.label || fallback;
+  };
+
+  const existingPermissionsRaw = record && record.permissions ? record.permissions : {};
+  // When editing, convert the Mongoose map (and any toObject helpers) to a plain object.
+  const existingPermissions = (() => {
+    if (!existingPermissionsRaw) return {};
+    if (typeof existingPermissionsRaw.toObject === 'function') {
+      return existingPermissionsRaw.toObject();
+    }
+    return existingPermissionsRaw;
+  })();
+%>
+
+<div class="space-y-4">
+  <div class="border border-gray-200 rounded-md overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+            Module
+          </th>
+          <% actions.forEach(action => { 
+              const actionKey = normalizeKey(action);
+              const actionLabel = normalizeLabel(action, actionKey);
+          %>
+            <th scope="col" class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+              <%= actionLabel %>
+            </th>
+          <% }) %>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% if (modules.length === 0) { %>
+          <tr>
+            <td colspan="<%= actions.length + 1 %>" class="px-4 py-4 text-sm text-gray-500 text-center">
+              No permission modules configured. Update `fieldOptions.permissions.modules` in `routes/admin.js`.
+            </td>
+          </tr>
+        <% } else { %>
+          <% modules.forEach(module => {
+              const moduleKey = normalizeKey(module);
+              const moduleLabel = normalizeLabel(module, moduleKey);
+              const modulePermissions = existingPermissions[moduleKey] || {};
+          %>
+            <tr>
+              <td class="px-4 py-3 text-sm font-medium text-gray-900">
+                <%= moduleLabel %>
+              </td>
+              <% actions.forEach(action => {
+                  const actionKey = normalizeKey(action);
+                  const isChecked = modulePermissions[actionKey] === true || modulePermissions[actionKey] === 'true';
+              %>
+                <td class="px-4 py-3 text-center">
+                  <label class="inline-flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      name="permissions[<%= moduleKey %>][<%= actionKey %>]"
+                      value="true"
+                      class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                      <%= isChecked ? 'checked' : '' %>
+                    >
+                    <span class="text-sm text-gray-600">Allow</span>
+                  </label>
+                </td>
+              <% }) %>
+            </tr>
+          <% }) %>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-sm text-gray-500">
+    Permissions that are left unchecked default to “No”. Update the module list in `fieldOptions.permissions.modules` to expose additional modules.
+  </p>
+</div>
+

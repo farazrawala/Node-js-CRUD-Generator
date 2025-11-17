@@ -55,6 +55,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     cssClasses = {},
     // Custom JavaScript functions
     customJS = {},
+    listHiddenFields = [],
     // Base URL for assets and links
     baseUrl = process.env.BASE_URL || 'http://localhost:8000'
   } = options;
@@ -72,6 +73,13 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
   // Generate field configuration
   const fieldConfig = generateFieldConfig(Model, fields, fieldTypes, fieldLabels, fieldValidation, fieldOptions);
+
+  // Mark fields that should be hidden in the list view.
+  listHiddenFields.forEach(fieldName => {
+    if (fieldConfig[fieldName]) {
+      fieldConfig[fieldName].showInList = false;
+    }
+  });
 
   /**
    * LIST - Display all records with pagination, search, and filters
@@ -274,6 +282,16 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       }
 
+      // Build a copy of fieldConfig for listing (exclude hidden fields)
+      const listFieldConfig = {};
+      Object.keys(fieldConfig).forEach(fieldName => {
+        const field = fieldConfig[fieldName];
+        if (!field || field.showInList === false) {
+          return;
+        }
+        listFieldConfig[fieldName] = field;
+      });
+
       // Render the list view
       res.render('admin/list', {
         title: `${titleCase}s`,
@@ -282,6 +300,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         titleCase,
         records,
         fieldConfig,
+        listFieldConfig,
         showDeleted,
         deletedPagination,
         softDelete, // Pass softDelete flag to template
@@ -923,6 +942,84 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       });
       
+      // Handle map-style fields (e.g., permissions[integration][view])
+      Object.keys(fieldConfig).forEach(fieldName => {
+        const field = fieldConfig[fieldName];
+        if (!field) {
+          return;
+        }
+
+        // Detect inputs like permissions[module][action] and convert them to nested objects.
+        const bracketPattern = new RegExp(`^${fieldName}\\[([^\\]]+)\\]\\[([^\\]]+)\\]$`);
+        const matchingKeys = Object.keys(req.body).filter(key => bracketPattern.test(key));
+        if (matchingKeys.length === 0) {
+          return;
+        }
+
+        const normalizeKey = (item) => {
+          if (!item) return '';
+          if (typeof item === 'string') return item;
+          return item.key || item.value || item.name || '';
+        };
+
+        const modulesOption = field.options?.modules || [];
+        const actionsOption = field.options?.actions || [];
+        const defaultActions = actionsOption.length > 0
+          ? actionsOption
+          : [{ key: 'view' }, { key: 'edit' }, { key: 'delete' }];
+
+        const modulesKeys = modulesOption.length > 0
+          ? modulesOption.map(normalizeKey)
+          : [];
+        const actionKeys = defaultActions.map(normalizeKey);
+
+        const mapData = {};
+
+        matchingKeys.forEach(key => {
+          const [, moduleKeyRaw, actionKeyRaw] = key.match(bracketPattern);
+          const moduleKey = moduleKeyRaw;
+          const actionKey = actionKeyRaw;
+
+          let rawValue = req.body[key];
+          if (Array.isArray(rawValue)) {
+            rawValue = rawValue[rawValue.length - 1];
+          }
+
+          const lowerValue = typeof rawValue === 'string' ? rawValue.toLowerCase() : rawValue;
+          const boolValue =
+            rawValue === true ||
+            rawValue === false ||
+            lowerValue === 'true' ||
+            lowerValue === 'false'
+              ? (rawValue === true || lowerValue === 'true')
+              : ['1', 1, 'on', 'yes'].includes(rawValue);
+
+          if (!mapData[moduleKey]) {
+            mapData[moduleKey] = {};
+          }
+          mapData[moduleKey][actionKey] = boolValue;
+
+          delete data[key];
+          delete req.body[key];
+        });
+
+        // Ensure that every configured module/action pair exists so unchecked boxes become false.
+        const modulesToEnsure = modulesKeys.length > 0 ? modulesKeys : Object.keys(mapData);
+
+        modulesToEnsure.forEach(moduleKey => {
+          if (!mapData[moduleKey]) {
+            mapData[moduleKey] = {};
+          }
+          actionKeys.forEach(actionKey => {
+            if (mapData[moduleKey][actionKey] === undefined) {
+              mapData[moduleKey][actionKey] = false;
+            }
+          });
+        });
+
+        data[fieldName] = mapData;
+      });
+
       // Don't handle file uploads here - we'll do it after creating the record to get the ID
       // Store file references for later processing
       const filesToUpload = {};
@@ -1490,6 +1587,84 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       });
       
+      // Handle map-style fields (e.g., permissions[integration][view]) during update
+      Object.keys(fieldConfig).forEach(fieldName => {
+        const field = fieldConfig[fieldName];
+        if (!field) {
+          return;
+        }
+
+        // Detect inputs like permissions[module][action] when updating and rebuild the map.
+        const bracketPattern = new RegExp(`^${fieldName}\\[([^\\]]+)\\]\\[([^\\]]+)\\]$`);
+        const matchingKeys = Object.keys(req.body).filter(key => bracketPattern.test(key));
+        if (matchingKeys.length === 0) {
+          return;
+        }
+
+        const normalizeKey = (item) => {
+          if (!item) return '';
+          if (typeof item === 'string') return item;
+          return item.key || item.value || item.name || '';
+        };
+
+        const modulesOption = field.options?.modules || [];
+        const actionsOption = field.options?.actions || [];
+        const defaultActions = actionsOption.length > 0
+          ? actionsOption
+          : [{ key: 'view' }, { key: 'edit' }, { key: 'delete' }];
+
+        const modulesKeys = modulesOption.length > 0
+          ? modulesOption.map(normalizeKey)
+          : [];
+        const actionKeys = defaultActions.map(normalizeKey);
+
+        const mapData = {};
+
+        matchingKeys.forEach(key => {
+          const [, moduleKeyRaw, actionKeyRaw] = key.match(bracketPattern);
+          const moduleKey = moduleKeyRaw;
+          const actionKey = actionKeyRaw;
+
+          let rawValue = req.body[key];
+          if (Array.isArray(rawValue)) {
+            rawValue = rawValue[rawValue.length - 1];
+          }
+
+          const lowerValue = typeof rawValue === 'string' ? rawValue.toLowerCase() : rawValue;
+          const boolValue =
+            rawValue === true ||
+            rawValue === false ||
+            lowerValue === 'true' ||
+            lowerValue === 'false'
+              ? (rawValue === true || lowerValue === 'true')
+              : ['1', 1, 'on', 'yes'].includes(rawValue);
+
+          if (!mapData[moduleKey]) {
+            mapData[moduleKey] = {};
+          }
+          mapData[moduleKey][actionKey] = boolValue;
+
+          delete updateData[key];
+          delete req.body[key];
+        });
+
+        // Ensure every configured module/action pair is present on the payload.
+        const modulesToEnsure = modulesKeys.length > 0 ? modulesKeys : Object.keys(mapData);
+
+        modulesToEnsure.forEach(moduleKey => {
+          if (!mapData[moduleKey]) {
+            mapData[moduleKey] = {};
+          }
+          actionKeys.forEach(actionKey => {
+            if (mapData[moduleKey][actionKey] === undefined) {
+              mapData[moduleKey][actionKey] = false;
+            }
+          });
+        });
+
+        updateData[fieldName] = mapData;
+      });
+      
       // Handle image removal for file fields
       console.log('🔍 Full request body keys:', Object.keys(req.body));
       console.log('🔍 Checking for removed images in request body:', Object.keys(req.body).filter(key => key.startsWith('removed_images_')));
@@ -1925,7 +2100,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             return schemaPath.default;
           }
           return null;
-        })()
+        })(),
+        showInList: true
       };
 
       config[fieldName] = field;

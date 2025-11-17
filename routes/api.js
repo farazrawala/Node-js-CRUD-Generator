@@ -10,9 +10,9 @@ const {
   // handleUserUpdate,
   // getAllUser,
   // userById,
- 
+
   // findUserByEmail,
-  
+
   handleUserLogin,
   handleAdminLogin,
   handleUserSignupCompany,
@@ -35,23 +35,17 @@ const {
   syncStoreCategory,
   // syncStoreBrand,
   syncProductRelations,
-  syncStoreProduct
+  syncStoreProduct,
 } = require("../controllers/integration");
 
-const {
-  execute_process
-} = require("../controllers/process");
-
+const { execute_process } = require("../controllers/process");
 
 const {
   apiCreateStockTransfer,
-  apiGetStockTransfers
+  apiGetStockTransfers,
 } = require("../controllers/stockTransfer");
 
-
-const {
-  purchaseOrderCreate
-} = require("../controllers/purchase_order");
+const { purchaseOrderCreate } = require("../controllers/purchase_order");
 
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
@@ -107,9 +101,6 @@ const {
 //   getAllorder_item,
 // } = require("../controllers/order_item");
 
-
-
-
 // User routes - Custom auth and management
 router.post("/user/user_company", handleUserSignupCompany);
 // router.post("/user/create", handleUserSignup);
@@ -119,9 +110,6 @@ router.post("/user/login", handleUserLogin);
 // router.get("/user/get/:id", userById);
 // router.post("/user/get-one", findUserByEmail);
 
-
-
-
 router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
 
 // Product routes - Custom CRUD + warehouse inventory management
@@ -130,14 +118,12 @@ router.patch("/product/update/:id", productUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 
-
 // Integration routes
 router.get("/integration/check-active/:id", checkIntegrationActive);
 router.get("/integration/sync-store-category/:id", syncStoreCategory);
 // router.get("/integration/sync-store-brand/:id", syncStoreBrand);
 router.get("/integration/sync-store-product/:id", syncStoreProduct);
 router.get("/integration/find-product-relations/:id", syncProductRelations);
-
 
 // Process routes
 router.get("/process/execute-process", execute_process);
@@ -151,7 +137,6 @@ router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
 // Stock transfer routes
 router.get("/stock-transfer", apiGetStockTransfers);
 router.post("/stock-transfer", apiCreateStockTransfer);
-
 
 // Category routes - Custom CRUD
 router.post("/product/create-product-variation", productCreateVariation);
@@ -170,11 +155,11 @@ router.post("/login/admin", handleAdminLogin);
 // This automatically creates routes like: /{model}/create, /{model}/update/:id, /{model}/get/:id, etc.
 registerAllModelRoutes(router, {
   excludedModels: [
-      // User has custom auth routes
-    'product',   // Product has custom warehouse inventory routes
-    'order',     // Keep custom routes if needed
-    'order_item',// Keep custom routes if needed
-    'url',       // URL has custom routes
+    // User has custom auth routes
+    "product", // Product has custom warehouse inventory routes
+    "order", // Keep custom routes if needed
+    "order_item", // Keep custom routes if needed
+    "url", // URL has custom routes
     // 'purchase_order' removed - we want BOTH dynamic routes AND custom routes
   ],
   modelConfigs: {
@@ -182,58 +167,71 @@ registerAllModelRoutes(router, {
     user: {
       enabled: true,
       excludedRoutes: [],
-      customRoutes: []
+      customRoutes: [],
     },
     blog: {
       enabled: true,
       excludedRoutes: [],
-      customRoutes: []
+      customRoutes: [],
     },
     integration: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     warehouse: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     company: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     complain: {
       enabled: true,
-      excludedRoutes: ['delete'] // Complain doesn't have delete route
+      excludedRoutes: ["delete"], // Complain doesn't have delete route
     },
     purchase_order: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
-    categories: {
+    category: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     purchase_order_item: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     attribute: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     process: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     brands: {
       enabled: true,
-      excludedRoutes: []
+      excludedRoutes: [],
     },
     product_relations: {
       enabled: true,
-      excludedRoutes: []
-    }
-  }
+      excludedRoutes: [],
+    },
+  },
 });
+
+// Add route aliases for category (plural form for backward compatibility)
+// These routes forward requests from /category/* to /category/*
+const categoryController =
+  require("../utils/dynamicRouteGenerator").generateControllerFunctions(
+    "category"
+  );
+// router.patch("/category/update/:id", categoryController.update);
+// router.post("/category/create", categoryController.create);
+// router.get("/category/get/:id", categoryController.getById);
+// router.get("/category/get-all", categoryController.getAll);
+// router.get("/category/get-all-active", categoryController.getAllActive);
+// router.delete("/category/delete/:id", categoryController.delete);
 
 module.exports = router;

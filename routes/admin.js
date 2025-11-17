@@ -28,7 +28,8 @@ const adminCrudGenerator = require("../utils/adminCrudGenerator");
 const userAdminCRUD = adminCrudGenerator(
   User,
   "users",
-  ["name", "email", "password", "role", "profile_image", "company_id"],
+  // Order controls how fields appear in the admin form. We insert permissions next to role-related settings.
+  ["name", "email", "password", "role", "permissions", "profile_image", "company_id"],
   {
     // Custom options for User model
     excludedFields: ["__v", "password"],
@@ -74,7 +75,9 @@ const userAdminCRUD = adminCrudGenerator(
       profile_image: "file",
       company_id: "select",
       password: "password",
+      permissions: "custom",
     },
+    listHiddenFields: ["permissions"],
     // Custom field options
     fieldOptions: {
       role: [
@@ -84,12 +87,27 @@ const userAdminCRUD = adminCrudGenerator(
         { value: "CUSTOMER", label: "Customer" },
       ],
       company_id: [], // Will be populated dynamically
+      // Configure the permission matrix once—modules become rows, actions become columns.
+      permissions: {
+        modules: [
+          { key: "integration", label: "Integration" },
+          { key: "orders", label: "Orders" },
+          { key: "analytics", label: "Analytics" },
+          { key: "inventory", label: "Inventory" },
+        ],
+        actions: [
+          { key: "view", label: "View" },
+          { key: "edit", label: "Edit" },
+          { key: "delete", label: "Delete" },
+        ],
+      },
     },
     // Custom field labels
     fieldLabels: {
       profile_image: "Profile Image",
       password: "Password",
       company_id: "Company",
+      permissions: "Permissions",
     },
 
     middleware: {
@@ -124,7 +142,37 @@ const userAdminCRUD = adminCrudGenerator(
         });
         
         return recordsWithPopulatedFields;
-      }
+       },
+       // Preload select options so the form shows fresh Company/User choices every visit.
+       beforeCreateForm: async (req, res) => {
+          try {
+            const companies = await Company.find({ status: 'active', deletedAt: null })
+            .select('company_name')
+            .sort({ company_name: 1 });
+          req.fieldConfig.company_id.options = companies.map(company => ({ 
+            value: company._id.toString(), 
+            label: company.company_name 
+          }));
+          const users = await User.find({ deletedAt: null }, 'name email').sort({ name: 1 });
+          req.fieldConfig.created_by.options = users.map(user => ({ value: user._id.toString(), label: user.name }));
+          req.fieldConfig.created_by.placeholder = 'Select User';
+          req.fieldConfig.created_by.helpText = 'Choose the user who created this integration';
+          
+          } catch (error) {
+            console.error('❌ Error in beforeCreateForm for user:', error);
+          }
+      },
+       // Keep the company list in sync when editing existing users.
+       beforeEditForm: async (req, res) => {
+        const companies = await Company.find({ status: 'active', deletedAt: null })
+        .select('company_name')
+        .sort({ company_name: 1 });
+        req.fieldConfig.company_id.options = companies.map(company => ({ 
+          value: company._id.toString(), 
+          label: company.company_name 
+        }));
+      },
+     
     },
     // Custom response formatting to show user name
     responseFormatting: {
@@ -135,7 +183,27 @@ const userAdminCRUD = adminCrudGenerator(
           recordObj.user_email = recordObj.company_id.email;
         }
         return recordObj;
-      })
+      }),
+      editForm: async (record) => {
+        if (record.permissions && typeof record.permissions.toObject === "function") {
+          record.permissions = record.permissions.toObject();
+        }
+        return record;
+      }
+    },
+    fieldProcessing: {
+      beforeInsert: async (data) => {
+        if (data.permissions && typeof data.permissions.toObject === "function") {
+          data.permissions = data.permissions.toObject();
+        }
+        return data;
+      },
+      beforeUpdate: async (data) => {
+        if (data.permissions && typeof data.permissions.toObject === "function") {
+          data.permissions = data.permissions.toObject();
+        }
+        return data;
+      }
     }
   }
 );

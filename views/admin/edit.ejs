@@ -372,6 +372,9 @@
                         
                         <% } else if (field.type === 'custom' && field.name === 'warehouse_inventory') { %>
                             <%- include('warehouse-inventory-field', { record: record, warehouses: typeof warehouses !== 'undefined' ? warehouses : [] }) %>
+                        <% } else if (field.type === 'custom' && field.name === 'permissions') { %>
+                            <!-- Render the permissions matrix partial for the custom Map field -->
+                            <%- include('permissions-field', { field: field, record: record }) %>
                         <% } %>
                         
                         <!-- Field Help Text -->

@@ -14,8 +14,6 @@ curl "https://example-store.com/wp-json/wc/store/v1/products/brands"
 // process fetch product_fetch wp single (done)
 // process fetch product_fetch wp variant (done)
 
-
-
 // sync categories sh (done)
 // process fetch product_fetch sh single  
 // process fetch product_fetch sh variant
@@ -26,17 +24,30 @@ Backend admin
 
 
 /insert into db
-// process sync(insert/update) product by id wp 
-// process sync(insert/update) product by id shp 
+// process sync(insert/update) product by id wp (done)
+// process sync(insert/update) product by id shp  (done)
+// user permissions. (done)
+// process (done)
+
+
+
+
+
+
 
 // check if all categories/products are going in correct company...
-// process brand fetch 
-
-// user permissions.
 
 // pos 
 create order with order_items
 fetch_order wp
 fetch_order shopify
+
+
+api with search...
+
+
+signup with front create default warehouse.
+
+
 
 

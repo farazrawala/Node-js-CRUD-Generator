@@ -5,7 +5,7 @@ const {
   handleGenericUpdate,
   handleGenericGetAll,
   handleGenericGetById,
-  handleGenericFindOne
+  handleGenericFindOne,
 } = require("../utils/modelHelper");
 
 async function handleUserSignup(req, res) {
@@ -57,39 +57,51 @@ async function handleUserLogin(req, res) {
       email: req.body.email,
       time: new Date().toISOString(),
     });
-    
+
     const { email, password } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({
         success: false,
-        message: "Email and password are required"
+        message: "Email and password are required",
       });
     }
 
     // Find user by email only
-    const user = await User.findOne({ email: email.toLowerCase() , role: { $in: ["ADMIN", "USER"] } });
-    
+    const user = await User.findOne({
+      email: email.toLowerCase(),
+      role: { $in: ["ADMIN", "USER"] },
+      // active: true,
+    }).populate({
+      path: "company_id",
+      select: "company_name company_email warehouse_id",
+      populate: {
+        path: "warehouse_id",
+        select:
+          "warehouse_name warehouse_address code city state zip_code phone email warehouse_image",
+      },
+    });
+
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: "Invalid email or password"
+        message: "Invalid email or password",
       });
     }
 
     // Verify password using the comparePassword method
     const isPasswordValid = await user.comparePassword(password);
-    
+
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
-        message: "Invalid email or password"
+        message: "Invalid email or password",
       });
     }
 
-    console.log("📞 About to call setUserToken with user:", user);
     const userWithToken = setUserToken(user);
     console.log("📞 setUserToken returned:", userWithToken);
+    console.log("📞 userWithToken.company_id:", userWithToken.company_id);
 
     // Set cookie for regular user login too
     res.cookie("token", userWithToken.token, {
@@ -98,21 +110,31 @@ async function handleUserLogin(req, res) {
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     });
 
-    return res.status(200).json({
+    // Ensure company data is included in response
+    // Explicitly preserve populated company data
+    const responseData = {
       success: true,
       message: "Login successful",
-      user: userWithToken
-    });
+      user: userWithToken,
+    };
 
+    // // If company data was populated, ensure it's in the response
+    // if (companyData) {
+    //   responseData.user.company_id = companyData;
+    //   console.log("✅ Company data added to response:", companyData);
+    // } else {
+    //   console.log("⚠️ No company data found for user");
+    // }
+
+    return res.status(200).json(responseData);
   } catch (error) {
     console.error("❌ User login error:", error);
     return res.status(500).json({
       success: false,
-      message: "Internal server error"
+      message: "Internal server error",
     });
   }
 }
-
 
 async function userById(req, res) {
   const response = await handleGenericGetById(req, "user", {
@@ -138,32 +160,38 @@ async function handleUserSignupCompany(req, res) {
 
     // Check if email already exists
     const find_email = await handleGenericFindOne(req, "user", {
-      searchCriteria: { 
-        email: req.body.email.toLowerCase() 
-      }
+      searchCriteria: {
+        email: req.body.email.toLowerCase(),
+      },
     });
 
     // Correct way to check if email exists
-    if(find_email.success && find_email.data) {
+    if (find_email.success && find_email.data) {
       console.log("❌ Email already exists:", req.body.email);
       return res.status(400).json({
         success: false,
-        message: "Email already exists"
+        message: "Email already exists",
       });
     }
 
     console.log("🏢 Creating company...");
+
     const create_company = await handleGenericCreate(req, "company", {
       beforeCreate: async (data, req) => {
         console.log("🏢 Company beforeCreate hook called");
         // Add required fields for company
-        data.company_name = req.body.company_name || 'Default Company Name';
+        data.company_name =
+          req.body.company_name + req.body.email ||
+          "Default Company Name for " + req.body.email;
         data.company_email = req.body.company_email || req.body.email;
-        data.company_phone = req.body.company_phone || 'N/A';
-        data.company_address = req.body.company_address || 'Default Address';
-        data.status = 'active';
-        console.log("🏢 Company data after setting:", JSON.stringify(data, null, 2));
-      }
+        data.company_phone = req.body.company_phone || "N/A";
+        data.company_address = req.body.company_address || "Default Address";
+        data.status = "active";
+        console.log(
+          "🏢 Company data after setting:",
+          JSON.stringify(data, null, 2)
+        );
+      },
     });
 
     if (!create_company.success) {
@@ -171,22 +199,27 @@ async function handleUserSignupCompany(req, res) {
       return res.status(500).json({
         success: false,
         message: "Company creation failed",
-        details: create_company
+        details: create_company,
       });
     }
 
     console.log("✅ Company created:", create_company.data._id);
     console.log("🏪 About to create warehouse...");
-    
+
     const create_warehouse = await handleGenericCreate(req, "warehouse", {
       beforeCreate: async (data, req) => {
         console.log("🏪 Warehouse beforeCreate hook called");
-        data.warehouse_name = req.body.warehouse_name || 'Current Store';
-        data.warehouse_address = req.body.warehouse_address || 'Default Address';
+        data.warehouse_name =
+          req.body.warehouse_name || "Current Store for " + req.body.email;
+        data.warehouse_address =
+          req.body.warehouse_address || "Default Address";
         data.company_id = create_company.data._id;
-        data.status = 'active';
-        console.log("🏪 Warehouse data after setting:", JSON.stringify(data, null, 2));
-      }
+        data.status = "active";
+        console.log(
+          "🏪 Warehouse data after setting:",
+          JSON.stringify(data, null, 2)
+        );
+      },
     });
 
     if (!create_warehouse.success) {
@@ -194,23 +227,53 @@ async function handleUserSignupCompany(req, res) {
       return res.status(500).json({
         success: false,
         message: "Warehouse creation failed",
-        details: create_warehouse
+        details: create_warehouse,
       });
+    } else {
+      // Update company with warehouse_id
+      // Save original req.body and req.params for later use
+      const originalBody = { ...req.body };
+      const originalParams = { ...req.params };
+
+      // Set req.params.id for the company ID
+      req.params.id = create_company.data._id;
+      // Set req.body to only contain warehouse_id for the update
+      req.body = { warehouse_id: create_warehouse.data._id };
+
+      const updateCompany = await handleGenericUpdate(req, "company", {});
+
+      // Restore original req.body and req.params for subsequent operations (user creation)
+      req.body = originalBody;
+      req.params = originalParams;
+
+      if (!updateCompany.success) {
+        console.log("❌ Company warehouse_id update failed:", updateCompany);
+        return res.status(200).json({
+          success: false,
+          message: "Failed to update company with warehouse_id",
+          details: updateCompany,
+        });
+      }
+
+      console.log(
+        "✅ Company updated with warehouse_id:",
+        create_warehouse.data._id
+      );
     }
 
     console.log("✅ Warehouse created:", create_warehouse.data._id);
     console.log("👤 About to create user...");
-    
+
     const user_created = await handleGenericCreate(req, "user", {
       beforeCreate: async (data, req) => {
         console.log("👤 User beforeCreate hook called");
         data.email = req.body.email;
-        data.name = req.body.name || 'User';
+        data.name = req.body.name || "User";
         data.password = req.body.password;
         data.company_id = create_company.data._id;
-        data.role = ['USER'];
+        data.role = ["USER"];
         console.log("👤 User data:", JSON.stringify(data, null, 2));
-      }
+      },
     });
 
     if (!user_created.success) {
@@ -218,7 +281,7 @@ async function handleUserSignupCompany(req, res) {
       return res.status(500).json({
         success: false,
         message: "User creation failed",
-        details: user_created
+        details: user_created,
       });
     }
 
@@ -230,19 +293,17 @@ async function handleUserSignupCompany(req, res) {
       data: {
         company: create_company.data,
         warehouse: create_warehouse.data,
-        user: user_created.data
-      }
+        user: user_created.data,
+      },
     });
-
   } catch (error) {
     console.error("❌ Company user signup error:", error);
     return res.status(500).json({
       success: false,
-      message: error.message || "Internal server error during company signup"
+      message: error.message || "Internal server error during company signup",
     });
   }
 }
-
 
 async function handleAdminLogin(req, res) {
   try {
@@ -252,39 +313,39 @@ async function handleAdminLogin(req, res) {
     });
 
     const { email, password } = req.body;
-    
+
     if (!email || !password) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Email and password are required" 
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required",
       });
     }
-    
+
     // Find user by email
     const user = await User.findOne({ email: email.toLowerCase() });
-    
+
     if (!user) {
-      return res.status(401).json({ 
-        success: false, 
-        message: "Invalid email or password" 
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
       });
     }
 
     // Check if user is admin (role is stored as array)
     if (!user.role.includes("ADMIN")) {
-      return res.status(403).json({ 
-        success: false, 
-        message: "Access denied. Admin privileges required." 
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Admin privileges required.",
       });
     }
 
     // Verify password using the comparePassword method
     const isPasswordValid = await user.comparePassword(password);
-    
+
     if (!isPasswordValid) {
-      return res.status(401).json({ 
-        success: false, 
-        message: "Invalid email or password" 
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
       });
     }
 
@@ -301,22 +362,21 @@ async function handleAdminLogin(req, res) {
 
     console.log("✅ Admin login successful for:", user.email);
 
-    res.status(200).json({ 
-      success: true, 
+    res.status(200).json({
+      success: true,
       message: "Admin login successful",
       user: {
         id: user._id,
         email: user.email,
         role: user.role,
-        name: user.name
-      }
+        name: user.name,
+      },
     });
-
   } catch (error) {
     console.error("❌ Admin login error:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Internal server error" 
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
     });
   }
 }
@@ -325,8 +385,8 @@ async function handleAdminLogin(req, res) {
 async function findUserByEmail(req, res) {
   // console.log("🔍 Searching for user with email:", req.body.email);
   const response = await handleGenericFindOne(req, "user", {
-    searchCriteria: { 
-      email: req.body.email.toLowerCase() 
+    searchCriteria: {
+      email: req.body.email.toLowerCase(),
     },
     excludeFields: ["password"], // Never return password
     beforeFind: async (criteria, req) => {
@@ -335,7 +395,7 @@ async function findUserByEmail(req, res) {
     },
     afterFind: async (record, req) => {
       console.log("✅ Found user:", record.email);
-    }
+    },
   });
   return res.status(response.status).json(response);
 }
@@ -343,8 +403,8 @@ async function findUserByEmail(req, res) {
 // Example: Find user by company name
 async function findUserByCompany(req, res) {
   const response = await handleGenericFindOne(req, "user", {
-    searchCriteria: { 
-      company_name: req.body.company_name 
+    searchCriteria: {
+      company_name: req.body.company_name,
     },
     excludeFields: ["password"],
     includeFields: ["name", "email", "company_name", "phone", "createdAt"], // Only return specific fields
@@ -355,19 +415,18 @@ async function findUserByCompany(req, res) {
 // Example: Find active user with specific role
 async function findActiveUserByRole(req, res) {
   const { role, email } = req.body;
-  
+
   const response = await handleGenericFindOne(req, "user", {
-    searchCriteria: { 
+    searchCriteria: {
       role: { $in: [role] }, // MongoDB array contains operator
       email: email.toLowerCase(),
-      active: true // Assuming you have an active field
+      active: true, // Assuming you have an active field
     },
     excludeFields: ["password"],
     sort: { lastLoginAt: -1 }, // Get the most recently active user
   });
   return res.status(response.status).json(response);
 }
-
 
 module.exports = {
   handleUserSignup,

@@ -286,9 +286,9 @@
                 <table class="min-w-full divide-y divide-gray-200">
                     <thead class="bg-gray-50">
                         <tr>
-                            <% Object.keys(fieldConfig).forEach(fieldName => { %>
+                            <% Object.keys(listFieldConfig).forEach(function(fieldName) { var field = listFieldConfig[fieldName]; %>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    <%= fieldConfig[fieldName].label %>
+                                    <%= field.label %>
                                 </th>
                             <% }); %>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -303,9 +303,9 @@
                         <% if (records && records.length > 0) { %>
                             <% records.forEach(record => { %>
                                 <tr class="hover:bg-gray-50">
-                                    <% Object.keys(fieldConfig).forEach(fieldName => { %>
+                                    <% Object.keys(listFieldConfig).forEach(function(fieldName) { var field = listFieldConfig[fieldName]; %>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                            <% if (fieldConfig[fieldName].type === 'select' && record[fieldName]) { %>
+                                            <% if (field.type === 'select' && record[fieldName]) { %>
                                                 <% 
                                                 // Handle select field with options
                                                 let selectedValue = record[fieldName];
@@ -321,10 +321,10 @@
                                                     } else if (selectedValue._id) {
                                                         displayText = selectedValue._id.toString();
                                                     }
-                                                } else if (fieldConfig[fieldName].options && Array.isArray(fieldConfig[fieldName].options)) {
+                                                } else if (field.options && Array.isArray(field.options)) {
                                                     
                                                     // Field is not populated - find the matching label from options
-                                                    const selectedOption = fieldConfig[fieldName].options.find(option => 
+                                                    const selectedOption = field.options.find(option => 
                                                         option.value === selectedValue || option.value === selectedValue.toString()
                                                     );
                                                     if (selectedOption) {
@@ -336,11 +336,11 @@
                                                     <%= displayText %>
                                                     <!-- Debug: <%= typeof selectedValue %> | <%= selectedValue %> -->
                                                 </span>
-                                            <% } else if (fieldConfig[fieldName].type === 'checkbox') { %>
+                                            <% } else if (field.type === 'checkbox') { %>
                                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium <%= record[fieldName] ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
                                                     <%= record[fieldName] ? 'Yes' : 'No' %>
                                                 </span>
-                                            <% } else if (fieldConfig[fieldName].type === 'file' && record[fieldName]) { %>
+                                            <% } else if (field.type === 'file' && record[fieldName]) { %>
                                                 <% 
                                                 // Handle both single images and multiple images
                                                 let images = record[fieldName];
@@ -375,11 +375,11 @@
                                                 <% if (cleanedImages.length > 0) { %>
                                                     <div class="flex space-x-1">
                                                         <% cleanedImages.slice(0, 3).forEach((imageSrc, index) => { %>
-                                                            <img src="<%= imageSrc %>"  alt="<%= fieldConfig[fieldName].label %> <%= index + 1 %>" class="h-10 w-10 rounded object-cover border border-gray-200">
+                                                            <img src="<%= imageSrc %>"  alt="<%= field.label %> <%= index + 1 %>" class="h-10 w-10 rounded object-cover border border-gray-200">
                                                             <script>
                                                                 console.log('🔍 Image src:', '<%= imageSrc %>');
                                                                 console.log('🔍 Image data src:', '<%= imageSrc %>');
-                                                                console.log('🔍 Image alt:', '<%= fieldConfig[fieldName].label %> <%= index + 1 %>');
+                                                    console.log('🔍 Image alt:', '<%= field.label %> <%= index + 1 %>');
                                                                 console.log('🔍 Image class:', 'h-10 w-10 rounded object-cover border border-gray-200');
                                                             </script>
                                                         <% }); %>
@@ -392,10 +392,10 @@
                                                 <% } else { %>
                                                     <span class="text-gray-400 text-xs">No image</span>
                                                 <% } %>
-                                            <% } else if (fieldConfig[fieldName].type === 'multiselect' && Array.isArray(record[fieldName])) { %>
+                                            <% } else if (field.type === 'multiselect' && Array.isArray(record[fieldName])) { %>
                                                 <script>
                                                     console.log('List - Multiselect Field:', '<%= fieldName %>');
-                                                    console.log('List - Field Config:', <%- JSON.stringify(fieldConfig[fieldName]) %>);
+                                                    console.log('List - Field Config:', <%- JSON.stringify(field) %>);
                                                     console.log('List - Record Value:', <%- JSON.stringify(record[fieldName]) %>);
                                                     console.log('List - Is Array:', <%= Array.isArray(record[fieldName]) %>);
                                                     console.log('List - Array Length:', <%= record[fieldName] ? record[fieldName].length : 0 %>);
@@ -420,10 +420,10 @@
                                                 <%= record.user_id.name %>
                                             <% } else if (fieldName === 'company_id' && record.company_id && typeof record.company_id === 'object' && record.company_id.name) { %>
                                                 <%= record.company_id.name %>
-                                            <% } else if (fieldConfig[fieldName].type === 'custom') { %>
+                                            <% } else if (field.type === 'custom') { %>
                                                 <script>
                                                     console.log('🔍 Custom field detected:', '<%= fieldName %>');
-                                                    console.log('🔍 Field config:', <%= JSON.stringify(fieldConfig[fieldName]) %>);
+                                                    console.log('🔍 Field config:', <%= JSON.stringify(field) %>);
                                                     console.log('🔍 Record data:', <%= JSON.stringify(record[fieldName]) %>);
                                                 </script>
                                                 <% if (fieldName === 'warehouse_inventory' && Array.isArray(record[fieldName])) { %>
@@ -459,7 +459,7 @@
                                             <% } else { %>
                                                 <div>
                                                     <div class="font-medium"><%= record[fieldName] || '-' %></div>
-                                                    <div class="text-xs text-gray-500">Type: <%= fieldConfig[fieldName].type %></div>
+                                                    <div class="text-xs text-gray-500">Type: <%= field.type %></div>
                                                 </div>
                                             <% } %>
                                         </td>
