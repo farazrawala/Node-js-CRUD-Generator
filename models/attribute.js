@@ -12,40 +12,40 @@ const modelSchema = new mongoose.Schema(
           name: {
             type: String,
             required: true,
-            field_name: "Attribute Value"
+            field_name: "Attribute Value",
           },
           last_updated: {
             type: Date,
             default: Date.now,
-            field_name: "Last Updated"
-          }
-        }
+            field_name: "Last Updated",
+          },
+        },
       ],
       default: [],
-      field_name: "Warehouse Inventory"
+      field_name: "Attribute Values",
     },
     // default fields
-    company_id:{
+    company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
       // required: true,
       field_name: "Company",
     },
-    created_by:{
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Created By",
     },
-    updated_by:{
+    updated_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Updated By",
     },
-    status: { 
+    status: {
       type: String,
       required: true,
-      enum: ["active", "inactive"], 
-      default: "active"              
+      enum: ["active", "inactive"],
+      default: "active",
     },
     deletedAt: {
       type: Date,

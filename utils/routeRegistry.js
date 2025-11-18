@@ -7,130 +7,139 @@ class RouteRegistry {
   constructor() {
     this.routes = new Map();
     this.routeConfig = {};
-    
+
     // Initialize default routes
     const defaultRoutes = {
       users: {
-        name: 'Users',
-        icon: 'fas fa-users',
-        path: '/admin/users',
-        description: 'Manage user accounts',
+        name: "Users",
+        icon: "fas fa-users",
+        path: "/admin/users",
+        description: "Manage user accounts",
         order: 1,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       products: {
-        name: 'Products',
-        icon: 'fas fa-box',
-        path: '/admin/products',
-        description: 'Manage product catalog',
+        name: "Products",
+        icon: "fas fa-box",
+        path: "/admin/products",
+        description: "Manage product catalog",
         order: 2,
         enabled: true,
         subMenus: [
           {
-            name: 'Product List',
-            icon: 'fas fa-list',
-            path: '/admin/products',
-            description: 'View all products'
+            name: "Product List",
+            icon: "fas fa-list",
+            path: "/admin/products",
+            description: "View all products",
           },
           {
-            name: 'Product Complaints',
-            icon: 'fas fa-exclamation-triangle',
-            path: '/admin/products/complaints',
-            description: 'Manage product-related complaints'
+            name: "Product Complaints",
+            icon: "fas fa-exclamation-triangle",
+            path: "/admin/products/complaints",
+            description: "Manage product-related complaints",
           },
           {
-            name: 'Add Product',
-            icon: 'fas fa-plus',
-            path: '/admin/products/create',
-            description: 'Add new product'
-          }
+            name: "Add Product",
+            icon: "fas fa-plus",
+            path: "/admin/products/create",
+            description: "Add new product",
+          },
         ],
-        customTabs: []
+        customTabs: [],
       },
       blogs: {
-        name: 'Blogs',
-        icon: 'fas fa-blog',
-        path: '/admin/blogs',
-        description: 'Manage blog posts',
+        name: "Blogs",
+        icon: "fas fa-blog",
+        path: "/admin/blogs",
+        description: "Manage blog posts",
         order: 3,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       orders: {
-        name: 'Orders',
-        icon: 'fas fa-shopping-cart',
-        path: '/admin/orders',
-        description: 'Manage customer orders',
+        name: "Orders",
+        icon: "fas fa-shopping-cart",
+        path: "/admin/orders",
+        description: "Manage customer orders",
         order: 4,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       categories: {
-        name: 'Categories',
-        icon: 'fas fa-tags',
-        path: '/admin/categories',
-        description: 'Manage product categories',
+        name: "Categories",
+        icon: "fas fa-tags",
+        path: "/admin/categories",
+        description: "Manage product categories",
         order: 5,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       complain: {
-        name: 'Complaints',
-        icon: 'fas fa-exclamation-triangle',
-        path: '/admin/complain',
-        description: 'Manage customer complaints',
+        name: "Complaints",
+        icon: "fas fa-exclamation-triangle",
+        path: "/admin/complain",
+        description: "Manage customer complaints",
         order: 6,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       company: {
-        name: 'Company',
-        icon: 'fas fa-building',
-        path: '/admin/company',
-        description: 'Manage Companies',
+        name: "Company",
+        icon: "fas fa-building",
+        path: "/admin/company",
+        description: "Manage Companies",
         order: 7,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       warehouse: {
-        name: 'Warehouses',
-        icon: 'fas fa-warehouse',
-        path: '/admin/warehouse',
-        description: 'Manage warehouses and inventory',
+        name: "Warehouses",
+        icon: "fas fa-warehouse",
+        path: "/admin/warehouse",
+        description: "Manage warehouses and inventory",
         order: 8,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       integration: {
-        name: 'Integrations',
-        icon: 'fas fa-cog',
-        path: '/admin/integration',
-        description: 'Manage integrations',
+        name: "Integrations",
+        icon: "fas fa-cog",
+        path: "/admin/integration",
+        description: "Manage integrations",
         order: 9,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       process: {
-        name: 'Processes',
-        icon: 'fas fa-cog',
-        path: '/admin/process',
-        description: 'Manage processes',
+        name: "Processes",
+        icon: "fas fa-cog",
+        path: "/admin/process",
+        description: "Manage processes",
         order: 10,
         enabled: true,
-        customTabs: []
+        customTabs: [],
       },
       brands: {
-        name: 'Brands',
-        icon: 'fas fa-brands',
-        path: '/admin/brands',
-        description: 'Manage brands',
+        name: "Brands",
+        icon: "fas fa-brands",
+        path: "/admin/brands",
+        description: "Manage brands",
         order: 11,
         enabled: true,
-        customTabs: []
-      }
+        customTabs: [],
+      },
+      attribute: {
+        name: "Attributes",
+        icon: "fas fa-tags",
+        path: "/admin/attribute",
+        description: "Manage attribute",
+        order: 12,
+        enabled: true,
+        customTabs: [],
+      },
     };
-    
+
     // Add default routes to both routeConfig and routes Map
     Object.entries(defaultRoutes).forEach(([key, config]) => {
       this.routeConfig[key] = config;
@@ -144,7 +153,7 @@ class RouteRegistry {
   registerRoute(key, config) {
     const routeConfig = {
       name: config.name || this.generateName(key),
-      icon: config.icon || 'fas fa-cog',
+      icon: config.icon || "fas fa-cog",
       path: config.path || `/admin/${key}`,
       description: config.description || `Manage ${key}`,
       order: config.order || this.getNextOrder(),
@@ -152,12 +161,12 @@ class RouteRegistry {
       crudController: config.crudController,
       customRoutes: config.customRoutes || [],
       subMenus: config.subMenus || [],
-      customTabs: config.customTabs || []
+      customTabs: config.customTabs || [],
     };
 
     this.routes.set(key, routeConfig);
     this.routeConfig[key] = routeConfig;
-    
+
     console.log(`📝 Registered route: ${key} -> ${routeConfig.path}`);
     return routeConfig;
   }
@@ -167,7 +176,7 @@ class RouteRegistry {
    */
   getEnabledRoutes() {
     return Array.from(this.routes.values())
-      .filter(route => route.enabled)
+      .filter((route) => route.enabled)
       .sort((a, b) => a.order - b.order);
   }
 
@@ -175,8 +184,7 @@ class RouteRegistry {
    * Get all routes (including disabled)
    */
   getAllRoutes() {
-    return Array.from(this.routes.values())
-      .sort((a, b) => a.order - b.order);
+    return Array.from(this.routes.values()).sort((a, b) => a.order - b.order);
   }
 
   /**
@@ -207,7 +215,7 @@ class RouteRegistry {
     const route = this.routes.get(key);
     if (route) {
       route.enabled = enabled;
-      console.log(`📝 ${enabled ? 'Enabled' : 'Disabled'} route: ${key}`);
+      console.log(`📝 ${enabled ? "Enabled" : "Disabled"} route: ${key}`);
       return route;
     }
     return null;
@@ -229,7 +237,7 @@ class RouteRegistry {
    * Generate route name from key
    */
   generateName(key) {
-    return key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ');
+    return key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, " ");
   }
 
   /**
@@ -237,7 +245,7 @@ class RouteRegistry {
    */
   getNextOrder() {
     const routes = Array.from(this.routes.values());
-    return routes.length > 0 ? Math.max(...routes.map(r => r.order)) + 1 : 1;
+    return routes.length > 0 ? Math.max(...routes.map((r) => r.order)) + 1 : 1;
   }
 
   /**
@@ -282,14 +290,21 @@ class RouteRegistry {
       route.customTabs = [];
     }
 
-    const existingIndex = route.customTabs.findIndex(tab => tab.path === tabConfig.path);
+    const existingIndex = route.customTabs.findIndex(
+      (tab) => tab.path === tabConfig.path
+    );
     if (existingIndex >= 0) {
-      route.customTabs[existingIndex] = { ...route.customTabs[existingIndex], ...tabConfig };
+      route.customTabs[existingIndex] = {
+        ...route.customTabs[existingIndex],
+        ...tabConfig,
+      };
     } else {
       route.customTabs.push(tabConfig);
     }
 
-    console.log(`📝 Added custom tab "${tabConfig.name}" to route "${routeKey}"`);
+    console.log(
+      `📝 Added custom tab "${tabConfig.name}" to route "${routeKey}"`
+    );
     return route;
   }
 
@@ -300,9 +315,11 @@ class RouteRegistry {
     const route = this.routes.get(routeKey);
     if (route && route.customTabs) {
       const originalLength = route.customTabs.length;
-      route.customTabs = route.customTabs.filter(tab => tab.path !== tabPath);
+      route.customTabs = route.customTabs.filter((tab) => tab.path !== tabPath);
       if (route.customTabs.length !== originalLength) {
-        console.log(`📝 Removed custom tab "${tabPath}" from route "${routeKey}"`);
+        console.log(
+          `📝 Removed custom tab "${tabPath}" from route "${routeKey}"`
+        );
       }
       return route;
     }
@@ -323,8 +340,10 @@ class RouteRegistry {
   removeSubMenu(routeKey, subMenuName) {
     const route = this.routes.get(routeKey);
     if (route && route.subMenus) {
-      route.subMenus = route.subMenus.filter(sub => sub.name !== subMenuName);
-      console.log(`📝 Removed sub-menu "${subMenuName}" from route "${routeKey}"`);
+      route.subMenus = route.subMenus.filter((sub) => sub.name !== subMenuName);
+      console.log(
+        `📝 Removed sub-menu "${subMenuName}" from route "${routeKey}"`
+      );
       return route;
     }
     return null;
@@ -335,7 +354,9 @@ class RouteRegistry {
    */
   getRoutesWithSubMenus() {
     return Array.from(this.routes.values())
-      .filter(route => route.enabled && route.subMenus && route.subMenus.length > 0)
+      .filter(
+        (route) => route.enabled && route.subMenus && route.subMenus.length > 0
+      )
       .sort((a, b) => a.order - b.order);
   }
 
@@ -344,17 +365,19 @@ class RouteRegistry {
    */
   getStats() {
     const routes = Array.from(this.routes.values());
-    const routesWithSubMenus = routes.filter(r => r.subMenus && r.subMenus.length > 0);
+    const routesWithSubMenus = routes.filter(
+      (r) => r.subMenus && r.subMenus.length > 0
+    );
     const totalSubMenus = routes.reduce((total, route) => {
       return total + (route.subMenus ? route.subMenus.length : 0);
     }, 0);
-    
+
     return {
       total: routes.length,
-      enabled: routes.filter(r => r.enabled).length,
-      disabled: routes.filter(r => !r.enabled).length,
+      enabled: routes.filter((r) => r.enabled).length,
+      disabled: routes.filter((r) => !r.enabled).length,
       withSubMenus: routesWithSubMenus.length,
-      totalSubMenus: totalSubMenus
+      totalSubMenus: totalSubMenus,
     };
   }
 
@@ -365,7 +388,7 @@ class RouteRegistry {
     return {
       routes: Object.fromEntries(this.routes),
       stats: this.getStats(),
-      exportedAt: new Date().toISOString()
+      exportedAt: new Date().toISOString(),
     };
   }
 

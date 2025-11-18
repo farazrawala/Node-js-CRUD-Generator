@@ -1,7 +1,7 @@
-const mongoose = require('mongoose');
-const path = require('path');
-const routeRegistry = require('./routeRegistry');
-const Company = require('../models/company');
+const mongoose = require("mongoose");
+const path = require("path");
+const routeRegistry = require("./routeRegistry");
+const Company = require("../models/company");
 
 /**
  * Generic Admin CRUD Generator
@@ -28,7 +28,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     // Custom error handling
     errorHandling = {},
     // Excluded fields from responses
-    excludedFields = ['__v'],
+    excludedFields = ["__v"],
     // Included fields in responses
     includedFields = [],
     // Soft delete support
@@ -57,25 +57,43 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     customJS = {},
     listHiddenFields = [],
     // Base URL for assets and links
-    baseUrl = process.env.BASE_URL || 'http://localhost:8000'
+    baseUrl = process.env.BASE_URL || "http://localhost:8000",
   } = options;
 
   // Convert modelName to singular and title case
-  const singularName = modelName.slice(-1) === 's' ? modelName.slice(0, -1) : modelName;
-  const titleCase = singularName.charAt(0).toUpperCase() + singularName.slice(1);
+  const singularName =
+    modelName.slice(-1) === "s" ? modelName.slice(0, -1) : modelName;
+  const titleCase =
+    singularName.charAt(0).toUpperCase() + singularName.slice(1);
 
   // Auto-detect fields from model schema if not provided
   if (fields.length === 0) {
-    fields = Object.keys(Model.schema.paths).filter(field => 
-      !['_id', '__v', 'createdAt', 'updatedAt', 'created_by', 'updated_by', 'company_id'].includes(field)
+    fields = Object.keys(Model.schema.paths).filter(
+      (field) =>
+        ![
+          "_id",
+          "__v",
+          "createdAt",
+          "updatedAt",
+          "created_by",
+          "updated_by",
+          "company_id",
+        ].includes(field)
     );
   }
 
   // Generate field configuration
-  const fieldConfig = generateFieldConfig(Model, fields, fieldTypes, fieldLabels, fieldValidation, fieldOptions);
+  const fieldConfig = generateFieldConfig(
+    Model,
+    fields,
+    fieldTypes,
+    fieldLabels,
+    fieldValidation,
+    fieldOptions
+  );
 
   // Mark fields that should be hidden in the list view.
-  listHiddenFields.forEach(fieldName => {
+  listHiddenFields.forEach((fieldName) => {
     if (fieldConfig[fieldName]) {
       fieldConfig[fieldName].showInList = false;
     }
@@ -89,9 +107,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       const { 
         page = 1, 
         limit = pagination.defaultLimit, 
-        sortBy = 'createdAt', 
-        sortOrder = 'desc',
-        search = '',
+        sortBy = "createdAt",
+        sortOrder = "desc",
+        search = "",
         ...filters 
       } = req.query;
 
@@ -100,24 +118,40 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       
       // Apply search
       if (search && searchableFields.length > 0) {
-        const searchQuery = searchableFields.map(field => ({
-          [field]: { $regex: search, $options: 'i' }
+        const searchQuery = searchableFields.map((field) => ({
+          [field]: { $regex: search, $options: "i" },
         }));
         query.$or = searchQuery;
       }
 
       // Apply filters
       // If filterableFields is empty, use all fields that are displayed (excluding system fields)
-      const fieldsToFilter = filterableFields.length > 0 ? filterableFields : fields.filter(field => 
-        !['_id', '__v', 'createdAt', 'updatedAt', 'deletedAt', 'created_by', 'updated_by', 'company_id'].includes(field)
-      );
-      
-      fieldsToFilter.forEach(field => {
-        if (filters[field] !== undefined && filters[field] !== '') {
-          if (typeof filters[field] === 'string' && filters[field].includes(',')) {
-            query[field] = { $in: filters[field].split(',') };
-          } else if (filters[field] === 'true' || filters[field] === 'false') {
-            query[field] = filters[field] === 'true';
+      const fieldsToFilter =
+        filterableFields.length > 0
+          ? filterableFields
+          : fields.filter(
+              (field) =>
+                ![
+                  "_id",
+                  "__v",
+                  "createdAt",
+                  "updatedAt",
+                  "deletedAt",
+                  "created_by",
+                  "updated_by",
+                  "company_id",
+                ].includes(field)
+            );
+
+      fieldsToFilter.forEach((field) => {
+        if (filters[field] !== undefined && filters[field] !== "") {
+          if (
+            typeof filters[field] === "string" &&
+            filters[field].includes(",")
+          ) {
+            query[field] = { $in: filters[field].split(",") };
+          } else if (filters[field] === "true" || filters[field] === "false") {
+            query[field] = filters[field] === "true";
           } else if (!isNaN(filters[field])) {
             query[field] = Number(filters[field]);
           } else {
@@ -128,7 +162,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Apply soft delete filter based on query parameter
       if (softDelete) {
-        const showDeleted = req.query.deleted === 'true';
+        const showDeleted = req.query.deleted === "true";
         if (showDeleted) {
           // Show only deleted records
           query.deletedAt = { $exists: true, $ne: null };
@@ -138,17 +172,14 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           if (query.$or) {
             // If there's already a $or query (from search), combine them using $and
             const deletedAtCondition = {
-              $or: [
-                { deletedAt: { $exists: false } },
-                { deletedAt: null }
-              ]
+              $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
             };
             query = { $and: [query, deletedAtCondition] };
           } else {
             // No existing $or, just set the deletedAt condition
             query.$or = [
               { deletedAt: { $exists: false } },
-              { deletedAt: null }
+              { deletedAt: null },
             ];
           }
         }
@@ -160,15 +191,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Handle company_id from URL query parameter (for filtering by company)
-      if (req.query.company_id && mongoose.Types.ObjectId.isValid(req.query.company_id)) {
+      if (
+        req.query.company_id &&
+        mongoose.Types.ObjectId.isValid(req.query.company_id)
+      ) {
         query.company_id = new mongoose.Types.ObjectId(req.query.company_id);
-        console.log(`🔍 list - Filtering by company_id from URL: ${req.query.company_id}`);
+        console.log(
+          `🔍 list - Filtering by company_id from URL: ${req.query.company_id}`
+        );
       }
 
       // Build sort object
       const sort = {};
       if (sortableFields.includes(sortBy)) {
-        sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+        sort[sortBy] = sortOrder === "desc" ? -1 : 1;
       } else {
         sort.createdAt = -1; // Default sort
       }
@@ -183,7 +219,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         .sort(sort)
         .skip(skip)
         .limit(actualLimit)
-        .select(includedFields.length > 0 ? includedFields.join(' ') : `-${excludedFields.join(' -')}`);
+        .select(
+          includedFields.length > 0
+            ? includedFields.join(" ")
+            : `-${excludedFields.join(" -")}`
+        );
 
       // Apply custom middleware
       if (middleware.afterQuery) {
@@ -195,13 +235,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Debug logging for fieldConfig options
-      console.log('🔍 FieldConfig debug:');
-      Object.keys(fieldConfig).forEach(fieldName => {
-        if (fieldConfig[fieldName].type === 'select') {
+      console.log("🔍 FieldConfig debug:");
+      Object.keys(fieldConfig).forEach((fieldName) => {
+        if (fieldConfig[fieldName].type === "select") {
           console.log(`🔍 Field: ${fieldName}`);
           console.log(`🔍 Type: ${fieldConfig[fieldName].type}`);
           console.log(`🔍 Options:`, fieldConfig[fieldName].options);
-          console.log(`🔍 Options length:`, fieldConfig[fieldName].options ? fieldConfig[fieldName].options.length : 'undefined');
+          console.log(
+            `🔍 Options length:`,
+            fieldConfig[fieldName].options
+              ? fieldConfig[fieldName].options.length
+              : "undefined"
+          );
         }
       });
 
@@ -210,11 +255,19 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         records = await responseFormatting.list(records, req);
       }
 
+      // Convert records to plain objects to ensure nested arrays are properly accessible
+      records = records.map(record => {
+        if (record && typeof record.toObject === 'function') {
+          return record.toObject();
+        }
+        return record;
+      });
+
       // Calculate pagination info
       const totalPages = Math.ceil(total / actualLimit);
 
       // Check if showing deleted records
-      const showDeleted = req.query.deleted === 'true';
+      const showDeleted = req.query.deleted === "true";
 
       // Get deleted records count for the badge (only if soft delete is enabled)
       let deletedPagination = null;
@@ -225,19 +278,25 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           
           // Apply search to deleted records
           if (search && searchableFields.length > 0) {
-            const searchQuery = searchableFields.map(field => ({
-              [field]: { $regex: search, $options: 'i' }
+            const searchQuery = searchableFields.map((field) => ({
+              [field]: { $regex: search, $options: "i" },
             }));
             deletedQuery.$or = searchQuery;
           }
 
           // Apply filters to deleted records
-          filterableFields.forEach(field => {
-            if (filters[field] !== undefined && filters[field] !== '') {
-              if (typeof filters[field] === 'string' && filters[field].includes(',')) {
-                deletedQuery[field] = { $in: filters[field].split(',') };
-              } else if (filters[field] === 'true' || filters[field] === 'false') {
-                deletedQuery[field] = filters[field] === 'true';
+          filterableFields.forEach((field) => {
+            if (filters[field] !== undefined && filters[field] !== "") {
+              if (
+                typeof filters[field] === "string" &&
+                filters[field].includes(",")
+              ) {
+                deletedQuery[field] = { $in: filters[field].split(",") };
+              } else if (
+                filters[field] === "true" ||
+                filters[field] === "false"
+              ) {
+                deletedQuery[field] = filters[field] === "true";
               } else if (!isNaN(filters[field])) {
                 deletedQuery[field] = Number(filters[field]);
               } else {
@@ -253,38 +312,40 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           const deletedTotal = await Model.countDocuments(deletedQuery);
           
           deletedPagination = {
-            totalItems: deletedTotal
+            totalItems: deletedTotal,
           };
         } catch (error) {
-          console.error('Error getting deleted records count:', error);
+          console.error("Error getting deleted records count:", error);
           deletedPagination = { totalItems: 0 };
         }
       }
 
       // Resolve custom tabs for the current module
       const routeTabs = routeRegistry.getCustomTabs(modelName) || [];
-      const activePath = `${req.baseUrl || ''}${req.path === '/' ? '' : req.path}`;
+      const activePath = `${req.baseUrl || ""}${
+        req.path === "/" ? "" : req.path
+      }`;
 
       // Fetch company options for filters (only if the model uses company_id)
       let companyOptions = [];
       if (Model.schema.paths.company_id) {
         try {
           companyOptions = await Company.find({ deletedAt: null })
-            .select('_id company_name')
+            .select("_id company_name")
             .sort({ company_name: 1 })
             .lean();
-          companyOptions = companyOptions.map(company => ({
+          companyOptions = companyOptions.map((company) => ({
             _id: company._id.toString(),
-            company_name: company.company_name
+            company_name: company.company_name,
           }));
         } catch (error) {
-          console.error('Error fetching company options:', error);
+          console.error("Error fetching company options:", error);
         }
       }
 
       // Build a copy of fieldConfig for listing (exclude hidden fields)
       const listFieldConfig = {};
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
         if (!field || field.showInList === false) {
           return;
@@ -293,7 +354,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       });
 
       // Render the list view
-      res.render('admin/list', {
+      res.render("admin/list", {
         title: `${titleCase}s`,
         modelName,
         singularName,
@@ -305,14 +366,14 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         deletedPagination,
         softDelete, // Pass softDelete flag to template
         routes: req.routes || [], // Add routes data for dynamic menu
-        baseUrl: req.baseUrl || 'http://localhost:8000',
+        baseUrl: req.baseUrl || "http://localhost:8000",
         pagination: {
           currentPage: parseInt(page),
           totalPages,
           totalItems: total,
           itemsPerPage: actualLimit,
           hasNextPage: page < totalPages,
-          hasPrevPage: page > 1
+          hasPrevPage: page > 1,
         },
         filters: {
           search,
@@ -320,24 +381,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           searchable: searchableFields,
           filterable: filterableFields,
           sortable: sortableFields,
-          company_id: filters.company_id || ''
+          company_id: filters.company_id || "",
         },
         companies: companyOptions,
         cssClasses,
         customJS,
         baseUrl: getBaseUrl(),
         customTabs: routeTabs,
-        customTabsActivePath: activePath || undefined
+        customTabsActivePath: activePath || undefined,
       });
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'list', req);
+      const errorResponse = await handleError(error, "list", req);
       if (errorResponse.statusCode === 500) {
-        res.status(500).render('admin/error', {
-          title: 'Error',
-          message: 'An error occurred while loading the data',
+        res.status(500).render("admin/error", {
+          title: "Error",
+          message: "An error occurred while loading the data",
           error: errorResponse,
-          baseUrl: getBaseUrl()
+          baseUrl: getBaseUrl(),
         });
       } else {
         res.status(errorResponse.statusCode).json(errorResponse);
@@ -352,11 +412,17 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     try {
       console.log(`🚀 createForm called for model: ${modelName}`);
       console.log(`🚀 createForm URL: ${req.url}`);
-      console.log(`🚀 createForm middleware.beforeCreateForm exists:`, !!middleware.beforeCreateForm);
+      console.log(
+        `🚀 createForm middleware.beforeCreateForm exists:`,
+        !!middleware.beforeCreateForm
+      );
       
       // Set fieldConfig on req before middleware runs
       req.fieldConfig = fieldConfig;
-      console.log(`🚀 createForm - fieldConfig keys:`, Object.keys(fieldConfig));
+      console.log(
+        `🚀 createForm - fieldConfig keys:`,
+        Object.keys(fieldConfig)
+      );
       
       // Apply custom middleware
       if (middleware.beforeCreateForm) {
@@ -371,24 +437,34 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       const finalFieldConfig = req.fieldConfig || fieldConfig;
       
       // Debug: Check fieldConfig state
-      console.log(`🔍 adminCrudGenerator [${modelName}] - finalFieldConfig keys:`, Object.keys(finalFieldConfig));
+      console.log(
+        `🔍 adminCrudGenerator [${modelName}] - finalFieldConfig keys:`,
+        Object.keys(finalFieldConfig)
+      );
       if (finalFieldConfig.warehouse_id) {
-        console.log(`🔍 adminCrudGenerator [${modelName}] - warehouse_id exists in finalFieldConfig`);
-        console.log(`🔍 adminCrudGenerator [${modelName}] - warehouse_id options:`, finalFieldConfig.warehouse_id.options?.length || 0);
+        console.log(
+          `🔍 adminCrudGenerator [${modelName}] - warehouse_id exists in finalFieldConfig`
+        );
+        console.log(
+          `🔍 adminCrudGenerator [${modelName}] - warehouse_id options:`,
+          finalFieldConfig.warehouse_id.options?.length || 0
+        );
       } else {
-        console.log(`⚠️ adminCrudGenerator [${modelName}] - warehouse_id NOT in finalFieldConfig`);
+        console.log(
+          `⚠️ adminCrudGenerator [${modelName}] - warehouse_id NOT in finalFieldConfig`
+        );
       }
 
       // Create record object with default values
       const recordWithDefaults = {};
-      Object.keys(finalFieldConfig).forEach(fieldName => {
+      Object.keys(finalFieldConfig).forEach((fieldName) => {
         const field = finalFieldConfig[fieldName];
         if (field.defaultValue !== null && field.defaultValue !== undefined) {
           recordWithDefaults[fieldName] = field.defaultValue;
         }
       });
 
-      res.render('admin/create', {
+      res.render("admin/create", {
         title: `Create ${titleCase}`,
         modelName,
         singularName,
@@ -396,22 +472,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         fieldConfig: finalFieldConfig,
         record: recordWithDefaults, // Record with default values
         action: `/admin/${modelName}`,
-        method: 'POST',
+        method: "POST",
         errors: [],
         cssClasses,
         customJS,
         routes: req.routes || [], // Add routes data for dynamic menu
         baseUrl: getBaseUrl(),
-        warehouses: req.warehouses || [] // Pass warehouses from middleware
+        warehouses: req.warehouses || [], // Pass warehouses from middleware
       });
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'createForm', req);
-      res.status(errorResponse.statusCode).render('admin/error', {
-        title: 'Error',
-        message: 'An error occurred while loading the form',
+      const errorResponse = await handleError(error, "createForm", req);
+      res.status(errorResponse.statusCode).render("admin/error", {
+        title: "Error",
+        message: "An error occurred while loading the form",
         error: errorResponse,
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
       });
     }
   }
@@ -425,7 +500,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (validation.insert) {
         const validationResult = await validation.insert(req.body);
         if (!validationResult.isValid) {
-          return res.status(400).render('admin/create', {
+          return res.status(400).render("admin/create", {
             title: `Create ${titleCase}`,
             modelName,
             singularName,
@@ -433,12 +508,12 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             fieldConfig,
             record: req.body,
             action: `/admin/${modelName}`,
-            method: 'POST',
+            method: "POST",
             errors: validationResult.errors,
             cssClasses,
             customJS,
             baseUrl: getBaseUrl(),
-            warehouses: req.warehouses || [] // Pass warehouses even on validation errors
+            warehouses: req.warehouses || [], // Pass warehouses even on validation errors
           });
         }
       }
@@ -453,15 +528,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       
       // Debug: Log all req.body keys related to multiselect fields
       console.log(`🔍 All req.body keys:`, Object.keys(req.body));
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
-        if (field.type === 'multiselect') {
+        if (field.type === "multiselect") {
           console.log(`🔍 Checking multiselect field: ${fieldName}`);
           console.log(`🔍 req.body[${fieldName}]:`, req.body[fieldName]);
-          console.log(`🔍 req.body[${fieldName}[]]:`, req.body[`${fieldName}[]`]);
+          console.log(
+            `🔍 req.body[${fieldName}[]]:`,
+            req.body[`${fieldName}[]`]
+          );
           // Check for indexed format
-          Object.keys(req.body).forEach(key => {
-            if (key.startsWith(`${fieldName}[`) && key.includes(']')) {
+          Object.keys(req.body).forEach((key) => {
+            if (key.startsWith(`${fieldName}[`) && key.includes("]")) {
               console.log(`🔍 Found indexed key: ${key} =`, req.body[key]);
             }
           });
@@ -469,13 +547,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       });
       
       // Handle array fields (multiselect fields with [] in name or indexed format like category_id[0])
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
-        if (field.type === 'multiselect') {
+        if (field.type === "multiselect") {
           // FIRST: Check if the field already exists in req.body (might be parsed from indexed format)
           // This handles cases where express-fileupload/body-parser already parsed category_id[0] into category_id
-          if (req.body[fieldName] && (Array.isArray(req.body[fieldName]) || typeof req.body[fieldName] === 'object')) {
-            console.log(`🔍 Found ${fieldName} directly in req.body (likely parsed from indexed format):`, req.body[fieldName]);
+          if (
+            req.body[fieldName] &&
+            (Array.isArray(req.body[fieldName]) ||
+              typeof req.body[fieldName] === "object")
+          ) {
+            console.log(
+              `🔍 Found ${fieldName} directly in req.body (likely parsed from indexed format):`,
+              req.body[fieldName]
+            );
             let values = req.body[fieldName];
             
             // Extract values from objects if array contains objects
@@ -483,46 +568,70 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             const extractedValues = [];
             if (Array.isArray(values)) {
               values.forEach((val, idx) => {
-                if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+                if (
+                  val &&
+                  typeof val === "object" &&
+                  !Array.isArray(val) &&
+                  !(val instanceof mongoose.Types.ObjectId)
+                ) {
                   // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
                   const objValue = Object.values(val)[0];
                   if (objValue) {
                     extractedValues.push(objValue);
-                    console.log(`✅ Extracted from object at index ${idx}:`, objValue);
+                    console.log(
+                      `✅ Extracted from object at index ${idx}:`,
+                      objValue
+                    );
                   }
                 } else {
                   extractedValues.push(val);
                 }
               });
-            } else if (typeof values === 'object' && values !== null) {
+            } else if (typeof values === "object" && values !== null) {
               // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
-              const sortedKeys = Object.keys(values).sort((a, b) => parseInt(a) - parseInt(b));
-              sortedKeys.forEach(key => {
+              const sortedKeys = Object.keys(values).sort(
+                (a, b) => parseInt(a) - parseInt(b)
+              );
+              sortedKeys.forEach((key) => {
                 extractedValues.push(values[key]);
               });
             }
             
-            values = extractedValues.length > 0 ? extractedValues : (Array.isArray(values) ? values : [values]);
+            values =
+              extractedValues.length > 0
+                ? extractedValues
+                : Array.isArray(values)
+                ? values
+                : [values];
             
             // Process as ObjectId array
             const schemaPath = Model.schema.paths[fieldName];
-            const isObjectIdArray = schemaPath && 
-              schemaPath.instance === 'Array' && 
-              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            const isObjectIdArray =
+              schemaPath &&
+              schemaPath.instance === "Array" &&
+              schemaPath.caster &&
+              schemaPath.caster.instance === "ObjectID";
             
             if (isObjectIdArray) {
               const processedValues = [];
               values.forEach((val, idx) => {
-                if (!val || val === '' || val === null || val === undefined) return;
+                if (!val || val === "" || val === null || val === undefined)
+                  return;
                 
                 if (val instanceof mongoose.Types.ObjectId) {
                   processedValues.push(val);
-                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                } else if (
+                  typeof val === "string" &&
+                  mongoose.Types.ObjectId.isValid(val.trim())
+                ) {
                   processedValues.push(new mongoose.Types.ObjectId(val.trim()));
                 }
               });
               data[fieldName] = processedValues;
-              console.log(`✅ Processed direct field ${fieldName} (from parsed format):`, data[fieldName]);
+              console.log(
+                `✅ Processed direct field ${fieldName} (from parsed format):`,
+                data[fieldName]
+              );
               
               // Remove from req.body to prevent re-processing
               delete req.body[fieldName];
@@ -533,18 +642,25 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           // SECOND: Check for indexed array format (category_id[0], category_id[1], etc.)
           const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
           const indexedValues = [];
-          Object.keys(req.body).forEach(key => {
+          Object.keys(req.body).forEach((key) => {
             if (indexedPattern.test(key)) {
               const index = parseInt(key.match(/\[(\d+)\]/)[1]);
               let value = req.body[key];
               
               // Handle stringified values
-              if (typeof value === 'string') {
+              if (typeof value === "string") {
                 value = value.trim();
-                console.log(`🔍 Processing indexed field ${key}:`, value, `(type: ${typeof value})`);
+                console.log(
+                  `🔍 Processing indexed field ${key}:`,
+                  value,
+                  `(type: ${typeof value})`
+                );
                 
                 // Try to parse if it looks like JSON
-                if ((value.startsWith('[') || value.startsWith('{')) && value.length > 1) {
+                if (
+                  (value.startsWith("[") || value.startsWith("{")) &&
+                  value.length > 1
+                ) {
                   try {
                     // Replace single quotes with double quotes for JSON parsing
                     let jsonString = value.replace(/'/g, '"');
@@ -554,23 +670,33 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                     // If parsed is an array, extract values
                     if (Array.isArray(parsed)) {
                       parsed.forEach((item, i) => {
-                        if (typeof item === 'object' && item !== null) {
+                        if (typeof item === "object" && item !== null) {
                           // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
                           const objValue = Object.values(item)[0];
                           if (objValue) {
                             indexedValues[index + i] = objValue;
-                            console.log(`✅ Extracted from array item ${i}:`, objValue);
+                            console.log(
+                              `✅ Extracted from array item ${i}:`,
+                              objValue
+                            );
                           }
                         } else {
                           indexedValues[index + i] = item;
-                          console.log(`✅ Using array item ${i} directly:`, item);
+                          console.log(
+                            `✅ Using array item ${i} directly:`,
+                            item
+                          );
                         }
                       });
                       // Skip adding the original value since we processed the array
                       return;
                     }
                     // If parsed is an object, extract the value
-                    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+                    if (
+                      typeof parsed === "object" &&
+                      parsed !== null &&
+                      !Array.isArray(parsed)
+                    ) {
                       const objValue = Object.values(parsed)[0];
                       if (objValue) {
                         value = objValue;
@@ -578,7 +704,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                       }
                     }
                   } catch (e) {
-                    console.log(`⚠️ Failed to parse JSON from ${key}:`, e.message);
+                    console.log(
+                      `⚠️ Failed to parse JSON from ${key}:`,
+                      e.message
+                    );
                     // If it's a valid ObjectId string, use it directly
                     if (mongoose.Types.ObjectId.isValid(value)) {
                       indexedValues[index] = value;
@@ -599,37 +728,52 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           
           // Check for array format (category_id[] or category_id) or indexed format
           if (indexedValues.length > 0) {
-            console.log(`🔍 Processing multiselect field: ${fieldName} (indexed format)`);
+            console.log(
+              `🔍 Processing multiselect field: ${fieldName} (indexed format)`
+            );
             console.log(`🔍 Found indexed values:`, indexedValues);
             
             // Use indexed values
-            let values = indexedValues.filter(v => v !== undefined && v !== null);
+            let values = indexedValues.filter(
+              (v) => v !== undefined && v !== null
+            );
             
             // Process the values
             const schemaPath = Model.schema.paths[fieldName];
-            const isObjectIdArray = schemaPath && 
-              schemaPath.instance === 'Array' && 
-              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            const isObjectIdArray =
+              schemaPath &&
+              schemaPath.instance === "Array" &&
+              schemaPath.caster &&
+              schemaPath.caster.instance === "ObjectID";
             
             if (isObjectIdArray) {
               const processedValues = [];
               values.forEach((val, idx) => {
-                if (!val || val === '' || val === null || val === undefined) return;
+                if (!val || val === "" || val === null || val === undefined)
+                  return;
                 
                 if (val instanceof mongoose.Types.ObjectId) {
                   processedValues.push(val);
-                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                } else if (
+                  typeof val === "string" &&
+                  mongoose.Types.ObjectId.isValid(val.trim())
+                ) {
                   processedValues.push(new mongoose.Types.ObjectId(val.trim()));
                 }
               });
               data[fieldName] = processedValues;
-              console.log(`✅ Processed indexed multiselect data:`, data[fieldName]);
+              console.log(
+                `✅ Processed indexed multiselect data:`,
+                data[fieldName]
+              );
             } else {
-              data[fieldName] = values.filter(val => val && val !== '' && val !== null && val !== undefined);
+              data[fieldName] = values.filter(
+                (val) => val && val !== "" && val !== null && val !== undefined
+              );
             }
             
             // Remove indexed fields from both req.body and data
-            Object.keys(req.body).forEach(key => {
+            Object.keys(req.body).forEach((key) => {
               if (indexedPattern.test(key)) {
                 delete req.body[key];
                 delete data[key]; // Also remove from data object
@@ -637,31 +781,44 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             });
             
             // Also remove any direct fieldName entry that might be in wrong format
-            if (data[fieldName] && typeof data[fieldName] === 'object' && !Array.isArray(data[fieldName])) {
-              console.log(`⚠️ Removing incorrectly formatted ${fieldName} from data:`, data[fieldName]);
+            if (
+              data[fieldName] &&
+              typeof data[fieldName] === "object" &&
+              !Array.isArray(data[fieldName])
+            ) {
+              console.log(
+                `⚠️ Removing incorrectly formatted ${fieldName} from data:`,
+                data[fieldName]
+              );
               delete data[fieldName];
             }
           } else if (req.body[`${fieldName}[]`]) {
             console.log(`🔍 Processing multiselect field: ${fieldName}[]`);
-            console.log(`🔍 Raw form data type:`, typeof req.body[`${fieldName}[]`]);
+            console.log(
+              `🔍 Raw form data type:`,
+              typeof req.body[`${fieldName}[]`]
+            );
             console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
             
             // Handle different input formats
             let values = req.body[`${fieldName}[]`];
             
             // If it's a string, try to parse it
-            if (typeof values === 'string') {
+            if (typeof values === "string") {
               // Remove any leading/trailing whitespace
               values = values.trim();
               
               // Check if it looks like a JSON string (starts with [ or {)
-              if (values.startsWith('[') || values.startsWith('{')) {
+              if (values.startsWith("[") || values.startsWith("{")) {
                 try {
                   // Try to parse as JSON
                   values = JSON.parse(values);
                   console.log(`🔍 Parsed JSON string:`, values);
                 } catch (e) {
-                  console.log(`⚠️ Failed to parse JSON, treating as single value:`, e.message);
+                  console.log(
+                    `⚠️ Failed to parse JSON, treating as single value:`,
+                    e.message
+                  );
                   // If not valid JSON, treat as single value
                   values = [values];
                 }
@@ -672,7 +829,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             }
             
             // If values is still a string, it might be a stringified array
-            if (typeof values === 'string') {
+            if (typeof values === "string") {
               try {
                 values = JSON.parse(values);
               } catch (e) {
@@ -683,7 +840,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             // Ensure it's an array
             if (!Array.isArray(values)) {
               // If it's an object, try to extract values
-              if (typeof values === 'object' && values !== null) {
+              if (typeof values === "object" && values !== null) {
                 values = Object.values(values);
               } else {
                 values = [values];
@@ -698,18 +855,24 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             
             // Check if this is an array of ObjectIds
             // For type: [mongoose.Schema.Types.ObjectId], check if it's an Array and the caster is ObjectId
-            const isObjectIdArray = schemaPath && 
-              schemaPath.instance === 'Array' && 
-              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            const isObjectIdArray =
+              schemaPath &&
+              schemaPath.instance === "Array" &&
+              schemaPath.caster &&
+              schemaPath.caster.instance === "ObjectID";
             
             if (isObjectIdArray) {
               // It's an array of ObjectIds - process each value
               const processedValues = [];
               
               values.forEach((val, idx) => {
-                console.log(`🔍 Processing value ${idx}:`, val, `(type: ${typeof val})`);
-                
-                if (!val || val === '' || val === null || val === undefined) {
+                console.log(
+                  `🔍 Processing value ${idx}:`,
+                  val,
+                  `(type: ${typeof val})`
+                );
+
+                if (!val || val === "" || val === null || val === undefined) {
                   console.log(`⏭️ Skipping empty value at index ${idx}`);
                   return; // Skip empty values
                 }
@@ -722,18 +885,26 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                 }
                 
                 // If it's a string that looks like an ObjectId, convert it
-                if (typeof val === 'string') {
+                if (typeof val === "string") {
                   const trimmedVal = val.trim();
                   if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
-                    console.log(`✅ Converting string to ObjectId at index ${idx}:`, trimmedVal);
-                    processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
+                    console.log(
+                      `✅ Converting string to ObjectId at index ${idx}:`,
+                      trimmedVal
+                    );
+                    processedValues.push(
+                      new mongoose.Types.ObjectId(trimmedVal)
+                    );
                     return;
                   }
                 }
                 
                 // If it's an object, extract the value
-                if (typeof val === 'object' && val !== null) {
-                  console.log(`🔍 Value ${idx} is object, extracting values:`, val);
+                if (typeof val === "object" && val !== null) {
+                  console.log(
+                    `🔍 Value ${idx} is object, extracting values:`,
+                    val
+                  );
                   
                   // Handle objects like { '0': 'id' } or { 'id': 'value' }
                   const objValues = Object.values(val);
@@ -743,29 +914,45 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                     if (!objValue) continue;
                     
                     // If the object value is a string ObjectId
-                    if (typeof objValue === 'string') {
+                    if (typeof objValue === "string") {
                       const trimmedObjVal = objValue.trim();
                       if (mongoose.Types.ObjectId.isValid(trimmedObjVal)) {
-                        console.log(`✅ Extracted ObjectId from object at index ${idx}:`, trimmedObjVal);
-                        processedValues.push(new mongoose.Types.ObjectId(trimmedObjVal));
+                        console.log(
+                          `✅ Extracted ObjectId from object at index ${idx}:`,
+                          trimmedObjVal
+                        );
+                        processedValues.push(
+                          new mongoose.Types.ObjectId(trimmedObjVal)
+                        );
                         return;
                       }
                     }
                     
                     // If the object value is itself an ObjectId
                     if (objValue instanceof mongoose.Types.ObjectId) {
-                      console.log(`✅ Extracted ObjectId from object at index ${idx}:`, objValue);
+                      console.log(
+                        `✅ Extracted ObjectId from object at index ${idx}:`,
+                        objValue
+                      );
                       processedValues.push(objValue);
                       return;
                     }
                     
                     // Handle nested objects
-                    if (typeof objValue === 'object' && objValue !== null) {
+                    if (typeof objValue === "object" && objValue !== null) {
                       const nestedValues = Object.values(objValue);
                       for (const nestedValue of nestedValues) {
-                        if (typeof nestedValue === 'string' && mongoose.Types.ObjectId.isValid(nestedValue.trim())) {
-                          console.log(`✅ Extracted ObjectId from nested object at index ${idx}:`, nestedValue);
-                          processedValues.push(new mongoose.Types.ObjectId(nestedValue.trim()));
+                        if (
+                          typeof nestedValue === "string" &&
+                          mongoose.Types.ObjectId.isValid(nestedValue.trim())
+                        ) {
+                          console.log(
+                            `✅ Extracted ObjectId from nested object at index ${idx}:`,
+                            nestedValue
+                          );
+                          processedValues.push(
+                            new mongoose.Types.ObjectId(nestedValue.trim())
+                          );
                           return;
                         }
                       }
@@ -774,24 +961,39 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                 }
                 
                 // Last resort: try to convert if it's valid
-                if (typeof val === 'string' || typeof val === 'number') {
+                if (typeof val === "string" || typeof val === "number") {
                   const strVal = String(val).trim();
                   if (mongoose.Types.ObjectId.isValid(strVal)) {
-                    console.log(`✅ Last resort conversion at index ${idx}:`, strVal);
+                    console.log(
+                      `✅ Last resort conversion at index ${idx}:`,
+                      strVal
+                    );
                     processedValues.push(new mongoose.Types.ObjectId(strVal));
                   } else {
-                    console.log(`⚠️ Could not convert value at index ${idx} to ObjectId:`, val);
+                    console.log(
+                      `⚠️ Could not convert value at index ${idx} to ObjectId:`,
+                      val
+                    );
                   }
                 } else {
-                  console.log(`⚠️ Unhandled value type at index ${idx}:`, typeof val, val);
+                  console.log(
+                    `⚠️ Unhandled value type at index ${idx}:`,
+                    typeof val,
+                    val
+                  );
                 }
               });
-              
-              console.log(`✅ Final processed values for ${fieldName}:`, processedValues);
+
+              console.log(
+                `✅ Final processed values for ${fieldName}:`,
+                processedValues
+              );
               data[fieldName] = processedValues;
             } else {
               // Regular array
-              data[fieldName] = values.filter(val => val && val !== '' && val !== null && val !== undefined);
+              data[fieldName] = values.filter(
+                (val) => val && val !== "" && val !== null && val !== undefined
+              );
             }
             
             console.log(`🔍 Processed multiselect data:`, data[fieldName]);
@@ -799,21 +1001,29 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             delete data[`${fieldName}[]`];
           } else if (req.body[fieldName]) {
             // Handle case where field is sent without [] suffix
-            console.log(`🔍 Processing multiselect field: ${fieldName} (direct field)`);
+            console.log(
+              `🔍 Processing multiselect field: ${fieldName} (direct field)`
+            );
             let values = req.body[fieldName];
             
             // Handle string input
-            if (typeof values === 'string') {
+            if (typeof values === "string") {
               values = values.trim();
               // Try to parse if it looks like JSON
-              if ((values.startsWith('[') || values.startsWith('{')) && values.length > 1) {
+              if (
+                (values.startsWith("[") || values.startsWith("{")) &&
+                values.length > 1
+              ) {
                 try {
                   // Replace single quotes with double quotes for JSON parsing
                   let jsonString = values.replace(/'/g, '"');
                   values = JSON.parse(jsonString);
                   console.log(`✅ Parsed JSON from ${fieldName}:`, values);
                 } catch (e) {
-                  console.log(`⚠️ Failed to parse JSON from ${fieldName}:`, e.message);
+                  console.log(
+                    `⚠️ Failed to parse JSON from ${fieldName}:`,
+                    e.message
+                  );
                   values = [values];
                 }
               } else {
@@ -830,12 +1040,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             // e.g., [ { '0': 'id' } ] -> [ 'id' ]
             const extractedValues = [];
             values.forEach((val, idx) => {
-              if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+              if (
+                val &&
+                typeof val === "object" &&
+                !Array.isArray(val) &&
+                !(val instanceof mongoose.Types.ObjectId)
+              ) {
                 // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
                 const objValue = Object.values(val)[0];
                 if (objValue) {
                   extractedValues.push(objValue);
-                  console.log(`✅ Extracted from object at index ${idx}:`, objValue);
+                  console.log(
+                    `✅ Extracted from object at index ${idx}:`,
+                    objValue
+                  );
                 }
               } else {
                 extractedValues.push(val);
@@ -846,18 +1064,24 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             const schemaPath = Model.schema.paths[fieldName];
             // Check if this is an array of ObjectIds
             // For type: [mongoose.Schema.Types.ObjectId], check if it's an Array and the caster is ObjectId
-            const isObjectIdArray = schemaPath && 
-              schemaPath.instance === 'Array' && 
-              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            const isObjectIdArray =
+              schemaPath &&
+              schemaPath.instance === "Array" &&
+              schemaPath.caster &&
+              schemaPath.caster.instance === "ObjectID";
             
             if (isObjectIdArray) {
               // It's an array of ObjectIds - process each value
               const processedValues = [];
               
               values.forEach((val, idx) => {
-                console.log(`🔍 Processing value ${idx}:`, val, `(type: ${typeof val})`);
-                
-                if (!val || val === '' || val === null || val === undefined) {
+                console.log(
+                  `🔍 Processing value ${idx}:`,
+                  val,
+                  `(type: ${typeof val})`
+                );
+
+                if (!val || val === "" || val === null || val === undefined) {
                   console.log(`⏭️ Skipping empty value at index ${idx}`);
                   return; // Skip empty values
                 }
@@ -870,18 +1094,26 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                 }
                 
                 // If it's a string that looks like an ObjectId, convert it
-                if (typeof val === 'string') {
+                if (typeof val === "string") {
                   const trimmedVal = val.trim();
                   if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
-                    console.log(`✅ Converting string to ObjectId at index ${idx}:`, trimmedVal);
-                    processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
+                    console.log(
+                      `✅ Converting string to ObjectId at index ${idx}:`,
+                      trimmedVal
+                    );
+                    processedValues.push(
+                      new mongoose.Types.ObjectId(trimmedVal)
+                    );
                     return;
                   }
                 }
                 
                 // If it's an object, extract the value
-                if (typeof val === 'object' && val !== null) {
-                  console.log(`🔍 Value ${idx} is object, extracting values:`, val);
+                if (typeof val === "object" && val !== null) {
+                  console.log(
+                    `🔍 Value ${idx} is object, extracting values:`,
+                    val
+                  );
                   
                   // Handle objects like { '0': 'id' } or { 'id': 'value' }
                   const objValues = Object.values(val);
@@ -891,29 +1123,45 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                     if (!objValue) continue;
                     
                     // If the object value is a string ObjectId
-                    if (typeof objValue === 'string') {
+                    if (typeof objValue === "string") {
                       const trimmedObjVal = objValue.trim();
                       if (mongoose.Types.ObjectId.isValid(trimmedObjVal)) {
-                        console.log(`✅ Extracted ObjectId from object at index ${idx}:`, trimmedObjVal);
-                        processedValues.push(new mongoose.Types.ObjectId(trimmedObjVal));
+                        console.log(
+                          `✅ Extracted ObjectId from object at index ${idx}:`,
+                          trimmedObjVal
+                        );
+                        processedValues.push(
+                          new mongoose.Types.ObjectId(trimmedObjVal)
+                        );
                         return;
                       }
                     }
                     
                     // If the object value is itself an ObjectId
                     if (objValue instanceof mongoose.Types.ObjectId) {
-                      console.log(`✅ Extracted ObjectId from object at index ${idx}:`, objValue);
+                      console.log(
+                        `✅ Extracted ObjectId from object at index ${idx}:`,
+                        objValue
+                      );
                       processedValues.push(objValue);
                       return;
                     }
                     
                     // Handle nested objects
-                    if (typeof objValue === 'object' && objValue !== null) {
+                    if (typeof objValue === "object" && objValue !== null) {
                       const nestedValues = Object.values(objValue);
                       for (const nestedValue of nestedValues) {
-                        if (typeof nestedValue === 'string' && mongoose.Types.ObjectId.isValid(nestedValue.trim())) {
-                          console.log(`✅ Extracted ObjectId from nested object at index ${idx}:`, nestedValue);
-                          processedValues.push(new mongoose.Types.ObjectId(nestedValue.trim()));
+                        if (
+                          typeof nestedValue === "string" &&
+                          mongoose.Types.ObjectId.isValid(nestedValue.trim())
+                        ) {
+                          console.log(
+                            `✅ Extracted ObjectId from nested object at index ${idx}:`,
+                            nestedValue
+                          );
+                          processedValues.push(
+                            new mongoose.Types.ObjectId(nestedValue.trim())
+                          );
                           return;
                         }
                       }
@@ -922,20 +1170,33 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                 }
                 
                 // Last resort: try to convert if it's valid
-                if (typeof val === 'string' || typeof val === 'number') {
+                if (typeof val === "string" || typeof val === "number") {
                   const strVal = String(val).trim();
                   if (mongoose.Types.ObjectId.isValid(strVal)) {
-                    console.log(`✅ Last resort conversion at index ${idx}:`, strVal);
+                    console.log(
+                      `✅ Last resort conversion at index ${idx}:`,
+                      strVal
+                    );
                     processedValues.push(new mongoose.Types.ObjectId(strVal));
                   } else {
-                    console.log(`⚠️ Could not convert value at index ${idx} to ObjectId:`, val);
+                    console.log(
+                      `⚠️ Could not convert value at index ${idx} to ObjectId:`,
+                      val
+                    );
                   }
                 } else {
-                  console.log(`⚠️ Unhandled value type at index ${idx}:`, typeof val, val);
+                  console.log(
+                    `⚠️ Unhandled value type at index ${idx}:`,
+                    typeof val,
+                    val
+                  );
                 }
               });
-              
-              console.log(`✅ Final processed values for ${fieldName}:`, processedValues);
+
+              console.log(
+                `✅ Final processed values for ${fieldName}:`,
+                processedValues
+              );
               data[fieldName] = processedValues;
             }
           }
@@ -943,39 +1204,48 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       });
       
       // Handle map-style fields (e.g., permissions[integration][view])
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
         if (!field) {
           return;
         }
 
+        // Skip custom field types - they are handled by fieldProcessing hooks
+        if (field.type === "custom") {
+          return;
+        }
+
         // Detect inputs like permissions[module][action] and convert them to nested objects.
-        const bracketPattern = new RegExp(`^${fieldName}\\[([^\\]]+)\\]\\[([^\\]]+)\\]$`);
-        const matchingKeys = Object.keys(req.body).filter(key => bracketPattern.test(key));
+        const bracketPattern = new RegExp(
+          `^${fieldName}\\[([^\\]]+)\\]\\[([^\\]]+)\\]$`
+        );
+        const matchingKeys = Object.keys(req.body).filter((key) =>
+          bracketPattern.test(key)
+        );
         if (matchingKeys.length === 0) {
           return;
         }
 
         const normalizeKey = (item) => {
-          if (!item) return '';
-          if (typeof item === 'string') return item;
-          return item.key || item.value || item.name || '';
+          if (!item) return "";
+          if (typeof item === "string") return item;
+          return item.key || item.value || item.name || "";
         };
 
         const modulesOption = field.options?.modules || [];
         const actionsOption = field.options?.actions || [];
-        const defaultActions = actionsOption.length > 0
+        const defaultActions =
+          actionsOption.length > 0
           ? actionsOption
-          : [{ key: 'view' }, { key: 'edit' }, { key: 'delete' }];
+            : [{ key: "view" }, { key: "edit" }, { key: "delete" }];
 
-        const modulesKeys = modulesOption.length > 0
-          ? modulesOption.map(normalizeKey)
-          : [];
+        const modulesKeys =
+          modulesOption.length > 0 ? modulesOption.map(normalizeKey) : [];
         const actionKeys = defaultActions.map(normalizeKey);
 
         const mapData = {};
 
-        matchingKeys.forEach(key => {
+        matchingKeys.forEach((key) => {
           const [, moduleKeyRaw, actionKeyRaw] = key.match(bracketPattern);
           const moduleKey = moduleKeyRaw;
           const actionKey = actionKeyRaw;
@@ -985,14 +1255,15 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             rawValue = rawValue[rawValue.length - 1];
           }
 
-          const lowerValue = typeof rawValue === 'string' ? rawValue.toLowerCase() : rawValue;
+          const lowerValue =
+            typeof rawValue === "string" ? rawValue.toLowerCase() : rawValue;
           const boolValue =
             rawValue === true ||
             rawValue === false ||
-            lowerValue === 'true' ||
-            lowerValue === 'false'
-              ? (rawValue === true || lowerValue === 'true')
-              : ['1', 1, 'on', 'yes'].includes(rawValue);
+            lowerValue === "true" ||
+            lowerValue === "false"
+              ? rawValue === true || lowerValue === "true"
+              : ["1", 1, "on", "yes"].includes(rawValue);
 
           if (!mapData[moduleKey]) {
             mapData[moduleKey] = {};
@@ -1004,13 +1275,14 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         });
 
         // Ensure that every configured module/action pair exists so unchecked boxes become false.
-        const modulesToEnsure = modulesKeys.length > 0 ? modulesKeys : Object.keys(mapData);
+        const modulesToEnsure =
+          modulesKeys.length > 0 ? modulesKeys : Object.keys(mapData);
 
-        modulesToEnsure.forEach(moduleKey => {
+        modulesToEnsure.forEach((moduleKey) => {
           if (!mapData[moduleKey]) {
             mapData[moduleKey] = {};
           }
-          actionKeys.forEach(actionKey => {
+          actionKeys.forEach((actionKey) => {
             if (mapData[moduleKey][actionKey] === undefined) {
               mapData[moduleKey][actionKey] = false;
             }
@@ -1024,9 +1296,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Store file references for later processing
       const filesToUpload = {};
       if (req.files) {
-        Object.keys(fieldConfig).forEach(fieldName => {
+        Object.keys(fieldConfig).forEach((fieldName) => {
           const field = fieldConfig[fieldName];
-          if (field.type === 'file' && req.files[fieldName]) {
+          if (field.type === "file" && req.files[fieldName]) {
             filesToUpload[fieldName] = req.files[fieldName];
             // Don't set data[fieldName] yet - we'll do it after record creation
           }
@@ -1048,31 +1320,48 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
-      if (Model.schema.paths.barcode && (!data.barcode || data.barcode.trim() === "")) {
-        const { generateProductBarcode } = require('./barcodeGenerator');
+      if (
+        Model.schema.paths.barcode &&
+        (!data.barcode || data.barcode.trim() === "")
+      ) {
+        const { generateProductBarcode } = require("./barcodeGenerator");
         data.barcode = generateProductBarcode();
-        console.log("🏷️ Generated new EAN13 barcode for admin form:", data.barcode);
+        console.log(
+          "🏷️ Generated new EAN13 barcode for admin form:",
+          data.barcode
+        );
       }
 
       // Final cleanup: Ensure multiselect fields are arrays and clean up any incorrectly formatted entries
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
-        if (field.type === 'multiselect') {
+        if (field.type === "multiselect") {
           // Check if the field exists but is not an array (might be an object with numeric keys)
-          if (data[fieldName] && typeof data[fieldName] === 'object' && !Array.isArray(data[fieldName])) {
-            console.log(`⚠️ Found incorrectly formatted ${fieldName} before save:`, data[fieldName]);
+          if (
+            data[fieldName] &&
+            typeof data[fieldName] === "object" &&
+            !Array.isArray(data[fieldName])
+          ) {
+            console.log(
+              `⚠️ Found incorrectly formatted ${fieldName} before save:`,
+              data[fieldName]
+            );
             // Try to extract values from object like { 0: "value", 1: "value" }
-            const extractedValues = Object.values(data[fieldName]).filter(v => v && v !== '');
+            const extractedValues = Object.values(data[fieldName]).filter(
+              (v) => v && v !== ""
+            );
             if (extractedValues.length > 0) {
               const schemaPath = Model.schema.paths[fieldName];
-              const isObjectIdArray = schemaPath && 
-                schemaPath.instance === 'Array' && 
-                (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+              const isObjectIdArray =
+                schemaPath &&
+                schemaPath.instance === "Array" &&
+                schemaPath.caster &&
+                schemaPath.caster.instance === "ObjectID";
               
               if (isObjectIdArray) {
                 data[fieldName] = extractedValues
-                  .filter(val => mongoose.Types.ObjectId.isValid(val))
-                  .map(val => new mongoose.Types.ObjectId(val));
+                  .filter((val) => mongoose.Types.ObjectId.isValid(val))
+                  .map((val) => new mongoose.Types.ObjectId(val));
               } else {
                 data[fieldName] = extractedValues;
               }
@@ -1099,7 +1388,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Now handle file uploads with the record ID (using same structure as API: uploads/singularName/recordId/)
       if (Object.keys(filesToUpload).length > 0) {
         const recordId = savedRecord._id.toString();
-        const fs = require('fs');
+        const fs = require("fs");
         
         // Process all file uploads
         for (const fieldName of Object.keys(filesToUpload)) {
@@ -1107,7 +1396,13 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           const field = fieldConfig[fieldName];
           
           // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
-          const uploadDir = path.join(__dirname, '..', 'uploads', singularName, recordId);
+          const uploadDir = path.join(
+            __dirname,
+            "..",
+            "uploads",
+            singularName,
+            recordId
+          );
           if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
           }
@@ -1120,7 +1415,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           for (let index = 0; index < filesArray.length; index++) {
             const f = filesArray[index];
             const timestamp = Date.now();
-            const fileExtension = path.extname(f.name) || `.${f.mimetype.split('/')[1]}`;
+            const fileExtension =
+              path.extname(f.name) || `.${f.mimetype.split("/")[1]}`;
             const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
             const filePath = path.join(uploadDir, fileName);
             
@@ -1147,13 +1443,17 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           }
           
           // If schema expects array store array else single string
-          const expectsArray = Array.isArray(Model.schema.obj[fieldName]?.type) || Model.schema.paths[fieldName]?.instance === 'Array';
+          const expectsArray =
+            Array.isArray(Model.schema.obj[fieldName]?.type) ||
+            Model.schema.paths[fieldName]?.instance === "Array";
           savedRecord[fieldName] = expectsArray ? storedPaths : storedPaths[0];
         }
         
         // Save the record again with image paths
         await savedRecord.save();
-        console.log(`✅ All files uploaded to: uploads/${singularName}/${recordId}/`);
+        console.log(
+          `✅ All files uploaded to: uploads/${singularName}/${recordId}/`
+        );
       }
 
       // Apply custom hooks
@@ -1168,24 +1468,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Remove excluded fields
-      excludedFields.forEach(field => delete responseData[field]);
+      excludedFields.forEach((field) => delete responseData[field]);
 
       // Redirect to list view with success message
-      req.flash('success', `${titleCase} created successfully`);
+      req.flash("success", `${titleCase} created successfully`);
       res.redirect(`/admin/${modelName}`);
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'insert', req);
+      const errorResponse = await handleError(error, "insert", req);
       
-      if (error.name === 'ValidationError') {
+      if (error.name === "ValidationError") {
         // Re-render form with validation errors
-        const errors = Object.values(error.errors).map(err => ({
+        const errors = Object.values(error.errors).map((err) => ({
           field: err.path,
           message: err.message,
-          value: err.value
+          value: err.value,
         }));
 
-        return res.render('admin/create', {
+        return res.render("admin/create", {
           title: `Create ${titleCase}`,
           modelName,
           singularName,
@@ -1193,21 +1492,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           fieldConfig,
           record: req.body,
           action: `/admin/${modelName}`,
-          method: 'POST',
+          method: "POST",
           errors,
           cssClasses,
           customJS,
           routes: req.routes || [], // Add routes data for dynamic menu
           baseUrl: getBaseUrl(),
-          warehouses: req.warehouses || [] // Pass warehouses even on validation errors
+          warehouses: req.warehouses || [], // Pass warehouses even on validation errors
         });
       }
 
-      res.status(errorResponse.statusCode).render('admin/error', {
-        title: 'Error',
-        message: 'An error occurred while creating the record',
+      res.status(errorResponse.statusCode).render("admin/error", {
+        title: "Error",
+        message: "An error occurred while creating the record",
         error: errorResponse,
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
       });
     }
   }
@@ -1219,17 +1518,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     try {
       console.log(`🚀 editForm called for model: ${modelName}`);
       console.log(`🚀 editForm URL: ${req.url}`);
-      console.log(`🚀 editForm middleware.beforeEditForm exists:`, !!middleware.beforeEditForm);
+      console.log(
+        `🚀 editForm middleware.beforeEditForm exists:`,
+        !!middleware.beforeEditForm
+      );
       
       const { id } = req.params;
 
       // Validate ObjectId
       if (!mongoose.Types.ObjectId.isValid(id)) {
-        return res.status(400).render('admin/error', {
-          title: 'Error',
-          message: 'Invalid ID format',
-          error: { statusCode: 400, message: 'Invalid ID format' },
-          baseUrl: getBaseUrl()
+        return res.status(400).render("admin/error", {
+          title: "Error",
+          message: "Invalid ID format",
+          error: { statusCode: 400, message: "Invalid ID format" },
+          baseUrl: getBaseUrl(),
         });
       }
 
@@ -1238,8 +1540,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (softDelete) {
         // Fix: Use $or to handle both cases - fields that don't exist and fields with null default
         query.$or = [
-          { deletedAt: { $exists: false } },  // For models without the field
-          { deletedAt: null }                  // For models with default null
+          { deletedAt: { $exists: false } }, // For models without the field
+          { deletedAt: null }, // For models with default null
         ];
       }
 
@@ -1256,14 +1558,17 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         console.log(`⚠️ editForm - no beforeEditForm middleware defined`);
       }
 
-      const record = await Model.findOne(query)
-        .select(includedFields.length > 0 ? includedFields.join(' ') : `-${excludedFields.join(' -')}`);
+      const record = await Model.findOne(query).select(
+        includedFields.length > 0
+          ? includedFields.join(" ")
+          : `-${excludedFields.join(" -")}`
+      );
 
       if (!record) {
-        return res.status(404).render('admin/error', {
-          title: 'Error',
+        return res.status(404).render("admin/error", {
+          title: "Error",
           message: `${titleCase} not found`,
-          error: { statusCode: 404, message: `${titleCase} not found` }
+          error: { statusCode: 404, message: `${titleCase} not found` },
         });
       }
 
@@ -1279,9 +1584,16 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         const existingOptions = req.fieldConfig?.warehouse_id?.options || [];
         await middleware.afterQuery([record], req);
         // Restore options if afterQuery overwrote them
-        if (req.fieldConfig?.warehouse_id && existingOptions.length > 0 && (!req.fieldConfig.warehouse_id.options || req.fieldConfig.warehouse_id.options.length === 0)) {
+        if (
+          req.fieldConfig?.warehouse_id &&
+          existingOptions.length > 0 &&
+          (!req.fieldConfig.warehouse_id.options ||
+            req.fieldConfig.warehouse_id.options.length === 0)
+        ) {
           req.fieldConfig.warehouse_id.options = existingOptions;
-          console.log(`✅ editForm - restored warehouse_id options after afterQuery`);
+          console.log(
+            `✅ editForm - restored warehouse_id options after afterQuery`
+          );
         }
         console.log(`✅ editForm - afterQuery middleware completed`);
       }
@@ -1290,12 +1602,22 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       const finalFieldConfig = req.fieldConfig || fieldConfig;
       
       // Debug: Check fieldConfig state
-      console.log(`🔍 adminCrudGenerator [${modelName}] editForm - finalFieldConfig keys:`, Object.keys(finalFieldConfig));
+      console.log(
+        `🔍 adminCrudGenerator [${modelName}] editForm - finalFieldConfig keys:`,
+        Object.keys(finalFieldConfig)
+      );
       if (finalFieldConfig.warehouse_id) {
-        console.log(`🔍 adminCrudGenerator [${modelName}] editForm - warehouse_id exists in finalFieldConfig`);
-        console.log(`🔍 adminCrudGenerator [${modelName}] editForm - warehouse_id options:`, finalFieldConfig.warehouse_id.options?.length || 0);
+        console.log(
+          `🔍 adminCrudGenerator [${modelName}] editForm - warehouse_id exists in finalFieldConfig`
+        );
+        console.log(
+          `🔍 adminCrudGenerator [${modelName}] editForm - warehouse_id options:`,
+          finalFieldConfig.warehouse_id.options?.length || 0
+        );
       } else {
-        console.log(`⚠️ adminCrudGenerator [${modelName}] editForm - warehouse_id NOT in finalFieldConfig`);
+        console.log(
+          `⚠️ adminCrudGenerator [${modelName}] editForm - warehouse_id NOT in finalFieldConfig`
+        );
       }
 
       // Format response
@@ -1304,7 +1626,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         responseData = await responseFormatting.editForm(responseData, req);
       }
 
-      res.render('admin/edit', {
+      res.render("admin/edit", {
         title: `Edit ${titleCase}`,
         modelName,
         singularName,
@@ -1312,22 +1634,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         fieldConfig: finalFieldConfig,
         record: responseData,
         action: `/admin/${modelName}/${id}`,
-        method: 'PUT',
+        method: "PUT",
         errors: [],
         cssClasses,
         customJS,
         routes: req.routes || [], // Add routes data for dynamic menu
         baseUrl: getBaseUrl(),
-        warehouses: req.warehouses || [] // Pass warehouses from middleware
+        warehouses: req.warehouses || [], // Pass warehouses from middleware
       });
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'editForm', req);
-      res.status(errorResponse.statusCode).render('admin/error', {
-        title: 'Error',
-        message: 'An error occurred while loading the form',
+      const errorResponse = await handleError(error, "editForm", req);
+      res.status(errorResponse.statusCode).render("admin/error", {
+        title: "Error",
+        message: "An error occurred while loading the form",
         error: errorResponse,
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
       });
     }
   }
@@ -1342,7 +1663,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       params: req.params,
       body: req.body,
       _method: req.body._method,
-      originalMethod: req.originalMethod
+      originalMethod: req.originalMethod,
     });
     
     try {
@@ -1350,11 +1671,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Validate ObjectId
       if (!mongoose.Types.ObjectId.isValid(id)) {
-        return res.status(400).render('admin/error', {
-          title: 'Error',
-          message: 'Invalid ID format',
-          error: { statusCode: 400, message: 'Invalid ID format' },
-          baseUrl: getBaseUrl()
+        return res.status(400).render("admin/error", {
+          title: "Error",
+          message: "Invalid ID format",
+          error: { statusCode: 400, message: "Invalid ID format" },
+          baseUrl: getBaseUrl(),
         });
       }
 
@@ -1362,7 +1683,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (validation.update) {
         const validationResult = await validation.update(req.body);
         if (!validationResult.isValid) {
-          return res.status(400).render('admin/edit', {
+          return res.status(400).render("admin/edit", {
             title: `Edit ${titleCase}`,
             modelName,
             singularName,
@@ -1370,13 +1691,13 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             fieldConfig,
             record: { ...req.body, _id: id },
             action: `/admin/${modelName}/${id}`,
-            method: 'PUT',
+            method: "PUT",
             errors: validationResult.errors,
             cssClasses,
             customJS,
             routes: req.routes || [],
             baseUrl: getBaseUrl(),
-            warehouses: req.warehouses || [] // Pass warehouses even on validation errors
+            warehouses: req.warehouses || [], // Pass warehouses even on validation errors
           });
         }
       }
@@ -1390,17 +1711,17 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       let query = { _id: id };
       if (softDelete) {
         query.$or = [
-          { deletedAt: { $exists: false } },  // For models without the field
-          { deletedAt: null }                  // For models with default null
+          { deletedAt: { $exists: false } }, // For models without the field
+          { deletedAt: null }, // For models with default null
         ];
       }
 
       const record = await Model.findOne(query);
       if (!record) {
-        return res.status(404).render('admin/error', {
-          title: 'Error',
+        return res.status(404).render("admin/error", {
+          title: "Error",
           message: `${titleCase} not found`,
-          error: { statusCode: 404, message: `${titleCase} not found` }
+          error: { statusCode: 404, message: `${titleCase} not found` },
         });
       }
 
@@ -1408,13 +1729,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       let updateData = { ...req.body };
       
       // Handle array fields (multiselect fields with [] in name or indexed format like category_id[0])
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
-        if (field.type === 'multiselect') {
+        if (field.type === "multiselect") {
           // FIRST: Check if the field already exists in req.body (might be parsed from indexed format)
           // This handles cases where express-fileupload/body-parser already parsed category_id[0] into category_id
-          if (req.body[fieldName] && (Array.isArray(req.body[fieldName]) || typeof req.body[fieldName] === 'object')) {
-            console.log(`🔍 Found ${fieldName} directly in req.body (UPDATE - likely parsed from indexed format):`, req.body[fieldName]);
+          if (
+            req.body[fieldName] &&
+            (Array.isArray(req.body[fieldName]) ||
+              typeof req.body[fieldName] === "object")
+          ) {
+            console.log(
+              `🔍 Found ${fieldName} directly in req.body (UPDATE - likely parsed from indexed format):`,
+              req.body[fieldName]
+            );
             let values = req.body[fieldName];
             
             // Extract values from objects if array contains objects
@@ -1422,46 +1750,70 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             const extractedValues = [];
             if (Array.isArray(values)) {
               values.forEach((val, idx) => {
-                if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+                if (
+                  val &&
+                  typeof val === "object" &&
+                  !Array.isArray(val) &&
+                  !(val instanceof mongoose.Types.ObjectId)
+                ) {
                   // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
                   const objValue = Object.values(val)[0];
                   if (objValue) {
                     extractedValues.push(objValue);
-                    console.log(`✅ Extracted from object at index ${idx} (UPDATE):`, objValue);
+                    console.log(
+                      `✅ Extracted from object at index ${idx} (UPDATE):`,
+                      objValue
+                    );
                   }
                 } else {
                   extractedValues.push(val);
                 }
               });
-            } else if (typeof values === 'object' && values !== null) {
+            } else if (typeof values === "object" && values !== null) {
               // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
-              const sortedKeys = Object.keys(values).sort((a, b) => parseInt(a) - parseInt(b));
-              sortedKeys.forEach(key => {
+              const sortedKeys = Object.keys(values).sort(
+                (a, b) => parseInt(a) - parseInt(b)
+              );
+              sortedKeys.forEach((key) => {
                 extractedValues.push(values[key]);
               });
             }
             
-            values = extractedValues.length > 0 ? extractedValues : (Array.isArray(values) ? values : [values]);
+            values =
+              extractedValues.length > 0
+                ? extractedValues
+                : Array.isArray(values)
+                ? values
+                : [values];
             
             // Process as ObjectId array
             const schemaPath = Model.schema.paths[fieldName];
-            const isObjectIdArray = schemaPath && 
-              schemaPath.instance === 'Array' && 
-              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            const isObjectIdArray =
+              schemaPath &&
+              schemaPath.instance === "Array" &&
+              schemaPath.caster &&
+              schemaPath.caster.instance === "ObjectID";
             
             if (isObjectIdArray) {
               const processedValues = [];
               values.forEach((val, idx) => {
-                if (!val || val === '' || val === null || val === undefined) return;
+                if (!val || val === "" || val === null || val === undefined)
+                  return;
                 
                 if (val instanceof mongoose.Types.ObjectId) {
                   processedValues.push(val);
-                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                } else if (
+                  typeof val === "string" &&
+                  mongoose.Types.ObjectId.isValid(val.trim())
+                ) {
                   processedValues.push(new mongoose.Types.ObjectId(val.trim()));
                 }
               });
               updateData[fieldName] = processedValues;
-              console.log(`✅ Processed direct field ${fieldName} (UPDATE - from parsed format):`, updateData[fieldName]);
+              console.log(
+                `✅ Processed direct field ${fieldName} (UPDATE - from parsed format):`,
+                updateData[fieldName]
+              );
               
               // Remove from req.body to prevent re-processing
               delete req.body[fieldName];
@@ -1472,18 +1824,25 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           // SECOND: Check for indexed array format (category_id[0], category_id[1], etc.)
           const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
           const indexedValues = [];
-          Object.keys(req.body).forEach(key => {
+          Object.keys(req.body).forEach((key) => {
             if (indexedPattern.test(key)) {
               const index = parseInt(key.match(/\[(\d+)\]/)[1]);
               let value = req.body[key];
               
               // Handle stringified values
-              if (typeof value === 'string') {
+              if (typeof value === "string") {
                 value = value.trim();
-                console.log(`🔍 Processing indexed field (UPDATE) ${key}:`, value, `(type: ${typeof value})`);
+                console.log(
+                  `🔍 Processing indexed field (UPDATE) ${key}:`,
+                  value,
+                  `(type: ${typeof value})`
+                );
                 
                 // Try to parse if it looks like JSON
-                if ((value.startsWith('[') || value.startsWith('{')) && value.length > 1) {
+                if (
+                  (value.startsWith("[") || value.startsWith("{")) &&
+                  value.length > 1
+                ) {
                   try {
                     // Replace single quotes with double quotes for JSON parsing
                     let jsonString = value.replace(/'/g, '"');
@@ -1493,23 +1852,33 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                     // If parsed is an array, extract values
                     if (Array.isArray(parsed)) {
                       parsed.forEach((item, i) => {
-                        if (typeof item === 'object' && item !== null) {
+                        if (typeof item === "object" && item !== null) {
                           // Extract value from object like { '0': 'id' } or { 'category_id': 'id' }
                           const objValue = Object.values(item)[0];
                           if (objValue) {
                             indexedValues[index + i] = objValue;
-                            console.log(`✅ Extracted from array item ${i}:`, objValue);
+                            console.log(
+                              `✅ Extracted from array item ${i}:`,
+                              objValue
+                            );
                           }
                         } else {
                           indexedValues[index + i] = item;
-                          console.log(`✅ Using array item ${i} directly:`, item);
+                          console.log(
+                            `✅ Using array item ${i} directly:`,
+                            item
+                          );
                         }
                       });
                       // Skip adding the original value since we processed the array
                       return;
                     }
                     // If parsed is an object, extract the value
-                    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+                    if (
+                      typeof parsed === "object" &&
+                      parsed !== null &&
+                      !Array.isArray(parsed)
+                    ) {
                       const objValue = Object.values(parsed)[0];
                       if (objValue) {
                         value = objValue;
@@ -1517,7 +1886,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                       }
                     }
                   } catch (e) {
-                    console.log(`⚠️ Failed to parse JSON from ${key}:`, e.message);
+                    console.log(
+                      `⚠️ Failed to parse JSON from ${key}:`,
+                      e.message
+                    );
                     // If it's a valid ObjectId string, use it directly
                     if (mongoose.Types.ObjectId.isValid(value)) {
                       indexedValues[index] = value;
@@ -1538,43 +1910,60 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           
           // Check for indexed format first
           if (indexedValues.length > 0) {
-            console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName} (indexed format)`);
+            console.log(
+              `🔍 Processing multiselect field (UPDATE): ${fieldName} (indexed format)`
+            );
             console.log(`🔍 Found indexed values:`, indexedValues);
             
             // Use indexed values
-            let values = indexedValues.filter(v => v !== undefined && v !== null);
+            let values = indexedValues.filter(
+              (v) => v !== undefined && v !== null
+            );
             
             // Process the values
             const schemaPath = Model.schema.paths[fieldName];
-            const isObjectIdArray = schemaPath && 
-              schemaPath.instance === 'Array' && 
-              (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
+            const isObjectIdArray =
+              schemaPath &&
+              schemaPath.instance === "Array" &&
+              schemaPath.caster &&
+              schemaPath.caster.instance === "ObjectID";
             
             if (isObjectIdArray) {
               const processedValues = [];
               values.forEach((val, idx) => {
-                if (!val || val === '' || val === null || val === undefined) return;
+                if (!val || val === "" || val === null || val === undefined)
+                  return;
                 
                 if (val instanceof mongoose.Types.ObjectId) {
                   processedValues.push(val);
-                } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
+                } else if (
+                  typeof val === "string" &&
+                  mongoose.Types.ObjectId.isValid(val.trim())
+                ) {
                   processedValues.push(new mongoose.Types.ObjectId(val.trim()));
                 }
               });
               updateData[fieldName] = processedValues;
-              console.log(`✅ Processed indexed multiselect data (UPDATE):`, updateData[fieldName]);
+              console.log(
+                `✅ Processed indexed multiselect data (UPDATE):`,
+                updateData[fieldName]
+              );
             } else {
-              updateData[fieldName] = values.filter(val => val && val !== '' && val !== null && val !== undefined);
+              updateData[fieldName] = values.filter(
+                (val) => val && val !== "" && val !== null && val !== undefined
+              );
             }
             
             // Remove indexed fields from updateData
-            Object.keys(updateData).forEach(key => {
+            Object.keys(updateData).forEach((key) => {
               if (indexedPattern.test(key)) {
                 delete updateData[key];
               }
             });
           } else if (req.body[`${fieldName}[]`]) {
-            console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
+            console.log(
+              `🔍 Processing multiselect field (UPDATE): ${fieldName}[]`
+            );
             console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
             // Convert array field to proper format
             updateData[fieldName] = Array.isArray(req.body[`${fieldName}[]`]) 
@@ -1588,39 +1977,43 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       });
       
       // Handle map-style fields (e.g., permissions[integration][view]) during update
-      Object.keys(fieldConfig).forEach(fieldName => {
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
         if (!field) {
           return;
         }
 
         // Detect inputs like permissions[module][action] when updating and rebuild the map.
-        const bracketPattern = new RegExp(`^${fieldName}\\[([^\\]]+)\\]\\[([^\\]]+)\\]$`);
-        const matchingKeys = Object.keys(req.body).filter(key => bracketPattern.test(key));
+        const bracketPattern = new RegExp(
+          `^${fieldName}\\[([^\\]]+)\\]\\[([^\\]]+)\\]$`
+        );
+        const matchingKeys = Object.keys(req.body).filter((key) =>
+          bracketPattern.test(key)
+        );
         if (matchingKeys.length === 0) {
           return;
         }
 
         const normalizeKey = (item) => {
-          if (!item) return '';
-          if (typeof item === 'string') return item;
-          return item.key || item.value || item.name || '';
+          if (!item) return "";
+          if (typeof item === "string") return item;
+          return item.key || item.value || item.name || "";
         };
 
         const modulesOption = field.options?.modules || [];
         const actionsOption = field.options?.actions || [];
-        const defaultActions = actionsOption.length > 0
+        const defaultActions =
+          actionsOption.length > 0
           ? actionsOption
-          : [{ key: 'view' }, { key: 'edit' }, { key: 'delete' }];
+            : [{ key: "view" }, { key: "edit" }, { key: "delete" }];
 
-        const modulesKeys = modulesOption.length > 0
-          ? modulesOption.map(normalizeKey)
-          : [];
+        const modulesKeys =
+          modulesOption.length > 0 ? modulesOption.map(normalizeKey) : [];
         const actionKeys = defaultActions.map(normalizeKey);
 
         const mapData = {};
 
-        matchingKeys.forEach(key => {
+        matchingKeys.forEach((key) => {
           const [, moduleKeyRaw, actionKeyRaw] = key.match(bracketPattern);
           const moduleKey = moduleKeyRaw;
           const actionKey = actionKeyRaw;
@@ -1630,14 +2023,15 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             rawValue = rawValue[rawValue.length - 1];
           }
 
-          const lowerValue = typeof rawValue === 'string' ? rawValue.toLowerCase() : rawValue;
+          const lowerValue =
+            typeof rawValue === "string" ? rawValue.toLowerCase() : rawValue;
           const boolValue =
             rawValue === true ||
             rawValue === false ||
-            lowerValue === 'true' ||
-            lowerValue === 'false'
-              ? (rawValue === true || lowerValue === 'true')
-              : ['1', 1, 'on', 'yes'].includes(rawValue);
+            lowerValue === "true" ||
+            lowerValue === "false"
+              ? rawValue === true || lowerValue === "true"
+              : ["1", 1, "on", "yes"].includes(rawValue);
 
           if (!mapData[moduleKey]) {
             mapData[moduleKey] = {};
@@ -1649,13 +2043,14 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         });
 
         // Ensure every configured module/action pair is present on the payload.
-        const modulesToEnsure = modulesKeys.length > 0 ? modulesKeys : Object.keys(mapData);
+        const modulesToEnsure =
+          modulesKeys.length > 0 ? modulesKeys : Object.keys(mapData);
 
-        modulesToEnsure.forEach(moduleKey => {
+        modulesToEnsure.forEach((moduleKey) => {
           if (!mapData[moduleKey]) {
             mapData[moduleKey] = {};
           }
-          actionKeys.forEach(actionKey => {
+          actionKeys.forEach((actionKey) => {
             if (mapData[moduleKey][actionKey] === undefined) {
               mapData[moduleKey][actionKey] = false;
             }
@@ -1666,25 +2061,42 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       });
       
       // Handle image removal for file fields
-      console.log('🔍 Full request body keys:', Object.keys(req.body));
-      console.log('🔍 Checking for removed images in request body:', Object.keys(req.body).filter(key => key.startsWith('removed_images_')));
+      console.log("🔍 Full request body keys:", Object.keys(req.body));
+      console.log(
+        "🔍 Checking for removed images in request body:",
+        Object.keys(req.body).filter((key) => key.startsWith("removed_images_"))
+      );
       
       // Log all removed_images data
-      Object.keys(req.body).forEach(key => {
-        if (key.startsWith('removed_images_')) {
-          console.log('🔍 Found removal data:', key, '=', req.body[key]);
-          console.log('🔍 Removal data type:', typeof req.body[key], 'Array?', Array.isArray(req.body[key]));
+      Object.keys(req.body).forEach((key) => {
+        if (key.startsWith("removed_images_")) {
+          console.log("🔍 Found removal data:", key, "=", req.body[key]);
+          console.log(
+            "🔍 Removal data type:",
+            typeof req.body[key],
+            "Array?",
+            Array.isArray(req.body[key])
+          );
         }
       });
-      
-      Object.keys(fieldConfig).forEach(fieldName => {
+
+      Object.keys(fieldConfig).forEach((fieldName) => {
         const field = fieldConfig[fieldName];
-        const expectsArray = Array.isArray(Model.schema.obj[fieldName]?.type) || Model.schema.paths[fieldName]?.instance === 'Array';
-        
-        if (field.type === 'file' && req.body[`removed_images_${fieldName}[]`]) {
-          console.log(`🔍 Processing removal for field: ${fieldName}, expectsArray: ${expectsArray}`);
-          
-          const removedImages = Array.isArray(req.body[`removed_images_${fieldName}[]`]) 
+        const expectsArray =
+          Array.isArray(Model.schema.obj[fieldName]?.type) ||
+          Model.schema.paths[fieldName]?.instance === "Array";
+
+        if (
+          field.type === "file" &&
+          req.body[`removed_images_${fieldName}[]`]
+        ) {
+          console.log(
+            `🔍 Processing removal for field: ${fieldName}, expectsArray: ${expectsArray}`
+          );
+
+          const removedImages = Array.isArray(
+            req.body[`removed_images_${fieldName}[]`]
+          )
             ? req.body[`removed_images_${fieldName}[]`] 
             : [req.body[`removed_images_${fieldName}[]`]];
           
@@ -1693,22 +2105,28 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           if (expectsArray) {
             // For array fields, filter out removed images
             const existingImages = record[fieldName] || [];
-            const existingArray = Array.isArray(existingImages) ? existingImages : [existingImages].filter(img => img);
+            const existingArray = Array.isArray(existingImages)
+              ? existingImages
+              : [existingImages].filter((img) => img);
             
             console.log(`🔍 Existing images:`, existingArray);
             
             // Filter out removed images
-            const filteredImages = existingArray.filter(img => !removedImages.includes(img));
+            const filteredImages = existingArray.filter(
+              (img) => !removedImages.includes(img)
+            );
             updateData[fieldName] = filteredImages;
             
-            console.log(`🗑️ Removed ${removedImages.length} images from array field ${fieldName}, ${filteredImages.length} images remaining`);
+            console.log(
+              `🗑️ Removed ${removedImages.length} images from array field ${fieldName}, ${filteredImages.length} images remaining`
+            );
           } else {
             // For single image fields, clear the field if the image is removed
             const currentImage = record[fieldName];
             console.log(`🔍 Current single image:`, currentImage);
             
             if (removedImages.includes(currentImage)) {
-              updateData[fieldName] = '';
+              updateData[fieldName] = "";
               console.log(`🗑️ Removed single image from field ${fieldName}`);
             }
           }
@@ -1721,15 +2139,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Handle file uploads for file fields (using same structure as API: uploads/singularName/recordId/)
       if (req.files) {
         const recordId = record._id.toString();
-        Object.keys(fieldConfig).forEach(fieldName => {
+        Object.keys(fieldConfig).forEach((fieldName) => {
           const field = fieldConfig[fieldName];
-          if (field.type === 'file' && req.files[fieldName]) {
+          if (field.type === "file" && req.files[fieldName]) {
             const file = req.files[fieldName];
             
             // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
-            const uploadDir = path.join(__dirname, '..', 'uploads', singularName, recordId);
-            if (!require('fs').existsSync(uploadDir)) {
-              require('fs').mkdirSync(uploadDir, { recursive: true });
+            const uploadDir = path.join(
+              __dirname,
+              "..",
+              "uploads",
+              singularName,
+              recordId
+            );
+            if (!require("fs").existsSync(uploadDir)) {
+              require("fs").mkdirSync(uploadDir, { recursive: true });
             }
             
             // Support multiple files if input is multiple
@@ -1737,35 +2161,44 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             const storedPaths = [];
             filesArray.forEach((f, index) => {
               const timestamp = Date.now();
-              const fileExtension = path.extname(f.name) || `.${f.mimetype.split('/')[1]}`;
+              const fileExtension =
+                path.extname(f.name) || `.${f.mimetype.split("/")[1]}`;
               const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
               const filePath = path.join(uploadDir, fileName);
               
               f.mv(filePath, (err) => {
                 if (err) {
-                  console.error('File upload error:', err);
+                  console.error("File upload error:", err);
                 }
               });
               // Store relative path: uploads/singularName/recordId/filename (e.g., uploads/product/recordId/filename)
               const relativePath = `uploads/${singularName}/${recordId}/${fileName}`;
               storedPaths.push(relativePath);
             });
-            const expectsArray = Array.isArray(Model.schema.obj[fieldName]?.type) || Model.schema.paths[fieldName]?.instance === 'Array';
+            const expectsArray =
+              Array.isArray(Model.schema.obj[fieldName]?.type) ||
+              Model.schema.paths[fieldName]?.instance === "Array";
             
             if (expectsArray) {
               // For array fields, append new images to existing ones (or already filtered ones)
               let existingImages;
               if (updateData[fieldName] !== undefined) {
                 // Use already filtered images if removal was processed
-                existingImages = Array.isArray(updateData[fieldName]) ? updateData[fieldName] : [updateData[fieldName]].filter(img => img);
+                existingImages = Array.isArray(updateData[fieldName])
+                  ? updateData[fieldName]
+                  : [updateData[fieldName]].filter((img) => img);
               } else {
                 // Use original images from record
                 const recordImages = record[fieldName] || [];
-                existingImages = Array.isArray(recordImages) ? recordImages : [recordImages].filter(img => img);
+                existingImages = Array.isArray(recordImages)
+                  ? recordImages
+                  : [recordImages].filter((img) => img);
               }
               
               updateData[fieldName] = [...existingImages, ...storedPaths];
-              console.log(`📷 Appending ${storedPaths.length} new images to existing ${existingImages.length} images for field ${fieldName}`);
+              console.log(
+                `📷 Appending ${storedPaths.length} new images to existing ${existingImages.length} images for field ${fieldName}`
+              );
             } else {
               // For single image fields, replace the existing image
               updateData[fieldName] = storedPaths[0];
@@ -1775,7 +2208,15 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
       
       if (fieldProcessing.beforeUpdate) {
-        updateData = await fieldProcessing.beforeUpdate(updateData, req, record);
+        console.log("🔄 BEFORE fieldProcessing.beforeUpdate - updateData keys:", Object.keys(updateData));
+        console.log("🔄 BEFORE fieldProcessing.beforeUpdate - updateData.attribute_values:", updateData.attribute_values);
+        updateData = await fieldProcessing.beforeUpdate(
+          updateData,
+          req,
+          record
+        );
+        console.log("🔄 AFTER fieldProcessing.beforeUpdate - updateData keys:", Object.keys(updateData));
+        console.log("🔄 AFTER fieldProcessing.beforeUpdate - updateData.attribute_values:", updateData.attribute_values);
       }
 
       // Automatically set updated_by if field exists and user is authenticated
@@ -1794,19 +2235,31 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Debug logging
-      console.log('🔄 Final updateData before saving:', updateData);
-      console.log('🔄 Original record images:', {
+      console.log("🔄 Final updateData before saving:", JSON.stringify(updateData, null, 2));
+      if (updateData.attribute_values) {
+        console.log("🔄 Final updateData.attribute_values:", JSON.stringify(updateData.attribute_values, null, 2));
+      }
+      console.log("🔄 Original record images:", {
         multi_images: record.multi_images,
-        product_image: record.product_image
+        product_image: record.product_image,
       });
 
       // Update record
       Object.assign(record, updateData);
-      const updatedRecord = await record.save();
       
-      console.log('✅ Updated record images:', {
+      // Mark nested arrays as modified so Mongoose detects the changes
+      if (updateData.attribute_values !== undefined) {
+        record.markModified('attribute_values');
+        console.log("🔄 Marked attribute_values as modified");
+      }
+      
+      console.log("🔄 Record after Object.assign - record.attribute_values:", JSON.stringify(record.attribute_values, null, 2));
+      const updatedRecord = await record.save();
+      console.log("✅ Record saved - updatedRecord.attribute_values:", JSON.stringify(updatedRecord.attribute_values, null, 2));
+      
+      console.log("✅ Updated record images:", {
         multi_images: updatedRecord.multi_images,
-        product_image: updatedRecord.product_image
+        product_image: updatedRecord.product_image,
       });
 
       // Apply custom hooks
@@ -1821,24 +2274,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Remove excluded fields
-      excludedFields.forEach(field => delete responseData[field]);
+      excludedFields.forEach((field) => delete responseData[field]);
 
       // Redirect to list view with success message
-      req.flash('success', `${titleCase} updated successfully`);
+      req.flash("success", `${titleCase} updated successfully`);
       res.redirect(`/admin/${modelName}`);
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'update', req);
+      const errorResponse = await handleError(error, "update", req);
       
-      if (error.name === 'ValidationError') {
+      if (error.name === "ValidationError") {
         // Re-render form with validation errors
-        const errors = Object.values(error.errors).map(err => ({
+        const errors = Object.values(error.errors).map((err) => ({
           field: err.path,
           message: err.message,
-          value: err.value
+          value: err.value,
         }));
 
-        return res.render('admin/edit', {
+        return res.render("admin/edit", {
           title: `Edit ${titleCase}`,
           modelName,
           singularName,
@@ -1846,21 +2298,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           fieldConfig,
           record: { ...req.body, _id: req.params.id },
           action: `/admin/${modelName}/${req.params.id}`,
-          method: 'PUT',
+          method: "PUT",
           errors,
           cssClasses,
           customJS,
           routes: req.routes || [], // Add routes data for dynamic menu
           baseUrl: getBaseUrl(),
-          warehouses: req.warehouses || [] // Pass warehouses even on validation errors
+          warehouses: req.warehouses || [], // Pass warehouses even on validation errors
         });
       }
 
-      res.status(errorResponse.statusCode).render('admin/error', {
-        title: 'Error',
-        message: 'An error occurred while updating the record',
+      res.status(errorResponse.statusCode).render("admin/error", {
+        title: "Error",
+        message: "An error occurred while updating the record",
         error: errorResponse,
-        baseUrl: getBaseUrl()
+        baseUrl: getBaseUrl(),
       });
     }
   }
@@ -1876,7 +2328,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (!mongoose.Types.ObjectId.isValid(id)) {
         return res.status(400).json({
           success: false,
-          message: `Invalid ${singularName} ID format`
+          message: `Invalid ${singularName} ID format`,
         });
       }
 
@@ -1889,8 +2341,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       let query = { _id: id };
       if (softDelete) {
         query.$or = [
-          { deletedAt: { $exists: false } },  // For models without the field
-          { deletedAt: null }                  // For models with default null
+          { deletedAt: { $exists: false } }, // For models without the field
+          { deletedAt: null }, // For models with default null
         ];
       }
 
@@ -1898,7 +2350,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (!record) {
         return res.status(404).json({
           success: false,
-          message: `${titleCase} not found`
+          message: `${titleCase} not found`,
         });
       }
 
@@ -1910,7 +2362,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       let deleteResult;
       if (softDelete) {
         // Soft delete
-        deleteResult = await Model.findByIdAndUpdate(id, { deletedAt: new Date() }, { new: true });
+        deleteResult = await Model.findByIdAndUpdate(
+          id,
+          { deletedAt: new Date() },
+          { new: true }
+        );
       } else {
         // Hard delete
         deleteResult = await Model.findByIdAndDelete(id);
@@ -1926,12 +2382,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         message: `${titleCase} deleted successfully`,
         data: {
           id: deleteResult._id,
-          deletedAt: softDelete ? deleteResult.deletedAt : undefined
-        }
+          deletedAt: softDelete ? deleteResult.deletedAt : undefined,
+        },
       });
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'delete', req);
+      const errorResponse = await handleError(error, "delete", req);
       res.status(errorResponse.statusCode).json(errorResponse);
     }
   }
@@ -1947,27 +2402,28 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (!mongoose.Types.ObjectId.isValid(id)) {
         return res.status(400).json({
           success: false,
-          message: `Invalid ${singularName} ID format`
+          message: `Invalid ${singularName} ID format`,
         });
       }
 
       if (!softDelete) {
         return res.status(400).json({
           success: false,
-          message: 'Restore functionality is only available when soft delete is enabled'
+          message:
+            "Restore functionality is only available when soft delete is enabled",
         });
       }
 
       // Find the deleted record
       const record = await Model.findOne({ 
         _id: id, 
-        deletedAt: { $exists: true, $ne: null } 
+        deletedAt: { $exists: true, $ne: null },
       });
       
       if (!record) {
         return res.status(404).json({
           success: false,
-          message: `${titleCase} not found or not deleted`
+          message: `${titleCase} not found or not deleted`,
         });
       }
 
@@ -1993,12 +2449,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         message: `${titleCase} restored successfully`,
         data: {
           id: restoreResult._id,
-          restoredAt: new Date()
-        }
+          restoredAt: new Date(),
+        },
       });
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'restore', req);
+      const errorResponse = await handleError(error, "restore", req);
       res.status(errorResponse.statusCode).json(errorResponse);
     }
   }
@@ -2014,27 +2469,28 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (!mongoose.Types.ObjectId.isValid(id)) {
         return res.status(400).json({
           success: false,
-          message: `Invalid ${singularName} ID format`
+          message: `Invalid ${singularName} ID format`,
         });
       }
 
       if (!softDelete) {
         return res.status(400).json({
           success: false,
-          message: 'Permanent delete functionality is only available when soft delete is enabled'
+          message:
+            "Permanent delete functionality is only available when soft delete is enabled",
         });
       }
 
       // Find the deleted record
       const record = await Model.findOne({ 
         _id: id, 
-        deletedAt: { $exists: true, $ne: null } 
+        deletedAt: { $exists: true, $ne: null },
       });
       
       if (!record) {
         return res.status(404).json({
           success: false,
-          message: `${titleCase} not found or not deleted`
+          message: `${titleCase} not found or not deleted`,
         });
       }
 
@@ -2056,12 +2512,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         message: `${titleCase} permanently deleted successfully`,
         data: {
           id: deleteResult._id,
-          permanentlyDeletedAt: new Date()
-        }
+          permanentlyDeletedAt: new Date(),
+        },
       });
-
     } catch (error) {
-      const errorResponse = await handleError(error, 'permanentDelete', req);
+      const errorResponse = await handleError(error, "permanentDelete", req);
       res.status(errorResponse.statusCode).json(errorResponse);
     }
   }
@@ -2069,10 +2524,17 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
   /**
    * Generate field configuration for forms
    */
-  function generateFieldConfig(Model, fields, fieldTypes, fieldLabels, fieldValidation, fieldOptions) {
+  function generateFieldConfig(
+    Model,
+    fields,
+    fieldTypes,
+    fieldLabels,
+    fieldValidation,
+    fieldOptions
+  ) {
     const config = {};
     
-    fields.forEach(fieldName => {
+    fields.forEach((fieldName) => {
       const schemaPath = Model.schema.paths[fieldName];
       if (!schemaPath) return;
 
@@ -2081,27 +2543,28 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         type: fieldTypes[fieldName] || inferFieldType(schemaPath),
         label: fieldLabels[fieldName] || getFieldLabel(schemaPath, fieldName),
         required: schemaPath.isRequired || false,
-        validation: fieldValidation[fieldName] || generateFieldValidation(schemaPath),
+        validation:
+          fieldValidation[fieldName] || generateFieldValidation(schemaPath),
         options: fieldOptions[fieldName] || generateFieldOptions(schemaPath),
         placeholder: generateFieldPlaceholder(fieldName),
         helpText: generateFieldHelpText(fieldName, schemaPath),
         defaultValue: (() => {
           // Handle Mongoose default values properly
           if (schemaPath.defaultValue !== undefined) {
-            if (typeof schemaPath.defaultValue === 'function') {
+            if (typeof schemaPath.defaultValue === "function") {
               return schemaPath.defaultValue();
             }
             return schemaPath.defaultValue;
           }
           if (schemaPath.default !== undefined) {
-            if (typeof schemaPath.default === 'function') {
+            if (typeof schemaPath.default === "function") {
               return schemaPath.default();
             }
             return schemaPath.default;
           }
           return null;
         })(),
-        showInList: true
+        showInList: true,
       };
 
       config[fieldName] = field;
@@ -2122,11 +2585,11 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    * Clean up image path to avoid double /uploads/ prefixes
    */
   function cleanImagePath(imagePath) {
-    if (!imagePath) return '';
+    if (!imagePath) return "";
     
     // Remove duplicate /uploads/uploads/ prefixes
-    if (imagePath.startsWith('/uploads/uploads/')) {
-      return imagePath.replace('/uploads/uploads/', '/uploads/');
+    if (imagePath.startsWith("/uploads/uploads/")) {
+      return imagePath.replace("/uploads/uploads/", "/uploads/");
     }
     
     return imagePath;
@@ -2136,20 +2599,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    * Build full URL for assets
    */
   function buildAssetUrl(assetPath) {
-    if (!assetPath) return '';
+    if (!assetPath) return "";
     
     // If it's already a full URL, return as is
-    if (assetPath.startsWith('http://') || assetPath.startsWith('https://')) {
+    if (assetPath.startsWith("http://") || assetPath.startsWith("https://")) {
       return assetPath;
     }
     
     // If it starts with /, it's a relative path from root
-    if (assetPath.startsWith('/')) {
+    if (assetPath.startsWith("/")) {
       return getBaseUrl() + assetPath;
     }
     
     // Otherwise, treat as relative path
-    return getBaseUrl() + '/' + assetPath;
+    return getBaseUrl() + "/" + assetPath;
   }
 
   /**
@@ -2161,55 +2624,62 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       return schemaPath.options.field_type;
     }
     
-    if (schemaPath.instance === 'String') {
+    if (schemaPath.instance === "String") {
       if (schemaPath.enumValues && schemaPath.enumValues.length > 0) {
-        return 'select';
+        return "select";
       }
-      if (schemaPath.path === 'email') {
-        return 'email';
+      if (schemaPath.path === "email") {
+        return "email";
       }
-      if (schemaPath.path === 'password') {
-        return 'password';
+      if (schemaPath.path === "password") {
+        return "password";
       }
-      if (schemaPath.path.includes('description') || schemaPath.path.includes('content')) {
-        return 'textarea';
+      if (
+        schemaPath.path.includes("description") ||
+        schemaPath.path.includes("content")
+      ) {
+        return "textarea";
       }
-      return 'text';
+      return "text";
     }
-    
-    if (schemaPath.instance === 'Number') {
-      return 'number';
+
+    if (schemaPath.instance === "Number") {
+      return "number";
     }
-    
-    if (schemaPath.instance === 'Boolean') {
-      return 'checkbox';
+
+    if (schemaPath.instance === "Boolean") {
+      return "checkbox";
     }
-    
-    if (schemaPath.instance === 'Date') {
-      return 'date';
+
+    if (schemaPath.instance === "Date") {
+      return "date";
     }
-    
-    if (schemaPath.instance === 'Array') {
+
+    if (schemaPath.instance === "Array") {
       // Check if it's an array of strings (could be images, tags, or multiselect)
-      if (schemaPath.schema && schemaPath.schema.instance === 'String') {
+      if (schemaPath.schema && schemaPath.schema.instance === "String") {
         // Check if field name suggests it's for images
-        if (schemaPath.path.includes('image') || schemaPath.path.includes('photo') || schemaPath.path.includes('picture')) {
-          return 'file';
+        if (
+          schemaPath.path.includes("image") ||
+          schemaPath.path.includes("photo") ||
+          schemaPath.path.includes("picture")
+        ) {
+          return "file";
         }
         // Check if field has enumValues (for multiselect)
         if (schemaPath.enumValues && schemaPath.enumValues.length > 0) {
-          return 'multiselect';
+          return "multiselect";
         }
-        return 'tags';
+        return "tags";
       }
-      return 'tags';
+      return "tags";
     }
     
-    if (schemaPath.instance === 'ObjectID') {
-      return 'select';
+    if (schemaPath.instance === "ObjectID") {
+      return "select";
     }
 
-    return 'text';
+    return "text";
   }
 
   /**
@@ -2230,9 +2700,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    */
   function generateFieldLabel(fieldName) {
     return fieldName
-      .replace(/([A-Z])/g, ' $1')
-      .replace(/^./, str => str.toUpperCase())
-      .replace(/_/g, ' ');
+      .replace(/([A-Z])/g, " $1")
+      .replace(/^./, (str) => str.toUpperCase())
+      .replace(/_/g, " ");
   }
 
   /**
@@ -2242,20 +2712,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     const validation = {};
     
     if (schemaPath.validators) {
-      schemaPath.validators.forEach(validator => {
-        if (validator.type === 'minlength') {
+      schemaPath.validators.forEach((validator) => {
+        if (validator.type === "minlength") {
           validation.minLength = validator.value;
         }
-        if (validator.type === 'maxlength') {
+        if (validator.type === "maxlength") {
           validation.maxLength = validator.value;
         }
-        if (validator.type === 'min') {
+        if (validator.type === "min") {
           validation.min = validator.value;
         }
-        if (validator.type === 'max') {
+        if (validator.type === "max") {
           validation.max = validator.value;
         }
-        if (validator.type === 'regexp') {
+        if (validator.type === "regexp") {
           validation.pattern = validator.value;
         }
       });
@@ -2269,21 +2739,26 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    */
   function generateFieldOptions(schemaPath) {
     if (schemaPath.enumValues && schemaPath.enumValues.length > 0) {
-      return schemaPath.enumValues.map(value => ({
+      return schemaPath.enumValues.map((value) => ({
         value,
-        label: value.charAt(0).toUpperCase() + value.slice(1)
+        label: value.charAt(0).toUpperCase() + value.slice(1),
       }));
     }
     
     // For array fields with enum values (multiselect)
-    if (schemaPath.instance === 'Array' && schemaPath.schema && schemaPath.schema.enumValues && schemaPath.schema.enumValues.length > 0) {
-      return schemaPath.schema.enumValues.map(value => ({
+    if (
+      schemaPath.instance === "Array" &&
+      schemaPath.schema &&
+      schemaPath.schema.enumValues &&
+      schemaPath.schema.enumValues.length > 0
+    ) {
+      return schemaPath.schema.enumValues.map((value) => ({
         value,
-        label: value.charAt(0).toUpperCase() + value.slice(1)
+        label: value.charAt(0).toUpperCase() + value.slice(1),
       }));
     }
     
-    if (schemaPath.instance === 'ObjectID' && schemaPath.options.ref) {
+    if (schemaPath.instance === "ObjectID" && schemaPath.options.ref) {
       // For reference fields, you might want to populate options
       return [];
     }
@@ -2295,7 +2770,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    * Generate field placeholder
    */
   function generateFieldPlaceholder(fieldName) {
-    return `Enter ${fieldName.replace(/_/g, ' ')}`;
+    return `Enter ${fieldName.replace(/_/g, " ")}`;
   }
 
   /**
@@ -2303,9 +2778,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    */
   function generateFieldHelpText(fieldName, schemaPath) {
     if (schemaPath.isRequired) {
-      return 'This field is required';
+      return "This field is required";
     }
-    return '';
+    return "";
   }
 
   /**
@@ -2321,29 +2796,31 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
     // Default error handling
     let statusCode = 500;
-    let message = 'Internal server error';
+    let message = "Internal server error";
     let errors = null;
 
-    if (error.name === 'ValidationError') {
+    if (error.name === "ValidationError") {
       statusCode = 400;
-      message = 'Validation Error';
-      errors = Object.values(error.errors).map(err => ({
+      message = "Validation Error";
+      errors = Object.values(error.errors).map((err) => ({
         field: err.path,
         message: err.message,
-        value: err.value
+        value: err.value,
       }));
-    } else if (error.name === 'CastError') {
+    } else if (error.name === "CastError") {
       statusCode = 400;
-      message = 'Invalid ID format';
+      message = "Invalid ID format";
     } else if (error.code === 11000) {
       statusCode = 409;
-      message = 'Duplicate entry found';
+      message = "Duplicate entry found";
       const field = Object.keys(error.keyPattern)[0];
-      errors = [{
+      errors = [
+        {
         field,
         message: `${field} already exists`,
-        value: error.keyValue[field]
-      }];
+          value: error.keyValue[field],
+        },
+      ];
     } else if (error.statusCode) {
       statusCode = error.statusCode;
       message = error.message;
@@ -2356,10 +2833,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       success: false,
       message,
       ...(errors && { errors }),
-      ...(process.env.NODE_ENV === 'development' && {
+      ...(process.env.NODE_ENV === "development" && {
         stack: error.stack,
-        details: error
-      })
+        details: error,
+      }),
     };
   }
 
@@ -2367,23 +2844,27 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
    * Generate admin routes
    */
   function generateAdminRoutes() {
-    const express = require('express');
+    const express = require("express");
     const router = express.Router();
 
     // CRUD routes
     // console.log(`🔧 Registering routes for model: ${modelName}`);
-    router.get('/', list);                           // LIST view
-    router.get('/create', createForm);               // CREATE form
-    router.post('/', insert);                        // INSERT action
-    router.get('/:id/edit', editForm);               // EDIT form
-    router.put('/:id', update);                     // UPDATE action
-    router.post('/:id', update);                    // UPDATE action (fallback for method override issues)
-    router.delete('/:id', deleteRecord);             // DELETE action
+    router.get("/", list); // LIST view
+    router.get("/create", createForm); // CREATE form
+    router.post("/", insert); // INSERT action
+    router.get("/:id/edit", editForm); // EDIT form (must come before /:id)
+    router.get("/:id", (req, res) => {
+      // VIEW/EDIT redirect - redirect to edit form
+      res.redirect(`/admin/${modelName}/${req.params.id}/edit`);
+    });
+    router.put("/:id", update); // UPDATE action
+    router.post("/:id", update); // UPDATE action (fallback for method override issues)
+    router.delete("/:id", deleteRecord); // DELETE action
     
     // Soft delete routes (only if soft delete is enabled)
     if (softDelete) {
-      router.post('/:id/restore', restoreRecord);    // RESTORE action
-      router.delete('/:id/permanent-delete', permanentDeleteRecord); // PERMANENT DELETE action
+      router.post("/:id/restore", restoreRecord); // RESTORE action
+      router.delete("/:id/permanent-delete", permanentDeleteRecord); // PERMANENT DELETE action
       // console.log(`✅ Soft delete routes registered for ${modelName}: POST /:id/restore, DELETE /:id/permanent-delete`);
     }
     
@@ -2403,16 +2884,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     update,
     deleteRecord,
     // Soft delete functions (only if enabled)
-    ...(softDelete ? {
+    ...(softDelete
+      ? {
       restoreRecord,
-      permanentDeleteRecord
-    } : {}),
+          permanentDeleteRecord,
+        }
+      : {}),
     // Utility methods
     getModel: () => Model,
     getModelName: () => modelName,
     getSingularName: () => singularName,
     getTitleCase: () => titleCase,
-    getFieldConfig: () => fieldConfig
+    getFieldConfig: () => fieldConfig,
   };
 
   /**
@@ -2432,8 +2915,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       titleCase,
       fields,
       fieldConfig,
-      options
-    }
+      options,
+    },
   };
 }
 

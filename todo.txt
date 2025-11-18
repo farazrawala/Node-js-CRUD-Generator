@@ -31,10 +31,6 @@ Backend admin
 
 
 
-
-
-
-
 // check if all categories/products are going in correct company...
 
 // pos 
@@ -42,11 +38,8 @@ create order with order_items
 fetch_order wp
 fetch_order shopify
 
-
 api with search...
-
-
-signup with front create default warehouse.
+attribut edit not working..
 
 
 

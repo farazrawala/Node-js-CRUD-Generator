@@ -449,6 +449,36 @@
                                                         <script>console.log('🏪 No inventory items found');</script>
                                                         <span class="text-gray-400 text-xs">No inventory</span>
                                                     <% } %>
+                                                <% } else if (fieldName === 'attribute_values' && Array.isArray(record[fieldName])) { %>
+                                                    <% if (record[fieldName].length > 0) { %>
+                                                        <div class="flex flex-wrap gap-1">
+                                                            <% record[fieldName].forEach((item) => { %>
+                                                                <% 
+                                                                // Extract the name value from the object
+                                                                var valueName = '';
+                                                                if (item && typeof item === 'object') {
+                                                                    // Handle Mongoose document (with toObject) or plain object
+                                                                    if (item.toObject && typeof item.toObject === 'function') {
+                                                                        var itemObj = item.toObject();
+                                                                        valueName = itemObj.name || '';
+                                                                    } else {
+                                                                        valueName = item.name || '';
+                                                                    }
+                                                                } else if (typeof item === 'string') {
+                                                                    valueName = item;
+                                                                }
+                                                                // Only display if we have a valid name
+                                                                if (valueName && valueName.trim() !== '') {
+                                                                %>
+                                                                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800" title="<%= valueName %>">
+                                                                        <%= valueName.trim() %>
+                                                                    </span>
+                                                                <% } %>
+                                                            <% }); %>
+                                                        </div>
+                                                    <% } else { %>
+                                                        <span class="text-gray-400 text-xs">No values</span>
+                                                    <% } %>
                                                 <% } else { %>
                                                     <script>console.log('🏪 Warehouse inventory is not an array or field name mismatch');</script>
                                                     <div>

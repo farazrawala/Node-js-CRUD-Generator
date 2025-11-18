@@ -1,0 +1,144 @@
+<!-- Attribute Values Management Field -->
+<div class="attribute-values-container">
+  <label class="block text-sm font-medium text-gray-700 mb-2">
+    Attribute Values
+    <span class="text-gray-500 text-xs ml-1"
+      >(Add multiple values for this attribute)</span
+    >
+  </label>
+
+  <div id="attribute-values-list" class="space-y-3 mb-3">
+    <% let attributeValues = []; if (typeof record !== 'undefined' && record &&
+    record.attribute_values) { attributeValues =
+    Array.isArray(record.attribute_values) ? record.attribute_values : []; } %>
+    <% if (attributeValues.length > 0) { %> <% attributeValues.forEach((item,
+    index) => { %>
+    <div
+      class="attribute-value-item flex gap-3 items-start p-3 bg-gray-50 rounded-md border border-gray-200"
+    >
+      <div class="flex-1">
+        <label class="block text-xs font-medium text-gray-600 mb-1"
+          >Attribute Value Name</label
+        >
+        <input
+          type="text"
+          name="attribute_values[<%= index %>][name]"
+          value="<%= item.name || '' %>"
+          placeholder="Enter attribute value name"
+          class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+        />
+      </div>
+      <button
+        type="button"
+        onclick="removeAttributeValueItem(this)"
+        class="mt-6 bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-md text-sm transition-colors flex-shrink-0"
+      >
+        <i class="fas fa-trash"></i>
+      </button>
+    </div>
+    <% }); %> <% } %>
+  </div>
+
+  <button
+    type="button"
+    onclick="addAttributeValueItem()"
+    class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors"
+  >
+    <i class="fas fa-plus mr-2"></i>Add Attribute Value
+  </button>
+
+  <p class="mt-2 text-xs text-gray-500">
+    <i class="fas fa-info-circle mr-1"></i>
+    Add multiple values to define the options for this attribute (e.g., for
+    "Color" attribute: Red, Blue, Green)
+  </p>
+</div>
+
+<script>
+  // Counter for new items - calculate from existing items
+  let attributeValueCounter = document.querySelectorAll(
+    ".attribute-value-item"
+  ).length;
+
+  // Add new attribute value item
+  function addAttributeValueItem() {
+    const container = document.getElementById("attribute-values-list");
+    if (!container) {
+      return;
+    }
+
+    const itemHtml = `
+            <div class="attribute-value-item flex gap-3 items-start p-3 bg-gray-50 rounded-md border border-gray-200">
+                <div class="flex-1">
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Attribute Value Name</label>
+                     <input type="text" 
+                            name="attribute_values[${attributeValueCounter}][name]" 
+                            value=""
+                            placeholder="Enter attribute value name"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+                </div>
+                <button type="button" 
+                        onclick="removeAttributeValueItem(this)" 
+                        class="mt-6 bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-md text-sm transition-colors flex-shrink-0">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+        `;
+
+    container.insertAdjacentHTML("beforeend", itemHtml);
+    attributeValueCounter++;
+  }
+
+  // Remove attribute value item
+  function removeAttributeValueItem(button) {
+    if (confirm("Are you sure you want to remove this attribute value?")) {
+      button.closest(".attribute-value-item").remove();
+
+      // Re-index remaining items
+      reindexAttributeValueItems();
+    }
+  }
+
+  // Re-index items after removal
+  function reindexAttributeValueItems() {
+    const items = document.querySelectorAll(".attribute-value-item");
+
+    items.forEach((item, index) => {
+      const nameInput = item.querySelector('input[name^="attribute_values"]');
+
+      if (nameInput) {
+        nameInput.name = `attribute_values[${index}][name]`;
+      }
+    });
+
+    attributeValueCounter = items.length;
+  }
+
+  // Initialize on page load
+  document.addEventListener("DOMContentLoaded", function () {
+    // Ensure the add button is available
+    const addButton = document.querySelector(
+      'button[onclick="addAttributeValueItem()"]'
+    );
+    if (!addButton) {
+      console.error("Add Attribute Value button not found");
+    }
+  });
+</script>
+
+<style>
+  .attribute-value-item {
+    animation: slideIn 0.3s ease-out;
+  }
+
+  @keyframes slideIn {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+</style>
