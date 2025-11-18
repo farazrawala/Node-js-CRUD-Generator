@@ -1,27 +1,27 @@
-const path = require('path');
-const fs = require('fs');
-const { getUserToken } = require('../service/auth');
+const path = require("path");
+const fs = require("fs");
+const { getUserToken } = require("../service/auth");
 /**
  * Generate URL-friendly slug from text
  * @param {string} text - The text to convert to slug
  * @returns {string} The generated slug
- * 
+ *
  * Usage examples:
  * - generateSlug("Product Name") => "product-name"
  * - generateSlug("iPhone 15 Pro Max!!!") => "iphone-15-pro-max"
  * - generateSlug("Gaming Laptop 2024") => "gaming-laptop-2024"
  */
 const generateSlug = (text) => {
-  if (!text) return '';
+  if (!text) return "";
   return text
     .toString()
     .toLowerCase()
     .trim()
-    .replace(/\s+/g, '-')           // Replace spaces with -
-    .replace(/[^\w\-]+/g, '')       // Remove all non-word chars
-    .replace(/\-\-+/g, '-')         // Replace multiple - with single -
-    .replace(/^-+/, '')             // Trim - from start of text
-    .replace(/-+$/, '');            // Trim - from end of text
+    .replace(/\s+/g, "-") // Replace spaces with -
+    .replace(/[^\w\-]+/g, "") // Remove all non-word chars
+    .replace(/\-\-+/g, "-") // Replace multiple - with single -
+    .replace(/^-+/, "") // Trim - from start of text
+    .replace(/-+$/, ""); // Trim - from end of text
 };
 
 /**
@@ -31,31 +31,31 @@ const generateSlug = (text) => {
 const getControllerName = () => {
   // Get the calling file name from stack trace
   const stack = new Error().stack;
-  const lines = stack.split('\n');
-  
-  console.log('🔍 Stack trace for controller detection:');
+  const lines = stack.split("\n");
+
+  console.log("🔍 Stack trace for controller detection:");
   lines.forEach((line, index) => {
     console.log(`  ${index}: ${line.trim()}`);
   });
-  
+
   // Look for the controller file in the stack trace
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     console.log(`🔍 Checking line ${i}: ${line.trim()}`);
-    
+
     // Look for lines that contain controller files (not modelHelper.js)
-    if (line.includes('controllers/') && !line.includes('modelHelper.js')) {
+    if (line.includes("controllers/") && !line.includes("modelHelper.js")) {
       console.log(`🔍 Found controller line: ${line}`);
-      
+
       // Try different regex patterns for file path extraction
       let filePath = null;
-      
+
       // Pattern 1: (file:///path/to/file)
       let match = line.match(/\(file:\/\/\/(.+)\)/);
       if (match) {
         filePath = match[1];
       }
-      
+
       // Pattern 2: (path/to/file)
       if (!filePath) {
         match = line.match(/\((.+)\)/);
@@ -63,7 +63,7 @@ const getControllerName = () => {
           filePath = match[1];
         }
       }
-      
+
       // Pattern 3: at Function (path/to/file)
       if (!filePath) {
         match = line.match(/at\s+\w+\s+\((.+)\)/);
@@ -71,35 +71,37 @@ const getControllerName = () => {
           filePath = match[1];
         }
       }
-      
+
       if (filePath) {
-        const fileName = path.basename(filePath, '.js');
-        console.log(`🔍 Auto-detected controller name: ${fileName} from ${filePath}`);
+        const fileName = path.basename(filePath, ".js");
+        console.log(
+          `🔍 Auto-detected controller name: ${fileName} from ${filePath}`
+        );
         return fileName;
       }
     }
   }
-  
+
   // Fallback: try to get from the immediate caller (line 2)
   if (lines.length > 2) {
     const callerLine = lines[2];
     console.log(`🔍 Trying fallback with line 2: ${callerLine.trim()}`);
-    
+
     let filePath = null;
     let match = callerLine.match(/\((.+)\)/);
     if (match) {
       filePath = match[1];
     }
-    
+
     if (filePath) {
-      const fileName = path.basename(filePath, '.js');
+      const fileName = path.basename(filePath, ".js");
       console.log(`🔍 Fallback controller name: ${fileName} from ${filePath}`);
       return fileName;
     }
   }
-  
-  console.log('⚠️ Could not detect controller name, using default: user');
-  return 'user'; // Default fallback
+
+  console.log("⚠️ Could not detect controller name, using default: user");
+  return "user"; // Default fallback
 };
 
 /**
@@ -110,12 +112,12 @@ const getControllerName = () => {
  */
 const getModelFromController = (controllerName, customPath = null) => {
   if (!controllerName) {
-    throw new Error('Controller name is required');
+    throw new Error("Controller name is required");
   }
-  
+
   // Determine models directory path
-  const modelsPath = customPath || path.join(__dirname, '..', 'models');
-  
+  const modelsPath = customPath || path.join(__dirname, "..", "models");
+
   // Dynamic require based on model name
   try {
     const Model = require(path.join(modelsPath, controllerName));
@@ -123,6 +125,94 @@ const getModelFromController = (controllerName, customPath = null) => {
   } catch (error) {
     throw new Error(`Model '${controllerName}' not found in ${modelsPath}`);
   }
+};
+
+/**
+ * Get base URL from request or environment variable
+ * @param {Object} req - Express request object (optional)
+ * @returns {string} Base URL
+ */
+const getBaseUrl = (req = null) => {
+  // First, try to get from environment variable
+  if (process.env.BASE_URL) {
+    return process.env.BASE_URL;
+  }
+
+  // If request is provided, construct from request
+  if (req) {
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:8000";
+    return `${protocol}://${host}`;
+  }
+
+  // Default fallback
+  return "http://localhost:8000";
+};
+
+/**
+ * Transform image URLs to full URLs
+ * @param {Object} data - The data object to transform
+ * @param {Object} Model - The Mongoose model
+ * @param {Object} req - Express request object (optional)
+ * @returns {Object} Data with transformed image URLs
+ */
+const transformImageUrls = (data, Model, req = null) => {
+  if (!data || !Model) {
+    return data;
+  }
+
+  const baseUrl = getBaseUrl(req);
+  const schema = Model.schema;
+  const transformedData = { ...data };
+
+  // Find all fields with field_type: "image"
+  Object.keys(schema.paths).forEach((fieldName) => {
+    const field = schema.paths[fieldName];
+    const fieldConfig = schema.obj[fieldName];
+
+    // Check if this is an image field
+    if (fieldConfig && fieldConfig.field_type === "image") {
+      const imageValue = transformedData[fieldName];
+
+      if (imageValue) {
+        // Handle array of images (e.g., multi_images)
+        if (Array.isArray(imageValue)) {
+          transformedData[fieldName] = imageValue.map((imgPath) => {
+            if (typeof imgPath === "string" && imgPath.trim() !== "") {
+              // Only transform if it's not already a full URL
+              if (
+                !imgPath.startsWith("http://") &&
+                !imgPath.startsWith("https://")
+              ) {
+                // Ensure the path starts with / if it doesn't
+                const normalizedPath = imgPath.startsWith("/")
+                  ? imgPath
+                  : `/${imgPath}`;
+                return `${baseUrl}${normalizedPath}`;
+              }
+            }
+            return imgPath;
+          });
+        }
+        // Handle single image string
+        else if (typeof imageValue === "string" && imageValue.trim() !== "") {
+          // Only transform if it's not already a full URL
+          if (
+            !imageValue.startsWith("http://") &&
+            !imageValue.startsWith("https://")
+          ) {
+            // Ensure the path starts with / if it doesn't
+            const normalizedPath = imageValue.startsWith("/")
+              ? imageValue
+              : `/${imageValue}`;
+            transformedData[fieldName] = `${baseUrl}${normalizedPath}`;
+          }
+        }
+      }
+    }
+  });
+
+  return transformedData;
 };
 
 /**
@@ -145,37 +235,58 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
     const filesArray = Array.isArray(uploaded) ? uploaded : [uploaded];
 
     // Validate file types
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    const allowedTypes = [
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/gif",
+      "image/webp",
+    ];
 
     // Ensure directory exists: uploads/{modelName}/{recordId}/
-    const uploadDir = path.join(__dirname, '..', 'uploads', modelName, recordId);
+    const uploadDir = path.join(
+      __dirname,
+      "..",
+      "uploads",
+      modelName,
+      recordId
+    );
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
 
-    const moveOne = (file, index) => new Promise((resolve, reject) => {
-      if (!allowedTypes.includes(file.mimetype)) {
-        return reject(new Error(`Invalid file type. Allowed types: ${allowedTypes.join(', ')}`));
-      }
-      const timestamp = Date.now();
-      const fileExtension = path.extname(file.name);
-      const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
-      const filePath = path.join(uploadDir, fileName);
-      file.mv(filePath, (err) => {
-        if (err) {
-          console.error('Error moving file:', err);
-          return reject(new Error('Failed to save image file'));
+    const moveOne = (file, index) =>
+      new Promise((resolve, reject) => {
+        if (!allowedTypes.includes(file.mimetype)) {
+          return reject(
+            new Error(
+              `Invalid file type. Allowed types: ${allowedTypes.join(", ")}`
+            )
+          );
         }
-        const relativePath = path.join('uploads', modelName, recordId, fileName).replace(/\\/g, '/');
-        console.log(`✅ Image uploaded successfully: ${relativePath}`);
-        resolve(relativePath);
+        const timestamp = Date.now();
+        const fileExtension = path.extname(file.name);
+        const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
+        const filePath = path.join(uploadDir, fileName);
+        file.mv(filePath, (err) => {
+          if (err) {
+            console.error("Error moving file:", err);
+            return reject(new Error("Failed to save image file"));
+          }
+          const relativePath = path
+            .join("uploads", modelName, recordId, fileName)
+            .replace(/\\/g, "/");
+          console.log(`✅ Image uploaded successfully: ${relativePath}`);
+          resolve(relativePath);
+        });
       });
-    });
 
-    const paths = await Promise.all(filesArray.map((f, idx) => moveOne(f, idx)));
+    const paths = await Promise.all(
+      filesArray.map((f, idx) => moveOne(f, idx))
+    );
     return Array.isArray(uploaded) ? paths : paths[0];
   } catch (error) {
-    console.error('❌ Image upload error:', error);
+    console.error("❌ Image upload error:", error);
     throw error;
   }
 };
@@ -188,16 +299,23 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
  * @param {Object} options - Additional options
  * @returns {Promise} Express response
  */
-const handleGenericCreate = async (req, controllerName = null, options = {}) => {
+const handleGenericCreate = async (
+  req,
+  controllerName = null,
+  options = {}
+) => {
   // Auto-detect controller name if not provided or empty
-  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
-  
+  const modelName =
+    controllerName && controllerName.trim() !== ""
+      ? controllerName
+      : getControllerName();
+
   const {
     excludeFields = [], // Fields to exclude from response
     customValidation = null, // Custom validation function
     beforeCreate = null, // Function to run before creating
     afterCreate = null, // Function to run after creating
-    errorHandlers = {} // Custom error handlers
+    errorHandlers = {}, // Custom error handlers
   } = options;
 
   if (!req.body || Object.keys(req.body).length === 0) {
@@ -214,21 +332,37 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     // Dynamically get the model
     const Model = getModelFromController(modelName);
     const modelSchema = Model.schema.obj;
-    
+
     // Debug: Log the incoming request data
     console.log("🔍 handleGenericCreate - Raw req.body:", req.body);
-    console.log("🔍 handleGenericCreate - req.body keys:", Object.keys(req.body));
-    console.log("🔍 handleGenericCreate - modelSchema keys:", Object.keys(modelSchema));
-    
+    console.log(
+      "🔍 handleGenericCreate - req.body keys:",
+      Object.keys(req.body)
+    );
+    console.log(
+      "🔍 handleGenericCreate - modelSchema keys:",
+      Object.keys(modelSchema)
+    );
+
     const requiredFields = Object.keys(modelSchema).filter((field) => {
       const fieldConfig = modelSchema[field];
       return fieldConfig.required === true && !fieldConfig.default;
     });
 
     // Validate required fields dynamically
-    const missingFields = requiredFields.filter(
-      (field) => !req.body[field] || req.body[field].trim().length === 0
-    );
+    const missingFields = requiredFields.filter((field) => {
+      const value = req.body[field];
+      // Check if field is missing or empty
+      if (value === undefined || value === null) {
+        return true; // Field is missing
+      }
+      // For strings, check if empty after trimming
+      if (typeof value === "string") {
+        return value.trim().length === 0;
+      }
+      // For other types (numbers, booleans, objects, arrays), just check if falsy
+      return !value;
+    });
 
     if (missingFields.length > 0) {
       return {
@@ -248,23 +382,23 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
         return {
           success: false,
           status: 400,
-          ...validationResult
+          ...validationResult,
         };
       }
     }
 
     // Prepare data for creation (only include fields that exist in schema)
     const modelData = {};
-    
+
     // Process regular fields
     Object.keys(req.body).forEach((key) => {
       if (modelSchema[key]) {
         const fieldConfig = modelSchema[key];
         let value = req.body[key];
-        
+
         // Handle ObjectID fields - convert empty strings to null
-        if (fieldConfig.type && fieldConfig.type.name === 'ObjectId') {
-          if (value === '' || value === 'null' || value === undefined) {
+        if (fieldConfig.type && fieldConfig.type.name === "ObjectId") {
+          if (value === "" || value === "null" || value === undefined) {
             modelData[key] = null;
           } else {
             modelData[key] = value;
@@ -272,7 +406,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
         } else {
           // For non-ObjectID fields, trim as usual
           // Only trim if value exists and has a trim method (strings)
-          if (value && typeof value === 'string') {
+          if (value && typeof value === "string") {
             modelData[key] = value.trim();
           } else if (value !== undefined && value !== null) {
             // For non-string values (numbers, booleans, objects, arrays), keep as is
@@ -283,27 +417,32 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     });
 
     console.log("🔧 About to start nested array processing...");
-    
+
     // Process nested array fields (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity], warehouse_inventory[0][warehouse_id])
     console.log("🚀 Starting nested array processing...");
     console.log("🚀 req.body keys:", Object.keys(req.body));
-    console.log("🚀 modelData before nested processing:", JSON.stringify(modelData, null, 2));
-    
+    console.log(
+      "🚀 modelData before nested processing:",
+      JSON.stringify(modelData, null, 2)
+    );
+
     Object.keys(req.body).forEach((key) => {
       console.log(`🔍 Checking key: ${key}`);
-      
+
       // Handle both indexed and non-indexed arrays
       // Pattern 2: field[index][subfield] (e.g., warehouse_inventory[0][warehouse_id]) - Check this FIRST
       // Pattern 1: field[subfield] (e.g., warehouse_inventory[warehouse_id])
       let arrayMatch = key.match(/^(.+)\[(\d+)\]\[(\w+)\]$/);
       let arrayFieldName, arrayItemField, index;
-      
+
       if (arrayMatch) {
         // Pattern 2: field[index][subfield]
         arrayFieldName = arrayMatch[1];
         index = parseInt(arrayMatch[2]);
         arrayItemField = arrayMatch[3];
-        console.log(`🔍 Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+        console.log(
+          `🔍 Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+        );
       } else {
         // Pattern 1: field[subfield]
         arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
@@ -311,34 +450,49 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           arrayFieldName = arrayMatch[1];
           arrayItemField = arrayMatch[2];
           index = 0; // Default to index 0
-          console.log(`🔍 Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+          console.log(
+            `🔍 Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+          );
         }
       }
-      
+
       if (arrayMatch) {
         // Check if this is a valid array field in the schema
-        console.log(`🔍 Checking schema for ${arrayFieldName}:`, modelSchema[arrayFieldName]);
+        console.log(
+          `🔍 Checking schema for ${arrayFieldName}:`,
+          modelSchema[arrayFieldName]
+        );
         console.log(`🔍 Is array:`, Array.isArray(modelSchema[arrayFieldName]));
-        console.log(`🔍 Is type array:`, Array.isArray(modelSchema[arrayFieldName]?.type));
-        
-        if (modelSchema[arrayFieldName] && Array.isArray(modelSchema[arrayFieldName].type)) {
+        console.log(
+          `🔍 Is type array:`,
+          Array.isArray(modelSchema[arrayFieldName]?.type)
+        );
+
+        if (
+          modelSchema[arrayFieldName] &&
+          Array.isArray(modelSchema[arrayFieldName].type)
+        ) {
           console.log(`🔍 Processing array field: ${arrayFieldName}`);
           if (!modelData[arrayFieldName]) {
             modelData[arrayFieldName] = [];
           }
-          
+
           const value = req.body[key];
-          
+
           // Ensure we have an object at this index
           if (!modelData[arrayFieldName][index]) {
             modelData[arrayFieldName][index] = {};
           }
-          
+
           // Set the field value
           modelData[arrayFieldName][index][arrayItemField] = value;
-          console.log(`🏭 Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`);
+          console.log(
+            `🏭 Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`
+          );
         } else {
-          console.log(`🔍 Schema field not found or not array: ${arrayFieldName}`);
+          console.log(
+            `🔍 Schema field not found or not array: ${arrayFieldName}`
+          );
         }
       } else {
         console.log(`🔍 No array match for key: ${key}`);
@@ -359,11 +513,13 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
       const schemaPath = Model.schema.paths[mapFieldName];
       const isMapField =
         schemaPath &&
-        typeof schemaPath.instance === 'string' &&
-        schemaPath.instance.toLowerCase().startsWith('map');
+        typeof schemaPath.instance === "string" &&
+        schemaPath.instance.toLowerCase().startsWith("map");
 
       if (!isMapField) {
-        console.log(`🔍 ${mapFieldName} is not a Map field, skipping map processing`);
+        console.log(
+          `🔍 ${mapFieldName} is not a Map field, skipping map processing`
+        );
         return;
       }
 
@@ -378,11 +534,11 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
       const rawValue = req.body[key];
       let value = rawValue;
 
-      if (typeof rawValue === 'string') {
+      if (typeof rawValue === "string") {
         const lower = rawValue.toLowerCase();
-        if (lower === 'true') {
+        if (lower === "true") {
           value = true;
-        } else if (lower === 'false') {
+        } else if (lower === "false") {
           value = false;
         }
       }
@@ -396,72 +552,106 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
 
     // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
     // These fields come as indexed format or already parsed into arrays/objects
-    const mongoose = require('mongoose');
+    const mongoose = require("mongoose");
     Object.keys(modelSchema).forEach((fieldName) => {
       const fieldConfig = modelSchema[fieldName];
-      
+
       // Check if this is an array of ObjectIds using Model schema paths
       const schemaPath = Model.schema.paths[fieldName];
-      const isObjectIdArray = schemaPath && 
-        schemaPath.instance === 'Array' && 
-        (schemaPath.caster && schemaPath.caster.instance === 'ObjectID');
-      
+      const isObjectIdArray =
+        schemaPath &&
+        schemaPath.instance === "Array" &&
+        schemaPath.caster &&
+        schemaPath.caster.instance === "ObjectID";
+
       // Also check field_type for multiselect
-      const isMultiselect = fieldConfig.field_type === 'multiselect';
-      
-      if (isObjectIdArray || (isMultiselect && Array.isArray(fieldConfig.type))) {
-        console.log(`🔍 Processing multiselect ObjectId array field: ${fieldName}`);
-        
+      const isMultiselect = fieldConfig.field_type === "multiselect";
+
+      if (
+        isObjectIdArray ||
+        (isMultiselect && Array.isArray(fieldConfig.type))
+      ) {
+        console.log(
+          `🔍 Processing multiselect ObjectId array field: ${fieldName}`
+        );
+
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
-        if (req.body[fieldName] && (Array.isArray(req.body[fieldName]) || typeof req.body[fieldName] === 'object')) {
-          console.log(`🔍 Found ${fieldName} directly in req.body:`, req.body[fieldName]);
+        if (
+          req.body[fieldName] &&
+          (Array.isArray(req.body[fieldName]) ||
+            typeof req.body[fieldName] === "object")
+        ) {
+          console.log(
+            `🔍 Found ${fieldName} directly in req.body:`,
+            req.body[fieldName]
+          );
           let values = req.body[fieldName];
-          
+
           // Extract values from objects if array contains objects
           const extractedValues = [];
           if (Array.isArray(values)) {
             values.forEach((val, idx) => {
-              if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof mongoose.Types.ObjectId)) {
+              if (
+                val &&
+                typeof val === "object" &&
+                !Array.isArray(val) &&
+                !(val instanceof mongoose.Types.ObjectId)
+              ) {
                 // Extract value from object like { '0': 'id' }
                 const objValue = Object.values(val)[0];
                 if (objValue) {
                   extractedValues.push(objValue);
-                  console.log(`✅ Extracted from object at index ${idx}:`, objValue);
+                  console.log(
+                    `✅ Extracted from object at index ${idx}:`,
+                    objValue
+                  );
                 }
               } else {
                 extractedValues.push(val);
               }
             });
-          } else if (typeof values === 'object' && values !== null) {
+          } else if (typeof values === "object" && values !== null) {
             // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
-            const sortedKeys = Object.keys(values).sort((a, b) => parseInt(a) - parseInt(b));
-            sortedKeys.forEach(key => {
+            const sortedKeys = Object.keys(values).sort(
+              (a, b) => parseInt(a) - parseInt(b)
+            );
+            sortedKeys.forEach((key) => {
               extractedValues.push(values[key]);
             });
           }
-          
-          values = extractedValues.length > 0 ? extractedValues : (Array.isArray(values) ? values : [values]);
-          
+
+          values =
+            extractedValues.length > 0
+              ? extractedValues
+              : Array.isArray(values)
+              ? values
+              : [values];
+
           // Convert to ObjectIds
           const processedValues = [];
           values.forEach((val, idx) => {
-            if (!val || val === '' || val === null || val === undefined) return;
-            
+            if (!val || val === "" || val === null || val === undefined) return;
+
             if (val instanceof mongoose.Types.ObjectId) {
               processedValues.push(val);
-            } else if (typeof val === 'string') {
+            } else if (typeof val === "string") {
               const trimmedVal = val.trim();
               // Handle stringified JSON arrays
-              if ((trimmedVal.startsWith('[') || trimmedVal.startsWith('{')) && trimmedVal.length > 1) {
+              if (
+                (trimmedVal.startsWith("[") || trimmedVal.startsWith("{")) &&
+                trimmedVal.length > 1
+              ) {
                 try {
                   let jsonString = trimmedVal.replace(/'/g, '"');
                   const parsed = JSON.parse(jsonString);
                   if (Array.isArray(parsed)) {
-                    parsed.forEach(item => {
-                      if (typeof item === 'object' && item !== null) {
+                    parsed.forEach((item) => {
+                      if (typeof item === "object" && item !== null) {
                         const objVal = Object.values(item)[0];
                         if (objVal && mongoose.Types.ObjectId.isValid(objVal)) {
-                          processedValues.push(new mongoose.Types.ObjectId(objVal));
+                          processedValues.push(
+                            new mongoose.Types.ObjectId(objVal)
+                          );
                         }
                       } else if (mongoose.Types.ObjectId.isValid(item)) {
                         processedValues.push(new mongoose.Types.ObjectId(item));
@@ -473,37 +663,43 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
                   // Not valid JSON, continue
                 }
               }
-              
+
               if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
                 processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
               }
             }
           });
-          
+
           modelData[fieldName] = processedValues;
-          console.log(`✅ Processed multiselect field ${fieldName}:`, modelData[fieldName]);
+          console.log(
+            `✅ Processed multiselect field ${fieldName}:`,
+            modelData[fieldName]
+          );
           delete req.body[fieldName]; // Remove to prevent re-processing
           return;
         }
-        
+
         // SECOND: Check for indexed format (category_id[0], category_id[1], etc.)
         const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
         const indexedValues = [];
-        Object.keys(req.body).forEach(key => {
+        Object.keys(req.body).forEach((key) => {
           if (indexedPattern.test(key)) {
             const index = parseInt(key.match(/\[(\d+)\]/)[1]);
             let value = req.body[key];
-            
+
             // Handle stringified values
-            if (typeof value === 'string') {
+            if (typeof value === "string") {
               value = value.trim();
-              if ((value.startsWith('[') || value.startsWith('{')) && value.length > 1) {
+              if (
+                (value.startsWith("[") || value.startsWith("{")) &&
+                value.length > 1
+              ) {
                 try {
                   let jsonString = value.replace(/'/g, '"');
                   const parsed = JSON.parse(jsonString);
                   if (Array.isArray(parsed)) {
                     parsed.forEach((item, i) => {
-                      if (typeof item === 'object' && item !== null) {
+                      if (typeof item === "object" && item !== null) {
                         const objValue = Object.values(item)[0];
                         if (objValue) {
                           indexedValues[index + i] = objValue;
@@ -519,25 +715,33 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
                 }
               }
             }
-            
+
             indexedValues[index] = value;
           }
         });
-        
+
         if (indexedValues.length > 0) {
           const processedValues = [];
-          indexedValues.filter(v => v !== undefined && v !== null).forEach(val => {
-            if (val instanceof mongoose.Types.ObjectId) {
-              processedValues.push(val);
-            } else if (typeof val === 'string' && mongoose.Types.ObjectId.isValid(val.trim())) {
-              processedValues.push(new mongoose.Types.ObjectId(val.trim()));
-            }
-          });
+          indexedValues
+            .filter((v) => v !== undefined && v !== null)
+            .forEach((val) => {
+              if (val instanceof mongoose.Types.ObjectId) {
+                processedValues.push(val);
+              } else if (
+                typeof val === "string" &&
+                mongoose.Types.ObjectId.isValid(val.trim())
+              ) {
+                processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+              }
+            });
           modelData[fieldName] = processedValues;
-          console.log(`✅ Processed indexed multiselect field ${fieldName}:`, modelData[fieldName]);
-          
+          console.log(
+            `✅ Processed indexed multiselect field ${fieldName}:`,
+            modelData[fieldName]
+          );
+
           // Remove indexed fields from req.body
-          Object.keys(req.body).forEach(key => {
+          Object.keys(req.body).forEach((key) => {
             if (indexedPattern.test(key)) {
               delete req.body[key];
             }
@@ -547,8 +751,14 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     });
 
     // Debug: Log the final processed data
-    console.log("🔍 handleGenericCreate - Final modelData:", JSON.stringify(modelData, null, 2));
-    console.log("🔍 handleGenericCreate - modelData keys:", Object.keys(modelData));
+    console.log(
+      "🔍 handleGenericCreate - Final modelData:",
+      JSON.stringify(modelData, null, 2)
+    );
+    console.log(
+      "🔍 handleGenericCreate - modelData keys:",
+      Object.keys(modelData)
+    );
 
     // Automatically set created_by if field exists and user is authenticated
     if (req.user && req.user._id && modelSchema.created_by) {
@@ -561,19 +771,20 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
       hasCompanyId: !!(req.user && req.user.company_id),
       hasSchemaField: !!modelSchema.company_id,
       userCompanyId: req.user?.company_id,
-      modelName: controllerName
+      modelName: controllerName,
     });
-    
+
     if (req.user && req.user.company_id && modelSchema.company_id) {
       modelData.company_id = req.user.company_id;
       console.log(`✅ Automatically set company_id to:`, req.user.company_id);
-      
     }
-    
 
     // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
-    if (modelSchema.barcode && (!modelData.barcode || modelData.barcode.trim() === "")) {
-      const { generateProductBarcode } = require('./barcodeGenerator');
+    if (
+      modelSchema.barcode &&
+      (!modelData.barcode || modelData.barcode.trim() === "")
+    ) {
+      const { generateProductBarcode } = require("./barcodeGenerator");
       modelData.barcode = generateProductBarcode();
       console.log("🏷️ Generated new EAN13 barcode for API:", modelData.barcode);
     }
@@ -613,15 +824,31 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
     // Now handle image uploads with the record ID
     for (const imageField of imageFields) {
       try {
-        const uploaded = await handleImageUpload(req, imageField, modelName, result._id.toString());
+        const uploaded = await handleImageUpload(
+          req,
+          imageField,
+          modelName,
+          result._id.toString()
+        );
         if (uploaded) {
           // If schema expects array (type: [String]) store as array; else store single string
-          const expectsArray = Array.isArray(Model.schema.obj[imageField]?.type) || Model.schema.paths[imageField]?.instance === 'Array';
-          result[imageField] = expectsArray ? (Array.isArray(uploaded) ? uploaded : [uploaded]) : (Array.isArray(uploaded) ? uploaded[0] : uploaded);
+          const expectsArray =
+            Array.isArray(Model.schema.obj[imageField]?.type) ||
+            Model.schema.paths[imageField]?.instance === "Array";
+          result[imageField] = expectsArray
+            ? Array.isArray(uploaded)
+              ? uploaded
+              : [uploaded]
+            : Array.isArray(uploaded)
+            ? uploaded[0]
+            : uploaded;
           await result.save();
         }
       } catch (error) {
-        console.error(`❌ Error uploading image for field ${imageField}:`, error);
+        console.error(
+          `❌ Error uploading image for field ${imageField}:`,
+          error
+        );
         // Continue with other fields even if one image upload fails
       }
     }
@@ -631,18 +858,20 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
       await afterCreate(result, req);
     }
 
-    // Prepare response data (exclude specified fields)
+    // Prepare response data (exclude specified fields and transform image URLs)
     const responseData = { ...result.toObject() };
-    excludeFields.forEach(field => {
+    excludeFields.forEach((field) => {
       delete responseData[field];
     });
+
+    // Transform image URLs to full URLs
+    const transformedData = transformImageUrls(responseData, Model, req);
 
     return {
       success: true,
       status: 201,
-      data: responseData,
+      data: transformedData,
     };
-
   } catch (error) {
     console.error("❌ Creation error:", error);
 
@@ -662,7 +891,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 400,
           error: "Validation failed",
           details: validationErrors,
-          type: "validation"
+          type: "validation",
         };
 
       case "CastError":
@@ -671,7 +900,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 400,
           error: "Invalid data type",
           details: `${error.path} should be ${error.kind}`,
-          type: "cast"
+          type: "cast",
         };
 
       case "MongoError":
@@ -685,7 +914,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
               status: 409,
               error: "Duplicate entry",
               details: `${duplicateField} already exists`,
-              type: "duplicate"
+              type: "duplicate",
             };
           case 121:
             return {
@@ -693,7 +922,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
               status: 400,
               error: "Document validation failed",
               details: error.errmsg,
-              type: "document_validation"
+              type: "document_validation",
             };
           default:
             return {
@@ -701,7 +930,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
               status: 500,
               error: "Database error",
               details: error.message,
-              type: "database"
+              type: "database",
             };
         }
 
@@ -711,7 +940,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 400,
           error: "Type error",
           details: error.message,
-          type: "type"
+          type: "type",
         };
 
       case "ReferenceError":
@@ -720,7 +949,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 500,
           error: "Reference error",
           details: error.message,
-          type: "reference"
+          type: "reference",
         };
 
       case "SyntaxError":
@@ -729,7 +958,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 400,
           error: "Syntax error",
           details: error.message,
-          type: "syntax"
+          type: "syntax",
         };
 
       case "RangeError":
@@ -738,7 +967,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 400,
           error: "Range error",
           details: error.message,
-          type: "range"
+          type: "range",
         };
 
       case "URIError":
@@ -747,7 +976,7 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 400,
           error: "URI error",
           details: error.message,
-          type: "uri"
+          type: "uri",
         };
 
       case "EvalError":
@@ -756,64 +985,65 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           status: 500,
           error: "Evaluation error",
           details: error.message,
-          type: "eval"
+          type: "eval",
         };
 
       default:
         // Handle unknown errors
         if (error.code) {
           // Handle HTTP status codes
-          const statusCode = error.code >= 400 && error.code < 600 ? error.code : 500;
+          const statusCode =
+            error.code >= 400 && error.code < 600 ? error.code : 500;
           return {
             success: false,
             status: statusCode,
             error: error.message || "Unknown error",
             details: error.stack,
             type: "unknown",
-            code: error.code
+            code: error.code,
           };
         }
 
         // Handle network/connection errors
-        if (error.message && error.message.includes('ECONNREFUSED')) {
+        if (error.message && error.message.includes("ECONNREFUSED")) {
           return {
             success: false,
             status: 503,
             error: "Database connection failed",
             details: "Unable to connect to database",
-            type: "connection"
+            type: "connection",
           };
         }
 
-        if (error.message && error.message.includes('timeout')) {
+        if (error.message && error.message.includes("timeout")) {
           return {
             success: false,
             status: 408,
             error: "Request timeout",
             details: "Operation timed out",
-            type: "timeout"
+            type: "timeout",
           };
         }
 
         // Handle memory errors
-        if (error.message && error.message.includes('ENOMEM')) {
+        if (error.message && error.message.includes("ENOMEM")) {
           return {
             success: false,
             status: 507,
             error: "Insufficient storage",
             details: "Server is out of memory",
-            type: "memory"
+            type: "memory",
           };
         }
 
         // Handle file system errors
-        if (error.code && error.code.startsWith('ENOENT')) {
+        if (error.code && error.code.startsWith("ENOENT")) {
           return {
             success: false,
             status: 500,
             error: "File not found",
             details: "Required file or directory not found",
-            type: "file_system"
+            type: "file_system",
           };
         }
 
@@ -822,9 +1052,12 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
           success: false,
           status: 500,
           error: "Internal server error",
-          details: process.env.NODE_ENV === 'development' ? error.stack : "Something went wrong",
+          details:
+            process.env.NODE_ENV === "development"
+              ? error.stack
+              : "Something went wrong",
           type: "internal",
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         };
     }
   }
@@ -840,8 +1073,11 @@ const handleGenericCreate = async (req, controllerName = null, options = {}) => 
  */
 const handleGenericUpdate = async (req, controllerName, options = {}) => {
   // Auto-detect controller name if not provided or empty
-  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
-  
+  const modelName =
+    controllerName && controllerName.trim() !== ""
+      ? controllerName
+      : getControllerName();
+
   if (!modelName) {
     return {
       success: false,
@@ -904,17 +1140,17 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 
     // Prepare update data (only include fields that exist in schema)
     const updateData = {};
-    
+
     // If allowedFields is specified, only allow those fields
     if (allowedFields.length > 0) {
       Object.keys(req.body).forEach((key) => {
         if (modelSchema[key] && allowedFields.includes(key)) {
           const fieldConfig = modelSchema[key];
           let value = req.body[key];
-          
+
           // Handle ObjectID fields - convert empty strings to null
-          if (fieldConfig.type && fieldConfig.type.name === 'ObjectId') {
-            if (value === '' || value === 'null' || value === undefined) {
+          if (fieldConfig.type && fieldConfig.type.name === "ObjectId") {
+            if (value === "" || value === "null" || value === undefined) {
               updateData[key] = null;
             } else {
               updateData[key] = value;
@@ -931,7 +1167,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             } else {
               // For non-ObjectID fields, trim as usual
               // Only trim if value exists and has a trim method (strings)
-              if (value && typeof value === 'string') {
+              if (value && typeof value === "string") {
                 updateData[key] = value.trim();
               } else if (value !== undefined && value !== null) {
                 // For non-string values (numbers, booleans, objects, arrays), keep as is
@@ -944,13 +1180,13 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     } else {
       // If no allowedFields specified, allow all fields except password for security
       Object.keys(req.body).forEach((key) => {
-        if (modelSchema[key] && key !== 'password') {
+        if (modelSchema[key] && key !== "password") {
           const fieldConfig = modelSchema[key];
           let value = req.body[key];
-          
+
           // Handle ObjectID fields - convert empty strings to null
-          if (fieldConfig.type && fieldConfig.type.name === 'ObjectId') {
-            if (value === '' || value === 'null' || value === undefined) {
+          if (fieldConfig.type && fieldConfig.type.name === "ObjectId") {
+            if (value === "" || value === "null" || value === undefined) {
               updateData[key] = null;
             } else {
               updateData[key] = value;
@@ -967,7 +1203,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             } else {
               // For non-ObjectID fields, trim as usual
               // Only trim if value exists and has a trim method (strings)
-              if (value && typeof value === 'string') {
+              if (value && typeof value === "string") {
                 updateData[key] = value.trim();
               } else if (value !== undefined && value !== null) {
                 // For non-string values (numbers, booleans, objects, arrays), keep as is
@@ -983,20 +1219,225 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     Object.keys(modelSchema).forEach((fieldName) => {
       const fieldConfig = modelSchema[fieldName];
       // Check if field has field_type: "multiselect" and if request has fieldName[] format
-      if (fieldConfig && fieldConfig.field_type === "multiselect" && req.body[`${fieldName}[]`] !== undefined) {
+      if (
+        fieldConfig &&
+        fieldConfig.field_type === "multiselect" &&
+        req.body[`${fieldName}[]`] !== undefined
+      ) {
         console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
         console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
-        
+
         // Convert array field to proper format
         const multiselectValue = req.body[`${fieldName}[]`];
-        updateData[fieldName] = Array.isArray(multiselectValue) 
-          ? multiselectValue 
+        updateData[fieldName] = Array.isArray(multiselectValue)
+          ? multiselectValue
           : [multiselectValue];
-        
+
         console.log(`🔍 Processed data:`, updateData[fieldName]);
-        
+
         // Remove the original array field key if it exists in updateData
         delete updateData[`${fieldName}[]`];
+      }
+    });
+
+    // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
+    // These fields come as indexed format or already parsed into arrays/objects
+    const mongoose = require("mongoose");
+    Object.keys(modelSchema).forEach((fieldName) => {
+      const fieldConfig = modelSchema[fieldName];
+
+      // Check if this is an array of ObjectIds using Model schema paths
+      const schemaPath = Model.schema.paths[fieldName];
+      const isObjectIdArray =
+        schemaPath &&
+        schemaPath.instance === "Array" &&
+        schemaPath.caster &&
+        schemaPath.caster.instance === "ObjectID";
+
+      // Also check field_type for multiselect
+      const isMultiselect =
+        fieldConfig && fieldConfig.field_type === "multiselect";
+
+      if (
+        isObjectIdArray ||
+        (isMultiselect && Array.isArray(fieldConfig.type))
+      ) {
+        console.log(
+          `🔍 Processing multiselect ObjectId array field (UPDATE): ${fieldName}`
+        );
+
+        // FIRST: Check if field already exists in req.body (parsed from indexed format)
+        if (
+          req.body[fieldName] &&
+          (Array.isArray(req.body[fieldName]) ||
+            typeof req.body[fieldName] === "object")
+        ) {
+          console.log(
+            `🔍 Found ${fieldName} directly in req.body:`,
+            req.body[fieldName]
+          );
+          let values = req.body[fieldName];
+
+          // Extract values from objects if array contains objects
+          const extractedValues = [];
+          if (Array.isArray(values)) {
+            values.forEach((val, idx) => {
+              if (
+                val &&
+                typeof val === "object" &&
+                !Array.isArray(val) &&
+                !(val instanceof mongoose.Types.ObjectId)
+              ) {
+                // Extract value from object like { '0': 'id' }
+                const objValue = Object.values(val)[0];
+                if (objValue) {
+                  extractedValues.push(objValue);
+                  console.log(
+                    `✅ Extracted from object at index ${idx}:`,
+                    objValue
+                  );
+                }
+              } else {
+                extractedValues.push(val);
+              }
+            });
+          } else if (typeof values === "object" && values !== null) {
+            // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
+            const sortedKeys = Object.keys(values).sort(
+              (a, b) => parseInt(a) - parseInt(b)
+            );
+            sortedKeys.forEach((key) => {
+              extractedValues.push(values[key]);
+            });
+          }
+
+          values =
+            extractedValues.length > 0
+              ? extractedValues
+              : Array.isArray(values)
+              ? values
+              : [values];
+
+          // Convert to ObjectIds
+          const processedValues = [];
+          values.forEach((val, idx) => {
+            if (!val || val === "" || val === null || val === undefined) return;
+
+            if (val instanceof mongoose.Types.ObjectId) {
+              processedValues.push(val);
+            } else if (typeof val === "string") {
+              const trimmedVal = val.trim();
+              // Handle stringified JSON arrays
+              if (
+                (trimmedVal.startsWith("[") || trimmedVal.startsWith("{")) &&
+                trimmedVal.length > 1
+              ) {
+                try {
+                  let jsonString = trimmedVal.replace(/'/g, '"');
+                  const parsed = JSON.parse(jsonString);
+                  if (Array.isArray(parsed)) {
+                    parsed.forEach((item) => {
+                      if (typeof item === "object" && item !== null) {
+                        const objVal = Object.values(item)[0];
+                        if (objVal && mongoose.Types.ObjectId.isValid(objVal)) {
+                          processedValues.push(
+                            new mongoose.Types.ObjectId(objVal)
+                          );
+                        }
+                      } else if (mongoose.Types.ObjectId.isValid(item)) {
+                        processedValues.push(new mongoose.Types.ObjectId(item));
+                      }
+                    });
+                    return;
+                  }
+                } catch (e) {
+                  // Not valid JSON, continue
+                }
+              }
+
+              if (mongoose.Types.ObjectId.isValid(trimmedVal)) {
+                processedValues.push(new mongoose.Types.ObjectId(trimmedVal));
+              }
+            }
+          });
+
+          updateData[fieldName] = processedValues;
+          console.log(
+            `✅ Processed multiselect field ${fieldName} (UPDATE):`,
+            updateData[fieldName]
+          );
+          delete req.body[fieldName]; // Remove to prevent re-processing
+          return;
+        }
+
+        // SECOND: Check for indexed format (category_id[0], category_id[1], etc.)
+        const indexedPattern = new RegExp(`^${fieldName}\\[\\d+\\]$`);
+        const indexedValues = [];
+        Object.keys(req.body).forEach((key) => {
+          if (indexedPattern.test(key)) {
+            const index = parseInt(key.match(/\[(\d+)\]/)[1]);
+            let value = req.body[key];
+
+            // Handle stringified values
+            if (typeof value === "string") {
+              value = value.trim();
+              if (
+                (value.startsWith("[") || value.startsWith("{")) &&
+                value.length > 1
+              ) {
+                try {
+                  let jsonString = value.replace(/'/g, '"');
+                  const parsed = JSON.parse(jsonString);
+                  if (Array.isArray(parsed)) {
+                    parsed.forEach((item, i) => {
+                      if (typeof item === "object" && item !== null) {
+                        const objValue = Object.values(item)[0];
+                        if (objValue) {
+                          indexedValues[index + i] = objValue;
+                        }
+                      } else {
+                        indexedValues[index + i] = item;
+                      }
+                    });
+                    return;
+                  }
+                } catch (e) {
+                  // Not valid JSON
+                }
+              }
+            }
+
+            indexedValues[index] = value;
+          }
+        });
+
+        if (indexedValues.length > 0) {
+          const processedValues = [];
+          indexedValues
+            .filter((v) => v !== undefined && v !== null)
+            .forEach((val) => {
+              if (val instanceof mongoose.Types.ObjectId) {
+                processedValues.push(val);
+              } else if (
+                typeof val === "string" &&
+                mongoose.Types.ObjectId.isValid(val.trim())
+              ) {
+                processedValues.push(new mongoose.Types.ObjectId(val.trim()));
+              }
+            });
+          updateData[fieldName] = processedValues;
+          console.log(
+            `✅ Processed indexed multiselect field ${fieldName} (UPDATE):`,
+            updateData[fieldName]
+          );
+
+          // Remove indexed fields from req.body
+          Object.keys(req.body).forEach((key) => {
+            if (indexedPattern.test(key)) {
+              delete req.body[key];
+            }
+          });
+        }
       }
     });
 
@@ -1004,20 +1445,26 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     // Handle both indexed format (attribute_values[0][name]) and non-indexed format (attribute_values[name])
     Object.keys(req.body).forEach((key) => {
       // Skip multiselect fields that are already handled (format: fieldName[])
-      if (key.endsWith('[]') && modelSchema[key.slice(0, -2)] && modelSchema[key.slice(0, -2)].field_type === "multiselect") {
+      if (
+        key.endsWith("[]") &&
+        modelSchema[key.slice(0, -2)] &&
+        modelSchema[key.slice(0, -2)].field_type === "multiselect"
+      ) {
         return;
       }
-      
+
       // Pattern 2: field[index][subfield] (e.g., attribute_values[0][name]) - Check this FIRST
       let arrayMatch = key.match(/^(.+)\[(\d+)\]\[(\w+)\]$/);
       let arrayFieldName, arrayItemField, index;
-      
+
       if (arrayMatch) {
         // Pattern 2: field[index][subfield]
         arrayFieldName = arrayMatch[1];
         index = parseInt(arrayMatch[2]);
         arrayItemField = arrayMatch[3];
-        console.log(`🔍 Update - Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+        console.log(
+          `🔍 Update - Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+        );
       } else {
         // Pattern 1: field[subfield] (e.g., warehouse_inventory[warehouse_id])
         arrayMatch = key.match(/^(.+)\[(\w+)\]$/);
@@ -1025,43 +1472,64 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           arrayFieldName = arrayMatch[1];
           arrayItemField = arrayMatch[2];
           index = 0; // Default to index 0
-          console.log(`🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`);
+          console.log(
+            `🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+          );
         }
       }
-      
+
       if (arrayMatch) {
         // Check if this is a valid array field in the schema
         // Check if it's an array type (Array.isArray(modelSchema[arrayFieldName].type))
-        console.log(`🔍 Update - Checking schema for ${arrayFieldName}:`, modelSchema[arrayFieldName]);
-        console.log(`🔍 Update - Is array type:`, Array.isArray(modelSchema[arrayFieldName]?.type));
-        
-        if (modelSchema[arrayFieldName] && Array.isArray(modelSchema[arrayFieldName].type)) {
+        console.log(
+          `🔍 Update - Checking schema for ${arrayFieldName}:`,
+          modelSchema[arrayFieldName]
+        );
+        console.log(
+          `🔍 Update - Is array type:`,
+          Array.isArray(modelSchema[arrayFieldName]?.type)
+        );
+
+        if (
+          modelSchema[arrayFieldName] &&
+          Array.isArray(modelSchema[arrayFieldName].type)
+        ) {
           if (!updateData[arrayFieldName]) {
             updateData[arrayFieldName] = [];
           }
-          
+
           const value = req.body[key];
-          
+
           // Ensure we have an object at this index
           if (!updateData[arrayFieldName][index]) {
             updateData[arrayFieldName][index] = {};
           }
-          
+
           // Set the field value
           updateData[arrayFieldName][index][arrayItemField] = value;
-          
+
           // If updating a nested array field, set last_updated if it exists in schema
-          if (modelSchema[arrayFieldName].type[0] && modelSchema[arrayFieldName].type[0].last_updated) {
+          if (
+            modelSchema[arrayFieldName].type[0] &&
+            modelSchema[arrayFieldName].type[0].last_updated
+          ) {
             updateData[arrayFieldName][index].last_updated = new Date();
           }
-          
-          console.log(`✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`);
-          console.log(`🔍 Update - Current ${arrayFieldName} array:`, JSON.stringify(updateData[arrayFieldName], null, 2));
-          
+
+          console.log(
+            `✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`
+          );
+          console.log(
+            `🔍 Update - Current ${arrayFieldName} array:`,
+            JSON.stringify(updateData[arrayFieldName], null, 2)
+          );
+
           // Remove the original key from req.body to prevent duplicate processing
           delete req.body[key];
         } else {
-          console.log(`⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`);
+          console.log(
+            `⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`
+          );
         }
       }
     });
@@ -1079,18 +1547,23 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     console.log(`📝 Preparing data for ${modelName} update:`, {
       receivedFields: Object.keys(req.body),
       schemaFields: Object.keys(modelSchema),
-      allowedFields: allowedFields.length > 0 ? allowedFields : 'ALL (except password)',
+      allowedFields:
+        allowedFields.length > 0 ? allowedFields : "ALL (except password)",
       updateDataFields: Object.keys(updateData),
     });
 
     // Run custom validation if provided
     if (customValidation) {
-      const validationResult = await customValidation(updateData, modelSchema, existingRecord);
+      const validationResult = await customValidation(
+        updateData,
+        modelSchema,
+        existingRecord
+      );
       if (validationResult.error) {
         return {
           success: false,
           status: 400,
-          ...validationResult
+          ...validationResult,
         };
       }
     }
@@ -1112,23 +1585,38 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     });
 
     // Update the record
-    const updatedRecord = await Model.findByIdAndUpdate(
-      recordId,
-      updateData,
-      { new: true, runValidators: true }
-    );
+    const updatedRecord = await Model.findByIdAndUpdate(recordId, updateData, {
+      new: true,
+      runValidators: true,
+    });
 
     // Handle image uploads for update
     for (const imageField of imageFields) {
       try {
-        const uploaded = await handleImageUpload(req, imageField, modelName, recordId);
+        const uploaded = await handleImageUpload(
+          req,
+          imageField,
+          modelName,
+          recordId
+        );
         if (uploaded) {
-          const expectsArray = Array.isArray(Model.schema.obj[imageField]?.type) || Model.schema.paths[imageField]?.instance === 'Array';
-          updatedRecord[imageField] = expectsArray ? (Array.isArray(uploaded) ? uploaded : [uploaded]) : (Array.isArray(uploaded) ? uploaded[0] : uploaded);
+          const expectsArray =
+            Array.isArray(Model.schema.obj[imageField]?.type) ||
+            Model.schema.paths[imageField]?.instance === "Array";
+          updatedRecord[imageField] = expectsArray
+            ? Array.isArray(uploaded)
+              ? uploaded
+              : [uploaded]
+            : Array.isArray(uploaded)
+            ? uploaded[0]
+            : uploaded;
           await updatedRecord.save();
         }
       } catch (error) {
-        console.error(`❌ Error uploading image for field ${imageField}:`, error);
+        console.error(
+          `❌ Error uploading image for field ${imageField}:`,
+          error
+        );
         // Continue with other fields even if one image upload fails
       }
     }
@@ -1138,19 +1626,21 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
       await afterUpdate(updatedRecord, req, existingRecord);
     }
 
-    // Prepare response data (exclude specified fields)
+    // Prepare response data (exclude specified fields and transform image URLs)
     const responseData = { ...updatedRecord.toObject() };
     excludeFields.forEach((field) => {
       delete responseData[field];
     });
 
+    // Transform image URLs to full URLs
+    const transformedData = transformImageUrls(responseData, Model, req);
+
     return {
       success: true,
       status: 200,
       message: `${modelName} updated successfully`,
-      data: responseData,
+      data: transformedData,
     };
-
   } catch (error) {
     console.error("❌ Update error:", error);
 
@@ -1358,10 +1848,17 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
  * @param {Object} options - Additional options
  * @returns {Promise} Express response
  */
-const handleGenericGetAll = async (req, controllerName = null, options = {}) => {
+const handleGenericGetAll = async (
+  req,
+  controllerName = null,
+  options = {}
+) => {
   // Auto-detect controller name if not provided or empty
-  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
-  
+  const modelName =
+    controllerName && controllerName.trim() !== ""
+      ? controllerName
+      : getControllerName();
+
   if (!modelName) {
     return {
       success: false,
@@ -1393,7 +1890,7 @@ const handleGenericGetAll = async (req, controllerName = null, options = {}) => 
 
     // Add population if specified
     if (populate && populate.length > 0) {
-      populate.forEach(field => {
+      populate.forEach((field) => {
         query = query.populate(field);
       });
     }
@@ -1418,16 +1915,19 @@ const handleGenericGetAll = async (req, controllerName = null, options = {}) => 
     // Get total count for pagination info
     const totalCount = await Model.countDocuments(filter);
 
-    // Prepare response data (exclude specified fields)
-    const responseData = records.map(record => {
+    // Prepare response data (exclude specified fields and transform image URLs)
+    const responseData = records.map((record) => {
       const data = { ...record.toObject() };
       excludeFields.forEach((field) => {
         delete data[field];
       });
-      return data;
+      // Transform image URLs to full URLs
+      return transformImageUrls(data, Model, req);
     });
 
-    console.log(`✅ Successfully fetched ${responseData.length} ${modelName} records`);
+    console.log(
+      `✅ Successfully fetched ${responseData.length} ${modelName} records`
+    );
 
     return {
       success: true,
@@ -1440,7 +1940,6 @@ const handleGenericGetAll = async (req, controllerName = null, options = {}) => 
         limit: limit,
       },
     };
-
   } catch (error) {
     console.error("❌ Get all error:", error);
 
@@ -1492,7 +1991,8 @@ const handleGenericGetAll = async (req, controllerName = null, options = {}) => 
         // Handle unknown errors
         if (error.code) {
           // Handle HTTP status codes
-          const statusCode = error.code >= 400 && error.code < 600 ? error.code : 500;
+          const statusCode =
+            error.code >= 400 && error.code < 600 ? error.code : 500;
           return {
             success: false,
             status: statusCode,
@@ -1519,7 +2019,10 @@ const handleGenericGetAll = async (req, controllerName = null, options = {}) => 
           success: false,
           status: 500,
           error: "Internal server error",
-          details: process.env.NODE_ENV === "development" ? error.stack : "Something went wrong",
+          details:
+            process.env.NODE_ENV === "development"
+              ? error.stack
+              : "Something went wrong",
           type: "internal",
           timestamp: new Date().toISOString(),
         };
@@ -1534,10 +2037,17 @@ const handleGenericGetAll = async (req, controllerName = null, options = {}) => 
  * @param {Object} options - Additional options
  * @returns {Promise} Express response
  */
-const handleGenericGetById = async (req, controllerName = null, options = {}) => {
+const handleGenericGetById = async (
+  req,
+  controllerName = null,
+  options = {}
+) => {
   // Auto-detect controller name if not provided or empty
-  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
-  
+  const modelName =
+    controllerName && controllerName.trim() !== ""
+      ? controllerName
+      : getControllerName();
+
   if (!modelName) {
     return {
       success: false,
@@ -1579,7 +2089,7 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
 
     // Add population if specified
     if (populate && populate.length > 0) {
-      populate.forEach(field => {
+      populate.forEach((field) => {
         query = query.populate(field);
       });
     }
@@ -1597,20 +2107,22 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
       };
     }
 
-    // Prepare response data (exclude specified fields)
+    // Prepare response data (exclude specified fields and transform image URLs)
     const responseData = { ...record.toObject() };
     excludeFields.forEach((field) => {
       delete responseData[field];
     });
+
+    // Transform image URLs to full URLs
+    const transformedData = transformImageUrls(responseData, Model, req);
 
     console.log(`✅ Successfully fetched ${modelName} with ID: ${recordId}`);
 
     return {
       success: true,
       status: 200,
-      data: responseData,
+      data: transformedData,
     };
-
   } catch (error) {
     console.error("❌ Get by ID error:", error);
 
@@ -1671,7 +2183,8 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
         // Handle unknown errors
         if (error.code) {
           // Handle HTTP status codes
-          const statusCode = error.code >= 400 && error.code < 600 ? error.code : 500;
+          const statusCode =
+            error.code >= 400 && error.code < 600 ? error.code : 500;
           return {
             success: false,
             status: statusCode,
@@ -1698,7 +2211,10 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
           success: false,
           status: 500,
           error: "Internal server error",
-          details: process.env.NODE_ENV === "development" ? error.stack : "Something went wrong",
+          details:
+            process.env.NODE_ENV === "development"
+              ? error.stack
+              : "Something went wrong",
           type: "internal",
           timestamp: new Date().toISOString(),
         };
@@ -1712,20 +2228,27 @@ const handleGenericGetById = async (req, controllerName = null, options = {}) =>
  * @param {string} controllerName - Name of the controller/model (optional, auto-detected if not provided)
  * @param {Object} options - Configuration options
  * @returns {Object} Response object with success status and data
- * 
+ *
  * Usage examples:
  * - Find by email: handleGenericFindOne(req, "user", { searchCriteria: { email: req.body.email } })
  * - Find by slug: handleGenericFindOne(req, "blog", { searchCriteria: { slug: req.params.slug } })
- * - Find with custom criteria: handleGenericFindOne(req, "product", { 
+ * - Find with custom criteria: handleGenericFindOne(req, "product", {
  *     searchCriteria: { category: "electronics", active: true },
  *     populate: ["category", "reviews"],
  *     excludeFields: ["internal_notes"]
  *   })
  */
-const handleGenericFindOne = async (req, controllerName = null, options = {}) => {
+const handleGenericFindOne = async (
+  req,
+  controllerName = null,
+  options = {}
+) => {
   // Auto-detect controller name if not provided or empty
-  const modelName = (controllerName && controllerName.trim() !== '') ? controllerName : getControllerName();
-  
+  const modelName =
+    controllerName && controllerName.trim() !== ""
+      ? controllerName
+      : getControllerName();
+
   if (!modelName) {
     return {
       success: false,
@@ -1766,7 +2289,7 @@ const handleGenericFindOne = async (req, controllerName = null, options = {}) =>
 
     // Execute beforeFind hook if provided
     let finalCriteria = { ...searchCriteria };
-    if (beforeFind && typeof beforeFind === 'function') {
+    if (beforeFind && typeof beforeFind === "function") {
       try {
         const beforeResult = await beforeFind(finalCriteria, req);
         if (beforeResult) {
@@ -1782,19 +2305,21 @@ const handleGenericFindOne = async (req, controllerName = null, options = {}) =>
 
     // Add field selection if specified
     if (includeFields && includeFields.length > 0) {
-      const fieldSelection = includeFields.join(' ');
+      const fieldSelection = includeFields.join(" ");
       query = query.select(fieldSelection);
     } else if (excludeFields && excludeFields.length > 0) {
-      const fieldExclusion = excludeFields.map(field => `-${field}`).join(' ');
+      const fieldExclusion = excludeFields
+        .map((field) => `-${field}`)
+        .join(" ");
       query = query.select(fieldExclusion);
     }
 
     // Add population if specified
     if (populate && populate.length > 0) {
-      populate.forEach(field => {
-        if (typeof field === 'string') {
+      populate.forEach((field) => {
+        if (typeof field === "string") {
           query = query.populate(field);
-        } else if (typeof field === 'object') {
+        } else if (typeof field === "object") {
           // Support for complex population like { path: 'author', select: 'name email' }
           query = query.populate(field);
         }
@@ -1814,13 +2339,15 @@ const handleGenericFindOne = async (req, controllerName = null, options = {}) =>
         success: false,
         status: 404,
         error: "Record not found",
-        details: `${modelName} with criteria ${JSON.stringify(finalCriteria)} not found`,
+        details: `${modelName} with criteria ${JSON.stringify(
+          finalCriteria
+        )} not found`,
         type: "not_found",
       };
     }
 
     // Execute afterFind hook if provided
-    if (afterFind && typeof afterFind === 'function') {
+    if (afterFind && typeof afterFind === "function") {
       try {
         await afterFind(record, req);
       } catch (hookError) {
@@ -1843,14 +2370,19 @@ const handleGenericFindOne = async (req, controllerName = null, options = {}) =>
       });
     }
 
-    console.log(`✅ Successfully found ${modelName} with criteria:`, finalCriteria);
+    // Transform image URLs to full URLs
+    const transformedData = transformImageUrls(responseData, Model, req);
+
+    console.log(
+      `✅ Successfully found ${modelName} with criteria:`,
+      finalCriteria
+    );
 
     return {
       success: true,
       status: 200,
-      data: responseData,
+      data: transformedData,
     };
-
   } catch (error) {
     console.error("❌ Find one error:", error);
 
@@ -1871,11 +2403,11 @@ const handleGenericFindOne = async (req, controllerName = null, options = {}) =>
         };
 
       case "ValidationError":
-        const validationErrors = Object.values(error.errors).map(err => ({
+        const validationErrors = Object.values(error.errors).map((err) => ({
           field: err.path,
-          message: err.message
+          message: err.message,
         }));
-        
+
         return {
           success: false,
           status: 400,

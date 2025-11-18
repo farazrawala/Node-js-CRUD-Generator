@@ -14,8 +14,6 @@ function checkForAuthentication(req, res, next) {
   return next();
 }
 
-
-
 function checkHeaderAuthentication(req, res, next) {
   console.log(`🔐 checkHeaderAuthentication called for:`, req.path);
   const authorizationHeaderValue = req.headers["authorization"];
@@ -23,47 +21,51 @@ function checkHeaderAuthentication(req, res, next) {
 
   // Allow public routes that don't need authentication
   const publicRoutePatterns = [
-    '/user/login',                     // Direct route access
+    "/user/login", // Direct route access
     // '/user/create',                    // Direct route access
-    '/api/user/login',                 // API route access
+    "/api/user/login", // API route access
     // '/api/user/create',                // API route access - REMOVED: Now requires auth to auto-add company_id
-    '/login/admin',                // Admin login
-    '/api/login/admin',                // Admin login
-    '/api/blog/get-all',               // Public blog routes
-    '/api/blog/get-all-active',        // Public blog routes
+    "/login/admin", // Admin login
+    "/api/login/admin", // Admin login
+    "/api/blog/get-all", // Public blog routes
+    "/api/blog/get-all-active", // Public blog routes
     // '/api/product/get-all',            // Public product routes
     // '/api/user/get-all',               // Public user routes
-    '/user/user_company',               // Public user routes
+    "/user/user_company", // Public user routes
     // '/api/user/user_company',               // Public user routes
-    /^\/api\/blog\/get\/.*/,          // /api/blog/get/:id
-    /^\/api\/product\/get\/.*/,       // /api/product/get/:id
-    /^\/api\/user\/get\/.*/,          // /api/user/get/:id
-    '/api/test'                        // Test route
+    /^\/api\/blog\/get\/.*/, // /api/blog/get/:id
+    // /^\/api\/product\/get\/.*/, // /api/product/get/:id
+    /^\/api\/user\/get\/.*/, // /api/user/get/:id
+    "/api/test", // Test route
   ];
 
   // Check if current route should be public
-  const isPublicRoute = publicRoutePatterns.some(pattern => {
-    const match = typeof pattern === 'string' 
-      ? req.path === pattern 
-      : pattern instanceof RegExp 
-        ? pattern.test(req.path) 
+  const isPublicRoute = publicRoutePatterns.some((pattern) => {
+    const match =
+      typeof pattern === "string"
+        ? req.path === pattern
+        : pattern instanceof RegExp
+        ? pattern.test(req.path)
         : false;
-    
+
     // Debug logging for this specific route
-    if (req.path === '/api/user/user_company') {
+    if (req.path === "/api/user/user_company") {
       console.log(`🔍 Checking pattern: ${pattern} -> Match: ${match}`);
     }
-    
+
     return match;
   });
-  
+
   // Debug logging for this specific route
-  if (req.path === '/api/user/user_company' || req.path === '/api/user/create') {
-    console.log('🔍 Route check:', req.path, 'isPublicRoute:', isPublicRoute);
+  if (
+    req.path === "/api/user/user_company" ||
+    req.path === "/api/user/create"
+  ) {
+    console.log("🔍 Route check:", req.path, "isPublicRoute:", isPublicRoute);
   }
-  
+
   if (isPublicRoute) {
-    console.log('✅ Public route - skipping auth check:', req.path);
+    console.log("✅ Public route - skipping auth check:", req.path);
     return next();
   }
 
@@ -71,25 +73,25 @@ function checkHeaderAuthentication(req, res, next) {
     return res.status(401).json({
       success: false,
       error: "Authorization header is required",
-      message: "Please provide authorization token in the header"
+      message: "Please provide authorization token in the header",
     });
   }
 
   // Extract token from "Bearer TOKEN" format or just use the token directly
-  const token = authorizationHeaderValue.startsWith("Bearer ") 
-    ? authorizationHeaderValue.split("Bearer ")[1] 
+  const token = authorizationHeaderValue.startsWith("Bearer ")
+    ? authorizationHeaderValue.split("Bearer ")[1]
     : authorizationHeaderValue;
-    
+
   const user = getUserToken(token);
-  
+
   if (!user) {
     return res.status(401).json({
       success: false,
       error: "Invalid or expired token",
-      message: "Please provide a valid authorization token"
+      message: "Please provide a valid authorization token",
     });
   }
-  
+
   req.user = user;
   return next();
 }
@@ -101,13 +103,15 @@ function restrictTo(roles) {
     console.log("Current user : " + req.user.email, req.user.role);
 
     // Check if user has any of the required roles (user.role is an array)
-    const userHasRole = req.user.role.some(userRole => roles.includes(userRole));
+    const userHasRole = req.user.role.some((userRole) =>
+      roles.includes(userRole)
+    );
     if (!userHasRole) {
       return res.status(403).json({
         success: false,
         message: "Access denied. Insufficient privileges.",
         required: roles,
-        current: req.user.role
+        current: req.user.role,
       });
     }
 

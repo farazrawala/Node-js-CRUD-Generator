@@ -9,14 +9,20 @@ const staticRoute = require("./routes/staticRouter");
 const fileUpload = require("express-fileupload");
 const methodOverride = require("method-override");
 
-const { restrictTo, checkForAuthentication,checkHeaderAuthentication } = require("./middlewares/auth");
+const {
+  restrictTo,
+  checkForAuthentication,
+  checkHeaderAuthentication,
+} = require("./middlewares/auth");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
 const modelsPath = path.join(__dirname, "models");
-const modelFiles = fs.readdirSync(modelsPath).filter(file => file.endsWith('.js'));
+const modelFiles = fs
+  .readdirSync(modelsPath)
+  .filter((file) => file.endsWith(".js"));
 
-modelFiles.forEach(file => {
+modelFiles.forEach((file) => {
   const modelPath = path.join(modelsPath, file);
   // console.log(`📦 Loading model: ${file}`);
   require(modelPath);
@@ -31,39 +37,80 @@ const flash = require("connect-flash");
 const cors = require("cors");
 
 // CORS configuration
-app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://127.0.0.1:3000'], // React development servers
-  credentials: true, // Allow cookies to be sent
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps, Postman, or curl)
+      if (!origin) return callback(null, true);
+
+      // Allow all origins in development, or specific origins in production
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173", // Vite default port
+        "http://localhost:5174",
+        "http://localhost:8080",
+        "http://localhost:8000",
+      ];
+
+      // In development, allow all origins
+      if (process.env.NODE_ENV !== "production") {
+        return callback(null, true);
+      }
+
+      // In production, check against allowed origins
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(null, true); // Still allow for now, but you can restrict in production
+      }
+    },
+    credentials: true, // Allow cookies to be sent
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+      "Access-Control-Request-Method",
+      "Access-Control-Request-Headers",
+    ],
+    exposedHeaders: ["Content-Range", "X-Content-Range"],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
+  })
+);
 
 app.use(cookieParser());
 app.set("view engine", "ejs");
 app.set("views", path.resolve("./views"));
 
 // Serve static files from uploads directory
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Session middleware (must come before flash)
-app.use(session({
-  secret: 'your-secret-key-here',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { 
-    secure: false, // Set to true if using HTTPS
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
-  }
-}));
+app.use(
+  session({
+    secret: "your-secret-key-here",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: false, // Set to true if using HTTPS
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    },
+  })
+);
 
 // Flash messages middleware
 app.use(flash());
 
 // Make flash messages available to all views
 app.use((req, res, next) => {
-  res.locals.success = req.flash('success');
-  res.locals.error = req.flash('error');
-  res.locals.info = req.flash('info');
+  res.locals.success = req.flash("success");
+  res.locals.error = req.flash("error");
+  res.locals.info = req.flash("info");
   next();
 });
 
@@ -82,9 +129,11 @@ app.use(
 );
 
 // Method override for PUT/DELETE requests (MUST be before body parsing)
-app.use(methodOverride('_method', {
-  methods: ['POST']
-}));
+app.use(
+  methodOverride("_method", {
+    methods: ["POST"],
+  })
+);
 
 // Middleware to handle different content types AFTER file upload
 app.use(express.urlencoded({ extended: true }));
@@ -93,7 +142,10 @@ app.use(express.json());
 // Debug middleware to log request details
 app.use((req, res, next) => {
   // Debug ALL admin requests
-  if (req.url.includes('/admin/') && (req.method === 'POST' || req.method === 'PUT')) {
+  if (
+    req.url.includes("/admin/") &&
+    (req.method === "POST" || req.method === "PUT")
+  ) {
     console.log(`🔍 Admin Request Debug:`, {
       method: req.method,
       url: req.url,
@@ -102,56 +154,65 @@ app.use((req, res, next) => {
       originalMethod: req.originalMethod,
       query: req.query,
       headers: {
-        'content-type': req.get('Content-Type'),
-        'content-length': req.get('Content-Length')
-      }
+        "content-type": req.get("Content-Type"),
+        "content-length": req.get("Content-Length"),
+      },
     });
   }
-  
+
   // Debug method override specifically
-  if (req.url.includes('/admin/blogs/') && req.method === 'POST') {
+  if (req.url.includes("/admin/blogs/") && req.method === "POST") {
     console.log(`🔄 Method Override Debug:`, {
       originalMethod: req.originalMethod,
       method: req.method,
       body: req.body,
-      _method: req.body._method
+      _method: req.body._method,
     });
   }
-  
+
   // Specific debug for complain requests
-  if (req.url.includes('/admin/complain/') && (req.method === 'POST' || req.method === 'PUT')) {
+  if (
+    req.url.includes("/admin/complain/") &&
+    (req.method === "POST" || req.method === "PUT")
+  ) {
     console.log(`🚨 COMPLAIN REQUEST DETECTED:`, {
       method: req.method,
       url: req.url,
       body: req.body,
       _method: req.body._method,
-      originalMethod: req.originalMethod
+      originalMethod: req.originalMethod,
     });
   }
-  
+
   // Specific debug for blogs requests
-  if (req.url.includes('/admin/blogs/') && (req.method === 'POST' || req.method === 'PUT')) {
+  if (
+    req.url.includes("/admin/blogs/") &&
+    (req.method === "POST" || req.method === "PUT")
+  ) {
     console.log(`📝 BLOG REQUEST DETECTED:`, {
       method: req.method,
       url: req.url,
       body: req.body,
       _method: req.body._method,
-      originalMethod: req.originalMethod
+      originalMethod: req.originalMethod,
     });
   }
-  
+
   // Specific debug for products requests
-  if (req.url.includes('/admin/products/') && (req.method === 'POST' || req.method === 'PUT')) {
+  if (
+    req.url.includes("/admin/products/") &&
+    (req.method === "POST" || req.method === "PUT")
+  ) {
     console.log(`🛍️ PRODUCT REQUEST DETECTED:`, {
       method: req.method,
       url: req.url,
       body: req.body,
       _method: req.body._method,
       originalMethod: req.originalMethod,
-      files: req.files ? Object.keys(req.files) : 'none'
+      files: req.files ? Object.keys(req.files) : "none",
     });
   }
-  
+
   next();
 });
 

@@ -70,7 +70,7 @@ async function handleUserLogin(req, res) {
     // Find user by email only
     const user = await User.findOne({
       email: email.toLowerCase(),
-      role: { $in: ["ADMIN", "USER"] },
+      // role: { $in: ["ADMIN", "USER"] },
       // active: true,
     }).populate({
       path: "company_id",
@@ -263,7 +263,7 @@ async function handleUserSignupCompany(req, res) {
         data.name = req.body.name || "User";
         data.password = req.body.password;
         data.company_id = create_company.data._id;
-        data.role = ["USER"];
+        data.role = ["USER", "ADMIN"];
         console.log("👤 User data:", JSON.stringify(data, null, 2));
       },
     });

@@ -23,6 +23,7 @@ const {
   productUpdate,
   productById,
   getAllProducts,
+  getAllActiveProducts,
   updateWarehouseQuantity,
   getProductWarehouseInventory,
   checkWarehouseStock,
@@ -117,6 +118,7 @@ router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
+router.get("/product/get-all-active", getAllActiveProducts);
 
 // Integration routes
 router.get("/integration/check-active/:id", checkIntegrationActive);

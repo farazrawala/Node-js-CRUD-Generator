@@ -15,6 +15,10 @@ const permissionSetSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    add: {
+      type: Boolean,
+      default: false,
+    },
   },
   { _id: false }
 );
@@ -41,7 +45,7 @@ const userSchema = new mongoose.Schema(
     role: {
       type: [String],
       required: true,
-      default: ["USER"], //  ADMIN, SUPERADMIN, VENDOR, USER ,CUSTOMER
+      default: ["USER", "ADMIN", "VENDOR", "CUSTOMER"], //  ADMIN, SUPERADMIN, VENDOR, USER ,CUSTOMER
       field_type: "multiselect",
     },
     permissions: {
@@ -51,39 +55,39 @@ const userSchema = new mongoose.Schema(
       field_name: "Permissions",
     },
     // default fields
-      company_id:{
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "company",
-        // required: true,
-        field_name: "Company",
-      },
-      created_by:{
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "user",
-        field_name: "Created By",
-      },
-      updated_by:{
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "user",
-        field_name: "Updated By",
-      },
-      status: { 
-        type: String,
-        required: true,
-        enum: ["active", "inactive"], 
-        default: "active"              
-      },
-      deletedAt: {
-        type: Date,
-        default: null,
-        field_name: "Deleted At",
-      },
+    company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      // required: true,
+      field_name: "Company",
+    },
+    created_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Created By",
+    },
+    updated_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Updated By",
+    },
+    status: {
+      type: String,
+      required: true,
+      enum: ["active", "inactive"],
+      default: "active",
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
+      field_name: "Deleted At",
+    },
   },
   { timestamps: true }
 );
 
 // Add methods to the schema
-userSchema.methods.comparePassword = async function(candidatePassword) {
+userSchema.methods.comparePassword = async function (candidatePassword) {
   try {
     return await bcrypt.compare(candidatePassword, this.password);
   } catch (error) {
@@ -92,9 +96,9 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
 };
 
 // Hash password before saving
-userSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) return next();
-  
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password")) return next();
+
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
