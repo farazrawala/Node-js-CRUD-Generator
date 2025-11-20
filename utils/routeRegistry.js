@@ -138,6 +138,15 @@ class RouteRegistry {
         enabled: true,
         customTabs: [],
       },
+      logs: {
+        name: "Logs",
+        icon: "fas fa-history",
+        path: "/admin/logs",
+        description: "Manage logs",
+        order: 13,
+        enabled: true,
+        customTabs: [],
+      },
     };
 
     // Add default routes to both routeConfig and routes Map
@@ -162,6 +171,7 @@ class RouteRegistry {
       customRoutes: config.customRoutes || [],
       subMenus: config.subMenus || [],
       customTabs: config.customTabs || [],
+      logs: config.logs || [],
     };
 
     this.routes.set(key, routeConfig);
