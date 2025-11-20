@@ -138,6 +138,420 @@ async function productCreateVariation(req, res) {
   }
 }
 
+async function getProductVariationById(req, res) {
+  const { id } = req.params;
+  const response = await handleGenericGetById(req, "product", {
+    excludeFields: [],
+    populate: [
+      {
+        path: "parent_product_id",
+        select: "product_name",
+      },
+    ],
+    sort: { createdAt: -1 }, // Sort by newest first
+    limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
+    skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
+  });
+
+  const childproducts = await handleGenericGetAll(req, "product", {
+    excludeFields: [],
+    filter: { parent_product_id: id },
+    populate: [
+      {
+        path: "parent_product_id",
+        select: "product_name",
+      },
+      {
+        path: "warehouse_inventory.warehouse_id",
+        select: "warehouse_name",
+      },
+      {
+        path: "category_id",
+        select: "name",
+      },
+    ],
+  });
+  response.data.childproducts = childproducts.data;
+  return res.status(200).json({
+    success: true,
+    message: "Product variation fetched successfully",
+    data: response.data,
+  });
+}
+
+/**
+ * Update product variation
+ *
+ * This function handles updating a parent product and its variations.
+ * It supports two operations:
+ * 1. Update existing variations (if variation has an 'id' field)
+ * 2. Create new variations (if variation doesn't have an 'id' field)
+ *
+ * @param {Object} req - Express request object
+ * @param {Object} req.params.id - Parent product ID from URL
+ * @param {Object} req.body - Request body containing product data and variations
+ * @param {Object} req.body.variations - Array of variations (can be form-encoded or direct array)
+ * @param {Object} res - Express response object
+ * @returns {Promise<Object>} JSON response with parent product and variations update results
+ */
+async function productUpdateVariation(req, res) {
+  try {
+    // Extract parent product ID from URL parameters
+    const { id } = req.params;
+
+    console.log("🔧 Product update variation - req.body:", req.body);
+    console.log("🔧 Product update variation - product ID:", id);
+
+    /**
+     * Step 1: Get company information
+     * Company data is needed to set company_id and warehouse_id for variations
+     */
+    const company = await handleGenericFindOne(req, "company", {
+      searchCriteria: {
+        _id: req.user.company_id,
+        deletedAt: null,
+      },
+      excludeFields: [],
+    });
+
+    // Validate company exists
+    if (!company.success || !company.data) {
+      return res.status(404).json({
+        success: false,
+        message: "Company not found",
+      });
+    }
+
+    /**
+     * Step 2: Parse variations from req.body
+     *
+     * Supports two input formats:
+     * 1. Direct array format (JSON): req.body.variations = [{...}, {...}]
+     * 2. Form-encoded format: variations[0][field_name] = value
+     *    Example: variations[0][product_name] = "Variant 1"
+     */
+    let variations = [];
+
+    if (Array.isArray(req.body.variations)) {
+      // Direct array format (JSON) - use as is
+      variations = req.body.variations;
+    } else {
+      // Form-encoded format: variations[0][field_name]
+      // Parse each key matching the pattern variations[index][field]
+      for (const key in req.body) {
+        const match = key.match(/^variations\[(\d+)\]\[(.+)\]$/);
+        if (match) {
+          const index = parseInt(match[1]); // Extract array index
+          const field = match[2]; // Extract field name
+
+          // Initialize variation object at this index if it doesn't exist
+          if (!variations[index]) variations[index] = {};
+
+          // Set the field value
+          variations[index][field] = req.body[key];
+        }
+      }
+    }
+
+    /**
+     * Step 3: Process warehouse inventory for parent product
+     *
+     * Initialize and set up warehouse_inventory array structure
+     * This ensures the parent product has proper inventory tracking
+     */
+    // Initialize warehouse_inventory array if it doesn't exist
+    if (!req.body.warehouse_inventory) {
+      req.body.warehouse_inventory = [];
+    }
+
+    // Ensure it's an array (handle case where it might be an object)
+    if (!Array.isArray(req.body.warehouse_inventory)) {
+      req.body.warehouse_inventory = [req.body.warehouse_inventory];
+    }
+
+    // Initialize first element if it doesn't exist
+    if (!req.body.warehouse_inventory[0]) {
+      req.body.warehouse_inventory[0] = {};
+    }
+
+    // Set warehouse_id, quantity, and last_updated timestamp
+    req.body.warehouse_inventory[0].warehouse_id = company.data.warehouse_id;
+    req.body.warehouse_inventory[0].quantity = req.body.quantity || 0;
+    req.body.warehouse_inventory[0].last_updated = new Date();
+
+    // Set company_id if not already set in request body
+    if (!req.body.company_id && company.data._id) {
+      req.body.company_id = company.data._id.toString();
+    }
+
+    /**
+     * Step 4: Update the parent product first
+     *
+     * The parent product must be updated successfully before processing variations
+     * because variations need the parent_product_id reference
+     */
+    const parentProductResponse = await handleGenericUpdate(req, "product", {
+      /**
+       * beforeUpdate hook: Process warehouse inventory data
+       *
+       * This hook processes warehouse_inventory data before saving.
+       * It handles both object and array formats and ensures proper structure.
+       */
+      beforeUpdate: async (updateData, req, existingRecord) => {
+        console.log("🔧 Product update variation - beforeUpdate hook called");
+        console.log(
+          "🔧 Original updateData.warehouse_inventory:",
+          updateData.warehouse_inventory
+        );
+
+        // Process warehouse inventory if present in request body
+        if (req.body.warehouse_inventory) {
+          const warehouseInventory = [];
+          const inventoryData = req.body.warehouse_inventory;
+
+          // Handle object format (e.g., {0: {warehouse_id: "...", quantity: 10}})
+          if (
+            typeof inventoryData === "object" &&
+            !Array.isArray(inventoryData)
+          ) {
+            // Convert object format to array
+            Object.keys(inventoryData).forEach((key) => {
+              const item = inventoryData[key];
+              // Validate item has required fields
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date(),
+                });
+              }
+            });
+          }
+          // Handle array format (e.g., [{warehouse_id: "...", quantity: 10}])
+          else if (Array.isArray(inventoryData)) {
+            inventoryData.forEach((item) => {
+              // Validate item has required fields
+              if (item.warehouse_id && item.quantity !== undefined) {
+                warehouseInventory.push({
+                  warehouse_id: item.warehouse_id,
+                  quantity: parseInt(item.quantity) || 0,
+                  last_updated: new Date(),
+                });
+              }
+            });
+          }
+
+          // Update the updateData with processed inventory
+          updateData.warehouse_inventory = warehouseInventory;
+          console.log(
+            "✅ Processed warehouse inventory in controller:",
+            warehouseInventory
+          );
+        }
+      },
+      /**
+       * afterUpdate hook: Log successful update
+       */
+      afterUpdate: async (record, req, existingRecord) => {
+        console.log("✅ Parent product updated successfully:", record);
+      },
+    });
+
+    /**
+     * Step 5: Validate parent product update was successful
+     *
+     * If parent product update fails, we cannot proceed with variations
+     * because they need the parent_product_id reference
+     */
+    if (
+      !parentProductResponse.success ||
+      !parentProductResponse.data ||
+      !parentProductResponse.data._id
+    ) {
+      console.error(
+        "❌ Failed to update parent product:",
+        parentProductResponse
+      );
+      return res.status(parentProductResponse.status || 500).json({
+        success: false,
+        message: "Failed to update parent product",
+        error: parentProductResponse.error || parentProductResponse,
+      });
+    }
+
+    // Extract parent product ID for use in variations
+    const parentProductId = parentProductResponse.data._id.toString();
+    console.log("✅ Parent product updated with ID:", parentProductId);
+
+    /**
+     * Step 6: Process variations
+     *
+     * For each variation in the array:
+     * - If variation has an 'id': Update existing variation
+     * - If variation doesn't have an 'id': Create new variation with parent_product_id
+     */
+    const variationResults = [];
+
+    if (variations.length > 0) {
+      // Process each variation sequentially
+      for (const variation of variations) {
+        if (variation.id) {
+          /**
+           * Update existing variation
+           *
+           * Variation has an ID, so we update the existing record
+           */
+          console.log("🔄 Updating variation with ID:", variation.id);
+
+          /**
+           * Create a mock request object for updating the variation
+           *
+           * handleGenericUpdate expects req.params.id to contain the record ID
+           * and req.body to contain the update data
+           *
+           * Create object that inherits from req to preserve Express methods (like req.get)
+           */
+          const variationReq = Object.create(Object.getPrototypeOf(req));
+          Object.assign(variationReq, req, {
+            params: { ...req.params, id: variation.id }, // Set variation ID in params
+            body: { ...variation }, // Use variation data as body
+          });
+
+          // Remove id from body since it's now in params
+          delete variationReq.body.id;
+
+          /**
+           * Set required fields for the variation:
+           * - company_id: Link to company
+           * - warehouse_inventory: Set up inventory tracking
+           * - parent_product_id: Link to parent product
+           */
+          variationReq.body.company_id = company.data._id.toString();
+          variationReq.body.warehouse_inventory = [
+            {
+              warehouse_id: company.data.warehouse_id,
+              quantity: variation.quantity || 0,
+              last_updated: new Date(),
+            },
+          ];
+          variationReq.body.parent_product_id = parentProductId;
+
+          // Update the variation using handleGenericUpdate
+          const variationResponse = await handleGenericUpdate(
+            variationReq,
+            "product",
+            {
+              beforeUpdate: async (updateData, req, existingRecord) => {
+                console.log(
+                  "🔧 Variation update - beforeUpdate hook called for:",
+                  variation.id
+                );
+              },
+              afterUpdate: async (record, req, existingRecord) => {
+                console.log(
+                  "✅ Product variation updated successfully:",
+                  record._id
+                );
+              },
+            }
+          );
+
+          // Store result for response
+          variationResults.push({
+            id: variation.id,
+            action: "updated",
+            response: variationResponse,
+          });
+        } else {
+          /**
+           * Create new variation
+           *
+           * Variation doesn't have an ID, so we create a new record
+           * and link it to the parent product via parent_product_id
+           */
+          console.log("➕ Creating new variation");
+
+          /**
+           * Create a mock request object for creating the variation
+           *
+           * handleGenericCreate expects req.body to contain the data
+           *
+           * Create object that inherits from req to preserve Express methods (like req.get)
+           */
+          const variantReq = Object.create(Object.getPrototypeOf(req));
+          Object.assign(variantReq, req, {
+            body: { ...variation }, // Use variation data as body
+          });
+
+          /**
+           * Set required fields for the new variation:
+           * - company_id: Link to company
+           * - warehouse_inventory: Set up inventory tracking
+           * - parent_product_id: Link to parent product (required for variations)
+           */
+          variantReq.body.company_id = company.data._id.toString();
+          variantReq.body.warehouse_inventory = [
+            {
+              warehouse_id: company.data.warehouse_id,
+              quantity: variation.quantity || 0,
+              last_updated: new Date(),
+            },
+          ];
+          variantReq.body.parent_product_id = parentProductId;
+
+          // Create the variation using handleGenericCreate
+          const variationResponse = await handleGenericCreate(
+            variantReq,
+            "product",
+            {
+              afterCreate: async (record, req) => {
+                console.log(
+                  "✅ Product variation created successfully:",
+                  record._id
+                );
+              },
+            }
+          );
+
+          // Store result for response
+          variationResults.push({
+            action: "created",
+            response: variationResponse,
+          });
+        }
+      }
+    }
+
+    /**
+     * Step 7: Return success response
+     *
+     * Response includes:
+     * - parent_product: Updated parent product data
+     * - variations: Array of variation update/create results
+     */
+    return res.status(parentProductResponse.status || 200).json({
+      success: true,
+      message: "Product variation updated successfully",
+      data: {
+        parent_product: parentProductResponse.data,
+        variations: variationResults,
+      },
+    });
+  } catch (error) {
+    /**
+     * Error handling
+     *
+     * Catch any unexpected errors and return appropriate error response
+     */
+    console.error("❌ Product update variation error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+}
+
 async function productCreate(req, res) {
   console.log("🔧 Product create - req.body:", req.body);
   console.log("🔧 Product create - req.body keys:", Object.keys(req.body));
@@ -550,4 +964,6 @@ module.exports = {
   checkWarehouseStock,
   getProductsByWarehouse,
   productCreateVariation,
+  productUpdateVariation,
+  getProductVariationById,
 };
