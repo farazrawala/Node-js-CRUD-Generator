@@ -953,6 +953,34 @@ async function getProductsByWarehouse(req, res) {
   }
 }
 
+async function productDelete(req, res) {
+  console.log(`🔐 Product delete attempt:`, {
+    id: req.params.id,
+    time: new Date().toISOString(),
+  });
+
+  const filter = {};
+
+  // Always filter by company_id if user has one
+  if (req.user && req.user.company_id) {
+    filter.company_id = req.user.company_id;
+    console.log(
+      `🔍 Filtering product delete by company_id:`,
+      req.user.company_id
+    );
+  }
+
+  // Manually set the request body with deletedAt data
+  req.body = { deletedAt: new Date().toISOString() };
+  const response = await handleGenericUpdate(req, "product", {
+    filter: filter,
+    afterUpdate: async (record, req, existingRecord) => {
+      console.log(`✅ Product soft deleted successfully.`);
+    },
+  });
+  return res.status(response.status).json(response);
+}
+
 module.exports = {
   productCreate,
   productUpdate,
@@ -966,4 +994,5 @@ module.exports = {
   productCreateVariation,
   productUpdateVariation,
   getProductVariationById,
+  productDelete,
 };

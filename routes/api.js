@@ -31,6 +31,7 @@ const {
   productCreateVariation,
   productUpdateVariation,
   getProductVariationById,
+  productDelete,
 } = require("../controllers/product");
 
 const {
@@ -121,6 +122,7 @@ router.patch("/product/update/:id", productUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 router.get("/product/get-all-active", getAllActiveProducts);
+router.delete("/product/delete/:id", productDelete);
 
 // Integration routes
 router.get("/integration/check-active/:id", checkIntegrationActive);

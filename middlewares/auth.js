@@ -1,4 +1,73 @@
 const { getUserToken } = require("../service/auth");
+const { handleGenericCreate } = require("../utils/modelHelper");
+
+/**
+ * Helper function to log API requests
+ * Works for both authenticated and public routes
+ * @param {Object} req - Express request object
+ * @param {Object} user - User object (optional, can be null for public routes)
+ */
+async function logApiRequest(req, user = null) {
+  try {
+    const action = req.path.split("/").pop().toUpperCase() || "UNKNOWN";
+    const method = req.method || "GET";
+
+    // Determine user information
+    let userEmail = "Anonymous";
+    let userId = null;
+    let companyId = null;
+
+    if (user) {
+      userEmail = user.email || user.name || "Unknown";
+      userId = user._id || null;
+      companyId = user.company_id || null;
+    } else {
+      // Try to get user from token if available (for public routes with optional auth)
+      const authorizationHeaderValue = req.headers["authorization"];
+      if (authorizationHeaderValue) {
+        try {
+          const token = authorizationHeaderValue.startsWith("Bearer ")
+            ? authorizationHeaderValue.split("Bearer ")[1]
+            : authorizationHeaderValue;
+          const tokenUser = getUserToken(token);
+          if (tokenUser) {
+            userEmail = tokenUser.email || tokenUser.name || "Unknown";
+            userId = tokenUser._id || null;
+            companyId = tokenUser.company_id || null;
+          }
+        } catch (error) {
+          // Token invalid or expired, continue with anonymous
+        }
+      }
+    }
+
+    // Create a mock request object with log data in req.body
+    const logReq = Object.create(Object.getPrototypeOf(req));
+    Object.assign(logReq, req, {
+      body: {
+        action: `${method} ${action}`,
+        url: req.path,
+        tags: ["api", method.toLowerCase(), user ? "authenticated" : "public"],
+        description: `User ${userEmail} accessed ${req.path}`,
+        company_id: companyId,
+        created_by: userId,
+      },
+    });
+
+    // Insert log asynchronously (don't block the request)
+    handleGenericCreate(logReq, "logs", {
+      afterCreate: async (record, req) => {
+        console.log("✅ Log created successfully:", record._id);
+      },
+    }).catch((error) => {
+      // Log error but don't block the request
+      console.error("❌ Failed to create log:", error);
+    });
+  } catch (error) {
+    // Log error but don't block the request
+    console.error("❌ Error creating log:", error);
+  }
+}
 
 function checkForAuthentication(req, res, next) {
   // const authorizationHeaderValue = req.headers["authorization"];
@@ -14,7 +83,7 @@ function checkForAuthentication(req, res, next) {
   return next();
 }
 
-function checkHeaderAuthentication(req, res, next) {
+async function checkHeaderAuthentication(req, res, next) {
   console.log(`🔐 checkHeaderAuthentication called for:`, req.path);
   const authorizationHeaderValue = req.headers["authorization"];
   req.user = null;
@@ -66,6 +135,8 @@ function checkHeaderAuthentication(req, res, next) {
 
   if (isPublicRoute) {
     console.log("✅ Public route - skipping auth check:", req.path);
+    // Log public route access
+    logApiRequest(req, null);
     return next();
   }
 
@@ -93,6 +164,10 @@ function checkHeaderAuthentication(req, res, next) {
   }
 
   req.user = user;
+
+  // Log authenticated route access
+  logApiRequest(req, user);
+
   return next();
 }
 
