@@ -1237,6 +1237,8 @@ const productAdminCRUD = adminCrudGenerator(
       parent_product_id: "select", // Dropdown select field+
       category_id: "multiselect",
       brand_id: "select",
+      product_type: "select", // Enum field for product type
+      unit: "select", // Enum field for unit
     },
     fieldLabels: {
       product_image: "Product Image", // Human-readable label for product image
@@ -1245,6 +1247,26 @@ const productAdminCRUD = adminCrudGenerator(
       warehouse_inventory_display: "Warehouse Inventory", // Human-readable label for warehouse inventory display
       total_quantity: "Total Quantity", // Human-readable label for total quantity
       product_price: "Product Price", // Human-readable label for product price
+      product_type: "Product Type", // Human-readable label for product type
+      unit: "Unit", // Human-readable label for unit
+    },
+    fieldOptions: {
+      product_type: [
+        { value: "Single", label: "Single" },
+        { value: "Variable", label: "Variable" },
+      ],
+      unit: [
+        { value: "Piece", label: "Piece" },
+        { value: "Ltr", label: "Ltr" },
+        { value: "Box", label: "Box" },
+        { value: "Meter", label: "Meter" },
+        { value: "Feet", label: "Feet" },
+        { value: "Yard", label: "Yard" },
+        { value: "Inch", label: "Inch" },
+        { value: "Centimeter", label: "Centimeter" },
+        { value: "Millimeter", label: "Millimeter" },
+        { value: "Others", label: "Others" },
+      ],
     },
     middleware: {
       afterQuery: async (records, req) => {
@@ -1472,6 +1494,21 @@ const productAdminCRUD = adminCrudGenerator(
       },
       // Process warehouse inventory before insert
       beforeInsert: async (req, res) => {
+        // Convert empty strings to null for ObjectId fields to prevent cast errors
+        const objectIdFields = [
+          "parent_product_id",
+          "brand_id",
+          "company_id",
+          "created_by",
+          "updated_by",
+        ];
+        
+        objectIdFields.forEach((field) => {
+          if (req.body[field] === "" || req.body[field] === undefined) {
+            req.body[field] = null;
+          }
+        });
+        
         // Parse warehouse_inventory from request
         if (req.body.warehouse_inventory) {
           const warehouseInventory = [];
@@ -1557,6 +1594,21 @@ const productAdminCRUD = adminCrudGenerator(
           req.body.warehouse_inventory
         );
 
+        // Convert empty strings to null for ObjectId fields to prevent cast errors
+        const objectIdFields = [
+          "parent_product_id",
+          "brand_id",
+          "company_id",
+          "created_by",
+          "updated_by",
+        ];
+        
+        objectIdFields.forEach((field) => {
+          if (req.body[field] === "" || req.body[field] === undefined) {
+            req.body[field] = null;
+          }
+        });
+
         // Parse warehouse_inventory from request
         if (req.body.warehouse_inventory) {
           const warehouseInventory = [];
@@ -1637,6 +1689,44 @@ const productAdminCRUD = adminCrudGenerator(
             );
           }
         }
+      },
+    },
+    fieldProcessing: {
+      beforeInsert: async (data, req) => {
+        // Convert empty strings to null for ObjectId fields to prevent cast errors
+        const objectIdFields = [
+          "parent_product_id",
+          "brand_id",
+          "company_id",
+          "created_by",
+          "updated_by",
+        ];
+        
+        objectIdFields.forEach((field) => {
+          if (data[field] === "" || data[field] === undefined) {
+            data[field] = null;
+          }
+        });
+        
+        return data;
+      },
+      beforeUpdate: async (data, req) => {
+        // Convert empty strings to null for ObjectId fields to prevent cast errors
+        const objectIdFields = [
+          "parent_product_id",
+          "brand_id",
+          "company_id",
+          "created_by",
+          "updated_by",
+        ];
+        
+        objectIdFields.forEach((field) => {
+          if (data[field] === "" || data[field] === undefined) {
+            data[field] = null;
+          }
+        });
+        
+        return data;
       },
     },
     // Custom response formatting to show warehouse inventory nicely
