@@ -39,6 +39,6 @@ fetch_order wp
 fetch_order shopify
 
 api with search... 
-attribut edit not working..
+attribute edit not working..
 
 

@@ -20,6 +20,7 @@ const stockTransferController = require("../controllers/stockTransfer");
 const Process = require("../models/process");
 const Brands = require("../models/brands");
 const Attribute = require("../models/attribute");
+const Logs = require("../models/logs");
 // Import CRUD generators
 const adminCrudGenerator = require("../utils/adminCrudGenerator");
 
@@ -2548,6 +2549,151 @@ const categoryAdminCRUD = adminCrudGenerator(
 );
 
 /**
+ * Auto-generate Admin CRUD with UI Forms for Logs model
+ */
+const logsAdminCRUD = adminCrudGenerator(
+  Logs,
+  "logs",
+  ["action", "url", "tags", "description", "company_id", "status"],
+  {
+    excludedFields: ["__v"],
+    includedFields: [
+      "action",
+      "url",
+      "tags",
+      "description",
+      "company_id",
+      "created_by",
+      "status",
+      "createdAt",
+      "updatedAt",
+    ],
+    searchableFields: ["action", "url", "description"],
+    filterableFields: ["status", "company_id"],
+    sortableFields: ["action", "url", "createdAt", "updatedAt"],
+    baseUrl: BASE_URL,
+    softDelete: true,
+    fieldTypes: {
+      description: "textarea",
+      tags: "text",
+      url: "url",
+      company_id: "select",
+      created_by: "select",
+      status: "select",
+    },
+    fieldProcessing: {
+      beforeInsert: async (data, req) => {
+        // Convert comma-separated tags string to array
+        if (data.tags && typeof data.tags === "string") {
+          data.tags = data.tags
+            .split(",")
+            .map((tag) => tag.trim())
+            .filter((tag) => tag !== "");
+        }
+        return data;
+      },
+      beforeUpdate: async (data, req) => {
+        // Convert comma-separated tags string to array
+        if (data.tags && typeof data.tags === "string") {
+          data.tags = data.tags
+            .split(",")
+            .map((tag) => tag.trim())
+            .filter((tag) => tag !== "");
+        }
+        return data;
+      },
+    },
+    fieldLabels: {
+      action: "Action",
+      url: "URL",
+      tags: "Tags (comma-separated)",
+      description: "Description",
+      company_id: "Company",
+      created_by: "Created By",
+      status: "Status",
+    },
+    fieldOptions: {
+      status: [
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" },
+      ],
+      company_id: [], // Will be populated dynamically
+      created_by: [], // Will be populated dynamically
+    },
+    middleware: {
+      afterQuery: async (records, req) => {
+        const populatedRecords = await Logs.populate(records, [
+          { path: "company_id", select: "company_name" },
+          { path: "created_by", select: "name email" },
+        ]);
+
+        // Populate company_id options
+        if (req.fieldConfig?.company_id) {
+          const companies = await Company.find(
+            { deletedAt: null },
+            "company_name"
+          ).sort({ company_name: 1 });
+          req.fieldConfig.company_id.options = [
+            { value: "", label: "None" },
+            ...companies.map((company) => ({
+              value: company._id.toString(),
+              label: company.company_name,
+            })),
+          ];
+          req.fieldConfig.company_id.placeholder = "Select Company";
+          req.fieldConfig.company_id.helpText = "Choose the company (optional)";
+        }
+
+        // Populate created_by options
+        if (req.fieldConfig?.created_by) {
+          const users = await User.find(
+            { deletedAt: { $exists: false } },
+            "name email"
+          ).sort({ name: 1 });
+          req.fieldConfig.created_by.options = [
+            { value: "", label: "None" },
+            ...users.map((user) => ({
+              value: user._id.toString(),
+              label: user.name,
+            })),
+          ];
+          req.fieldConfig.created_by.placeholder = "Select User";
+          req.fieldConfig.created_by.helpText = "Choose the user (optional)";
+        }
+
+        return populatedRecords;
+      },
+    },
+    responseFormatting: {
+      list: async (records) =>
+        records.map((record) => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          // Format tags array for display
+          if (Array.isArray(recordObj.tags)) {
+            recordObj.tags = recordObj.tags.join(", ");
+          }
+          // Format company name
+          if (recordObj.company_id?.company_name) {
+            recordObj.company_name = recordObj.company_id.company_name;
+          }
+          // Format created_by name
+          if (recordObj.created_by?.name) {
+            recordObj.created_by_name = recordObj.created_by.name;
+          }
+          return recordObj;
+        }),
+      editForm: async (recordData) => {
+        // Convert tags array to comma-separated string for form input
+        if (Array.isArray(recordData.tags)) {
+          recordData.tags = recordData.tags.join(", ");
+        }
+        return recordData;
+      },
+    },
+  }
+);
+
+/**
  * Mount all Admin CRUD routes under /admin
  *
  * This automatically creates:
@@ -2556,6 +2702,7 @@ const categoryAdminCRUD = adminCrudGenerator(
  * - /admin/blogs - Blog CRUD with forms
  * - /admin/orders - Order CRUD with forms
  * - /admin/categories - Category CRUD with forms
+ * - /admin/logs - Logs CRUD with forms
  */
 
 // Apply admin authentication middleware to all routes
@@ -2576,6 +2723,7 @@ routeRegistry.updateRoute("integration", {
 });
 routeRegistry.updateRoute("process", { crudController: processAdminCRUD });
 routeRegistry.updateRoute("brands", { crudController: brandsAdminCRUD });
+routeRegistry.updateRoute("logs", { crudController: logsAdminCRUD });
 
 routeRegistry.addCustomTab("products", {
   name: "Stock Transfer",
