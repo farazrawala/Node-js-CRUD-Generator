@@ -1,25 +1,30 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const categorySchema = new mongoose.Schema(
   {
     parent_id: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'category',
+      ref: "category",
       default: null,
-      set: function(value) {
+      set: function (value) {
         // Convert empty strings, 'null', undefined to null
-        if (value === '' || value === 'null' || value === undefined || value === null) {
+        if (
+          value === "" ||
+          value === "null" ||
+          value === undefined ||
+          value === null
+        ) {
           return null;
         }
         return value;
-      }
+      },
     },
     name: {
       type: String,
-      required: [true, 'Category name is required'],
+      required: [true, "Category name is required"],
       trim: true,
-      minlength: [2, 'Category name must be at least 2 characters long'],
-      maxlength: [100, 'Category name cannot exceed 50 characters']
+      minlength: [2, "Category name must be at least 2 characters long"],
+      maxlength: [100, "Category name cannot exceed 50 characters"],
     },
     slug: {
       type: String,
@@ -32,42 +37,46 @@ const categorySchema = new mongoose.Schema(
     },
     isActive: {
       type: Boolean,
-      default: true
+      default: true,
     },
     icon: {
       type: String,
-      default: '📁'
+      default: "",
+    },
+    image: {
+      type: String,
+      field_name: "Category Image",
     },
     color: {
       type: String,
-      default: '#667eea'
+      default: "#667eea",
     },
     sort_order: {
       type: Number,
-      default: 0
+      default: 0,
     },
     // default fields
-    company_id:{
+    company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
       // required: true,
       field_name: "Company",
     },
-    created_by:{
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Created By",
     },
-    updated_by:{
+    updated_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Updated By",
     },
-    status: { 
+    status: {
       type: String,
       required: true,
-      enum: ["active", "inactive"], 
-      default: "active"              
+      enum: ["active", "inactive"],
+      default: "active",
     },
     deletedAt: {
       type: Date,
@@ -78,18 +87,18 @@ const categorySchema = new mongoose.Schema(
   {
     timestamps: true,
     toJSON: { virtuals: true },
-    toObject: { virtuals: true }
-  }
+    toObject: { virtuals: true },
+  },
 );
 
 // Virtual for formatted creation date
-categorySchema.virtual('formattedCreatedAt').get(function() {
-  return this.createdAt ? this.createdAt.toLocaleDateString() : '';
+categorySchema.virtual("formattedCreatedAt").get(function () {
+  return this.createdAt ? this.createdAt.toLocaleDateString() : "";
 });
 
 // Virtual for formatted update date
-categorySchema.virtual('formattedUpdatedAt').get(function() {
-  return this.updatedAt ? this.updatedAt.toLocaleDateString() : '';
+categorySchema.virtual("formattedUpdatedAt").get(function () {
+  return this.updatedAt ? this.updatedAt.toLocaleDateString() : "";
 });
 
 // Index for better query performance
@@ -98,50 +107,54 @@ categorySchema.index({ isActive: 1 });
 categorySchema.index({ sort_order: 1 });
 
 // Pre-save middleware
-categorySchema.pre('save', function(next) {
+categorySchema.pre("save", function (next) {
   // Ensure name is properly formatted
   if (this.name) {
     this.name = this.name.trim();
   }
-  
+
   // Ensure description is properly formatted
   if (this.description) {
     this.description = this.description.trim();
   }
-  
+
   // Handle empty parent_id - convert empty string to null
-  if (this.parent_id === '' || this.parent_id === 'null' || this.parent_id === undefined) {
+  if (
+    this.parent_id === "" ||
+    this.parent_id === "null" ||
+    this.parent_id === undefined
+  ) {
     this.parent_id = null;
   }
-  
+
   next();
 });
 
 // Static method to get active categories
-categorySchema.statics.getActiveCategories = function() {
+categorySchema.statics.getActiveCategories = function () {
   return this.find({ isActive: true }).sort({ sort_order: 1, name: 1 });
 };
 
 // Static method to get categories by name pattern
-categorySchema.statics.searchByName = function(searchTerm) {
+categorySchema.statics.searchByName = function (searchTerm) {
   return this.find({
-    name: { $regex: searchTerm, $options: 'i' },
-    isActive: true
+    name: { $regex: searchTerm, $options: "i" },
+    isActive: true,
   }).sort({ name: 1 });
 };
 
 // Instance method to toggle active status
-categorySchema.methods.toggleActive = function() {
+categorySchema.methods.toggleActive = function () {
   this.isActive = !this.isActive;
   return this.save();
 };
 
 // Instance method to update sort order
-categorySchema.methods.updateSortOrder = function(newOrder) {
+categorySchema.methods.updateSortOrder = function (newOrder) {
   this.sort_order = newOrder;
   return this.save();
 };
 
-const Category = mongoose.model('category', categorySchema);
+const Category = mongoose.model("category", categorySchema);
 
 module.exports = Category;

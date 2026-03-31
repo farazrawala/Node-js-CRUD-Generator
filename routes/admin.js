@@ -173,7 +173,7 @@ const userAdminCRUD = adminCrudGenerator(
             label: company.company_name,
           }));
           const users = await User.find({ deletedAt: null }, "name email").sort(
-            { name: 1 }
+            { name: 1 },
           );
           req.fieldConfig.created_by.options = users.map((user) => ({
             value: user._id.toString(),
@@ -241,7 +241,7 @@ const userAdminCRUD = adminCrudGenerator(
         return data;
       },
     },
-  }
+  },
 );
 
 /**
@@ -369,15 +369,15 @@ const companyAdminCRUD = adminCrudGenerator(
         try {
           console.log(
             "🔍 beforeCreateForm - req.fieldConfig exists:",
-            !!req.fieldConfig
+            !!req.fieldConfig,
           );
           console.log(
             "🔍 beforeCreateForm - fieldConfig keys:",
-            req.fieldConfig ? Object.keys(req.fieldConfig) : "N/A"
+            req.fieldConfig ? Object.keys(req.fieldConfig) : "N/A",
           );
           console.log(
             "🔍 beforeCreateForm - warehouse_id in fieldConfig:",
-            req.fieldConfig ? !!req.fieldConfig.warehouse_id : "N/A"
+            req.fieldConfig ? !!req.fieldConfig.warehouse_id : "N/A",
           );
 
           const warehouses = await Warehouse.find({
@@ -389,14 +389,14 @@ const companyAdminCRUD = adminCrudGenerator(
 
           console.log(
             "🔍 beforeCreateForm - warehouses found:",
-            warehouses.length
+            warehouses.length,
           );
           console.log(
             "🔍 beforeCreateForm - warehouse data:",
             warehouses.map((w) => ({
               id: w._id.toString(),
               name: w.warehouse_name,
-            }))
+            })),
           );
 
           // Ensure warehouse_id field exists in fieldConfig
@@ -418,7 +418,7 @@ const companyAdminCRUD = adminCrudGenerator(
             (warehouse) => ({
               value: warehouse._id.toString(),
               label: warehouse.warehouse_name,
-            })
+            }),
           );
           req.fieldConfig.warehouse_id.placeholder = "Select Warehouse";
           req.fieldConfig.warehouse_id.helpText =
@@ -427,11 +427,11 @@ const companyAdminCRUD = adminCrudGenerator(
 
           console.log(
             "✅ beforeCreateForm - warehouse_id options set:",
-            req.fieldConfig.warehouse_id.options.length
+            req.fieldConfig.warehouse_id.options.length,
           );
           console.log(
             "✅ beforeCreateForm - final warehouse_id config:",
-            JSON.stringify(req.fieldConfig.warehouse_id, null, 2)
+            JSON.stringify(req.fieldConfig.warehouse_id, null, 2),
           );
         } catch (error) {
           console.error("❌ Error in beforeCreateForm for company:", error);
@@ -455,11 +455,11 @@ const companyAdminCRUD = adminCrudGenerator(
           console.log("🔍 beforeEditForm called for company");
           console.log(
             "🔍 beforeEditForm - req.fieldConfig exists:",
-            !!req.fieldConfig
+            !!req.fieldConfig,
           );
           console.log(
             "🔍 beforeEditForm - fieldConfig keys:",
-            req.fieldConfig ? Object.keys(req.fieldConfig) : "N/A"
+            req.fieldConfig ? Object.keys(req.fieldConfig) : "N/A",
           );
 
           const warehouses = await Warehouse.find({
@@ -471,14 +471,14 @@ const companyAdminCRUD = adminCrudGenerator(
 
           console.log(
             "🔍 beforeEditForm - warehouses found:",
-            warehouses.length
+            warehouses.length,
           );
           console.log(
             "🔍 beforeEditForm - warehouse data:",
             warehouses.map((w) => ({
               id: w._id.toString(),
               name: w.warehouse_name,
-            }))
+            })),
           );
 
           // Ensure warehouse_id field exists in fieldConfig
@@ -501,7 +501,7 @@ const companyAdminCRUD = adminCrudGenerator(
             (warehouse) => ({
               value: warehouse._id.toString(),
               label: warehouse.warehouse_name,
-            })
+            }),
           );
           req.fieldConfig.warehouse_id.placeholder = "Select Warehouse";
           req.fieldConfig.warehouse_id.helpText =
@@ -509,11 +509,11 @@ const companyAdminCRUD = adminCrudGenerator(
 
           console.log(
             "✅ beforeEditForm - warehouse_id options set:",
-            req.fieldConfig.warehouse_id.options.length
+            req.fieldConfig.warehouse_id.options.length,
           );
           console.log(
             "✅ beforeEditForm - final warehouse_id config:",
-            JSON.stringify(req.fieldConfig.warehouse_id, null, 2)
+            JSON.stringify(req.fieldConfig.warehouse_id, null, 2),
           );
         } catch (error) {
           console.error("❌ Error in beforeEditForm for company:", error);
@@ -533,7 +533,7 @@ const companyAdminCRUD = adminCrudGenerator(
         }
       },
     },
-  }
+  },
 );
 
 /**
@@ -573,7 +573,7 @@ const blogAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.user_id) {
           const users = await User.find(
             { deletedAt: { $exists: false } },
-            "name email"
+            "name email",
           ).sort({ name: 1 });
           req.fieldConfig.user_id.options = users.map((user) => ({
             value: user._id.toString(),
@@ -599,7 +599,7 @@ const blogAdminCRUD = adminCrudGenerator(
           return recordObj;
         }),
     },
-  }
+  },
 );
 
 const attributeAdminCRUD = adminCrudGenerator(
@@ -642,7 +642,7 @@ const attributeAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.user_id) {
           const users = await User.find(
             { deletedAt: { $exists: false } },
-            "name"
+            "name",
           ).sort({ name: 1 });
           req.fieldConfig.user_id.options = users.map((user) => ({
             value: user._id.toString(),
@@ -675,7 +675,7 @@ const attributeAdminCRUD = adminCrudGenerator(
                 };
               }
               return item;
-            }
+            },
           );
         }
         return recordData;
@@ -688,7 +688,7 @@ const attributeAdminCRUD = adminCrudGenerator(
         console.log("🔍 beforeInsert - req.body keys:", Object.keys(req.body));
         console.log(
           "🔍 beforeInsert - req.body.attribute_values:",
-          req.body.attribute_values
+          req.body.attribute_values,
         );
 
         const attributeValues = [];
@@ -696,12 +696,12 @@ const attributeAdminCRUD = adminCrudGenerator(
         // FIRST: Check for attribute_values fields with indexed format (e.g., attribute_values[0][name])
         // This is the most common format from HTML forms
         const attributeFields = Object.keys(req.body).filter((key) =>
-          key.includes("attribute_values")
+          key.includes("attribute_values"),
         );
 
         console.log(
           "🔍 beforeInsert - Found attribute_fields:",
-          attributeFields
+          attributeFields,
         );
 
         if (attributeFields.length > 0) {
@@ -718,7 +718,7 @@ const attributeAdminCRUD = adminCrudGenerator(
               const value = req.body[field];
               console.log(
                 `🔍 beforeInsert - Processing field ${field}:`,
-                value
+                value,
               );
               // Only store non-empty values
               if (value !== undefined && value !== null && value !== "") {
@@ -789,7 +789,7 @@ const attributeAdminCRUD = adminCrudGenerator(
 
         console.log(
           "🔍 beforeInsert - Final attributeValues:",
-          attributeValues
+          attributeValues,
         );
 
         // Always set attribute_values, even if empty array
@@ -807,7 +807,7 @@ const attributeAdminCRUD = adminCrudGenerator(
 
         console.log(
           "🔍 beforeInsert - Final data.attribute_values:",
-          data.attribute_values
+          data.attribute_values,
         );
 
         return data;
@@ -818,15 +818,15 @@ const attributeAdminCRUD = adminCrudGenerator(
         console.log("🔍 beforeUpdate - req.body keys:", Object.keys(req.body));
         console.log(
           "🔍 beforeUpdate - req.body.attribute_values:",
-          JSON.stringify(req.body.attribute_values, null, 2)
+          JSON.stringify(req.body.attribute_values, null, 2),
         );
         console.log(
           "🔍 beforeUpdate - existing record attribute_values:",
-          record?.attribute_values
+          record?.attribute_values,
         );
         console.log(
           "🔍 beforeUpdate - data.attribute_values:",
-          data.attribute_values
+          data.attribute_values,
         );
 
         const attributeValues = [];
@@ -835,12 +835,12 @@ const attributeAdminCRUD = adminCrudGenerator(
         // Express urlencoded({ extended: true }) parses these into nested objects
         const attributeFields = Object.keys(req.body).filter(
           (key) =>
-            key.includes("attribute_values") && key !== "attribute_values"
+            key.includes("attribute_values") && key !== "attribute_values",
         );
 
         console.log(
           "🔍 beforeUpdate - Found attribute_fields (excluding 'attribute_values' key):",
-          attributeFields
+          attributeFields,
         );
 
         // Process indexed fields if they exist (raw form data before parsing)
@@ -857,7 +857,7 @@ const attributeAdminCRUD = adminCrudGenerator(
               const value = req.body[field];
               console.log(
                 `🔍 beforeUpdate - Processing field ${field}:`,
-                value
+                value,
               );
               if (value !== undefined && value !== null && value !== "") {
                 valuesData[index][property] = value;
@@ -867,7 +867,7 @@ const attributeAdminCRUD = adminCrudGenerator(
 
           console.log(
             "🔍 beforeUpdate - Parsed valuesData from indexed fields:",
-            valuesData
+            valuesData,
           );
 
           Object.keys(valuesData).forEach((key) => {
@@ -895,7 +895,7 @@ const attributeAdminCRUD = adminCrudGenerator(
           const valuesData = req.body.attribute_values;
           console.log(
             "🔍 beforeUpdate - Processing req.body.attribute_values:",
-            JSON.stringify(valuesData, null, 2)
+            JSON.stringify(valuesData, null, 2),
           );
 
           // Handle object format from form (e.g., attribute_values[0][name] parsed as { 0: { name: 'value' } })
@@ -912,13 +912,13 @@ const attributeAdminCRUD = adminCrudGenerator(
               const sortedKeys = keys.sort((a, b) => parseInt(a) - parseInt(b));
               console.log(
                 "🔍 beforeUpdate - Found numeric keys, converting to array:",
-                sortedKeys
+                sortedKeys,
               );
               sortedKeys.forEach((key) => {
                 const item = valuesData[key];
                 console.log(
                   `🔍 beforeUpdate - Processing item at index ${key}:`,
-                  item
+                  item,
                 );
                 if (
                   item &&
@@ -974,7 +974,7 @@ const attributeAdminCRUD = adminCrudGenerator(
         ) {
           console.log(
             "🔍 beforeUpdate - Checking data.attribute_values:",
-            data.attribute_values
+            data.attribute_values,
           );
           const valuesData = data.attribute_values;
 
@@ -1022,13 +1022,13 @@ const attributeAdminCRUD = adminCrudGenerator(
 
         console.log(
           "🔍 beforeUpdate - Final attributeValues:",
-          JSON.stringify(attributeValues, null, 2)
+          JSON.stringify(attributeValues, null, 2),
         );
         console.log(
           "🔍 beforeUpdate - Has form data:",
           attributeFields.length > 0 ||
             req.body.attribute_values !== undefined ||
-            data.attribute_values !== undefined
+            data.attribute_values !== undefined,
         );
 
         // Always update if we found any attribute_values data, or if explicitly set to empty array
@@ -1064,12 +1064,13 @@ const attributeAdminCRUD = adminCrudGenerator(
         } else {
           // No form data for attribute_values - preserve existing values
           console.log(
-            "🔍 beforeUpdate - No form data for attribute_values, preserving existing values"
+            "🔍 beforeUpdate - No form data for attribute_values, preserving existing values",
           );
           if (record && record.attribute_values) {
             // Convert Mongoose subdocuments to plain objects if needed
-            const existingValues = Array.isArray(record.attribute_values)
-              ? record.attribute_values.map((item) => {
+            const existingValues =
+              Array.isArray(record.attribute_values) ?
+                record.attribute_values.map((item) => {
                   if (item && typeof item === "object" && item.toObject) {
                     return item.toObject();
                   }
@@ -1079,20 +1080,20 @@ const attributeAdminCRUD = adminCrudGenerator(
             data.attribute_values = existingValues;
             console.log(
               "🔍 beforeUpdate - Preserved existing values:",
-              JSON.stringify(data.attribute_values, null, 2)
+              JSON.stringify(data.attribute_values, null, 2),
             );
           }
         }
 
         console.log(
           "🔍 beforeUpdate - Final data.attribute_values:",
-          JSON.stringify(data.attribute_values, null, 2)
+          JSON.stringify(data.attribute_values, null, 2),
         );
 
         return data;
       },
     },
-  }
+  },
 );
 
 /**
@@ -1133,7 +1134,7 @@ const orderAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.user_id) {
           const users = await User.find(
             { deletedAt: { $exists: false } },
-            "name"
+            "name",
           ).sort({ name: 1 });
           req.fieldConfig.user_id.options = users.map((user) => ({
             value: user._id.toString(),
@@ -1157,7 +1158,7 @@ const orderAdminCRUD = adminCrudGenerator(
           return recordObj;
         }),
     },
-  }
+  },
 );
 /**
  * Auto-generate Admin CRUD with UI Forms for Product model
@@ -1275,13 +1276,13 @@ const productAdminCRUD = adminCrudGenerator(
           (record) =>
             record.parent_product_id &&
             record.parent_product_id !== null &&
-            record.parent_product_id !== ""
+            record.parent_product_id !== "",
         );
 
         if (req.fieldConfig?.category_id) {
           const categories = await Category.find(
             { deletedAt: null },
-            "name"
+            "name",
           ).sort({ name: 1 });
           req.fieldConfig.category_id.options = categories.map((category) => ({
             value: category._id.toString(),
@@ -1395,7 +1396,7 @@ const productAdminCRUD = adminCrudGenerator(
           console.log("🔍 Field config exists:", !!req.fieldConfig);
           console.log(
             "🔍 Parent product field exists:",
-            !!req.fieldConfig?.parent_product_id
+            !!req.fieldConfig?.parent_product_id,
           );
 
           // Add parent products to request object for view access
@@ -1405,7 +1406,7 @@ const productAdminCRUD = adminCrudGenerator(
               (product) => ({
                 value: product._id.toString(),
                 label: product.product_name,
-              })
+              }),
             ); // Convert products to dropdown options
             req.fieldConfig.parent_product_id.placeholder =
               "Select Parent Product"; // Set dropdown placeholder
@@ -1413,17 +1414,17 @@ const productAdminCRUD = adminCrudGenerator(
               "Choose the parent product for this product"; // Set dropdown help text
             console.log(
               "✅ Parent product options set:",
-              req.fieldConfig.parent_product_id.options.length
+              req.fieldConfig.parent_product_id.options.length,
             ); // Log success with count
             console.log(
               "🔍 Options array:",
-              req.fieldConfig.parent_product_id.options
+              req.fieldConfig.parent_product_id.options,
             ); // Log the actual options
           } else {
             console.log("❌ Parent product field config not found"); // Log error if config missing
             console.log(
               "🔍 Available field config keys:",
-              Object.keys(req.fieldConfig || {})
+              Object.keys(req.fieldConfig || {}),
             ); // Log available fields
           }
 
@@ -1470,7 +1471,7 @@ const productAdminCRUD = adminCrudGenerator(
             (product) => ({
               value: product._id.toString(),
               label: product.product_name,
-            })
+            }),
           ); // Convert products to dropdown options
           req.fieldConfig.parent_product_id.placeholder =
             "Select Parent Product"; // Set dropdown placeholder text
@@ -1502,13 +1503,13 @@ const productAdminCRUD = adminCrudGenerator(
           "created_by",
           "updated_by",
         ];
-        
+
         objectIdFields.forEach((field) => {
           if (req.body[field] === "" || req.body[field] === undefined) {
             req.body[field] = null;
           }
         });
-        
+
         // Parse warehouse_inventory from request
         if (req.body.warehouse_inventory) {
           const warehouseInventory = [];
@@ -1547,7 +1548,7 @@ const productAdminCRUD = adminCrudGenerator(
         } else {
           // Check for warehouse_inventory fields with different patterns
           const warehouseFields = Object.keys(req.body).filter((key) =>
-            key.includes("warehouse_inventory")
+            key.includes("warehouse_inventory"),
           );
 
           if (warehouseFields.length > 0) {
@@ -1557,7 +1558,7 @@ const productAdminCRUD = adminCrudGenerator(
             const inventoryData = {};
             warehouseFields.forEach((field) => {
               const match = field.match(
-                /warehouse_inventory\[(\d+)\]\[(\w+)\]/
+                /warehouse_inventory\[(\d+)\]\[(\w+)\]/,
               );
               if (match) {
                 const [, index, property] = match;
@@ -1587,11 +1588,11 @@ const productAdminCRUD = adminCrudGenerator(
       // Process warehouse inventory before update
       beforeUpdate: async (req, res) => {
         console.log(
-          "🔧 beforeUpdate middleware - Processing warehouse inventory"
+          "🔧 beforeUpdate middleware - Processing warehouse inventory",
         );
         console.log(
           "🔧 Original req.body.warehouse_inventory:",
-          req.body.warehouse_inventory
+          req.body.warehouse_inventory,
         );
 
         // Convert empty strings to null for ObjectId fields to prevent cast errors
@@ -1602,7 +1603,7 @@ const productAdminCRUD = adminCrudGenerator(
           "created_by",
           "updated_by",
         ];
-        
+
         objectIdFields.forEach((field) => {
           if (req.body[field] === "" || req.body[field] === undefined) {
             req.body[field] = null;
@@ -1648,7 +1649,7 @@ const productAdminCRUD = adminCrudGenerator(
         } else {
           // Check for warehouse_inventory fields with different patterns
           const warehouseFields = Object.keys(req.body).filter((key) =>
-            key.includes("warehouse_inventory")
+            key.includes("warehouse_inventory"),
           );
 
           if (warehouseFields.length > 0) {
@@ -1659,7 +1660,7 @@ const productAdminCRUD = adminCrudGenerator(
             const inventoryData = {};
             warehouseFields.forEach((field) => {
               const match = field.match(
-                /warehouse_inventory\[(\d+)\]\[(\w+)\]/
+                /warehouse_inventory\[(\d+)\]\[(\w+)\]/,
               );
               if (match) {
                 const [, index, property] = match;
@@ -1685,7 +1686,7 @@ const productAdminCRUD = adminCrudGenerator(
             req.body.warehouse_inventory = warehouseInventory;
             console.log(
               "✅ Processed warehouse inventory from field names:",
-              warehouseInventory
+              warehouseInventory,
             );
           }
         }
@@ -1701,13 +1702,13 @@ const productAdminCRUD = adminCrudGenerator(
           "created_by",
           "updated_by",
         ];
-        
+
         objectIdFields.forEach((field) => {
           if (data[field] === "" || data[field] === undefined) {
             data[field] = null;
           }
         });
-        
+
         return data;
       },
       beforeUpdate: async (data, req) => {
@@ -1719,13 +1720,13 @@ const productAdminCRUD = adminCrudGenerator(
           "created_by",
           "updated_by",
         ];
-        
+
         objectIdFields.forEach((field) => {
           if (data[field] === "" || data[field] === undefined) {
             data[field] = null;
           }
         });
-        
+
         return data;
       },
     },
@@ -1754,7 +1755,7 @@ const productAdminCRUD = adminCrudGenerator(
             // Also add a summary
             const totalQuantity = recordObj.warehouse_inventory.reduce(
               (sum, item) => sum + (item.quantity || 0),
-              0
+              0,
             );
             recordObj.total_quantity = totalQuantity;
           } else {
@@ -1765,7 +1766,7 @@ const productAdminCRUD = adminCrudGenerator(
           return recordObj;
         }),
     },
-  }
+  },
 );
 
 /**
@@ -1930,7 +1931,7 @@ const warehouseAdminCRUD = adminCrudGenerator(
         });
       },
     },
-  }
+  },
 );
 
 const complainAdminCRUD = adminCrudGenerator(
@@ -1967,7 +1968,7 @@ const complainAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.user_id) {
           const users = await User.find(
             { deletedAt: { $exists: false } },
-            "name email"
+            "name email",
           ).sort({ name: 1 });
           req.fieldConfig.user_id.options = users.map((user) => ({
             value: user._id.toString(),
@@ -1993,7 +1994,7 @@ const complainAdminCRUD = adminCrudGenerator(
           return recordObj;
         }),
     },
-  }
+  },
 );
 
 /**
@@ -2192,7 +2193,7 @@ const processAdminCRUD = adminCrudGenerator(
           "Choose the user who created this integration";
       },
     },
-  }
+  },
 );
 
 /**
@@ -2348,7 +2349,7 @@ const integrationAdminCRUD = adminCrudGenerator(
           "Choose the user who created this integration";
       },
     },
-  }
+  },
 );
 
 /**
@@ -2497,7 +2498,7 @@ const brandsAdminCRUD = adminCrudGenerator(
           "Choose the user who created this integration";
       },
     },
-  }
+  },
 );
 
 /**
@@ -2513,6 +2514,7 @@ const categoryAdminCRUD = adminCrudGenerator(
     "isActive",
     "icon",
     "color",
+    "image",
     "sort_order",
     "status",
     "company_id",
@@ -2527,6 +2529,7 @@ const categoryAdminCRUD = adminCrudGenerator(
       "isActive",
       "icon",
       "color",
+      "image",
       "sort_order",
       "status",
       "createdAt",
@@ -2543,6 +2546,7 @@ const categoryAdminCRUD = adminCrudGenerator(
       sort_order: "number",
       description: "textarea",
       parent_id: "select",
+      image: "file",
     },
     fieldLabels: {
       parent_id: "Parent Category",
@@ -2564,7 +2568,7 @@ const categoryAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.parent_id) {
           const categories = await Category.find(
             { deletedAt: null },
-            "name"
+            "name",
           ).sort({ name: 1 });
           req.fieldConfig.parent_id.options = [
             { value: "", label: "None (Top Level Category)" },
@@ -2635,7 +2639,7 @@ const categoryAdminCRUD = adminCrudGenerator(
         { value: false, label: "Inactive" },
       ],
     },
-  }
+  },
 );
 
 /**
@@ -2721,7 +2725,7 @@ const logsAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.company_id) {
           const companies = await Company.find(
             { deletedAt: null },
-            "company_name"
+            "company_name",
           ).sort({ company_name: 1 });
           req.fieldConfig.company_id.options = [
             { value: "", label: "None" },
@@ -2738,7 +2742,7 @@ const logsAdminCRUD = adminCrudGenerator(
         if (req.fieldConfig?.created_by) {
           const users = await User.find(
             { deletedAt: { $exists: false } },
-            "name email"
+            "name email",
           ).sort({ name: 1 });
           req.fieldConfig.created_by.options = [
             { value: "", label: "None" },
@@ -2780,7 +2784,7 @@ const logsAdminCRUD = adminCrudGenerator(
         return recordData;
       },
     },
-  }
+  },
 );
 
 /**
@@ -2871,30 +2875,30 @@ router.get("/products/complaints", (req, res) => {
 // Product stock transfer routes
 router.get(
   "/products/stock-transfer",
-  stockTransferController.renderStockTransfer
+  stockTransferController.renderStockTransfer,
 );
 router.post(
   "/products/stock-transfer",
-  stockTransferController.handleStockTransfer
+  stockTransferController.handleStockTransfer,
 );
 
 // Mount all registered CRUD routes dynamically
 const enabledRoutes = routeRegistry.getEnabledRoutes();
 console.log(
   "🔧 Mounting CRUD routes. Enabled routes:",
-  enabledRoutes.map((r) => ({ key: r.key || r.name, path: r.path }))
+  enabledRoutes.map((r) => ({ key: r.key || r.name, path: r.path })),
 );
 enabledRoutes.forEach((route) => {
   if (route.crudController && route.crudController.routes) {
     const routePath = route.path.replace("/admin/", "");
     console.log(
-      `🔧 Mounting ${route.name || route.key} routes at /${routePath}`
+      `🔧 Mounting ${route.name || route.key} routes at /${routePath}`,
     );
     router.use(`/${routePath}`, route.crudController.routes);
     console.log(
       `✅ ${
         route.name || route.key
-      } routes mounted successfully at /${routePath}`
+      } routes mounted successfully at /${routePath}`,
     );
 
     // Add a test route to verify company routes are accessible
@@ -2904,12 +2908,12 @@ enabledRoutes.forEach((route) => {
         res.json({ message: "Company routes are working!", path: routePath });
       });
       console.log(
-        `✅ Test route added for company at /admin/${routePath}/test`
+        `✅ Test route added for company at /admin/${routePath}/test`,
       );
     }
   } else {
     console.log(
-      `⚠️ Skipping ${route.name || route.key} - no crudController or routes`
+      `⚠️ Skipping ${route.name || route.key} - no crudController or routes`,
     );
   }
 });
