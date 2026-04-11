@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "devs": "node --watch index.js",
-    "dev": "nodemon -L index.js",
+    "dev": "node --watch index.js",
+    "devs": "nodemon -L index.js",
     "server": "node index.js"
   },
   "author": "",

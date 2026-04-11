@@ -2518,7 +2518,6 @@ const categoryAdminCRUD = adminCrudGenerator(
     "sort_order",
     "status",
     "company_id",
-    "created_by",
   ],
   {
     excludedFields: ["__v"],
@@ -2534,7 +2533,6 @@ const categoryAdminCRUD = adminCrudGenerator(
       "status",
       "createdAt",
       "company_id",
-      "created_by",
     ],
     searchableFields: ["name", "description"],
     filterableFields: ["isActive"],
@@ -2547,6 +2545,8 @@ const categoryAdminCRUD = adminCrudGenerator(
       description: "textarea",
       parent_id: "select",
       image: "file",
+      company_id: "select",
+      // created_by: "select",
     },
     fieldLabels: {
       parent_id: "Parent Category",
@@ -2581,6 +2581,21 @@ const categoryAdminCRUD = adminCrudGenerator(
           req.fieldConfig.parent_id.helpText =
             "Choose the parent category (optional)";
         }
+        if (req.fieldConfig?.company_id) {
+          const companies = await Company.find(
+            { deletedAt: null },
+            "company_name",
+          ).sort({ company_name: 1 });
+          req.fieldConfig.company_id.options = [
+            { value: "", label: "None" },
+            ...companies.map((company) => ({
+              value: company._id.toString(),
+              label: company.company_name,
+            })),
+          ];
+          req.fieldConfig.company_id.placeholder = "Select Company";
+          req.fieldConfig.company_id.helpText = "Choose the company (optional)";
+        }
         // Add both User name and Company name fields for display in list view
         const recordsWithPopulatedFields = populatedRecords.map((record) => {
           const recordObj = record.toObject ? record.toObject() : record;
@@ -2590,14 +2605,6 @@ const categoryAdminCRUD = adminCrudGenerator(
             recordObj.created_by = record.created_by.name || "No User";
           } else {
             recordObj.created_by = "No User";
-          }
-
-          // Handle company_id field
-          if (record.company_id) {
-            recordObj.company_id =
-              record.company_id.company_name || "No Company";
-          } else {
-            recordObj.company_id = "No Company";
           }
 
           if (record.parent_id) {
