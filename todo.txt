@@ -42,13 +42,11 @@ api with search...
 attribute edit not working..
 
 
-in category company dropdown/add image.
-
-
 // Front end 
 navigate with permissions
 
-create category with parent.
+create category with parent (done)
+
 create sub company.
 
 

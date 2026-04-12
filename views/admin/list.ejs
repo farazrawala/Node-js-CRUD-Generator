@@ -316,6 +316,8 @@
                                                     // Field is populated - use the populated data
                                                     if (selectedValue.product_name) {
                                                         displayText = selectedValue.product_name;
+                                                    } else if (selectedValue.company_name) {
+                                                        displayText = selectedValue.company_name;
                                                     } else if (selectedValue.name) {
                                                         displayText = selectedValue.name;
                                                     } else if (selectedValue._id) {
@@ -418,8 +420,8 @@
                                                 <% } %>
                                             <% } else if (fieldName === 'user_id' && record.user_id && typeof record.user_id === 'object' && record.user_id.name) { %>
                                                 <%= record.user_id.name %>
-                                            <% } else if (fieldName === 'company_id' && record.company_id && typeof record.company_id === 'object' && record.company_id.name) { %>
-                                                <%= record.company_id.name %>
+                                            <% } else if (fieldName === 'company_id' && record.company_id && typeof record.company_id === 'object' && record.company_id.company_name) { %>
+                                                <%= record.company_id.company_name %>
                                             <% } else if (field.type === 'custom') { %>
                                                 <script>
                                                     console.log('🔍 Custom field detected:', '<%= fieldName %>');

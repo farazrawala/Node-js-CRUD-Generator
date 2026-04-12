@@ -2657,6 +2657,7 @@ const logsAdminCRUD = adminCrudGenerator(
   "logs",
   ["action", "url", "tags", "description", "company_id", "status"],
   {
+    listHiddenFields: ["action", "description"],
     excludedFields: ["__v"],
     includedFields: [
       "action",

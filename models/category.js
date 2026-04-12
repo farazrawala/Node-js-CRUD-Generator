@@ -46,6 +46,7 @@ const categorySchema = new mongoose.Schema(
     image: {
       type: String,
       field_name: "Category Image",
+      field_type: "image",
     },
     color: {
       type: String,
