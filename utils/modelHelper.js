@@ -1898,6 +1898,72 @@ function parseSearchFieldsFromQuery(value) {
     .filter(Boolean);
 }
 
+const QUERY_KEYS_SKIP_POPULATE_TRUE = new Set([
+  "limit",
+  "skip",
+  "search",
+  "searchFields",
+  "populate",
+  "sort",
+  "sortBy",
+  "sortOrder",
+  "page",
+  "deleted",
+]);
+
+function isPopulateablePath(Model, fieldName) {
+  const p = Model.schema.path(fieldName);
+  if (!p) return false;
+  if (p.options && p.options.ref) return true;
+  if (
+    p.instance === "Array" &&
+    p.caster &&
+    p.caster.options &&
+    p.caster.options.ref
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Build populate list from query:
+ * - ?populate=created_by,company_id
+ * - ?created_by=true (any top-level ref/array-of-refs path; value must be true / "true" / "1")
+ */
+function buildPopulateFromQuery(query, modelName) {
+  const Model = getModelFromController(modelName);
+  const populate = [];
+  const seen = new Set();
+
+  const pop = query.populate;
+  if (pop != null && String(pop).trim() !== "") {
+    String(pop)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((field) => {
+        if (!seen.has(field) && isPopulateablePath(Model, field)) {
+          populate.push(field);
+          seen.add(field);
+        }
+      });
+  }
+
+  Object.keys(query).forEach((key) => {
+    if (QUERY_KEYS_SKIP_POPULATE_TRUE.has(key)) return;
+    const val = query[key];
+    if (val !== true && val !== "true" && val !== "1") return;
+    if (seen.has(key)) return;
+    if (isPopulateablePath(Model, key)) {
+      populate.push(key);
+      seen.add(key);
+    }
+  });
+
+  return populate;
+}
+
 /**
  * Generic get all records function that works with any model
  * @param {Object} req - Express request object
@@ -2514,4 +2580,5 @@ module.exports = {
   handleGenericFindOne,
   handleImageUpload,
   parseSearchFieldsFromQuery,
+  buildPopulateFromQuery,
 };

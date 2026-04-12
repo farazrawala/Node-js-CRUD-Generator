@@ -12,6 +12,7 @@ const {
   handleGenericGetAll,
   handleGenericDelete,
   parseSearchFieldsFromQuery,
+  buildPopulateFromQuery,
 } = require('./modelHelper');
 
 /**
@@ -110,6 +111,7 @@ function generateControllerFunctions(modelName) {
         filter: filter,
         search: req.query.search,
         searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+        populate: buildPopulateFromQuery(req.query, modelName),
       });
       return res.status(response.status).json(response);
     },
@@ -132,6 +134,7 @@ function generateControllerFunctions(modelName) {
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
         search: req.query.search,
         searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+        populate: buildPopulateFromQuery(req.query, modelName),
       });
       return res.status(response.status).json(response);
     },
