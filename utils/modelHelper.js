@@ -1842,10 +1842,60 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 };
 
 /**
+ * Escape regex metacharacters in a user-provided search string (safe $regex).
+ */
+function escapeRegexForSearch(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Top-level string fields on a Mongoose schema (for generic text search).
+ */
+function getDefaultSearchFieldsFromModel(Model) {
+  const skip = new Set([
+    "_id",
+    "__v",
+    "password",
+    "deletedAt",
+    "createdAt",
+    "updatedAt",
+    "created_by",
+    "updated_by",
+  ]);
+  const paths = Model.schema?.paths || {};
+  return Object.keys(paths).filter((key) => {
+    if (skip.has(key)) return false;
+    return paths[key]?.instance === "String";
+  });
+}
+
+/**
+ * AND-combines an existing filter with a case-insensitive $or regex across fields.
+ */
+function mergeSearchIntoFilter(filter, searchTerm, searchFields) {
+  if (!searchTerm || !searchFields.length) {
+    return { ...filter };
+  }
+  const escaped = escapeRegexForSearch(searchTerm);
+  return {
+    $and: [
+      filter,
+      {
+        $or: searchFields.map((field) => ({
+          [field]: { $regex: escaped, $options: "i" },
+        })),
+      },
+    ],
+  };
+}
+
+/**
  * Generic get all records function that works with any model
  * @param {Object} req - Express request object
  * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
  * @param {Object} options - Additional options
+ * @param {string} [options.search] - Optional text search (combined with filter via $and + $or regex on string fields)
+ * @param {string[]} [options.searchFields] - Fields to search; if omitted with search set, uses top-level string schema fields
  * @returns {Promise} Express response
  */
 const handleGenericGetAll = async (
@@ -1877,16 +1927,32 @@ const handleGenericGetAll = async (
     skip = 0, // Skip number of records (for pagination)
     filter = {}, // Filter conditions
     errorHandlers = {}, // Custom error handlers
+    search = null,
+    searchFields: searchFieldsOption = null,
   } = options;
 
   try {
     // Dynamically get the model
     const Model = getModelFromController(modelName);
 
-    console.log(`🔍 Fetching all ${modelName} records with filter:`, filter);
+    const searchTerm =
+      typeof search === "string" ? search.trim() : "";
+    let searchFields = Array.isArray(searchFieldsOption)
+      ? searchFieldsOption.filter(Boolean)
+      : [];
+    if (searchTerm && searchFields.length === 0) {
+      searchFields = getDefaultSearchFieldsFromModel(Model);
+    }
+
+    const mongoFilter =
+      searchTerm && searchFields.length > 0
+        ? mergeSearchIntoFilter(filter, searchTerm, searchFields)
+        : { ...filter };
+
+    console.log(`🔍 Fetching all ${modelName} records with filter:`, mongoFilter);
 
     // Build query
-    let query = Model.find(filter);
+    let query = Model.find(mongoFilter);
 
     // Add population if specified
     if (populate && populate.length > 0) {
@@ -1913,7 +1979,7 @@ const handleGenericGetAll = async (
     const records = await query;
 
     // Get total count for pagination info
-    const totalCount = await Model.countDocuments(filter);
+    const totalCount = await Model.countDocuments(mongoFilter);
 
     // Prepare response data (exclude specified fields and transform image URLs)
     const responseData = records.map((record) => {

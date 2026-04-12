@@ -13,6 +13,15 @@ const {
   handleGenericDelete
 } = require('./modelHelper');
 
+/** Comma-separated field names from ?searchFields=a,b for handleGenericGetAll */
+function parseSearchFieldsFromQuery(value) {
+  if (value == null || String(value).trim() === '') return null;
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 /**
  * Get all model names from the models directory
  */
@@ -107,6 +116,8 @@ function generateControllerFunctions(modelName) {
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
         filter: filter,
+        search: req.query.search,
+        searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
       });
       return res.status(response.status).json(response);
     },
@@ -127,6 +138,8 @@ function generateControllerFunctions(modelName) {
         sort: { createdAt: -1 },
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
+        search: req.query.search,
+        searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
       });
       return res.status(response.status).json(response);
     },
