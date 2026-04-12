@@ -4,6 +4,7 @@ const {
   handleGenericGetById,
   handleGenericGetAll,
   handleGenericFindOne,
+  parseSearchFieldsFromQuery,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
@@ -708,6 +709,8 @@ async function getAllProducts(req, res) {
         { parent_product_id: null },
       ],
     },
+    search: req.query.search,
+    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
   });
   return res.status(response.status).json(response);
 }
@@ -740,6 +743,8 @@ async function getAllActiveProducts(req, res) {
         { parent_product_id: null },
       ],
     },
+    search: req.query.search,
+    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
   });
   return res.status(response.status).json(response);
 }

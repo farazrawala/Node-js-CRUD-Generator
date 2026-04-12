@@ -1889,6 +1889,15 @@ function mergeSearchIntoFilter(filter, searchTerm, searchFields) {
   };
 }
 
+/** Parse `?searchFields=a,b,c` for handleGenericGetAll */
+function parseSearchFieldsFromQuery(value) {
+  if (value == null || String(value).trim() === "") return null;
+  return String(value)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 /**
  * Generic get all records function that works with any model
  * @param {Object} req - Express request object
@@ -2504,4 +2513,5 @@ module.exports = {
   handleGenericGetAll,
   handleGenericFindOne,
   handleImageUpload,
+  parseSearchFieldsFromQuery,
 };

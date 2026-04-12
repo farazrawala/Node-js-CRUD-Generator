@@ -10,17 +10,9 @@ const {
   handleGenericUpdate,
   handleGenericGetById,
   handleGenericGetAll,
-  handleGenericDelete
+  handleGenericDelete,
+  parseSearchFieldsFromQuery,
 } = require('./modelHelper');
-
-/** Comma-separated field names from ?searchFields=a,b for handleGenericGetAll */
-function parseSearchFieldsFromQuery(value) {
-  if (value == null || String(value).trim() === '') return null;
-  return String(value)
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
 
 /**
  * Get all model names from the models directory

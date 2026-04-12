@@ -1,3 +1,7 @@
+curl "http://localhost:8000/api/product/active?search=test&searchFields=product_name,sku,barcode"
+
+
+
 
 // filter by company in listings //done
 // process crud api // done.
