@@ -859,7 +859,7 @@ const handleGenericCreate = async (
     }
 
     // Prepare response data (exclude specified fields and transform image URLs)
-    const responseData = { ...result.toObject() };
+    const responseData = { ...result.toObject({ flattenMaps: true }) };
     excludeFields.forEach((field) => {
       delete responseData[field];
     });
@@ -1627,7 +1627,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     }
 
     // Prepare response data (exclude specified fields and transform image URLs)
-    const responseData = { ...updatedRecord.toObject() };
+    const responseData = { ...updatedRecord.toObject({ flattenMaps: true }) };
     excludeFields.forEach((field) => {
       delete responseData[field];
     });
@@ -2058,7 +2058,7 @@ const handleGenericGetAll = async (
 
     // Prepare response data (exclude specified fields and transform image URLs)
     const responseData = records.map((record) => {
-      const data = { ...record.toObject() };
+      const data = { ...record.toObject({ flattenMaps: true }) };
       excludeFields.forEach((field) => {
         delete data[field];
       });
@@ -2249,7 +2249,7 @@ const handleGenericGetById = async (
     }
 
     // Prepare response data (exclude specified fields and transform image URLs)
-    const responseData = { ...record.toObject() };
+    const responseData = { ...record.toObject({ flattenMaps: true }) };
     excludeFields.forEach((field) => {
       delete responseData[field];
     });
@@ -2499,7 +2499,7 @@ const handleGenericFindOne = async (
     // Prepare response data
     let responseData;
     if (record.toObject) {
-      responseData = record.toObject();
+      responseData = record.toObject({ flattenMaps: true });
     } else {
       responseData = { ...record };
     }
