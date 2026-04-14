@@ -20,7 +20,7 @@ const permissionSetSchema = new mongoose.Schema(
       default: false,
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const userSchema = new mongoose.Schema(
@@ -48,6 +48,11 @@ const userSchema = new mongoose.Schema(
       default: ["USER", "ADMIN", "VENDOR", "CUSTOMER"], //  ADMIN, SUPERADMIN, VENDOR, USER ,CUSTOMER
       field_type: "multiselect",
     },
+    // assign_company_id: {
+    //   type: mongoose.Schema.Types.ObjectId,
+    //   ref: "company",
+    //   field_name: "Assign Branch",
+    // },
     permissions: {
       type: Map,
       of: permissionSetSchema,
@@ -83,7 +88,7 @@ const userSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 // Add methods to the schema

@@ -2,64 +2,64 @@ const mongoose = require("mongoose");
 
 const modelSchema = new mongoose.Schema(
   {
-    warehouse_name: {
+    name: {
       type: String,
       // required: true,
     },
-    warehouse_address: {
+    name: {
       type: String,
       // required: true,
     },
-    code:{
+    code: {
       type: String,
       field_name: "Warehouse Code",
     },
-    city:{
+    city: {
       type: String,
       field_name: "City",
     },
-    state:{
+    state: {
       type: String,
       field_name: "State",
     },
-    zip_code:{
+    zip_code: {
       type: String,
       field_name: "Zip Code",
     },
-    phone:{
+    phone: {
       type: String,
       field_name: "Phone",
     },
-    email:{
+    email: {
       type: String,
       field_name: "Email",
-    }, 
+    },
     warehouse_image: {
       type: String,
       field_name: "WareHouse Image",
     },
     // default fields
-    company_id:{
+    company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
       // required: true,
       field_name: "Company",
     },
-    created_by:{
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Created By",
     },
-    updated_by:{
+    updated_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Updated By",
     },
-    status: { 
+    status: {
       type: String,
       required: true,
-      enum: ["active", "inactive"], 
-      default: "active"              
+      enum: ["active", "inactive"],
+      default: "active",
     },
     deletedAt: {
       type: Date,
@@ -67,7 +67,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const MODEL = mongoose.model("warehouse", modelSchema);

@@ -14,7 +14,7 @@ async function getNextSequence(name) {
   const counter = await Counter.findByIdAndUpdate(
     name,
     { $inc: { seq: 1 } },
-    { new: true, upsert: true }
+    { new: true, upsert: true },
   );
   return counter.seq;
 }
@@ -28,7 +28,11 @@ const modelSchema = new mongoose.Schema(
     order_no: {
       type: String,
       field_name: "Order No",
-      unique: true,
+    },
+    company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      field_name: "Company",
     },
     email: {
       type: String,
@@ -59,8 +63,11 @@ const modelSchema = new mongoose.Schema(
     //   field_type: "image",
     // },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+
+// Ensure order number is unique per company.
+modelSchema.index({ company_id: 1, order_no: 1 }, { unique: true });
 
 // Pre-save hook to auto-generate order_no if not provided
 modelSchema.pre("save", async function (next) {
@@ -70,7 +77,11 @@ modelSchema.pre("save", async function (next) {
 
   if (!this.order_no || this.order_no.trim() === "") {
     try {
-      const seq = await getNextSequence("order_no");
+      const companyCounterKey =
+        this.company_id ?
+          `order_no_${this.company_id.toString()}`
+        : "order_no_global";
+      const seq = await getNextSequence(companyCounterKey);
       this.order_no = `ORD-${String(seq).padStart(6, "0")}`;
     } catch (error) {
       return next(error);

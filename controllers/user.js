@@ -74,12 +74,8 @@ async function handleUserLogin(req, res) {
       // active: true,
     }).populate({
       path: "company_id",
-      select: "company_name company_email warehouse_id",
-      populate: {
-        path: "warehouse_id",
-        select:
-          "warehouse_name warehouse_address code city state zip_code phone email warehouse_image",
-      },
+      // `warehouse_id` is not defined in company schema, so avoid nested populate.
+      select: "company_name company_email company_phone company_address company_logo",
     });
 
     if (!user) {

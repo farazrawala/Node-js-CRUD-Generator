@@ -21,28 +21,35 @@ const modelSchema = new mongoose.Schema(
     company_logo: {
       type: String,
       field_name: "Logo Image",
+      field_type: "image",
     },
-    warehouse_id:{
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "warehouse",
-      field_name: "Default Store",
-    },
+    // warehouse_id:{
+    //   type: mongoose.Schema.Types.ObjectId,
+    //   ref: "warehouse",
+    //   field_name: "Default Store",
+    // },
     // default fields
-    created_by:{
+    company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      // required: true,
+      field_name: "Company",
+    },
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Created By",
     },
-    updated_by:{
+    updated_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Updated By",
     },
-    status: { 
+    status: {
       type: String,
       required: true,
-      enum: ["active", "inactive"], 
-      default: "active"              
+      enum: ["active", "inactive"],
+      default: "active",
     },
     deletedAt: {
       type: Date,
@@ -50,7 +57,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const MODEL = mongoose.model("company", modelSchema);

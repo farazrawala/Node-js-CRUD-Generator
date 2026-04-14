@@ -41,9 +41,21 @@ async function getAllorder(req, res) {
   return res.status(response.status).json(response);
 }
 
+async function order_save(req, res) {
+  console.log("🔍 Incoming request body:", JSON.stringify(req.body, null, 2));
+
+  // const response = await handleGenericCreate(req, "order", {
+  //   afterCreate: async (record, req) => {
+  //     console.log("✅ Record created successfully:", record);
+  //   },
+  // });
+  // return res.status(response.status).json(response);
+}
+
 module.exports = {
   orderCreate,
   orderUpdate,
   orderById,
   getAllorder,
+  order_save,
 };

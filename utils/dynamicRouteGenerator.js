@@ -43,6 +43,22 @@ function generateControllerFunctions(modelName) {
       
       const response = await handleGenericCreate(req, modelName, {
         afterCreate: async (record, req) => {
+          // Special case: when creating a company, link it back to the creator user.
+          // Company documents do not have `company_id`, but user documents do.
+          if (modelName === 'company' && req.user && req.user._id) {
+            try {
+              const UserModel = require(path.join(__dirname, '..', 'models', 'user'));
+              await UserModel.findByIdAndUpdate(
+                req.user._id,
+                { company_id: record._id },
+                { new: true }
+              );
+              console.log(`🔗 Linked user ${req.user._id} to company ${record._id}`);
+            } catch (linkErr) {
+              console.error(`⚠️ Failed to link user to company after create:`, linkErr.message);
+            }
+          }
+
           console.log(`✅ ${modelName} created successfully:`, record._id);
         },
       });
@@ -168,6 +184,19 @@ function generateControllerFunctions(modelName) {
 }
 
 /**
+ * Build route names for a model (singular + plural alias).
+ * Example: "order" -> ["order", "orders"]
+ */
+function getModelRouteNames(modelName) {
+  const names = [modelName];
+  const pluralName = modelName.endsWith('s') ? modelName : `${modelName}s`;
+  if (!names.includes(pluralName)) {
+    names.push(pluralName);
+  }
+  return names;
+}
+
+/**
  * Register CRUD routes for a model
  */
 function registerModelRoutes(router, modelName, options = {}) {
@@ -183,31 +212,34 @@ function registerModelRoutes(router, modelName, options = {}) {
   }
 
   const controller = generateControllerFunctions(modelName);
+  const routeNames = getModelRouteNames(modelName);
 
-  // Register standard CRUD routes
-  if (!excludedRoutes.includes('create')) {
-    router.post(`/${modelName}/create`, controller.create);
-  }
-  
-  if (!excludedRoutes.includes('update')) {
-    router.patch(`/${modelName}/update/:id`, controller.update);
-  }
-  
-  if (!excludedRoutes.includes('getById')) {
-    router.get(`/${modelName}/get/:id`, controller.getById);
-  }
-  
-  if (!excludedRoutes.includes('getAll')) {
-    router.get(`/${modelName}/get-all`, controller.getAll);
-  }
-  
-  if (!excludedRoutes.includes('getAllActive')) {
-    router.get(`/${modelName}/get-all-active`, controller.getAllActive);
-  }
-  
-  if (!excludedRoutes.includes('delete')) {
-    router.delete(`/${modelName}/delete/:id`, controller.delete);
-  }
+  routeNames.forEach((routeName) => {
+    // Register standard CRUD routes for singular/plural aliases.
+    if (!excludedRoutes.includes('create')) {
+      router.post(`/${routeName}/create`, controller.create);
+    }
+
+    if (!excludedRoutes.includes('update')) {
+      router.patch(`/${routeName}/update/:id`, controller.update);
+    }
+
+    if (!excludedRoutes.includes('getById')) {
+      router.get(`/${routeName}/get/:id`, controller.getById);
+    }
+
+    if (!excludedRoutes.includes('getAll')) {
+      router.get(`/${routeName}/get-all`, controller.getAll);
+    }
+
+    if (!excludedRoutes.includes('getAllActive')) {
+      router.get(`/${routeName}/get-all-active`, controller.getAllActive);
+    }
+
+    if (!excludedRoutes.includes('delete')) {
+      router.delete(`/${routeName}/delete/:id`, controller.delete);
+    }
+  });
 
   // Register custom routes
   customRoutes.forEach(route => {
@@ -217,7 +249,10 @@ function registerModelRoutes(router, modelName, options = {}) {
     }
   });
 
-  console.log(`✅ Registered ${modelName} routes: POST /create, PATCH /update/:id, GET /get/:id, GET /get-all, GET /get-all-active, DELETE /delete/:id`);
+  const routeSummary = routeNames.map((name) => `/${name}`).join(', ');
+  console.log(
+    `✅ Registered ${modelName} routes for ${routeSummary}: POST /create, PATCH /update/:id, GET /get/:id, GET /get-all, GET /get-all-active, DELETE /delete/:id`
+  );
 }
 
 /**
@@ -259,6 +294,7 @@ function registerAllModelRoutes(router, options = {}) {
 
 module.exports = {
   getAllModels,
+  getModelRouteNames,
   generateControllerFunctions,
   registerModelRoutes,
   registerAllModelRoutes

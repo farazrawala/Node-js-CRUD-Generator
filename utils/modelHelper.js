@@ -75,7 +75,7 @@ const getControllerName = () => {
       if (filePath) {
         const fileName = path.basename(filePath, ".js");
         console.log(
-          `🔍 Auto-detected controller name: ${fileName} from ${filePath}`
+          `🔍 Auto-detected controller name: ${fileName} from ${filePath}`,
         );
         return fileName;
       }
@@ -185,9 +185,8 @@ const transformImageUrls = (data, Model, req = null) => {
                 !imgPath.startsWith("https://")
               ) {
                 // Ensure the path starts with / if it doesn't
-                const normalizedPath = imgPath.startsWith("/")
-                  ? imgPath
-                  : `/${imgPath}`;
+                const normalizedPath =
+                  imgPath.startsWith("/") ? imgPath : `/${imgPath}`;
                 return `${baseUrl}${normalizedPath}`;
               }
             }
@@ -202,9 +201,8 @@ const transformImageUrls = (data, Model, req = null) => {
             !imageValue.startsWith("https://")
           ) {
             // Ensure the path starts with / if it doesn't
-            const normalizedPath = imageValue.startsWith("/")
-              ? imageValue
-              : `/${imageValue}`;
+            const normalizedPath =
+              imageValue.startsWith("/") ? imageValue : `/${imageValue}`;
             transformedData[fieldName] = `${baseUrl}${normalizedPath}`;
           }
         }
@@ -249,7 +247,7 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
       "..",
       "uploads",
       modelName,
-      recordId
+      recordId,
     );
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
@@ -260,8 +258,8 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
         if (!allowedTypes.includes(file.mimetype)) {
           return reject(
             new Error(
-              `Invalid file type. Allowed types: ${allowedTypes.join(", ")}`
-            )
+              `Invalid file type. Allowed types: ${allowedTypes.join(", ")}`,
+            ),
           );
         }
         const timestamp = Date.now();
@@ -282,7 +280,7 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
       });
 
     const paths = await Promise.all(
-      filesArray.map((f, idx) => moveOne(f, idx))
+      filesArray.map((f, idx) => moveOne(f, idx)),
     );
     return Array.isArray(uploaded) ? paths : paths[0];
   } catch (error) {
@@ -302,13 +300,13 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
 const handleGenericCreate = async (
   req,
   controllerName = null,
-  options = {}
+  options = {},
 ) => {
   // Auto-detect controller name if not provided or empty
   const modelName =
-    controllerName && controllerName.trim() !== ""
-      ? controllerName
-      : getControllerName();
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
 
   const {
     excludeFields = [], // Fields to exclude from response
@@ -337,11 +335,11 @@ const handleGenericCreate = async (
     console.log("🔍 handleGenericCreate - Raw req.body:", req.body);
     console.log(
       "🔍 handleGenericCreate - req.body keys:",
-      Object.keys(req.body)
+      Object.keys(req.body),
     );
     console.log(
       "🔍 handleGenericCreate - modelSchema keys:",
-      Object.keys(modelSchema)
+      Object.keys(modelSchema),
     );
 
     const requiredFields = Object.keys(modelSchema).filter((field) => {
@@ -423,7 +421,7 @@ const handleGenericCreate = async (
     console.log("🚀 req.body keys:", Object.keys(req.body));
     console.log(
       "🚀 modelData before nested processing:",
-      JSON.stringify(modelData, null, 2)
+      JSON.stringify(modelData, null, 2),
     );
 
     Object.keys(req.body).forEach((key) => {
@@ -441,7 +439,7 @@ const handleGenericCreate = async (
         index = parseInt(arrayMatch[2]);
         arrayItemField = arrayMatch[3];
         console.log(
-          `🔍 Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+          `🔍 Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
         );
       } else {
         // Pattern 1: field[subfield]
@@ -451,7 +449,7 @@ const handleGenericCreate = async (
           arrayItemField = arrayMatch[2];
           index = 0; // Default to index 0
           console.log(
-            `🔍 Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+            `🔍 Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
           );
         }
       }
@@ -460,12 +458,12 @@ const handleGenericCreate = async (
         // Check if this is a valid array field in the schema
         console.log(
           `🔍 Checking schema for ${arrayFieldName}:`,
-          modelSchema[arrayFieldName]
+          modelSchema[arrayFieldName],
         );
         console.log(`🔍 Is array:`, Array.isArray(modelSchema[arrayFieldName]));
         console.log(
           `🔍 Is type array:`,
-          Array.isArray(modelSchema[arrayFieldName]?.type)
+          Array.isArray(modelSchema[arrayFieldName]?.type),
         );
 
         if (
@@ -487,11 +485,11 @@ const handleGenericCreate = async (
           // Set the field value
           modelData[arrayFieldName][index][arrayItemField] = value;
           console.log(
-            `🏭 Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`
+            `🏭 Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`,
           );
         } else {
           console.log(
-            `🔍 Schema field not found or not array: ${arrayFieldName}`
+            `🔍 Schema field not found or not array: ${arrayFieldName}`,
           );
         }
       } else {
@@ -518,7 +516,7 @@ const handleGenericCreate = async (
 
       if (!isMapField) {
         console.log(
-          `🔍 ${mapFieldName} is not a Map field, skipping map processing`
+          `🔍 ${mapFieldName} is not a Map field, skipping map processing`,
         );
         return;
       }
@@ -546,7 +544,7 @@ const handleGenericCreate = async (
       modelData[mapFieldName][mapKey][mapSubField] = value;
       console.log(
         `🗺️ Processed map field: ${mapFieldName}[${mapKey}].${mapSubField} =`,
-        value
+        value,
       );
     });
 
@@ -572,7 +570,7 @@ const handleGenericCreate = async (
         (isMultiselect && Array.isArray(fieldConfig.type))
       ) {
         console.log(
-          `🔍 Processing multiselect ObjectId array field: ${fieldName}`
+          `🔍 Processing multiselect ObjectId array field: ${fieldName}`,
         );
 
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
@@ -583,7 +581,7 @@ const handleGenericCreate = async (
         ) {
           console.log(
             `🔍 Found ${fieldName} directly in req.body:`,
-            req.body[fieldName]
+            req.body[fieldName],
           );
           let values = req.body[fieldName];
 
@@ -603,7 +601,7 @@ const handleGenericCreate = async (
                   extractedValues.push(objValue);
                   console.log(
                     `✅ Extracted from object at index ${idx}:`,
-                    objValue
+                    objValue,
                   );
                 }
               } else {
@@ -613,7 +611,7 @@ const handleGenericCreate = async (
           } else if (typeof values === "object" && values !== null) {
             // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
             const sortedKeys = Object.keys(values).sort(
-              (a, b) => parseInt(a) - parseInt(b)
+              (a, b) => parseInt(a) - parseInt(b),
             );
             sortedKeys.forEach((key) => {
               extractedValues.push(values[key]);
@@ -621,11 +619,9 @@ const handleGenericCreate = async (
           }
 
           values =
-            extractedValues.length > 0
-              ? extractedValues
-              : Array.isArray(values)
-              ? values
-              : [values];
+            extractedValues.length > 0 ? extractedValues
+            : Array.isArray(values) ? values
+            : [values];
 
           // Convert to ObjectIds
           const processedValues = [];
@@ -650,7 +646,7 @@ const handleGenericCreate = async (
                         const objVal = Object.values(item)[0];
                         if (objVal && mongoose.Types.ObjectId.isValid(objVal)) {
                           processedValues.push(
-                            new mongoose.Types.ObjectId(objVal)
+                            new mongoose.Types.ObjectId(objVal),
                           );
                         }
                       } else if (mongoose.Types.ObjectId.isValid(item)) {
@@ -673,7 +669,7 @@ const handleGenericCreate = async (
           modelData[fieldName] = processedValues;
           console.log(
             `✅ Processed multiselect field ${fieldName}:`,
-            modelData[fieldName]
+            modelData[fieldName],
           );
           delete req.body[fieldName]; // Remove to prevent re-processing
           return;
@@ -737,7 +733,7 @@ const handleGenericCreate = async (
           modelData[fieldName] = processedValues;
           console.log(
             `✅ Processed indexed multiselect field ${fieldName}:`,
-            modelData[fieldName]
+            modelData[fieldName],
           );
 
           // Remove indexed fields from req.body
@@ -753,11 +749,11 @@ const handleGenericCreate = async (
     // Debug: Log the final processed data
     console.log(
       "🔍 handleGenericCreate - Final modelData:",
-      JSON.stringify(modelData, null, 2)
+      JSON.stringify(modelData, null, 2),
     );
     console.log(
       "🔍 handleGenericCreate - modelData keys:",
-      Object.keys(modelData)
+      Object.keys(modelData),
     );
 
     // Automatically set created_by if field exists and user is authenticated
@@ -828,26 +824,26 @@ const handleGenericCreate = async (
           req,
           imageField,
           modelName,
-          result._id.toString()
+          result._id.toString(),
         );
         if (uploaded) {
           // If schema expects array (type: [String]) store as array; else store single string
           const expectsArray =
             Array.isArray(Model.schema.obj[imageField]?.type) ||
             Model.schema.paths[imageField]?.instance === "Array";
-          result[imageField] = expectsArray
-            ? Array.isArray(uploaded)
-              ? uploaded
+          result[imageField] =
+            expectsArray ?
+              Array.isArray(uploaded) ?
+                uploaded
               : [uploaded]
-            : Array.isArray(uploaded)
-            ? uploaded[0]
+            : Array.isArray(uploaded) ? uploaded[0]
             : uploaded;
           await result.save();
         }
       } catch (error) {
         console.error(
           `❌ Error uploading image for field ${imageField}:`,
-          error
+          error,
         );
         // Continue with other fields even if one image upload fails
       }
@@ -884,7 +880,7 @@ const handleGenericCreate = async (
     switch (error.name) {
       case "ValidationError":
         const validationErrors = Object.values(error.errors).map(
-          (err) => err.message
+          (err) => err.message,
         );
         return {
           success: false,
@@ -1053,9 +1049,9 @@ const handleGenericCreate = async (
           status: 500,
           error: "Internal server error",
           details:
-            process.env.NODE_ENV === "development"
-              ? error.stack
-              : "Something went wrong",
+            process.env.NODE_ENV === "development" ?
+              error.stack
+            : "Something went wrong",
           type: "internal",
           timestamp: new Date().toISOString(),
         };
@@ -1074,9 +1070,9 @@ const handleGenericCreate = async (
 const handleGenericUpdate = async (req, controllerName, options = {}) => {
   // Auto-detect controller name if not provided or empty
   const modelName =
-    controllerName && controllerName.trim() !== ""
-      ? controllerName
-      : getControllerName();
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
 
   if (!modelName) {
     return {
@@ -1229,9 +1225,10 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 
         // Convert array field to proper format
         const multiselectValue = req.body[`${fieldName}[]`];
-        updateData[fieldName] = Array.isArray(multiselectValue)
-          ? multiselectValue
-          : [multiselectValue];
+        updateData[fieldName] =
+          Array.isArray(multiselectValue) ? multiselectValue : (
+            [multiselectValue]
+          );
 
         console.log(`🔍 Processed data:`, updateData[fieldName]);
 
@@ -1263,7 +1260,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         (isMultiselect && Array.isArray(fieldConfig.type))
       ) {
         console.log(
-          `🔍 Processing multiselect ObjectId array field (UPDATE): ${fieldName}`
+          `🔍 Processing multiselect ObjectId array field (UPDATE): ${fieldName}`,
         );
 
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
@@ -1274,7 +1271,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         ) {
           console.log(
             `🔍 Found ${fieldName} directly in req.body:`,
-            req.body[fieldName]
+            req.body[fieldName],
           );
           let values = req.body[fieldName];
 
@@ -1294,7 +1291,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
                   extractedValues.push(objValue);
                   console.log(
                     `✅ Extracted from object at index ${idx}:`,
-                    objValue
+                    objValue,
                   );
                 }
               } else {
@@ -1304,7 +1301,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           } else if (typeof values === "object" && values !== null) {
             // Handle object with numeric keys like { '0': 'id', '1': 'id2' }
             const sortedKeys = Object.keys(values).sort(
-              (a, b) => parseInt(a) - parseInt(b)
+              (a, b) => parseInt(a) - parseInt(b),
             );
             sortedKeys.forEach((key) => {
               extractedValues.push(values[key]);
@@ -1312,11 +1309,9 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           }
 
           values =
-            extractedValues.length > 0
-              ? extractedValues
-              : Array.isArray(values)
-              ? values
-              : [values];
+            extractedValues.length > 0 ? extractedValues
+            : Array.isArray(values) ? values
+            : [values];
 
           // Convert to ObjectIds
           const processedValues = [];
@@ -1341,7 +1336,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
                         const objVal = Object.values(item)[0];
                         if (objVal && mongoose.Types.ObjectId.isValid(objVal)) {
                           processedValues.push(
-                            new mongoose.Types.ObjectId(objVal)
+                            new mongoose.Types.ObjectId(objVal),
                           );
                         }
                       } else if (mongoose.Types.ObjectId.isValid(item)) {
@@ -1364,7 +1359,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           updateData[fieldName] = processedValues;
           console.log(
             `✅ Processed multiselect field ${fieldName} (UPDATE):`,
-            updateData[fieldName]
+            updateData[fieldName],
           );
           delete req.body[fieldName]; // Remove to prevent re-processing
           return;
@@ -1428,7 +1423,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           updateData[fieldName] = processedValues;
           console.log(
             `✅ Processed indexed multiselect field ${fieldName} (UPDATE):`,
-            updateData[fieldName]
+            updateData[fieldName],
           );
 
           // Remove indexed fields from req.body
@@ -1463,7 +1458,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         index = parseInt(arrayMatch[2]);
         arrayItemField = arrayMatch[3];
         console.log(
-          `🔍 Update - Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+          `🔍 Update - Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
         );
       } else {
         // Pattern 1: field[subfield] (e.g., warehouse_inventory[warehouse_id])
@@ -1473,7 +1468,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           arrayItemField = arrayMatch[2];
           index = 0; // Default to index 0
           console.log(
-            `🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`
+            `🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
           );
         }
       }
@@ -1483,11 +1478,11 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         // Check if it's an array type (Array.isArray(modelSchema[arrayFieldName].type))
         console.log(
           `🔍 Update - Checking schema for ${arrayFieldName}:`,
-          modelSchema[arrayFieldName]
+          modelSchema[arrayFieldName],
         );
         console.log(
           `🔍 Update - Is array type:`,
-          Array.isArray(modelSchema[arrayFieldName]?.type)
+          Array.isArray(modelSchema[arrayFieldName]?.type),
         );
 
         if (
@@ -1517,18 +1512,18 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           }
 
           console.log(
-            `✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`
+            `✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`,
           );
           console.log(
             `🔍 Update - Current ${arrayFieldName} array:`,
-            JSON.stringify(updateData[arrayFieldName], null, 2)
+            JSON.stringify(updateData[arrayFieldName], null, 2),
           );
 
           // Remove the original key from req.body to prevent duplicate processing
           delete req.body[key];
         } else {
           console.log(
-            `⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`
+            `⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`,
           );
         }
       }
@@ -1557,7 +1552,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
       const validationResult = await customValidation(
         updateData,
         modelSchema,
-        existingRecord
+        existingRecord,
       );
       if (validationResult.error) {
         return {
@@ -1597,25 +1592,25 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           req,
           imageField,
           modelName,
-          recordId
+          recordId,
         );
         if (uploaded) {
           const expectsArray =
             Array.isArray(Model.schema.obj[imageField]?.type) ||
             Model.schema.paths[imageField]?.instance === "Array";
-          updatedRecord[imageField] = expectsArray
-            ? Array.isArray(uploaded)
-              ? uploaded
+          updatedRecord[imageField] =
+            expectsArray ?
+              Array.isArray(uploaded) ?
+                uploaded
               : [uploaded]
-            : Array.isArray(uploaded)
-            ? uploaded[0]
+            : Array.isArray(uploaded) ? uploaded[0]
             : uploaded;
           await updatedRecord.save();
         }
       } catch (error) {
         console.error(
           `❌ Error uploading image for field ${imageField}:`,
-          error
+          error,
         );
         // Continue with other fields even if one image upload fails
       }
@@ -1653,7 +1648,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     switch (error.name) {
       case "ValidationError":
         const validationErrors = Object.values(error.errors).map(
-          (err) => err.message
+          (err) => err.message,
         );
         return {
           success: false,
@@ -1831,9 +1826,9 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           status: 500,
           error: "Internal server error",
           details:
-            process.env.NODE_ENV === "development"
-              ? error.stack
-              : "Something went wrong",
+            process.env.NODE_ENV === "development" ?
+              error.stack
+            : "Something went wrong",
           type: "internal",
           timestamp: new Date().toISOString(),
         };
@@ -1976,13 +1971,13 @@ function buildPopulateFromQuery(query, modelName) {
 const handleGenericGetAll = async (
   req,
   controllerName = null,
-  options = {}
+  options = {},
 ) => {
   // Auto-detect controller name if not provided or empty
   const modelName =
-    controllerName && controllerName.trim() !== ""
-      ? controllerName
-      : getControllerName();
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
 
   if (!modelName) {
     return {
@@ -2010,21 +2005,24 @@ const handleGenericGetAll = async (
     // Dynamically get the model
     const Model = getModelFromController(modelName);
 
-    const searchTerm =
-      typeof search === "string" ? search.trim() : "";
-    let searchFields = Array.isArray(searchFieldsOption)
-      ? searchFieldsOption.filter(Boolean)
+    const searchTerm = typeof search === "string" ? search.trim() : "";
+    let searchFields =
+      Array.isArray(searchFieldsOption) ?
+        searchFieldsOption.filter(Boolean)
       : [];
     if (searchTerm && searchFields.length === 0) {
       searchFields = getDefaultSearchFieldsFromModel(Model);
     }
 
     const mongoFilter =
-      searchTerm && searchFields.length > 0
-        ? mergeSearchIntoFilter(filter, searchTerm, searchFields)
-        : { ...filter };
+      searchTerm && searchFields.length > 0 ?
+        mergeSearchIntoFilter(filter, searchTerm, searchFields)
+      : { ...filter };
 
-    console.log(`🔍 Fetching all ${modelName} records with filter:`, mongoFilter);
+    console.log(
+      `🔍 Fetching all ${modelName} records with filter:`,
+      mongoFilter,
+    );
 
     // Build query
     let query = Model.find(mongoFilter);
@@ -2067,7 +2065,7 @@ const handleGenericGetAll = async (
     });
 
     console.log(
-      `✅ Successfully fetched ${responseData.length} ${modelName} records`
+      `✅ Successfully fetched ${responseData.length} ${modelName} records`,
     );
 
     return {
@@ -2161,9 +2159,9 @@ const handleGenericGetAll = async (
           status: 500,
           error: "Internal server error",
           details:
-            process.env.NODE_ENV === "development"
-              ? error.stack
-              : "Something went wrong",
+            process.env.NODE_ENV === "development" ?
+              error.stack
+            : "Something went wrong",
           type: "internal",
           timestamp: new Date().toISOString(),
         };
@@ -2181,13 +2179,13 @@ const handleGenericGetAll = async (
 const handleGenericGetById = async (
   req,
   controllerName = null,
-  options = {}
+  options = {},
 ) => {
   // Auto-detect controller name if not provided or empty
   const modelName =
-    controllerName && controllerName.trim() !== ""
-      ? controllerName
-      : getControllerName();
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
 
   if (!modelName) {
     return {
@@ -2353,9 +2351,9 @@ const handleGenericGetById = async (
           status: 500,
           error: "Internal server error",
           details:
-            process.env.NODE_ENV === "development"
-              ? error.stack
-              : "Something went wrong",
+            process.env.NODE_ENV === "development" ?
+              error.stack
+            : "Something went wrong",
           type: "internal",
           timestamp: new Date().toISOString(),
         };
@@ -2382,13 +2380,13 @@ const handleGenericGetById = async (
 const handleGenericFindOne = async (
   req,
   controllerName = null,
-  options = {}
+  options = {},
 ) => {
   // Auto-detect controller name if not provided or empty
   const modelName =
-    controllerName && controllerName.trim() !== ""
-      ? controllerName
-      : getControllerName();
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
 
   if (!modelName) {
     return {
@@ -2481,7 +2479,7 @@ const handleGenericFindOne = async (
         status: 404,
         error: "Record not found",
         details: `${modelName} with criteria ${JSON.stringify(
-          finalCriteria
+          finalCriteria,
         )} not found`,
         type: "not_found",
       };
@@ -2516,7 +2514,7 @@ const handleGenericFindOne = async (
 
     console.log(
       `✅ Successfully found ${modelName} with criteria:`,
-      finalCriteria
+      finalCriteria,
     );
 
     return {
