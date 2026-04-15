@@ -15,6 +15,7 @@ const Category = require("../models/category");
 const Complain = require("../models/complain");
 const Company = require("../models/company");
 const Branch = require("../models/branch");
+const Account = require("../models/account");
 const Warehouse = require("../models/warehouse");
 const Integration = require("../models/integration");
 const stockTransferController = require("../controllers/stockTransfer");
@@ -596,7 +597,137 @@ const branchAdminCRUD = adminCrudGenerator(
           const recordObj = record.toObject ? record.toObject() : record;
           recordObj.created_by =
             record.created_by?.name || record.created_by?.email || "No User";
-          recordObj.company_id = record.company_id?.company_name || "No Company";
+          recordObj.company_id =
+            record.company_id?.company_name || "No Company";
+          return recordObj;
+        });
+      },
+      beforeCreateForm: async (req, res) => {
+        try {
+          const companies = await Company.find({
+            status: "active",
+            deletedAt: null,
+          })
+            .select("company_name")
+            .sort({ company_name: 1 });
+
+          req.fieldConfig.company_id.options = companies.map((company) => ({
+            value: company._id.toString(),
+            label: company.company_name,
+          }));
+          req.fieldConfig.company_id.placeholder = "Select Company";
+          req.fieldConfig.company_id.helpText =
+            "Choose the company for this branch";
+        } catch (error) {
+          console.error("❌ Error in beforeCreateForm for branch:", error);
+        }
+      },
+      beforeEditForm: async (req, res) => {
+        try {
+          const companies = await Company.find({
+            status: "active",
+            deletedAt: null,
+          })
+            .select("company_name")
+            .sort({ company_name: 1 });
+
+          req.fieldConfig.company_id.options = companies.map((company) => ({
+            value: company._id.toString(),
+            label: company.company_name,
+          }));
+          req.fieldConfig.company_id.placeholder = "Select Company";
+          req.fieldConfig.company_id.helpText =
+            "Choose the company for this branch";
+        } catch (error) {
+          console.error("❌ Error in beforeEditForm for branch:", error);
+        }
+      },
+    },
+  },
+);
+
+/**
+ * Auto-generate Admin CRUD with UI Forms for Account model
+ */
+const accountAdminCRUD = adminCrudGenerator(
+  Account,
+  "account",
+  [
+    "name",
+    "account_number",
+    "initial_balance",
+    "description",
+    "account_type",
+    "company_id",
+  ], // Headings.
+  {
+    excludedFields: ["__v"],
+    includedFields: [
+      "name",
+      "account_number",
+      "initial_balance",
+      "description",
+      "account_type",
+      "company_id",
+      "status",
+    ],
+    searchableFields: [
+      "name",
+      "account_number",
+      "description",
+      "account_type",
+      "status",
+    ],
+    filterableFields: ["status"],
+    sortableFields: [
+      "name",
+      "account_number",
+      "description",
+      "account_type",
+      "createdAt",
+    ],
+    baseUrl: BASE_URL,
+    softDelete: true, // Enable soft delete functionality
+    fieldTypes: {
+      status: "select",
+      deletedAt: "hidden",
+      company_id: "select",
+    },
+    fieldLabels: {
+      // image: "Logo",
+      name: "Name",
+      // phone: "Phone",
+      // email: "Email",
+      // address: "Address",
+      // warehouse_id: "Default Store",
+    },
+    fieldOptions: {
+      status: [
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" },
+      ],
+    },
+    fieldProcessing: {
+      beforeInsert: async (data, req) => {
+        if (!data.user_id && req.user?._id) {
+          data.user_id = req.user._id;
+        }
+        return data;
+      },
+    },
+    middleware: {
+      afterQuery: async (records) => {
+        const populatedRecords = await Branch.populate(records, [
+          { path: "company_id", select: "company_name" },
+          { path: "created_by", select: "name email" },
+        ]);
+
+        return populatedRecords.map((record) => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          recordObj.created_by =
+            record.created_by?.name || record.created_by?.email || "No User";
+          recordObj.company_id =
+            record.company_id?.company_name || "No Company";
           return recordObj;
         });
       },
@@ -2927,6 +3058,7 @@ routeRegistry.updateRoute("categories", { crudController: categoryAdminCRUD });
 routeRegistry.updateRoute("complain", { crudController: complainAdminCRUD });
 routeRegistry.updateRoute("company", { crudController: companyAdminCRUD });
 routeRegistry.updateRoute("branch", { crudController: branchAdminCRUD });
+routeRegistry.updateRoute("account", { crudController: accountAdminCRUD });
 routeRegistry.updateRoute("warehouse", { crudController: warehouseAdminCRUD });
 routeRegistry.updateRoute("attribute", { crudController: attributeAdminCRUD });
 routeRegistry.updateRoute("integration", {
@@ -3356,6 +3488,7 @@ router.get("/crud-controllers", (req, res) => {
     complain: complainAdminCRUD.controller,
     company: companyAdminCRUD.controller,
     branch: branchAdminCRUD.controller,
+    account: accountAdminCRUD.controller,
     warehouse: warehouseAdminCRUD.controller,
     integration: integrationAdminCRUD.controller,
     process: processAdminCRUD.controller,
