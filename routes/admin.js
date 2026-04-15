@@ -14,6 +14,7 @@ const Order = require("../models/order");
 const Category = require("../models/category");
 const Complain = require("../models/complain");
 const Company = require("../models/company");
+const Branch = require("../models/branch");
 const Warehouse = require("../models/warehouse");
 const Integration = require("../models/integration");
 const stockTransferController = require("../controllers/stockTransfer");
@@ -530,6 +531,113 @@ const companyAdminCRUD = adminCrudGenerator(
               helpText: "Choose the warehouse for this company",
             };
           }
+        }
+      },
+    },
+  },
+);
+
+const branchAdminCRUD = adminCrudGenerator(
+  Branch,
+  "branch",
+  ["name", "phone", "email", "address", "company_id", "image", "status"], // Headings.
+  {
+    excludedFields: ["__v"],
+    includedFields: [
+      "name",
+      "phone",
+      "email",
+      "address",
+      "company_id",
+      "image",
+      "status",
+    ],
+    searchableFields: ["name", "email", "phone"],
+    filterableFields: ["status"],
+    sortableFields: ["name", "email", "status", "createdAt"],
+    baseUrl: BASE_URL,
+    softDelete: true, // Enable soft delete functionality
+    fieldTypes: {
+      image: "file",
+      status: "select",
+      deletedAt: "hidden",
+      company_id: "select",
+    },
+    fieldLabels: {
+      image: "Logo",
+      name: "Branch Name",
+      phone: "Phone",
+      email: "Email",
+      address: "Address",
+      // warehouse_id: "Default Store",
+    },
+    fieldOptions: {
+      status: [
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" },
+      ],
+    },
+    fieldProcessing: {
+      beforeInsert: async (data, req) => {
+        if (!data.user_id && req.user?._id) {
+          data.user_id = req.user._id;
+        }
+        return data;
+      },
+    },
+    middleware: {
+      afterQuery: async (records) => {
+        const populatedRecords = await Branch.populate(records, [
+          { path: "company_id", select: "company_name" },
+          { path: "created_by", select: "name email" },
+        ]);
+
+        return populatedRecords.map((record) => {
+          const recordObj = record.toObject ? record.toObject() : record;
+          recordObj.created_by =
+            record.created_by?.name || record.created_by?.email || "No User";
+          recordObj.company_id = record.company_id?.company_name || "No Company";
+          return recordObj;
+        });
+      },
+      beforeCreateForm: async (req, res) => {
+        try {
+          const companies = await Company.find({
+            status: "active",
+            deletedAt: null,
+          })
+            .select("company_name")
+            .sort({ company_name: 1 });
+
+          req.fieldConfig.company_id.options = companies.map((company) => ({
+            value: company._id.toString(),
+            label: company.company_name,
+          }));
+          req.fieldConfig.company_id.placeholder = "Select Company";
+          req.fieldConfig.company_id.helpText =
+            "Choose the company for this branch";
+        } catch (error) {
+          console.error("❌ Error in beforeCreateForm for branch:", error);
+        }
+      },
+      beforeEditForm: async (req, res) => {
+        try {
+          const companies = await Company.find({
+            status: "active",
+            deletedAt: null,
+          })
+            .select("company_name")
+            .sort({ company_name: 1 });
+
+          req.fieldConfig.company_id.options = companies.map((company) => ({
+            value: company._id.toString(),
+            label: company.company_name,
+          }));
+          req.fieldConfig.company_id.placeholder = "Select Company";
+          req.fieldConfig.company_id.helpText =
+            "Choose the company for this branch";
+        } catch (error) {
+          console.error("❌ Error in beforeEditForm for branch:", error);
         }
       },
     },
@@ -2818,6 +2926,7 @@ routeRegistry.updateRoute("orders", { crudController: orderAdminCRUD });
 routeRegistry.updateRoute("categories", { crudController: categoryAdminCRUD });
 routeRegistry.updateRoute("complain", { crudController: complainAdminCRUD });
 routeRegistry.updateRoute("company", { crudController: companyAdminCRUD });
+routeRegistry.updateRoute("branch", { crudController: branchAdminCRUD });
 routeRegistry.updateRoute("warehouse", { crudController: warehouseAdminCRUD });
 routeRegistry.updateRoute("attribute", { crudController: attributeAdminCRUD });
 routeRegistry.updateRoute("integration", {
@@ -3246,6 +3355,7 @@ router.get("/crud-controllers", (req, res) => {
     categories: categoryAdminCRUD.controller,
     complain: complainAdminCRUD.controller,
     company: companyAdminCRUD.controller,
+    branch: branchAdminCRUD.controller,
     warehouse: warehouseAdminCRUD.controller,
     integration: integrationAdminCRUD.controller,
     process: processAdminCRUD.controller,
@@ -3266,6 +3376,7 @@ router.get("/crud-controllers", (req, res) => {
         categories: "/admin/categories",
         complain: "/admin/complain",
         company: "/admin/company",
+        branch: "/admin/branch",
         warehouse: "/admin/warehouse",
         integration: "/admin/integration",
         process: "/admin/process",

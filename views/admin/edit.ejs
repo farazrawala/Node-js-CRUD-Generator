@@ -69,6 +69,10 @@
                     <i class="fas fa-tags mr-3"></i>
                     <span>Categories</span>
                 </a>
+                <a href="/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-code-branch mr-3"></i>
+                    <span>Branches</span>
+                </a>
                 <a href="/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-exclamation-triangle mr-3"></i>
                     <span>Complaints</span>
@@ -116,6 +120,17 @@
             <form method="POST" action="<%= action %>" enctype="multipart/form-data" class="space-y-6">
                 <!-- Hidden method override for PUT -->
                 <input type="hidden" name="_method" value="PUT">
+                <% const formErrors = (errors || []).filter(error => !error.field || !fieldConfig[error.field]); %>
+                <% if (formErrors.length > 0) { %>
+                    <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">
+                        <p class="font-medium">Could not update this record:</p>
+                        <ul class="mt-2 list-disc list-inside text-sm space-y-1">
+                            <% formErrors.forEach(error => { %>
+                                <li><%= error.message %></li>
+                            <% }); %>
+                        </ul>
+                    </div>
+                <% } %>
                 
                 <!-- Dynamic Form Fields -->
                 <% Object.keys(fieldConfig).forEach(fieldName => { %>
@@ -183,11 +198,12 @@
                                       class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 <%= errors && errors.find(e => e.field === field.name) ? 'border-red-500' : '' %>"><%= record[field.name] || '' %></textarea>
                         
                         <% } else if (field.type === 'select') { %>
+                            <% const selectedValue = (record[field.name] && typeof record[field.name] === 'object' && record[field.name]._id) ? record[field.name]._id.toString() : (record[field.name] !== undefined && record[field.name] !== null ? record[field.name].toString() : ''); %>
                             <script>
                                 console.log('Field Name2:', '<%= field.name %>');
                                 console.log('Field Options:', <%- JSON.stringify(field.options) %>);
                                 console.log('Field Options Length:', <%= field.options ? field.options.length : 0 %>);
-                                console.log('Select :', <%- JSON.stringify(record[field.name] && record[field.name]._id ? record[field.name]._id : null) %>);
+                                console.log('Select :', <%- JSON.stringify(selectedValue || null) %>);
                                 <% if (field.options && field.options.length > 0) { %>
                                     <% field.options.forEach((option, index) => { %>
                                         console.log('Option <%= index %>:', <%- JSON.stringify(option) %>);
@@ -201,7 +217,7 @@
                                 <option value="">Select <%= field.label %></option>
                                 <% if (field.options && field.options.length > 0) { %>
                                     <% field.options.forEach(option => { %>
-                                        <option value="<%= option.value %>" <%= (record[field.name] && record[field.name]._id && record[field.name]._id.toString() === option.value) ? 'selected' : '' %>>
+                                        <option value="<%= option.value %>" <%= (selectedValue === option.value) ? 'selected' : '' %>>
                                             <%= option.label %>
                                         </option>
                                     <% }); %>

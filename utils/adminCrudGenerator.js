@@ -1487,7 +1487,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (error.name === "ValidationError") {
         // Re-render form with validation errors
         const errors = Object.values(error.errors).map((err) => ({
-          field: err.path,
+          field: fieldConfig[err.path] ? err.path : null,
           message: err.message,
           value: err.value,
         }));
@@ -1510,11 +1510,55 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         });
       }
 
-      res.status(errorResponse.statusCode).render("admin/error", {
-        title: "Error",
-        message: "An error occurred while creating the record",
-        error: errorResponse,
+      // Keep users on the create form and show actionable messages for non-validation errors.
+      if (error.code === 11000) {
+        const duplicateField = Object.keys(error.keyPattern || {})[0] || "field";
+        const duplicateValue = error.keyValue?.[duplicateField];
+        const duplicateMessage =
+          duplicateValue !== undefined ?
+            `${duplicateField} "${duplicateValue}" already exists. Please use a different value.`
+          : `${duplicateField} already exists. Please use a different value.`;
+
+        return res.status(400).render("admin/create", {
+          title: `Create ${titleCase}`,
+          modelName,
+          singularName,
+          titleCase,
+          fieldConfig,
+          record: req.body,
+          action: `/admin/${modelName}`,
+          method: "POST",
+          errors: [{ field: duplicateField, message: duplicateMessage }],
+          cssClasses,
+          customJS,
+          routes: req.routes || [],
+          baseUrl: getBaseUrl(),
+          warehouses: req.warehouses || [],
+        });
+      }
+
+      return res.status(errorResponse.statusCode || 500).render("admin/create", {
+        title: `Create ${titleCase}`,
+        modelName,
+        singularName,
+        titleCase,
+        fieldConfig,
+        record: req.body,
+        action: `/admin/${modelName}`,
+        method: "POST",
+        errors: [
+          {
+            message:
+              errorResponse.message ||
+              error.message ||
+              "An unexpected error occurred while creating the record.",
+          },
+        ],
+        cssClasses,
+        customJS,
+        routes: req.routes || [], // Add routes data for dynamic menu
         baseUrl: getBaseUrl(),
+        warehouses: req.warehouses || [], // Pass warehouses even on failures
       });
     }
   }
@@ -2322,7 +2366,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (error.name === "ValidationError") {
         // Re-render form with validation errors
         const errors = Object.values(error.errors).map((err) => ({
-          field: err.path,
+          field: fieldConfig[err.path] ? err.path : null,
           message: err.message,
           value: err.value,
         }));

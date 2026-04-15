@@ -103,6 +103,10 @@
                     <i class="fas fa-tags mr-3"></i>
                     <span>Categories</span>
                 </a>
+                <a href="/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <i class="fas fa-code-branch mr-3"></i>
+                    <span>Branches</span>
+                </a>
                 <a href="/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-exclamation-triangle mr-3"></i>
                     <span>Complaints</span>
@@ -148,6 +152,18 @@
         <!-- Create Form -->
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <form method="POST" action="<%= action %>" enctype="multipart/form-data" class="space-y-6">
+                <% const formErrors = (errors || []).filter(error => !error.field || !fieldConfig[error.field]); %>
+                <% if (formErrors.length > 0) { %>
+                    <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">
+                        <p class="font-medium">Could not create this record:</p>
+                        <ul class="mt-2 list-disc list-inside text-sm space-y-1">
+                            <% formErrors.forEach(error => { %>
+                                <li><%= error.message %></li>
+                            <% }); %>
+                        </ul>
+                    </div>
+                <% } %>
+
                 <!-- Debug: All fieldConfig keys: <%= JSON.stringify(Object.keys(fieldConfig)) %> -->
                 <!-- Debug: parent_product_id fieldConfig: <%= JSON.stringify(fieldConfig.parent_product_id) %> -->
                 <!-- Debug: Template - All fieldConfig keys: <%= JSON.stringify(Object.keys(fieldConfig)) %> -->
