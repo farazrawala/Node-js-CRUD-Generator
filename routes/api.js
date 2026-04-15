@@ -34,7 +34,7 @@ const {
   productDelete,
 } = require("../controllers/product");
 
-const { order_save } = require("../controllers/order");
+const { order_save, getOrderByorderItem } = require("../controllers/order");
 const {
   checkIntegrationActive,
   syncStoreCategory,
@@ -157,6 +157,7 @@ router.get("/product/get-product-variation/:id", getProductVariationById);
 
 // Order routes
 router.post("/order/order_save", order_save);
+router.get("/order/get-order-by-order-item", getOrderByorderItem);
 
 router.post("/test", (req, res) => {
   console.log("Test route hit");

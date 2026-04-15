@@ -48,15 +48,43 @@ const modelSchema = new mongoose.Schema(
     },
     description: {
       type: String,
-      required: true,
+      // required: true
     },
-
-    user_id: {
+    // default fields
+    company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      // required: true,
+      field_name: "Company",
+    },
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
-      required: true,
-      field_name: "Order User",
+      field_name: "Created By",
     },
+    updated_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Updated By",
+    },
+    status: {
+      type: String,
+      required: true,
+      enum: ["active", "inactive"],
+      default: "active",
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
+      field_name: "Deleted At",
+    },
+
+    // user_id: {
+    //   type: mongoose.Schema.Types.ObjectId,
+    //   ref: "user",
+    //   required: true,
+    //   field_name: "Order User",
+    // },
 
     // image: {
     //   type: [String],
