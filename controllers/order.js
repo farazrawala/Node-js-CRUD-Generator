@@ -4,7 +4,6 @@ const OrderItem = require("../models/order_item");
 const {
   handleGenericCreate,
   handleGenericUpdate,
-  handleGenericGetById,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
 
@@ -17,113 +16,61 @@ const {
 //   return res.status(response.status).json(response);
 // }
 
-// async function orderUpdate(req, res) {
-//   const response = await handleGenericUpdate(req, "", {
-//     afterUpdate: async (record, req, existingUser) => {
-//       console.log("✅ Record updated successfully:", record);
-//     },
-//   });
-//   return res.status(response.status).json(response);
-// }
-
-// async function orderById(req, res) {
-//   const response = await handleGenericGetById(req, "order", {
-//     excludeFields: [], // Don't exclude any fields
-//   });
-//   return res.status(response.status).json(response);
-// }
-
-function orderItemGroupKey(order_id) {
-  if (order_id == null) {
-    return null;
-  }
-  if (typeof order_id === "object" && order_id._id != null) {
-    return String(order_id._id);
-  }
-  return String(order_id);
-}
-
 async function getOrderByorderItem(req, res) {
   const filter = { status: "active", deletedAt: null };
-  const response = await handleGenericGetAll(req, "order_item", {
+  const response = await handleGenericGetAll(req, "order", {
     filter,
     excludeFields: [],
     sort: { createdAt: -1 },
-    limit: req.query.limit ? parseInt(req.query.limit) : null,
-    skip: req.query.skip ? parseInt(req.query.skip) : 0,
-    // group: {
-    //   _id: "$order_id",
-    //   order_items: { $push: "$$ROOT" },
-    // },
-    // populate: [
-    //   {
-    //     path: "product_id",
-    //     select: "product_name",
-    //   },
-    //   {
-    //     path: "order_id",
-    //     select: "order_no",
-    //   },
-    // ],
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
+  });
+
+  if (!response.success || !Array.isArray(response.data)) {
+    return res.status(response.status).json(response);
+  }
+
+  const orderIds = response.data.map((o) => o._id).filter(Boolean);
+  if (orderIds.length === 0) {
+    return res.status(response.status).json(response);
+  }
+
+  const itemFilter = {
+    order_id: { $in: orderIds },
+    status: "active",
+    deletedAt: null,
+  };
+  const items = await OrderItem.find(itemFilter)
+    .populate("product_id")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const itemsByOrderId = new Map();
+  for (const id of orderIds) {
+    itemsByOrderId.set(String(id), []);
+  }
+  for (const item of items) {
+    const key = String(item.order_id);
+    if (!itemsByOrderId.has(key)) {
+      itemsByOrderId.set(key, []);
+    }
+    itemsByOrderId.get(key).push(item);
+  }
+
+  const data = response.data.map((order) => {
+    const order_items = itemsByOrderId.get(String(order._id)) || [];
+    return {
+      ...order,
+      order_items,
+      no_of_items: order_items.length,
+    };
   });
 
   return res.status(response.status).json({
     ...response,
-    // data,
-    pagination: {
-      ...response.pagination,
-      // groupCount: data.length,
-    },
+    data,
   });
 }
-
-// async function getOrderByorderItem(req, res) {
-//   const filter = { status: "active", deletedAt: null };
-//   const response = await handleGenericGetAll(req, "order", {
-//     filter,
-//     excludeFields: [],
-//     populate: [],
-//     sort: { createdAt: -1 },
-//     limit: req.query.limit ? parseInt(req.query.limit) : null,
-//     skip: req.query.skip ? parseInt(req.query.skip) : 0,
-//   });
-
-//   if (!response.success || !Array.isArray(response.data)) {
-//     return res.status(response.status).json(response);
-//   }
-
-//   const orderIds = response.data.map((o) => o._id).filter(Boolean);
-//   if (orderIds.length === 0) {
-//     return res.status(response.status).json(response);
-//   }
-
-//   const items = await OrderItem.find({ order_id: { $in: orderIds } })
-//     .populate("product_id")
-//     .sort({ createdAt: 1 })
-//     .lean();
-
-//   const itemsByOrderId = new Map();
-//   for (const id of orderIds) {
-//     itemsByOrderId.set(String(id), []);
-//   }
-//   for (const item of items) {
-//     const key = String(item.order_id);
-//     if (!itemsByOrderId.has(key)) {
-//       itemsByOrderId.set(key, []);
-//     }
-//     itemsByOrderId.get(key).push(item);
-//   }
-
-//   const data = response.data.map((order) => ({
-//     ...order,
-//     order_items: itemsByOrderId.get(String(order._id)) || [],
-//   }));
-
-//   return res.status(response.status).json({
-//     ...response,
-//     data,
-//   });
-// }
 
 async function order_save(req, res) {
   console.log("🔍 Incoming request body:", JSON.stringify(req.body, null, 2));
@@ -177,11 +124,71 @@ async function order_save(req, res) {
   return res.status(response.status).json(response);
 }
 
+async function getOrderByOrderNo(req, res) {
+  const param = String(req.params.id || "").trim();
+  if (!param) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: "Please provide id in the URL parameters",
+      type: "missing_id",
+    });
+  }
+
+  const filter = { status: "active", deletedAt: null };
+
+  let order = await Order.findOne({ order_no: param, ...filter });
+  if (!order && mongoose.Types.ObjectId.isValid(param)) {
+    order = await Order.findOne({ _id: param, ...filter });
+  }
+
+  if (!order) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `order with order_no or id "${param}" not found`,
+      type: "not_found",
+    });
+  }
+
+  const items = await OrderItem.find({
+    order_id: order._id,
+    status: "active",
+    deletedAt: null,
+  })
+    .populate("product_id")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const data = {
+    ...order.toObject({ flattenMaps: true }),
+    order_items: items,
+    no_of_items: items.length,
+  };
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    data,
+  });
+}
+
+async function invoiceUpdate(req, res) {
+  const response = await handleGenericUpdate(req, "order", {
+    afterUpdate: async (record, req, existingUser) => {
+      console.log("✅ Record updated successfully:", record);
+    },
+  });
+  return res.status(response.status).json(response);
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
-  // orderById,
-  // getAllorder,
+  invoiceUpdate,
+  getOrderByOrderNo,
   order_save,
   getOrderByorderItem,
 };
