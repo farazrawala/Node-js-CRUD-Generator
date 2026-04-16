@@ -56,3 +56,13 @@ create sub company.
 
 
 
+
+model_helper :: 361
+do this for branch_id alos.
+if (
+        field === "company_id" &&
+        modelSchema.company_id &&
+        req.user?.company_id
+      ) {
+        return false;
+      }

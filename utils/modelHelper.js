@@ -349,6 +349,19 @@ const handleGenericCreate = async (
 
     // Validate required fields dynamically
     const missingFields = requiredFields.filter((field) => {
+      // These are injected later from req.user (see below). Do not require them
+      // in req.body or validation fails before that assignment runs.
+      if (field === "created_by" && modelSchema.created_by && req.user?._id) {
+        return false;
+      }
+      if (
+        field === "company_id" &&
+        modelSchema.company_id &&
+        req.user?.company_id
+      ) {
+        return false;
+      }
+
       const value = req.body[field];
       // Check if field is missing or empty
       if (value === undefined || value === null) {
@@ -1999,6 +2012,10 @@ const handleGenericGetAll = async (
     errorHandlers = {}, // Custom error handlers
     search = null,
     searchFields: searchFieldsOption = null,
+    /** If set, run aggregation: $match → $sort (optional) → $group → $sort → skip/limit. Value is the body of the $group stage (must include _id). */
+    group = null,
+    /** Sort applied after $group (default { _id: -1 }). */
+    groupSort = { _id: -1 },
   } = options;
 
   try {
@@ -2023,6 +2040,104 @@ const handleGenericGetAll = async (
       `🔍 Fetching all ${modelName} records with filter:`,
       mongoFilter,
     );
+
+    const useGroupAggregation =
+      group &&
+      typeof group === "object" &&
+      Object.keys(group).length > 0 &&
+      group._id !== undefined;
+
+    if (useGroupAggregation) {
+      if (populate && populate.length > 0) {
+        return {
+          success: false,
+          status: 400,
+          error: "populate is not supported together with group aggregation",
+          type: "validation",
+        };
+      }
+
+      const pipeline = [{ $match: mongoFilter }];
+
+      if (sort && typeof sort === "object" && Object.keys(sort).length > 0) {
+        pipeline.push({ $sort: sort });
+      }
+
+      pipeline.push({ $group: group });
+
+      if (
+        groupSort &&
+        typeof groupSort === "object" &&
+        Object.keys(groupSort).length > 0
+      ) {
+        pipeline.push({ $sort: groupSort });
+      }
+
+      const countPipeline = [
+        { $match: mongoFilter },
+        { $group: { _id: group._id } },
+        { $count: "total" },
+      ];
+      const countAgg = await Model.aggregate(countPipeline);
+      const totalCount = countAgg[0]?.total ?? 0;
+
+      if (skip > 0) {
+        pipeline.push({ $skip: skip });
+      }
+      if (limit != null && limit > 0) {
+        pipeline.push({ $limit: limit });
+      }
+
+      const records = await Model.aggregate(pipeline);
+
+      const isLikelyDocArray = (arr) => {
+        if (!Array.isArray(arr) || arr.length === 0) {
+          return false;
+        }
+        const first = arr[0];
+        return (
+          first !== null &&
+          typeof first === "object" &&
+          !Array.isArray(first) &&
+          first._id !== undefined
+        );
+      };
+
+      const responseData = records.map((doc) => {
+        const shaped = { ...doc };
+        for (const key of Object.keys(shaped)) {
+          const val = shaped[key];
+          if (!isLikelyDocArray(val)) {
+            continue;
+          }
+          shaped[key] = val.map((item) => {
+            const data = { ...item };
+            excludeFields.forEach((field) => {
+              delete data[field];
+            });
+            return transformImageUrls(data, Model, req);
+          });
+        }
+        return shaped;
+      });
+
+      console.log(
+        `✅ Successfully fetched ${responseData.length} grouped ${modelName} records`,
+      );
+
+      return {
+        success: true,
+        status: 200,
+        data: responseData,
+        grouped: true,
+        pagination: {
+          total: totalCount,
+          count: responseData.length,
+          skip: skip,
+          limit: limit,
+        },
+      };
+    }
 
     // Build query
     let query = Model.find(mongoFilter);
