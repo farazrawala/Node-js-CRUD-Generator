@@ -57,7 +57,10 @@ const {
   apiGetStockTransfers,
 } = require("../controllers/stockTransfer");
 
-const { purchaseOrderCreate } = require("../controllers/purchase_order");
+const {
+  purchaseOrderCreate,
+  getPurchaseOrderByPurchaseItem,
+} = require("../controllers/purchase_order");
 const { getMyBranches } = require("../controllers/company");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
@@ -123,6 +126,10 @@ router.post("/user/login", handleUserLogin);
 // router.post("/user/get-one", findUserByEmail);
 
 router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
+router.get(
+  "/purchase_order/get-purchase-order-by-purchase-item",
+  getPurchaseOrderByPurchaseItem,
+);
 
 // Product routes - Custom CRUD + warehouse inventory management
 router.post("/product/create", productCreate);

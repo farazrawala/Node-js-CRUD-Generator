@@ -1,7 +1,10 @@
 const mongoose = require("mongoose");
 const PurchaseOrder = require("../models/purchase_order");
 const PurchaseOrderItem = require("../models/purchase_order_item");
-const { handleGenericCreate } = require("../utils/modelHelper");
+const {
+  handleGenericCreate,
+  handleGenericGetAll,
+} = require("../utils/modelHelper");
 
 /** e.g. product_id[0], qty[0], price[0] */
 function parseBracketLineItems(body) {
@@ -150,6 +153,71 @@ function collectLineItems(body) {
   return lines;
 }
 
+async function getPurchaseOrderByPurchaseItem(req, res) {
+  const filter = { status: "active", deletedAt: null };
+  const response = await handleGenericGetAll(req, "purchase_order", {
+    filter,
+    excludeFields: [],
+    sort: { createdAt: -1 },
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
+  });
+
+  if (!response.success || !Array.isArray(response.data)) {
+    return res.status(response.status).json(response);
+  }
+
+  const poIds = response.data.map((o) => o._id).filter(Boolean);
+  if (poIds.length === 0) {
+    return res.status(response.status).json(response);
+  }
+
+  const itemFilter = {
+    purchase_order_id: { $in: poIds },
+    status: "active",
+    deletedAt: null,
+  };
+  const items = await PurchaseOrderItem.find(itemFilter)
+    .populate("product_id")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const itemsByPoId = new Map();
+  for (const id of poIds) {
+    itemsByPoId.set(String(id), []);
+  }
+  for (const item of items) {
+    const key = String(item.purchase_order_id);
+    if (!itemsByPoId.has(key)) {
+      itemsByPoId.set(key, []);
+    }
+    itemsByPoId.get(key).push(item);
+  }
+
+  const data = response.data.map((po) => {
+    const purchase_order_items =
+      itemsByPoId.get(String(po._id)) || [];
+    const purchase_order_items_total = purchase_order_items.reduce(
+      (sum, row) => {
+        const sub = Number(row.subtotal);
+        return sum + (Number.isFinite(sub) ? sub : 0);
+      },
+      0,
+    );
+    return {
+      ...po,
+      purchase_order_items,
+      no_of_items: purchase_order_items.length,
+      purchase_order_items_total,
+    };
+  });
+
+  return res.status(response.status).json({
+    ...response,
+    data,
+  });
+}
+
 async function purchaseOrderCreate(req, res) {
   const originalBody = req.body;
   const lines = collectLineItems(originalBody);
@@ -245,6 +313,7 @@ async function purchaseOrderCreate(req, res) {
 
 module.exports = {
   purchaseOrderCreate,
+  getPurchaseOrderByPurchaseItem,
   // purchase_orderUpdate,
   // purchase_orderById,
   // getAllpurchase_order,
