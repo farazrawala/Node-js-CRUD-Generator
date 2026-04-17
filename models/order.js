@@ -44,13 +44,50 @@ const modelSchema = new mongoose.Schema(
     },
     address: {
       type: String,
-      required: true,
+      // required: true,
     },
     description: {
       type: String,
       // required: true
     },
+    discount: {
+      type: Number,
+      default: 0,
+    },
+    amount_received: {
+      type: Number,
+      field_name: "Amount Received",
+    },
+    change_given: {
+      type: Number,
+      field_name: "Change Given",
+    },
+    // total: {
+    //   type: Number,
+    //   required: true,
+    // },
+    order_status: {
+      type: String,
+      enum: [
+        "active",
+        "placed",
+        "confirmed",
+        "shipped",
+        "delivered",
+        "drafted",
+        "pending",
+        "completed",
+        "cancelled",
+        "refunded",
+        "failed",
+      ],
+      default: "placed",
+    },
     // default fields
+    branch_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "branch",
+    },
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",

@@ -1,11 +1,157 @@
 const mongoose = require("mongoose");
 const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
+const Product = require("../models/product");
 const {
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
+
+/** Form keys: product_id[0], qty[0], price[0], … */
+function parseOrderLineItems(body) {
+  const byIndex = new Map();
+  if (!body || typeof body !== "object") return [];
+  for (const key of Object.keys(body)) {
+    let m = key.match(/^product_id\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).product_id = body[key];
+      continue;
+    }
+    m = key.match(/^qty\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).qty = body[key];
+      continue;
+    }
+    m = key.match(/^price\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).price = body[key];
+      continue;
+    }
+  }
+  const sorted = [...byIndex.keys()].sort((a, b) => a - b);
+  const lines = [];
+  for (const i of sorted) {
+    const row = byIndex.get(i);
+    const qtyRaw = row.qty;
+    const qtyNum = parseFloat(String(qtyRaw ?? "").trim());
+    const priceNum = parseFloat(String(row.price ?? "").trim());
+    const subtotal =
+      Number.isFinite(qtyNum) && Number.isFinite(priceNum) ?
+        qtyNum * priceNum
+      : NaN;
+    lines.push({
+      product_id: row.product_id,
+      qtyRaw,
+      qty: qtyNum,
+      price: priceNum,
+      subtotal,
+    });
+  }
+  return lines.filter(
+    (l) =>
+      l.product_id &&
+      String(l.product_id).trim() !== "" &&
+      mongoose.Types.ObjectId.isValid(String(l.product_id).trim()) &&
+      Number.isFinite(l.subtotal),
+  );
+}
+
+function stripLineItemKeys(body) {
+  const out = {};
+  for (const k of Object.keys(body)) {
+    if (/^(product_id|qty|price)\[\d+\]$/.test(k)) continue;
+    out[k] = body[k];
+  }
+  return out;
+}
+
+function normalizeOrderNumericFields(obj) {
+  const out = { ...obj };
+  for (const key of ["discount", "amount_received", "change_given"]) {
+    if (!(key in out)) continue;
+    const v = out[key];
+    if (v === "" || v === null || v === undefined) {
+      delete out[key];
+      continue;
+    }
+    const n = typeof v === "number" ? v : Number(String(v).trim());
+    if (Number.isFinite(n)) out[key] = n;
+    else delete out[key];
+  }
+  return out;
+}
+
+async function getProductLineName(productId) {
+  const id = String(productId || "").trim();
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) return "Item";
+  const p = await Product.findById(id).select("product_name").lean();
+  return (p && p.product_name) || "Item";
+}
+
+async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
+  const companyId = orderSnapshot.company_id || req.user?.company_id;
+  const createdBy = req.user?._id;
+  if (!createdBy) {
+    return {
+      error: {
+        success: false,
+        status: 401,
+        error: "Authentication required",
+        details: "created_by is required for order items",
+        type: "unauthorized",
+      },
+    };
+  }
+  if (!companyId) {
+    return {
+      error: {
+        success: false,
+        status: 400,
+        error: "company_id required",
+        details: "Order or user must have company_id to create line items",
+        type: "validation",
+      },
+    };
+  }
+  const docs = [];
+  for (const line of lines) {
+    const name = await getProductLineName(line.product_id);
+    docs.push({
+      order_id: orderId,
+      product_id: String(line.product_id).trim(),
+      name,
+      qty: String(line.qtyRaw ?? line.qty).trim(),
+      price: Number(line.price),
+      subtotal: Number(line.subtotal),
+      company_id: companyId,
+      branch_id: orderSnapshot.branch_id || undefined,
+      created_by: createdBy,
+      status: "active",
+      deletedAt: null,
+    });
+  }
+  return { docs };
+}
+
+function shapeOrderWithItems(orderPlain, items) {
+  const order_items_total = items.reduce((sum, item) => {
+    const sub = Number(item.subtotal);
+    return sum + (Number.isFinite(sub) ? sub : 0);
+  }, 0);
+  return {
+    ...orderPlain,
+    order_items: items,
+    no_of_items: items.length,
+    order_items_total,
+  };
+}
 
 // async function orderCreate(req, res) {
 //   const response = await handleGenericCreate(req, "order", {
@@ -59,10 +205,15 @@ async function getOrderByorderItem(req, res) {
 
   const data = response.data.map((order) => {
     const order_items = itemsByOrderId.get(String(order._id)) || [];
+    const order_items_total = order_items.reduce((sum, item) => {
+      const sub = Number(item.subtotal);
+      return sum + (Number.isFinite(sub) ? sub : 0);
+    }, 0);
     return {
       ...order,
       order_items,
       no_of_items: order_items.length,
+      order_items_total,
     };
   });
 
@@ -73,55 +224,142 @@ async function getOrderByorderItem(req, res) {
 }
 
 async function order_save(req, res) {
-  console.log("🔍 Incoming request body:", JSON.stringify(req.body, null, 2));
+  const lines = parseOrderLineItems(req.body);
+  if (lines.length === 0) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Order lines required",
+      details:
+        "Send at least one valid line with product_id[n], qty[n], and price[n] (e.g. product_id[0], qty[0], price[0]).",
+      type: "validation",
+    });
+  }
+
+  const originalBody = req.body;
+  req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
+  delete req.body._id;
 
   const response = await handleGenericCreate(req, "order", {
-    afterCreate: async (record, req) => {
-      console.log("✅ Record created successfully:", record);
-    },
+    afterCreate: async () => {},
   });
+
+  req.body = originalBody;
+
+  if (!response || !response.success || !response.data) {
+    return res
+      .status(response && response.status ? response.status : 400)
+      .json(response);
+  }
+
+  const orderId = response.data._id;
+  const built = await buildOrderItemDocuments(
+    orderId,
+    response.data,
+    lines,
+    req,
+  );
+  if (built.error) {
+    await Order.findByIdAndDelete(orderId);
+    return res.status(built.error.status).json(built.error);
+  }
+
+  try {
+    const inserted = await OrderItem.insertMany(built.docs);
+    const items = inserted.map((d) => d.toObject({ flattenMaps: true }));
+    const data = shapeOrderWithItems(response.data, items);
+    return res.status(201).json({
+      success: true,
+      status: 201,
+      data,
+    });
+  } catch (err) {
+    await Order.findByIdAndDelete(orderId);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: "Failed to create order line items",
+      details: err.message,
+      type: "order_item_insert",
+    });
+  }
+}
+
+async function order_update(req, res) {
+  const lines = parseOrderLineItems(req.body);
+  const originalBody = req.body;
+  req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
+  delete req.body._id;
+
+  const response = await handleGenericUpdate(req, "order", {
+    afterUpdate: async () => {},
+    filter: { status: "active", deletedAt: null },
+  });
+
+  req.body = originalBody;
+
+  if (!response || !response.success || !response.data) {
+    return res
+      .status(response && response.status ? response.status : 400)
+      .json(response);
+  }
+
   const orderId = response.data._id;
 
-  const products = [];
-  Object.keys(req.body).forEach((key) => {
-    const match = key.match(/\[(\d+)\]/);
-    if (!match) return;
-    const index = match[1];
-    if (!products[index]) {
-      products[index] = {};
+  if (lines.length > 0) {
+    const built = await buildOrderItemDocuments(
+      orderId,
+      response.data,
+      lines,
+      req,
+    );
+    if (built.error) {
+      return res.status(built.error.status).json(built.error);
     }
-    if (key.startsWith("product_id")) {
-      products[index].product_id = req.body[key];
-    }
-    if (key.startsWith("qty")) {
-      products[index].qty = req.body[key];
-    }
-    if (key.startsWith("price")) {
-      products[index].price = req.body[key];
-    }
-  });
-  console.log("🔍 products", products);
-  let orderItemRes = [];
-  products.forEach(async (product, index) => {
-    req.body.order_id = orderId;
-    req.body.product_id = product.product_id;
-    req.body.qty = product.qty;
-    req.body.price = product.price;
-    orderItemRes[index] = await handleGenericCreate(req, "order_item", {
-      afterCreate: async (record, req) => {
-        console.log("✅ Record created successfully:", record);
-      },
-    })
-      .then((response) => {
-        console.log("✅ Record created successfully:", response);
-      })
-      .catch((error) => {
-        console.error("❌ Failed to create record:", error);
-        return res.status(error.status).json(error);
+    const previousItems = await OrderItem.find({ order_id: orderId }).lean();
+    try {
+      await OrderItem.deleteMany({ order_id: orderId });
+      const inserted = await OrderItem.insertMany(built.docs);
+      const items = inserted.map((d) => d.toObject({ flattenMaps: true }));
+      const data = shapeOrderWithItems(response.data, items);
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        data,
       });
+    } catch (err) {
+      if (previousItems.length > 0) {
+        try {
+          await OrderItem.insertMany(previousItems, { ordered: false });
+        } catch (restoreErr) {
+          console.error("Order item restore failed:", restoreErr);
+        }
+      }
+      return res.status(500).json({
+        success: false,
+        status: 500,
+        error: "Failed to replace order line items",
+        details: err.message,
+        type: "order_item_insert",
+      });
+    }
+  }
+
+  const items = await OrderItem.find({
+    order_id: orderId,
+    status: "active",
+    deletedAt: null,
+  })
+    .populate("product_id")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const data = shapeOrderWithItems(response.data, items);
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    data,
   });
-  console.log("🔍 orderItemRes1", orderItemRes);
-  return res.status(response.status).json(response);
 }
 
 async function getOrderByOrderNo(req, res) {
@@ -162,10 +400,16 @@ async function getOrderByOrderNo(req, res) {
     .sort({ createdAt: 1 })
     .lean();
 
+  const order_items_total = items.reduce((sum, item) => {
+    const sub = Number(item.subtotal);
+    return sum + (Number.isFinite(sub) ? sub : 0);
+  }, 0);
+
   const data = {
     ...order.toObject({ flattenMaps: true }),
     order_items: items,
     no_of_items: items.length,
+    order_items_total,
   };
 
   return res.status(200).json({
@@ -190,5 +434,6 @@ module.exports = {
   invoiceUpdate,
   getOrderByOrderNo,
   order_save,
+  order_update,
   getOrderByorderItem,
 };

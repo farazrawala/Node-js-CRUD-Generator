@@ -14,7 +14,7 @@ async function getNextSequence(name) {
   const counter = await Counter.findByIdAndUpdate(
     name,
     { $inc: { seq: 1 } },
-    { new: true, upsert: true }
+    { new: true, upsert: true },
   );
   return counter.seq;
 }
@@ -43,7 +43,7 @@ const modelSchema = new mongoose.Schema(
 
     image: {
       type: String,
-      field_name: "Blog Image",
+      field_name: "Image",
     },
 
     company_id: {
@@ -87,7 +87,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 // Pre-save hook to auto-generate purchase_order_no if not provided

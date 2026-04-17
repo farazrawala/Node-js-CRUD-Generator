@@ -19,6 +19,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    subtotal: {
+      type: Number,
+      required: true,
+    },
     // image: {
     //   type: String,
     //   field_type: "image",

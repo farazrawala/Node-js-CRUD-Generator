@@ -83,7 +83,7 @@ async function productCreateVariation(req, res) {
     ) {
       console.error(
         "❌ Failed to create parent product:",
-        parentProductResponse
+        parentProductResponse,
       );
       return res.status(parentProductResponse.status || 500).json({
         success: false,
@@ -94,7 +94,7 @@ async function productCreateVariation(req, res) {
 
     console.log(
       "✅ Parent product created with ID:",
-      parentProductResponse.data._id
+      parentProductResponse.data._id,
     );
 
     if (variations.length > 0) {
@@ -121,11 +121,11 @@ async function productCreateVariation(req, res) {
             afterCreate: async (record, req) => {
               console.log("✅ Product variation created successfully:", record);
             },
-          }
+          },
         );
         console.log(
           "🔧 Product create variation - response:",
-          variationResponse
+          variationResponse,
         );
         // return res.status(variationResponse.status).json(variationResponse);
       }
@@ -302,7 +302,7 @@ async function productUpdateVariation(req, res) {
         console.log("🔧 Product update variation - beforeUpdate hook called");
         console.log(
           "🔧 Original updateData.warehouse_inventory:",
-          updateData.warehouse_inventory
+          updateData.warehouse_inventory,
         );
 
         // Process warehouse inventory if present in request body
@@ -346,7 +346,7 @@ async function productUpdateVariation(req, res) {
           updateData.warehouse_inventory = warehouseInventory;
           console.log(
             "✅ Processed warehouse inventory in controller:",
-            warehouseInventory
+            warehouseInventory,
           );
         }
       },
@@ -371,7 +371,7 @@ async function productUpdateVariation(req, res) {
     ) {
       console.error(
         "❌ Failed to update parent product:",
-        parentProductResponse
+        parentProductResponse,
       );
       return res.status(parentProductResponse.status || 500).json({
         success: false,
@@ -445,16 +445,16 @@ async function productUpdateVariation(req, res) {
               beforeUpdate: async (updateData, req, existingRecord) => {
                 console.log(
                   "🔧 Variation update - beforeUpdate hook called for:",
-                  variation.id
+                  variation.id,
                 );
               },
               afterUpdate: async (record, req, existingRecord) => {
                 console.log(
                   "✅ Product variation updated successfully:",
-                  record._id
+                  record._id,
                 );
               },
-            }
+            },
           );
 
           // Store result for response
@@ -508,10 +508,10 @@ async function productUpdateVariation(req, res) {
               afterCreate: async (record, req) => {
                 console.log(
                   "✅ Product variation created successfully:",
-                  record._id
+                  record._id,
                 );
               },
-            }
+            },
           );
 
           // Store result for response
@@ -581,7 +581,7 @@ async function productUpdate(req, res) {
       console.log("🔧 Product update - beforeUpdate hook called");
       console.log(
         "🔧 Original updateData.warehouse_inventory:",
-        updateData.warehouse_inventory
+        updateData.warehouse_inventory,
       );
 
       // Process warehouse inventory if present
@@ -621,18 +621,18 @@ async function productUpdate(req, res) {
         updateData.warehouse_inventory = warehouseInventory;
         console.log(
           "✅ Processed warehouse inventory in controller:",
-          warehouseInventory
+          warehouseInventory,
         );
       } else {
         // Check for warehouse_inventory fields with different patterns
         const warehouseFields = Object.keys(req.body).filter((key) =>
-          key.includes("warehouse_inventory")
+          key.includes("warehouse_inventory"),
         );
 
         if (warehouseFields.length > 0) {
           console.log(
             "🔧 Found warehouse fields in controller:",
-            warehouseFields
+            warehouseFields,
           );
           const warehouseInventory = [];
 
@@ -664,7 +664,7 @@ async function productUpdate(req, res) {
           updateData.warehouse_inventory = warehouseInventory;
           console.log(
             "✅ Processed warehouse inventory from field names in controller:",
-            warehouseInventory
+            warehouseInventory,
           );
         }
       }
@@ -847,7 +847,7 @@ async function getProductWarehouseInventory(req, res) {
 
     const product = await Product.findById(productId).populate(
       "warehouse_inventory.warehouse_id",
-      "warehouse_name warehouse_address status"
+      "warehouse_name warehouse_address status",
     );
 
     if (!product) {
@@ -935,7 +935,7 @@ async function getProductsByWarehouse(req, res) {
       "warehouse_inventory.quantity": { $gt: 0 },
     }).populate(
       "warehouse_inventory.warehouse_id",
-      "warehouse_name warehouse_address"
+      "warehouse_name warehouse_address",
     );
 
     return res.status(200).json({
@@ -971,7 +971,7 @@ async function productDelete(req, res) {
     filter.company_id = req.user.company_id;
     console.log(
       `🔍 Filtering product delete by company_id:`,
-      req.user.company_id
+      req.user.company_id,
     );
   }
 
@@ -982,6 +982,23 @@ async function productDelete(req, res) {
     afterUpdate: async (record, req, existingRecord) => {
       console.log(`✅ Product soft deleted successfully.`);
     },
+  });
+  return res.status(response.status).json(response);
+}
+
+async function getAllActiveProductsPOS(req, res) {
+  const filter = { status: "active", deletedAt: null, product_type: "Single" };
+  const response = await handleGenericGetAll(req, "product", {
+    filter,
+    excludeFields: [], // Don't exclude any fields
+    search: req.query.search,
+    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+    populate: [
+      {
+        path: "parent_product_id",
+        select: "product_name",
+      },
+    ],
   });
   return res.status(response.status).json(response);
 }
@@ -1000,4 +1017,5 @@ module.exports = {
   productUpdateVariation,
   getProductVariationById,
   productDelete,
+  getAllActiveProductsPOS,
 };

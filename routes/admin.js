@@ -3196,7 +3196,7 @@ router.get("/dashboard", async (req, res) => {
       .limit(5)
       .select("order_number total_amount status createdAt");
 
-    // Get dynamic routes for sidebar
+    // Get dynamic routes for sidebar  //posPayAmount
     const enabledRoutes = routeRegistry.getEnabledRoutes();
 
     res.render("admin/dashboard", {

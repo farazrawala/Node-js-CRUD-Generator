@@ -2022,11 +2022,28 @@ const handleGenericGetAll = async (
     // Dynamically get the model
     const Model = getModelFromController(modelName);
 
-    const searchTerm = typeof search === "string" ? search.trim() : "";
+    const searchFromOptions =
+      search == null ? "" : (
+        typeof search === "string" ?
+          search.trim()
+        : String(search).trim()
+      );
+    const searchFromQuery =
+      req.query && req.query.search != null ?
+        String(req.query.search).trim()
+      : "";
+    const searchTerm = searchFromOptions || searchFromQuery;
+
     let searchFields =
       Array.isArray(searchFieldsOption) ?
         searchFieldsOption.filter(Boolean)
       : [];
+    if (searchFields.length === 0 && req.query && req.query.searchFields) {
+      const parsed = parseSearchFieldsFromQuery(req.query.searchFields);
+      if (parsed && parsed.length > 0) {
+        searchFields = parsed;
+      }
+    }
     if (searchTerm && searchFields.length === 0) {
       searchFields = getDefaultSearchFieldsFromModel(Model);
     }
