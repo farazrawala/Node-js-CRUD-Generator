@@ -122,6 +122,13 @@ const modelSchema = new mongoose.Schema(
             min: 0,
             field_name: "Quantity"
           },
+          quantity_action: {
+            type: String,
+            enum: ["add", "subtract"],
+            default: "add",
+            field_type: "select",
+            field_name: "Quantity Action"
+          },
           last_updated: {
             type: Date,
             default: Date.now,
@@ -266,12 +273,14 @@ modelSchema.methods.setWarehouseQuantity = function(warehouseId, quantity) {
   if (existingIndex >= 0) {
     // Update existing warehouse quantity
     this.warehouse_inventory[existingIndex].quantity = quantity;
+    this.warehouse_inventory[existingIndex].quantity_action = "add";
     this.warehouse_inventory[existingIndex].last_updated = new Date();
   } else {
     // Add new warehouse inventory entry
     this.warehouse_inventory.push({
       warehouse_id: warehouseId,
       quantity: quantity,
+      quantity_action: "add",
       last_updated: new Date()
     });
   }
@@ -307,6 +316,7 @@ modelSchema.methods.decreaseWarehouseQuantity = function(warehouseId, quantity) 
     const currentQty = this.warehouse_inventory[existingIndex].quantity;
     if (currentQty >= quantity) {
       this.warehouse_inventory[existingIndex].quantity -= quantity;
+      this.warehouse_inventory[existingIndex].quantity_action = "subtract";
       this.warehouse_inventory[existingIndex].last_updated = new Date();
       return true;
     }
@@ -323,11 +333,13 @@ modelSchema.methods.increaseWarehouseQuantity = function(warehouseId, quantity) 
 
   if (existingIndex >= 0) {
     this.warehouse_inventory[existingIndex].quantity += quantity;
+    this.warehouse_inventory[existingIndex].quantity_action = "add";
     this.warehouse_inventory[existingIndex].last_updated = new Date();
   } else {
     this.warehouse_inventory.push({
       warehouse_id: warehouseId,
       quantity: quantity,
+      quantity_action: "add",
       last_updated: new Date()
     });
   }

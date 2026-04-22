@@ -7,7 +7,188 @@ const {
   parseSearchFieldsFromQuery,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
+const Logs = require("../models/logs");
+const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
+
+function normalizeWarehouseInventoryInput(reqBody) {
+  if (reqBody.warehouse_inventory) {
+    const inventoryData = reqBody.warehouse_inventory;
+    const normalized = [];
+
+    if (typeof inventoryData === "object" && !Array.isArray(inventoryData)) {
+      Object.keys(inventoryData).forEach((key) => {
+        const item = inventoryData[key];
+        if (item && item.warehouse_id && item.quantity !== undefined) {
+          normalized.push({
+            warehouse_id: item.warehouse_id,
+            quantity: parseInt(item.quantity) || 0,
+            quantity_action: item.quantity_action || "add",
+          });
+        }
+      });
+    } else if (Array.isArray(inventoryData)) {
+      inventoryData.forEach((item) => {
+        if (item && item.warehouse_id && item.quantity !== undefined) {
+          normalized.push({
+            warehouse_id: item.warehouse_id,
+            quantity: parseInt(item.quantity) || 0,
+            quantity_action: item.quantity_action || "add",
+          });
+        }
+      });
+    }
+
+    return normalized;
+  }
+
+  const warehouseFields = Object.keys(reqBody).filter((key) =>
+    key.includes("warehouse_inventory"),
+  );
+
+  if (warehouseFields.length === 0) {
+    return null;
+  }
+
+  const inventoryData = {};
+  warehouseFields.forEach((field) => {
+    const match = field.match(/warehouse_inventory\[(\d+)\]\[(\w+)\]/);
+    if (match) {
+      const [, index, property] = match;
+      if (!inventoryData[index]) {
+        inventoryData[index] = {};
+      }
+      inventoryData[index][property] = reqBody[field];
+    }
+  });
+
+  const normalized = [];
+  Object.keys(inventoryData).forEach((key) => {
+    const item = inventoryData[key];
+    if (item && item.warehouse_id && item.quantity !== undefined) {
+      normalized.push({
+        warehouse_id: item.warehouse_id,
+        quantity: parseInt(item.quantity) || 0,
+        quantity_action: item.quantity_action || "add",
+      });
+    }
+  });
+
+  return normalized;
+}
+
+function mergeWarehouseInventory(
+  existingInventory = [],
+  incomingInventory = [],
+) {
+  const inventoryMap = new Map();
+  const changes = [];
+
+  existingInventory.forEach((item) => {
+    const warehouseId = item?.warehouse_id?.toString();
+    if (!warehouseId) return;
+    inventoryMap.set(warehouseId, {
+      warehouse_id: item.warehouse_id,
+      quantity: parseInt(item.quantity) || 0,
+      quantity_action: item.quantity_action || "add",
+      last_updated: item.last_updated || new Date(),
+    });
+  });
+
+  incomingInventory.forEach((item) => {
+    const warehouseId = item?.warehouse_id?.toString();
+    if (!warehouseId) return;
+
+    const current = inventoryMap.get(warehouseId) || {
+      warehouse_id: item.warehouse_id,
+      quantity: 0,
+      quantity_action: "add",
+      last_updated: new Date(),
+    };
+
+    const changeQty = parseInt(item.quantity) || 0;
+    const action = item.quantity_action === "subtract" ? "subtract" : "add";
+
+    const previousQuantity = parseInt(current.quantity) || 0;
+    current.quantity =
+      action === "subtract" ?
+        Math.max(0, current.quantity - changeQty)
+      : current.quantity + changeQty;
+    current.quantity_action = action;
+    current.last_updated = new Date();
+
+    if (previousQuantity !== current.quantity) {
+      changes.push({
+        warehouse_id: warehouseId,
+        action,
+        from_qty: previousQuantity,
+        to_qty: current.quantity,
+      });
+    }
+
+    inventoryMap.set(warehouseId, current);
+  });
+
+  return {
+    mergedInventory: Array.from(inventoryMap.values()),
+    changes,
+  };
+}
+
+function getIncomingInventoryForMerge(updateData, reqBody) {
+  // Prefer updateData because handleGenericUpdate may normalize nested
+  // array fields and remove raw form-data keys from req.body before hooks run.
+  const fromUpdateData = normalizeWarehouseInventoryInput({
+    warehouse_inventory: updateData?.warehouse_inventory,
+  });
+  if (fromUpdateData && fromUpdateData.length > 0) {
+    return fromUpdateData;
+  }
+
+  return normalizeWarehouseInventoryInput(reqBody);
+}
+
+async function createWarehouseStockLogs(changes, req, productName) {
+  if (!Array.isArray(changes) || changes.length === 0) return;
+
+  const warehouseIds = [
+    ...new Set(changes.map((change) => change.warehouse_id).filter(Boolean)),
+  ];
+  let warehouseNameMap = new Map();
+
+  if (warehouseIds.length > 0) {
+    try {
+      const warehouses = await Warehouse.find({ _id: { $in: warehouseIds } })
+        .select("_id warehouse_name name")
+        .lean();
+      warehouseNameMap = new Map(
+        warehouses.map((warehouse) => [
+          warehouse._id.toString(),
+          warehouse.warehouse_name || warehouse.name || "Unknown Warehouse",
+        ]),
+      );
+    } catch (error) {
+      console.error("❌ Failed to fetch warehouse names for logs:", error);
+    }
+  }
+
+  const logsToCreate = changes.map((change) => ({
+    action: "product_stock_update",
+    url: req.originalUrl || req.url || "/api/product/update",
+    tags: ["product", "warehouse", "stock", change.action],
+    description: `${productName} :: warehouse ${warehouseNameMap.get(change.warehouse_id) || "Unknown Warehouse"} (${change.warehouse_id}) is updating from ${change.from_qty} to ${change.to_qty}.`,
+    company_id: req.user?.company_id || null,
+    created_by: req.user?._id || null,
+    updated_by: req.user?._id || null,
+    status: "active",
+  }));
+
+  try {
+    await Logs.insertMany(logsToCreate);
+  } catch (error) {
+    console.error("❌ Failed to create warehouse stock logs:", error);
+  }
+}
 
 async function productCreateVariation(req, res) {
   try {
@@ -28,25 +209,18 @@ async function productCreateVariation(req, res) {
       });
     }
 
-    // Initialize warehouse_inventory array if it doesn't exist
-    if (!req.body.warehouse_inventory) {
-      req.body.warehouse_inventory = [];
+    // Backward compatibility: if no warehouse inventory is provided,
+    // seed one default company warehouse entry.
+    if (!normalizeWarehouseInventoryInput(req.body)) {
+      req.body.warehouse_inventory = [
+        {
+          warehouse_id: company.data.warehouse_id,
+          quantity: req.body.quantity || 0,
+          quantity_action: "add",
+          last_updated: new Date(),
+        },
+      ];
     }
-
-    // Ensure it's an array
-    if (!Array.isArray(req.body.warehouse_inventory)) {
-      req.body.warehouse_inventory = [req.body.warehouse_inventory];
-    }
-
-    // Initialize first element if it doesn't exist
-    if (!req.body.warehouse_inventory[0]) {
-      req.body.warehouse_inventory[0] = {};
-    }
-
-    // Set warehouse_id and quantity
-    req.body.warehouse_inventory[0].warehouse_id = company.data.warehouse_id;
-    req.body.warehouse_inventory[0].quantity = req.body.quantity || 0;
-    req.body.warehouse_inventory[0].last_updated = new Date();
 
     // Set company_id if not already set
     if (!req.body.company_id && company.data._id) {
@@ -106,6 +280,7 @@ async function productCreateVariation(req, res) {
           {
             warehouse_id: company.data.warehouse_id,
             quantity: variation.quantity || 0,
+            quantity_action: variation.quantity_action || "add",
             last_updated: new Date(),
           },
         ];
@@ -260,25 +435,18 @@ async function productUpdateVariation(req, res) {
      * Initialize and set up warehouse_inventory array structure
      * This ensures the parent product has proper inventory tracking
      */
-    // Initialize warehouse_inventory array if it doesn't exist
-    if (!req.body.warehouse_inventory) {
-      req.body.warehouse_inventory = [];
+    // Backward compatibility: only seed default warehouse if no
+    // warehouse inventory payload is provided in request.
+    if (!normalizeWarehouseInventoryInput(req.body)) {
+      req.body.warehouse_inventory = [
+        {
+          warehouse_id: company.data.warehouse_id,
+          quantity: req.body.quantity || 0,
+          quantity_action: "add",
+          last_updated: new Date(),
+        },
+      ];
     }
-
-    // Ensure it's an array (handle case where it might be an object)
-    if (!Array.isArray(req.body.warehouse_inventory)) {
-      req.body.warehouse_inventory = [req.body.warehouse_inventory];
-    }
-
-    // Initialize first element if it doesn't exist
-    if (!req.body.warehouse_inventory[0]) {
-      req.body.warehouse_inventory[0] = {};
-    }
-
-    // Set warehouse_id, quantity, and last_updated timestamp
-    req.body.warehouse_inventory[0].warehouse_id = company.data.warehouse_id;
-    req.body.warehouse_inventory[0].quantity = req.body.quantity || 0;
-    req.body.warehouse_inventory[0].last_updated = new Date();
 
     // Set company_id if not already set in request body
     if (!req.body.company_id && company.data._id) {
@@ -305,48 +473,20 @@ async function productUpdateVariation(req, res) {
           updateData.warehouse_inventory,
         );
 
-        // Process warehouse inventory if present in request body
-        if (req.body.warehouse_inventory) {
-          const warehouseInventory = [];
-          const inventoryData = req.body.warehouse_inventory;
-
-          // Handle object format (e.g., {0: {warehouse_id: "...", quantity: 10}})
-          if (
-            typeof inventoryData === "object" &&
-            !Array.isArray(inventoryData)
-          ) {
-            // Convert object format to array
-            Object.keys(inventoryData).forEach((key) => {
-              const item = inventoryData[key];
-              // Validate item has required fields
-              if (item.warehouse_id && item.quantity !== undefined) {
-                warehouseInventory.push({
-                  warehouse_id: item.warehouse_id,
-                  quantity: parseInt(item.quantity) || 0,
-                  last_updated: new Date(),
-                });
-              }
-            });
-          }
-          // Handle array format (e.g., [{warehouse_id: "...", quantity: 10}])
-          else if (Array.isArray(inventoryData)) {
-            inventoryData.forEach((item) => {
-              // Validate item has required fields
-              if (item.warehouse_id && item.quantity !== undefined) {
-                warehouseInventory.push({
-                  warehouse_id: item.warehouse_id,
-                  quantity: parseInt(item.quantity) || 0,
-                  last_updated: new Date(),
-                });
-              }
-            });
-          }
-
-          // Update the updateData with processed inventory
-          updateData.warehouse_inventory = warehouseInventory;
+        const incomingInventory = getIncomingInventoryForMerge(
+          updateData,
+          req.body,
+        );
+        if (incomingInventory !== null) {
+          const { mergedInventory, changes } = mergeWarehouseInventory(
+            existingRecord?.warehouse_inventory || [],
+            incomingInventory,
+          );
+          updateData.warehouse_inventory = mergedInventory;
+          req._warehouseStockChanges = changes;
           console.log(
-            "✅ Processed warehouse inventory in controller:",
-            warehouseInventory,
+            "✅ Merged warehouse inventory in controller:",
+            mergedInventory,
           );
         }
       },
@@ -355,6 +495,11 @@ async function productUpdateVariation(req, res) {
        */
       afterUpdate: async (record, req, existingRecord) => {
         console.log("✅ Parent product updated successfully:", record);
+        await createWarehouseStockLogs(
+          req._warehouseStockChanges || [],
+          req,
+          record.product_name || "Product",
+        );
       },
     });
 
@@ -432,6 +577,7 @@ async function productUpdateVariation(req, res) {
             {
               warehouse_id: company.data.warehouse_id,
               quantity: variation.quantity || 0,
+              quantity_action: variation.quantity_action || "add",
               last_updated: new Date(),
             },
           ];
@@ -495,6 +641,7 @@ async function productUpdateVariation(req, res) {
             {
               warehouse_id: company.data.warehouse_id,
               quantity: variation.quantity || 0,
+              quantity_action: variation.quantity_action || "add",
               last_updated: new Date(),
             },
           ];
@@ -584,93 +731,30 @@ async function productUpdate(req, res) {
         updateData.warehouse_inventory,
       );
 
-      // Process warehouse inventory if present
-      if (req.body.warehouse_inventory) {
-        const warehouseInventory = [];
-        const inventoryData = req.body.warehouse_inventory;
-
-        // Handle object format from form (e.g., warehouse_inventory[0][warehouse_id])
-        if (
-          typeof inventoryData === "object" &&
-          !Array.isArray(inventoryData)
-        ) {
-          // Convert object format to array
-          Object.keys(inventoryData).forEach((key) => {
-            const item = inventoryData[key];
-            if (item.warehouse_id && item.quantity !== undefined) {
-              warehouseInventory.push({
-                warehouse_id: item.warehouse_id,
-                quantity: parseInt(item.quantity) || 0,
-                last_updated: new Date(),
-              });
-            }
-          });
-        } else if (Array.isArray(inventoryData)) {
-          inventoryData.forEach((item) => {
-            if (item.warehouse_id && item.quantity !== undefined) {
-              warehouseInventory.push({
-                warehouse_id: item.warehouse_id,
-                quantity: parseInt(item.quantity) || 0,
-                last_updated: new Date(),
-              });
-            }
-          });
-        }
-
-        // Update the updateData with processed inventory
-        updateData.warehouse_inventory = warehouseInventory;
+      const incomingInventory = getIncomingInventoryForMerge(
+        updateData,
+        req.body,
+      );
+      if (incomingInventory !== null) {
+        const { mergedInventory, changes } = mergeWarehouseInventory(
+          existingRecord?.warehouse_inventory || [],
+          incomingInventory,
+        );
+        updateData.warehouse_inventory = mergedInventory;
+        req._warehouseStockChanges = changes;
         console.log(
-          "✅ Processed warehouse inventory in controller:",
-          warehouseInventory,
+          "✅ Merged warehouse inventory in controller:",
+          mergedInventory,
         );
-      } else {
-        // Check for warehouse_inventory fields with different patterns
-        const warehouseFields = Object.keys(req.body).filter((key) =>
-          key.includes("warehouse_inventory"),
-        );
-
-        if (warehouseFields.length > 0) {
-          console.log(
-            "🔧 Found warehouse fields in controller:",
-            warehouseFields,
-          );
-          const warehouseInventory = [];
-
-          // Try to parse the warehouse_inventory data from the field names
-          const inventoryData = {};
-          warehouseFields.forEach((field) => {
-            const match = field.match(/warehouse_inventory\[(\d+)\]\[(\w+)\]/);
-            if (match) {
-              const [, index, property] = match;
-              if (!inventoryData[index]) {
-                inventoryData[index] = {};
-              }
-              inventoryData[index][property] = req.body[field];
-            }
-          });
-
-          // Convert to array format
-          Object.keys(inventoryData).forEach((key) => {
-            const item = inventoryData[key];
-            if (item.warehouse_id && item.quantity !== undefined) {
-              warehouseInventory.push({
-                warehouse_id: item.warehouse_id,
-                quantity: parseInt(item.quantity) || 0,
-                last_updated: new Date(),
-              });
-            }
-          });
-
-          updateData.warehouse_inventory = warehouseInventory;
-          console.log(
-            "✅ Processed warehouse inventory from field names in controller:",
-            warehouseInventory,
-          );
-        }
       }
     },
     afterUpdate: async (record, req, existingUser) => {
       console.log("✅ Record updated successfully:", record);
+      await createWarehouseStockLogs(
+        req._warehouseStockChanges || [],
+        req,
+        record.product_name || "Product",
+      );
     },
   });
   return res.status(response.status).json(response);
@@ -1001,6 +1085,18 @@ async function getAllActiveProductsPOS(req, res) {
     ],
   });
   return res.status(response.status).json(response);
+}
+
+async function updateStockByWarehouse(req, res) {
+  try {
+    const { warehouse_id, quantity } = req.body;
+  } catch (error) {
+    console.error("❌ Update stock by warehouse error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error",
+    });
+  }
 }
 
 module.exports = {
