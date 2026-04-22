@@ -3,6 +3,7 @@ const PurchaseOrder = require("../models/purchase_order");
 const PurchaseOrderItem = require("../models/purchase_order_item");
 const {
   handleGenericCreate,
+  handleGenericUpdate,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
 
@@ -48,8 +49,7 @@ function parseBracketLineItems(body) {
     const price = parseFloat(String(row.price ?? "").trim());
     const fromTotal = parseFloat(String(row.total ?? "").trim());
     const subtotal =
-      Number.isFinite(fromTotal) ?
-        fromTotal
+      Number.isFinite(fromTotal) ? fromTotal
       : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
       : NaN;
     lines.push({
@@ -76,7 +76,9 @@ function parseLegacyArrayLineItems(body) {
       body["product_id[]"]
     : [body["product_id[]"]].filter(Boolean);
   const qtyArray =
-    Array.isArray(body["qty[]"]) ? body["qty[]"] : [body["qty[]"]].filter(Boolean);
+    Array.isArray(body["qty[]"]) ?
+      body["qty[]"]
+    : [body["qty[]"]].filter(Boolean);
   const priceArray =
     Array.isArray(body["price[]"]) ?
       body["price[]"]
@@ -92,8 +94,7 @@ function parseLegacyArrayLineItems(body) {
       const price = parseFloat(String(priceArray[index] ?? "").trim());
       const fromTotal = parseFloat(String(totalArray[index] ?? "").trim());
       const subtotal =
-        Number.isFinite(fromTotal) ?
-          fromTotal
+        Number.isFinite(fromTotal) ? fromTotal
         : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
         : NaN;
       return { product_id: productId, qty, price, subtotal };
@@ -153,8 +154,62 @@ function collectLineItems(body) {
   return lines;
 }
 
+function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
+  const companyId = poSnapshot.company_id || req.user?.company_id;
+  const userId = req.user?._id;
+  const docs = [];
+  for (const line of lines) {
+    const doc = {
+      purchase_order_id: poId,
+      product_id: String(line.product_id).trim(),
+      qty: line.qty,
+      price: line.price,
+      subtotal: line.subtotal,
+      status: "active",
+      deletedAt: null,
+    };
+    if (companyId) doc.company_id = companyId;
+    if (userId) {
+      doc.created_by = userId;
+      doc.updated_by = userId;
+    }
+    docs.push(doc);
+  }
+  return { docs };
+}
+
+function shapePurchaseOrderWithItems(poPlain, items) {
+  const purchase_order_items_total = items.reduce((sum, item) => {
+    const sub = Number(item.subtotal);
+    return sum + (Number.isFinite(sub) ? sub : 0);
+  }, 0);
+  return {
+    ...poPlain,
+    purchase_order_items: items,
+    no_of_items: items.length,
+    purchase_order_items_total,
+  };
+}
+
 async function getPurchaseOrderByPurchaseItem(req, res) {
+  const idParam =
+    req.params && req.params.id != null ? String(req.params.id).trim() : "";
+
+  if (idParam && !mongoose.Types.ObjectId.isValid(idParam)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid id",
+      details: "id must be a valid purchase_order ObjectId",
+      type: "invalid_id",
+    });
+  }
+
   const filter = { status: "active", deletedAt: null };
+  if (idParam) {
+    filter._id = idParam;
+  }
+
   const response = await handleGenericGetAll(req, "purchase_order", {
     filter,
     excludeFields: [],
@@ -165,6 +220,16 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
 
   if (!response.success || !Array.isArray(response.data)) {
     return res.status(response.status).json(response);
+  }
+
+  if (idParam && response.data.length === 0) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `purchase_order with id "${idParam}" not found`,
+      type: "not_found",
+    });
   }
 
   const poIds = response.data.map((o) => o._id).filter(Boolean);
@@ -195,8 +260,7 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
   }
 
   const data = response.data.map((po) => {
-    const purchase_order_items =
-      itemsByPoId.get(String(po._id)) || [];
+    const purchase_order_items = itemsByPoId.get(String(po._id)) || [];
     const purchase_order_items_total = purchase_order_items.reduce(
       (sum, row) => {
         const sub = Number(row.subtotal);
@@ -214,6 +278,59 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
 
   return res.status(response.status).json({
     ...response,
+    data,
+  });
+}
+
+async function getPurchaseOrderByOrderNo(req, res) {
+  const param = String(req.params.id || "").trim();
+  if (!param) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: "Please provide id in the URL parameters",
+      type: "missing_id",
+    });
+  }
+
+  const filter = { status: "active", deletedAt: null };
+
+  let po = await PurchaseOrder.findOne({
+    purchase_order_no: param,
+    ...filter,
+  });
+  if (!po && mongoose.Types.ObjectId.isValid(param)) {
+    po = await PurchaseOrder.findOne({ _id: param, ...filter });
+  }
+
+  if (!po) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `purchase_order with purchase_order_no or id "${param}" not found`,
+      type: "not_found",
+    });
+  }
+
+  const items = await PurchaseOrderItem.find({
+    purchase_order_id: po._id,
+    status: "active",
+    deletedAt: null,
+  })
+    .populate("product_id")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const data = shapePurchaseOrderWithItems(
+    po.toObject({ flattenMaps: true }),
+    items,
+  );
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
     data,
   });
 }
@@ -311,9 +428,89 @@ async function purchaseOrderCreate(req, res) {
   }
 }
 
+async function purchase_order_update(req, res) {
+  const lines = collectLineItems(req.body);
+  const originalBody = req.body;
+  req.body = stripLineItemKeysFromBody(originalBody);
+  delete req.body._id;
+
+  const response = await handleGenericUpdate(req, "purchase_order", {
+    afterUpdate: async () => {},
+    filter: { status: "active", deletedAt: null },
+  });
+
+  req.body = originalBody;
+
+  if (!response || !response.success || !response.data) {
+    return res
+      .status(response && response.status ? response.status : 400)
+      .json(response);
+  }
+
+  const poId = response.data._id;
+
+  if (lines.length > 0) {
+    const built = buildPurchaseOrderItemDocuments(
+      poId,
+      response.data,
+      lines,
+      req,
+    );
+    const previousItems = await PurchaseOrderItem.find({
+      purchase_order_id: poId,
+    }).lean();
+    try {
+      await PurchaseOrderItem.deleteMany({ purchase_order_id: poId });
+      const inserted = await PurchaseOrderItem.insertMany(built.docs);
+      const items = inserted.map((d) => d.toObject({ flattenMaps: true }));
+      const data = shapePurchaseOrderWithItems(response.data, items);
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        data,
+      });
+    } catch (err) {
+      if (previousItems.length > 0) {
+        try {
+          await PurchaseOrderItem.insertMany(previousItems, {
+            ordered: false,
+          });
+        } catch (restoreErr) {
+          console.error("Purchase order item restore failed:", restoreErr);
+        }
+      }
+      return res.status(500).json({
+        success: false,
+        status: 500,
+        error: "Failed to replace purchase order line items",
+        details: err.message,
+        type: "purchase_order_item_insert",
+      });
+    }
+  }
+
+  const items = await PurchaseOrderItem.find({
+    purchase_order_id: poId,
+    status: "active",
+    deletedAt: null,
+  })
+    .populate("product_id")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const data = shapePurchaseOrderWithItems(response.data, items);
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    data,
+  });
+}
+
 module.exports = {
   purchaseOrderCreate,
+  purchase_order_update,
   getPurchaseOrderByPurchaseItem,
+  getPurchaseOrderByOrderNo,
   // purchase_orderUpdate,
   // purchase_orderById,
   // getAllpurchase_order,

@@ -75,6 +75,23 @@ const modelSchema = new mongoose.Schema(
       ref: "user",
       field_name: "Updated By",
     },
+    order_status: {
+      type: String,
+      enum: [
+        "active",
+        "placed",
+        "confirmed",
+        "shipped",
+        "delivered",
+        "drafted",
+        "pending",
+        "completed",
+        "cancelled",
+        "refunded",
+        "failed",
+      ],
+      default: "placed",
+    },
     status: {
       type: String,
       required: true,

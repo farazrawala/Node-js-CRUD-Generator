@@ -59,7 +59,9 @@ const {
 
 const {
   purchaseOrderCreate,
+  purchase_order_update,
   getPurchaseOrderByPurchaseItem,
+  getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
 const { getMyBranches } = require("../controllers/company");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
@@ -126,9 +128,21 @@ router.post("/user/login", handleUserLogin);
 // router.post("/user/get-one", findUserByEmail);
 
 router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
+router.patch(
+  "/purchase_order/purchase_order_update/:id",
+  purchase_order_update,
+);
 router.get(
   "/purchase_order/get-purchase-order-by-purchase-item",
   getPurchaseOrderByPurchaseItem,
+);
+router.get(
+  "/purchase_order/get-purchase-order-by-purchase-item/:id",
+  getPurchaseOrderByPurchaseItem,
+);
+router.get(
+  "/purchase_order/get-purchase-order-by-order-no/:id",
+  getPurchaseOrderByOrderNo,
 );
 
 // Product routes - Custom CRUD + warehouse inventory management
