@@ -190,6 +190,72 @@ async function createWarehouseStockLogs(changes, req, productName) {
   }
 }
 
+async function updateWarehouseDefault(req, res) {
+  try {
+    const productId = req.params.id || req.body.product_id;
+    const warehouseId = req.body.warehouse_id || req.params.warehouse_id;
+
+    if (!productId || !warehouseId) {
+      return res.status(400).json({
+        success: false,
+        message: "product_id and warehouse_id are required",
+      });
+    }
+
+    const filter = { _id: productId, deletedAt: null };
+    if (req.user?.company_id) {
+      filter.company_id = req.user.company_id;
+    }
+
+    const product = await Product.findOne(filter);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    if (
+      !Array.isArray(product.warehouse_inventory) ||
+      product.warehouse_inventory.length === 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Product has no warehouse inventory",
+      });
+    }
+
+    const targetIndex = product.warehouse_inventory.findIndex(
+      (item) => item?.warehouse_id?.toString() === warehouseId.toString(),
+    );
+
+    if (targetIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Warehouse not found in product inventory",
+      });
+    }
+
+    if (targetIndex > 0) {
+      const [targetWarehouse] = product.warehouse_inventory.splice(targetIndex, 1);
+      product.warehouse_inventory.unshift(targetWarehouse);
+      product.markModified("warehouse_inventory");
+      await product.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Warehouse moved to default position",
+      data: product,
+    });
+  } catch (error) {
+    console.error("❌ Update warehouse default error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error",
+    });
+  }
+}
 async function productCreateVariation(req, res) {
   try {
     // console.log("🔧 Product create variation - req.body keys:", Object.keys(req.body));
@@ -1114,4 +1180,5 @@ module.exports = {
   getProductVariationById,
   productDelete,
   getAllActiveProductsPOS,
+  updateWarehouseDefault,
 };
