@@ -289,8 +289,19 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
   }
 };
 
+/** Populated subdocs (e.g. `company_id` with `{ _id, company_name }`) must be reduced to an id for ObjectId paths. */
+function coalesceObjectId(value) {
+  if (value == null || value === "") {
+    return value;
+  }
+  if (typeof value === "object" && value._id != null) {
+    return value._id;
+  }
+  return value;
+}
+
 /**
- * Generic create function that works with any model
+ * Generic create function that works for any model
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
@@ -354,6 +365,9 @@ const handleGenericCreate = async (
       if (field === "created_by" && modelSchema.created_by && req.user?._id) {
         return false;
       }
+      if (field === "user_id" && modelSchema.user_id && req.user?._id) {
+        return false;
+      }
       if (
         field === "company_id" &&
         modelSchema.company_id &&
@@ -412,7 +426,7 @@ const handleGenericCreate = async (
           if (value === "" || value === "null" || value === undefined) {
             modelData[key] = null;
           } else {
-            modelData[key] = value;
+            modelData[key] = coalesceObjectId(value);
           }
         } else {
           // For non-ObjectID fields, trim as usual
@@ -774,6 +788,11 @@ const handleGenericCreate = async (
       modelData.created_by = req.user._id;
     }
 
+    // Same pattern as blog/transaction: `user_id` when schema expects poster
+    if (req.user && req.user._id && modelSchema.user_id && !modelData.user_id) {
+      modelData.user_id = req.user._id;
+    }
+
     // Automatically set company_id if field exists and user has company_id
     console.log(`🔍 Checking company_id assignment:`, {
       hasUser: !!req.user,
@@ -784,8 +803,8 @@ const handleGenericCreate = async (
     });
 
     if (req.user && req.user.company_id && modelSchema.company_id) {
-      modelData.company_id = req.user.company_id;
-      console.log(`✅ Automatically set company_id to:`, req.user.company_id);
+      modelData.company_id = coalesceObjectId(req.user.company_id);
+      console.log(`✅ Automatically set company_id to:`, modelData.company_id);
     }
 
     // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
@@ -808,7 +827,9 @@ const handleGenericCreate = async (
     Object.keys(modelSchema).forEach((field) => {
       const fieldConfig = modelSchema[field];
       if (fieldConfig.default && !modelData[field]) {
-        modelData[field] = fieldConfig.default;
+        const def = fieldConfig.default;
+        modelData[field] =
+          typeof def === "function" ? def.call(modelData) : def;
       }
     });
 
@@ -1162,7 +1183,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             if (value === "" || value === "null" || value === undefined) {
               updateData[key] = null;
             } else {
-              updateData[key] = value;
+              updateData[key] = coalesceObjectId(value);
             }
           } else {
             // Handle multiselect fields - ensure they are arrays
@@ -1198,7 +1219,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             if (value === "" || value === "null" || value === undefined) {
               updateData[key] = null;
             } else {
-              updateData[key] = value;
+              updateData[key] = coalesceObjectId(value);
             }
           } else {
             // Handle multiselect fields - ensure they are arrays
@@ -1549,7 +1570,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 
     // Automatically set company_id if field exists and user has company_id
     if (req.user && req.user.company_id && modelSchema.company_id) {
-      updateData.company_id = req.user.company_id;
+      updateData.company_id = coalesceObjectId(req.user.company_id);
     }
 
     console.log(`📝 Preparing data for ${modelName} update:`, {
@@ -1922,22 +1943,112 @@ const QUERY_KEYS_SKIP_POPULATE_TRUE = new Set([
 function isPopulateablePath(Model, fieldName) {
   const p = Model.schema.path(fieldName);
   if (!p) return false;
-  if (p.options && p.options.ref) return true;
+  if (p.options && (p.options.ref || p.options.refPath)) return true;
   if (
     p.instance === "Array" &&
     p.caster &&
     p.caster.options &&
-    p.caster.options.ref
+    (p.caster.options.ref || p.caster.options.refPath)
   ) {
     return true;
   }
   return false;
 }
 
+/** Polymorphic ref under `reference_id`; Mongoose does not populate refPath here — see hydrateTransactionPolymorphicRef. */
+const TRANSACTION_POLY_REF_PATH = "reference_id.ref_id";
+
+function mapTransactionPopulatePath(field) {
+  if (field === "ref_id") {
+    return TRANSACTION_POLY_REF_PATH;
+  }
+  return field;
+}
+
+function isPlainObjectIdOnly(val) {
+  const mongoose = require("mongoose");
+  if (val == null) return true;
+  if (mongoose.isValidObjectId(val)) return true;
+  if (val._bsontype === "ObjectId" || val.constructor?.name === "ObjectId") {
+    return true;
+  }
+  return false;
+}
+
+async function hydrateTransactionPolymorphicRef(data) {
+  const mongoose = require("mongoose");
+  const ref = data?.reference_id;
+  if (!ref || !ref.module || ref.ref_id == null) {
+    return;
+  }
+  if (!isPlainObjectIdOnly(ref.ref_id)) {
+    return;
+  }
+
+  let RefModel;
+  try {
+    RefModel = mongoose.model(ref.module);
+  } catch {
+    return;
+  }
+
+  const doc = await RefModel.findById(ref.ref_id).lean();
+  if (doc) {
+    ref.ref_id = { ...doc };
+  }
+}
+
+/** Split populate list: Mongoose paths vs transaction polymorphic ref (manual hydrate). */
+function normalizeTransactionPopulateList(modelName, populate) {
+  if (!Array.isArray(populate)) {
+    return { mongoosePopulate: populate || [], shouldHydrateTxPolyRef: false };
+  }
+  if (modelName !== "transaction") {
+    return { mongoosePopulate: populate, shouldHydrateTxPolyRef: false };
+  }
+  const expanded = populate.map((p) => {
+    if (typeof p === "string") {
+      return mapTransactionPopulatePath(p);
+    }
+    if (typeof p === "object" && p && p.path === "ref_id") {
+      return { ...p, path: TRANSACTION_POLY_REF_PATH };
+    }
+    return p;
+  });
+  const shouldHydrateTxPolyRef = expanded.some(
+    (p) =>
+      p === TRANSACTION_POLY_REF_PATH ||
+      (typeof p === "object" && p && p.path === TRANSACTION_POLY_REF_PATH),
+  );
+  let mongoosePopulate =
+    shouldHydrateTxPolyRef ?
+      expanded.filter(
+        (p) =>
+          p !== TRANSACTION_POLY_REF_PATH &&
+          !(typeof p === "object" && p && p.path === TRANSACTION_POLY_REF_PATH),
+      )
+    : expanded;
+
+  if (shouldHydrateTxPolyRef && modelName === "transaction") {
+    const TxModel = getModelFromController(modelName);
+    const hasAccount = mongoosePopulate.some(
+      (p) =>
+        p === "account_id" ||
+        (typeof p === "object" && p && p.path === "account_id"),
+    );
+    if (!hasAccount && isPopulateablePath(TxModel, "account_id")) {
+      mongoosePopulate = [...mongoosePopulate, "account_id"];
+    }
+  }
+
+  return { mongoosePopulate, shouldHydrateTxPolyRef };
+}
+
 /**
  * Build populate list from query:
  * - ?populate=created_by,company_id
  * - ?created_by=true (any top-level ref/array-of-refs path; value must be true / "true" / "1")
+ * - transaction: ?populate=ref_id → reference_id.ref_id (order, etc.); account_id is auto-added when ref_id is requested
  */
 function buildPopulateFromQuery(query, modelName) {
   const Model = getModelFromController(modelName);
@@ -1950,6 +2061,9 @@ function buildPopulateFromQuery(query, modelName) {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean)
+      .map((field) =>
+        modelName === "transaction" ? mapTransactionPopulatePath(field) : field,
+      )
       .forEach((field) => {
         if (!seen.has(field) && isPopulateablePath(Model, field)) {
           populate.push(field);
@@ -1962,12 +2076,24 @@ function buildPopulateFromQuery(query, modelName) {
     if (QUERY_KEYS_SKIP_POPULATE_TRUE.has(key)) return;
     const val = query[key];
     if (val !== true && val !== "true" && val !== "1") return;
-    if (seen.has(key)) return;
-    if (isPopulateablePath(Model, key)) {
-      populate.push(key);
-      seen.add(key);
+    const pathKey =
+      modelName === "transaction" ? mapTransactionPopulatePath(key) : key;
+    if (seen.has(pathKey)) return;
+    if (isPopulateablePath(Model, pathKey)) {
+      populate.push(pathKey);
+      seen.add(pathKey);
     }
   });
+
+  if (
+    modelName === "transaction" &&
+    populate.includes(TRANSACTION_POLY_REF_PATH) &&
+    !seen.has("account_id") &&
+    isPopulateablePath(Model, "account_id")
+  ) {
+    populate.push("account_id");
+    seen.add("account_id");
+  }
 
   return populate;
 }
@@ -2021,6 +2147,9 @@ const handleGenericGetAll = async (
   try {
     // Dynamically get the model
     const Model = getModelFromController(modelName);
+
+    const { mongoosePopulate: populateForMongoose, shouldHydrateTxPolyRef } =
+      normalizeTransactionPopulateList(modelName, populate);
 
     const searchFromOptions =
       search == null ? "" : (
@@ -2160,8 +2289,8 @@ const handleGenericGetAll = async (
     let query = Model.find(mongoFilter);
 
     // Add population if specified
-    if (populate && populate.length > 0) {
-      populate.forEach((field) => {
+    if (populateForMongoose && populateForMongoose.length > 0) {
+      populateForMongoose.forEach((field) => {
         query = query.populate(field);
       });
     }
@@ -2187,14 +2316,18 @@ const handleGenericGetAll = async (
     const totalCount = await Model.countDocuments(mongoFilter);
 
     // Prepare response data (exclude specified fields and transform image URLs)
-    const responseData = records.map((record) => {
-      const data = { ...record.toObject({ flattenMaps: true }) };
-      excludeFields.forEach((field) => {
-        delete data[field];
-      });
-      // Transform image URLs to full URLs
-      return transformImageUrls(data, Model, req);
-    });
+    const responseData = await Promise.all(
+      records.map(async (record) => {
+        const data = { ...record.toObject({ flattenMaps: true }) };
+        excludeFields.forEach((field) => {
+          delete data[field];
+        });
+        if (shouldHydrateTxPolyRef) {
+          await hydrateTransactionPolymorphicRef(data);
+        }
+        return transformImageUrls(data, Model, req);
+      }),
+    );
 
     console.log(
       `✅ Successfully fetched ${responseData.length} ${modelName} records`,
@@ -2353,14 +2486,17 @@ const handleGenericGetById = async (
     // Dynamically get the model
     const Model = getModelFromController(modelName);
 
+    const { mongoosePopulate: populateForMongoose, shouldHydrateTxPolyRef } =
+      normalizeTransactionPopulateList(modelName, populate);
+
     console.log(`🔍 Fetching ${modelName} with ID: ${recordId}`);
 
     // Build query
     let query = Model.findOne({ _id: recordId, ...filter });
 
     // Add population if specified
-    if (populate && populate.length > 0) {
-      populate.forEach((field) => {
+    if (populateForMongoose && populateForMongoose.length > 0) {
+      populateForMongoose.forEach((field) => {
         query = query.populate(field);
       });
     }
@@ -2383,6 +2519,10 @@ const handleGenericGetById = async (
     excludeFields.forEach((field) => {
       delete responseData[field];
     });
+
+    if (shouldHydrateTxPolyRef) {
+      await hydrateTransactionPolymorphicRef(responseData);
+    }
 
     // Transform image URLs to full URLs
     const transformedData = transformImageUrls(responseData, Model, req);
@@ -2556,6 +2696,9 @@ const handleGenericFindOne = async (
     // Dynamically get the model
     const Model = getModelFromController(modelName);
 
+    const { mongoosePopulate: populateForMongoose, shouldHydrateTxPolyRef } =
+      normalizeTransactionPopulateList(modelName, populate);
+
     console.log(`🔍 Finding one ${modelName} with criteria:`, searchCriteria);
 
     // Execute beforeFind hook if provided
@@ -2586,8 +2729,8 @@ const handleGenericFindOne = async (
     }
 
     // Add population if specified
-    if (populate && populate.length > 0) {
-      populate.forEach((field) => {
+    if (populateForMongoose && populateForMongoose.length > 0) {
+      populateForMongoose.forEach((field) => {
         if (typeof field === "string") {
           query = query.populate(field);
         } else if (typeof field === "object") {
@@ -2639,6 +2782,10 @@ const handleGenericFindOne = async (
       excludeFields.forEach((field) => {
         delete responseData[field];
       });
+    }
+
+    if (shouldHydrateTxPolyRef) {
+      await hydrateTransactionPolymorphicRef(responseData);
     }
 
     // Transform image URLs to full URLs

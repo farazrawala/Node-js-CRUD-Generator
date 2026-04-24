@@ -125,6 +125,7 @@ app.use(
     responseOnLimit: "File size limit has been reached",
     useTempFiles: false, // Use memory instead of temp files
     debug: false,
+    parseNested: true, // multipart keys like reference_id[module] → nested req.body
   })
 );
 

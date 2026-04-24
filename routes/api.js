@@ -65,6 +65,7 @@ const {
   getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
 const { getMyBranches } = require("../controllers/company");
+const { transactionBulkCreate } = require("../controllers/transaction");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
 // const {
@@ -192,6 +193,9 @@ router.patch("/order/order_update/:id", order_update);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
+
+router.post("/transaction/bulk-create", transactionBulkCreate);
+router.post("/transactions/bulk-create", transactionBulkCreate);
 
 router.post("/test", (req, res) => {
   console.log("Test route hit");

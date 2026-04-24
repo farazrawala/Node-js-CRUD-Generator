@@ -1,0 +1,66 @@
+{
+  "info": {
+    "name": "Transaction bulk create (form-data)",
+    "description": "**POST** `/api/transaction/bulk-create` (alias: `/api/transactions/bulk-create`).\n\n**Auth:** Bearer token (`bearerToken`).\n\n**Body → form-data** (requires `parseNested: true` on `express-fileupload` in `index.js`). Bracket keys build `req.body.items` as an array.\n\nOptional row: `stopOnError` = `true` to abort after first failure.\n\nReplace ObjectIds with real `account` / `order` ids from your DB.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "bearerToken", "value": "" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{bearerToken}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "Bulk create — form-data (2 rows)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "items[0][account_id]", "value": "507f191e810c19729de860ea", "type": "text" },
+            { "key": "items[0][type]", "value": "debit", "type": "text" },
+            { "key": "items[0][amount]", "value": "100", "type": "text" },
+            { "key": "items[0][description]", "value": "Bulk row 1", "type": "text" },
+            { "key": "items[0][reference_id][module]", "value": "order", "type": "text" },
+            { "key": "items[0][reference_id][ref_id]", "value": "69e2a31c3d12e7592dd79799", "type": "text" },
+            { "key": "items[0][reference_id][field]", "value": "total", "type": "text" },
+            { "key": "items[0][reference_id][amount]", "value": "100", "type": "text" },
+            { "key": "items[1][account_id]", "value": "507f191e810c19729de860eb", "type": "text" },
+            { "key": "items[1][type]", "value": "credit", "type": "text" },
+            { "key": "items[1][amount]", "value": "100", "type": "text" },
+            { "key": "items[1][description]", "value": "Bulk row 2", "type": "text" },
+            { "key": "stopOnError", "value": "false", "type": "text", "description": "Optional: true to stop on first error" }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/transaction/bulk-create",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "transaction", "bulk-create"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Bulk create — raw JSON (same payload)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"items\": [\n    {\n      \"account_id\": \"507f191e810c19729de860ea\",\n      \"type\": \"debit\",\n      \"amount\": 100,\n      \"description\": \"Bulk row 1\",\n      \"reference_id\": {\n        \"module\": \"order\",\n        \"ref_id\": \"69e2a31c3d12e7592dd79799\",\n        \"field\": \"total\",\n        \"amount\": 100\n      }\n    },\n    {\n      \"account_id\": \"507f191e810c19729de860eb\",\n      \"type\": \"credit\",\n      \"amount\": 100,\n      \"description\": \"Bulk row 2\"\n    }\n  ],\n  \"stopOnError\": false\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/transaction/bulk-create",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "transaction", "bulk-create"]
+        }
+      },
+      "response": []
+    }
+  ]
+}

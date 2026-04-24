@@ -7,9 +7,32 @@ const {
   handleGenericUpdate,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
+const {
+  createTransactionsFromItems: transactionBulkCreate,
+} = require("./transaction");
 
-/** Form keys: product_id[0], qty[0], price[0], … */
-function parseOrderLineItems(body) {
+function indexedContainerLength(v) {
+  if (v == null) return 0;
+  if (Array.isArray(v)) return v.length;
+  if (typeof v === "object") {
+    const nums = Object.keys(v)
+      .map((k) => parseInt(k, 10))
+      .filter((n) => !Number.isNaN(n));
+    if (nums.length === 0) return 0;
+    return Math.max(...nums) + 1;
+  }
+  return 0;
+}
+
+function indexedContainerGet(v, i) {
+  if (v == null) return undefined;
+  if (Array.isArray(v)) return v[i];
+  if (typeof v === "object") return v[i] ?? v[String(i)];
+  return undefined;
+}
+
+/** Flat keys: product_id[0], qty[0], price[0], … (raw multipart without parseNested, etc.) */
+function parseOrderLineItemsFromFlatKeys(body) {
   const byIndex = new Map();
   if (!body || typeof body !== "object") return [];
   for (const key of Object.keys(body)) {
@@ -63,12 +86,66 @@ function parseOrderLineItems(body) {
   );
 }
 
+/**
+ * Parallel containers from express-fileupload parseNested or qs (urlencoded):
+ * body.product_id = [id0, id1], body.qty = [...], body.price = [...]
+ */
+function parseOrderLineItemsFromIndexedContainers(body) {
+  if (!body || typeof body !== "object") return [];
+  const p = body.product_id;
+  const q = body.qty;
+  const pr = body.price;
+  const len = Math.max(
+    indexedContainerLength(p),
+    indexedContainerLength(q),
+    indexedContainerLength(pr),
+  );
+  if (len === 0) return [];
+
+  const lines = [];
+  for (let i = 0; i < len; i++) {
+    const product_id = indexedContainerGet(p, i);
+    const qtyRaw = indexedContainerGet(q, i);
+    const priceRaw = indexedContainerGet(pr, i);
+    const qtyNum = parseFloat(String(qtyRaw ?? "").trim());
+    const priceNum = parseFloat(String(priceRaw ?? "").trim());
+    const subtotal =
+      Number.isFinite(qtyNum) && Number.isFinite(priceNum) ?
+        qtyNum * priceNum
+      : NaN;
+    lines.push({
+      product_id,
+      qtyRaw,
+      qty: qtyNum,
+      price: priceNum,
+      subtotal,
+    });
+  }
+  return lines.filter(
+    (l) =>
+      l.product_id &&
+      String(l.product_id).trim() !== "" &&
+      mongoose.Types.ObjectId.isValid(String(l.product_id).trim()) &&
+      Number.isFinite(l.subtotal),
+  );
+}
+
+/** Form keys: product_id[0], qty[0], price[0], … or nested arrays from parseNested / qs */
+function parseOrderLineItems(body) {
+  const fromFlat = parseOrderLineItemsFromFlatKeys(body);
+  if (fromFlat.length > 0) return fromFlat;
+  return parseOrderLineItemsFromIndexedContainers(body);
+}
+
 function stripLineItemKeys(body) {
   const out = {};
   for (const k of Object.keys(body)) {
     if (/^(product_id|qty|price)\[\d+\]$/.test(k)) continue;
     out[k] = body[k];
   }
+  if (Array.isArray(out.product_id)) delete out.product_id;
+  if (Array.isArray(out.qty)) delete out.qty;
+  if (Array.isArray(out.price)) delete out.price;
   return out;
 }
 
@@ -241,7 +318,47 @@ async function order_save(req, res) {
   delete req.body._id;
 
   const response = await handleGenericCreate(req, "order", {
-    afterCreate: async () => {},
+    afterCreate: async (record, orderReq) => {
+      console.log("✅ Order created successfully:", record?._id);
+
+      // Same insert path as POST /api/transaction/bulk-create (`createTransactionsFromItems`).
+      try {
+        const orderTotal = Number(
+          lines
+            .reduce(
+              (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
+              0,
+            )
+            .toFixed(2),
+        );
+        const { created, failed } = await transactionBulkCreate(
+          orderReq,
+          [
+            {
+              account_id: "69ea81245b47a0fc87931258",
+              type: "credit",
+              amount: orderTotal,
+              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              description: "Sale Order",
+              reference_id: {
+                module: "order",
+                ref_id: record._id,
+                field: "total",
+                amount: orderTotal,
+              },
+            },
+          ],
+          { stopOnError: true },
+        );
+        if (failed.length) {
+          console.error("⚠️ Post-order transaction bulk insert failed:", failed);
+        } else if (created[0]?.data?._id) {
+          console.log("✅ Transaction(s) created:", created.map((c) => c.data._id));
+        }
+      } catch (e) {
+        console.error("⚠️ Post-order transaction error:", e.message);
+      }
+    },
   });
 
   req.body = originalBody;
