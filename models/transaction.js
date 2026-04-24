@@ -37,6 +37,11 @@ const modelSchema = new mongoose.Schema(
       //   required: true,
       field_name: "Amount",
     },
+    reference_user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      required: true,
+    },
     reference_id: {
       type: referenceEmbedSchema,
       required: false,
