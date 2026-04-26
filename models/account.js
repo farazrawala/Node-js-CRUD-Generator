@@ -32,7 +32,7 @@ const modelSchema = new mongoose.Schema(
         "other expense",
         "equity",
         "liability",
-        // "other",
+        "other",
       ],
       field_name: "Account Type",
     },

@@ -15,6 +15,60 @@ const {
   buildPopulateFromQuery,
 } = require('./modelHelper');
 
+const RESERVED_QUERY_KEYS = new Set([
+  'limit',
+  'skip',
+  'search',
+  'searchFields',
+  'populate',
+  'sort',
+  'sortBy',
+  'sortOrder',
+  'page',
+  'deleted',
+]);
+
+function parseQueryValue(raw) {
+  if (raw === undefined || raw === null) return raw;
+  if (Array.isArray(raw)) return raw.map(parseQueryValue);
+  const str = String(raw).trim();
+  if (str.includes(',')) {
+    return str
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  if (str === 'true') return true;
+  if (str === 'false') return false;
+  if (str !== '' && !Number.isNaN(Number(str))) return Number(str);
+  return str;
+}
+
+function applyQueryFilters(baseFilter, query = {}) {
+  const filter = { ...baseFilter };
+  Object.keys(query).forEach((key) => {
+    if (RESERVED_QUERY_KEYS.has(key)) return;
+    const parsed = parseQueryValue(query[key]);
+    if (parsed === '' || parsed === undefined) return;
+    if (Array.isArray(parsed)) {
+      filter[key] = { $in: parsed };
+      return;
+    }
+    filter[key] = parsed;
+  });
+  return filter;
+}
+
+function buildSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
+  const sortBy = typeof query.sortBy === 'string' ? query.sortBy.trim() : '';
+  const sortOrderRaw = typeof query.sortOrder === 'string' ? query.sortOrder.trim().toLowerCase() : '';
+  if (!sortBy) {
+    return fallback;
+  }
+  const direction = sortOrderRaw === 'asc' || sortOrderRaw === '1' ? 1 : -1;
+  return { [sortBy]: direction };
+}
+
 /**
  * Get all model names from the models directory
  */
@@ -101,13 +155,15 @@ function generateControllerFunctions(modelName) {
 
     // Get all
     getAll: async (req, res) => {
-      const filter = { deletedAt: null };
+      let filter = { deletedAt: null };
       
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
         console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
+      filter = applyQueryFilters(filter, req.query);
+      const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       // console.log("filter", filter);
       // console.log("req.query.limit", req.query.limit);
@@ -121,7 +177,7 @@ function generateControllerFunctions(modelName) {
       
       const response = await handleGenericGetAll(req, modelName, {
         excludeFields: ['password'], // Don't exclude any fields except password
-        sort: { createdAt: -1 }, // Sort by newest first
+        sort,
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
         filter: filter,
@@ -134,18 +190,20 @@ function generateControllerFunctions(modelName) {
 
     // Get all active (if status field exists)
     getAllActive: async (req, res) => {
-      const filter = { status: 'active', deletedAt: null };
+      let filter = { status: 'active', deletedAt: null };
       
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;
         console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
+      filter = applyQueryFilters(filter, req.query);
+      const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       const response = await handleGenericGetAll(req, modelName, {
         filter: filter,
         excludeFields: ['password'],
-        sort: { createdAt: -1 },
+        sort,
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
         search: req.query.search,

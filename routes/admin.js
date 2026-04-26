@@ -495,7 +495,8 @@ const companyAdminCRUD = adminCrudGenerator(
             if (!req.fieldConfig[fieldName]) return;
             req.fieldConfig[fieldName].type = "select";
             req.fieldConfig[fieldName].options = accountOptions;
-            req.fieldConfig[fieldName].placeholder = `Select ${req.fieldConfig[fieldName].label}`;
+            req.fieldConfig[fieldName].placeholder =
+              `Select ${req.fieldConfig[fieldName].label}`;
           });
 
           console.log(
@@ -615,7 +616,8 @@ const companyAdminCRUD = adminCrudGenerator(
             if (!req.fieldConfig[fieldName]) return;
             req.fieldConfig[fieldName].type = "select";
             req.fieldConfig[fieldName].options = accountOptions;
-            req.fieldConfig[fieldName].placeholder = `Select ${req.fieldConfig[fieldName].label}`;
+            req.fieldConfig[fieldName].placeholder =
+              `Select ${req.fieldConfig[fieldName].label}`;
           });
 
           console.log(

@@ -1,5 +1,6 @@
 const { getUserToken } = require("../service/auth");
 const { handleGenericCreate } = require("../utils/modelHelper");
+const User = require("../models/user");
 
 /**
  * Helper function to log API requests
@@ -69,7 +70,68 @@ async function logApiRequest(req, user = null) {
   }
 }
 
-function checkForAuthentication(req, res, next) {
+/**
+ * Decode user from JWT and enrich from database (including populated company).
+ * Falls back to token payload if DB lookup fails.
+ */
+async function hydrateUserFromToken(token) {
+  const tokenUser = getUserToken(token);
+  if (!tokenUser?._id) {
+    return tokenUser || null;
+  }
+
+  try {
+    const dbUser = await User.findById(tokenUser._id)
+      .populate([
+        {
+          path: "company_id",
+          // No select whitelist: include full company document.
+          populate: [
+            { path: "default_cash_account", select: "name account_number company_id" },
+            { path: "default_sales_account", select: "name account_number company_id" },
+            { path: "default_purchase_account", select: "name account_number company_id" },
+            { path: "default_sales_discount_account", select: "name account_number company_id" },
+            { path: "default_purchase_discount_account", select: "name account_number company_id" },
+            { path: "default_account_receivable_account", select: "name account_number company_id" },
+            { path: "default_account_payable_account", select: "name account_number company_id" },
+            { path: "default_shipping_account", select: "name account_number company_id" },
+          ],
+        },
+      ])
+      .lean();
+    if (!dbUser) {
+      return tokenUser;
+    }
+    if (dbUser.company_id && typeof dbUser.company_id === "object") {
+      const company = dbUser.company_id;
+      const companyDefaultAccountFields = [
+        "default_cash_account",
+        "default_sales_account",
+        "default_purchase_account",
+        "default_sales_discount_account",
+        "default_purchase_discount_account",
+        "default_account_receivable_account",
+        "default_account_payable_account",
+        "default_shipping_account",
+        "warehouse_id",
+      ];
+      companyDefaultAccountFields.forEach((field) => {
+        if (company[field] === undefined) {
+          company[field] = null;
+        }
+      });
+    }
+    return {
+      ...tokenUser,
+      ...dbUser,
+    };
+  } catch (error) {
+    console.error("⚠️ Failed to hydrate req.user from DB:", error.message);
+    return tokenUser;
+  }
+}
+
+async function checkForAuthentication(req, res, next) {
   // const authorizationHeaderValue = req.headers["authorization"];
   const tokencookie = req.cookies?.token;
   req.user = null;
@@ -77,7 +139,7 @@ function checkForAuthentication(req, res, next) {
   if (!tokencookie) return next();
 
   const token = tokencookie;
-  const user = getUserToken(token);
+  const user = await hydrateUserFromToken(token);
   req.user = user;
 
   return next();
@@ -153,7 +215,7 @@ async function checkHeaderAuthentication(req, res, next) {
     ? authorizationHeaderValue.split("Bearer ")[1]
     : authorizationHeaderValue;
 
-  const user = getUserToken(token);
+  const user = await hydrateUserFromToken(token);
 
   if (!user) {
     return res.status(401).json({
@@ -204,7 +266,7 @@ async function restrictToLoginUserOnly(req, res, next) {
   console.log("Authorization", req.headers);
   if (!userUid) return res.redirect("/login");
   const token = userUid.split("Bearer ")[1];
-  const user = getUserToken(token);
+  const user = await hydrateUserFromToken(token);
   if (!user) return res.redirect("/login");
   req.user = user;
   next();

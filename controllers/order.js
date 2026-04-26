@@ -11,6 +11,28 @@ const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
 
+async function logOrderTransactionError(req, description) {
+  try {
+    const companyId =
+      req.user?.company_id?._id || req.user?.company_id || undefined;
+    const createdBy = req.user?._id || undefined;
+    const logReq = Object.create(Object.getPrototypeOf(req));
+    Object.assign(logReq, req, {
+      body: {
+        action: "POST ORDER TRANSACTION ERROR",
+        url: req.originalUrl || req.path || "/api/order/save",
+        tags: ["api", "order", "transaction", "error"],
+        description,
+        company_id: companyId,
+        created_by: createdBy,
+      },
+    });
+    await handleGenericCreate(logReq, "logs", {});
+  } catch (logErr) {
+    console.error("⚠️ Failed to write transaction error log:", logErr.message);
+  }
+}
+
 function indexedContainerLength(v) {
   if (v == null) return 0;
   if (Array.isArray(v)) return v.length;
@@ -317,6 +339,9 @@ async function order_save(req, res) {
   req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
   delete req.body._id;
 
+  const transaction_number = `TXN-${Date.now()}-${Math.floor(Math.random() * 10000000)}`;
+  req.body.transaction_number = transaction_number;
+
   const response = await handleGenericCreate(req, "order", {
     afterCreate: async (record, orderReq) => {
       console.log("✅ Order created successfully:", record);
@@ -336,16 +361,17 @@ async function order_save(req, res) {
         // discount 75
         //     sales 100
         //     shipment 50
+
         const { created, failed } = await transactionBulkCreate(
           orderReq,
           [
             {
               // sales
-              account_id: "69ea81245b47a0fc87931258",
+              account_id: orderReq.user.company_id.default_sales_account,
               type: "credit",
               amount: orderTotal,
               reference_user_id: record?.customer_id,
-              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              transaction_number,
               description: "Sale Order",
               reference_id: {
                 module: "order",
@@ -354,11 +380,11 @@ async function order_save(req, res) {
             },
             {
               // shipment
-              account_id: "69eb97d344e381d4fae19b71",
+              account_id: orderReq.user.company_id.default_shipping_account,
               type: "credit",
               amount: record?.shipment,
               reference_user_id: record?.customer_id,
-              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              transaction_number,
               description: "Sale Order",
               reference_id: {
                 module: "order",
@@ -368,11 +394,12 @@ async function order_save(req, res) {
 
             {
               // Sales Discount
-              account_id: "69ea81565b47a0fc87931260",
+              account_id:
+                orderReq.user.company_id.default_sales_discount_account,
               type: "debit",
               amount: record?.discount,
               reference_user_id: record?.customer_id,
-              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              transaction_number,
               description: "Sale Discount",
               reference_id: {
                 module: "order",
@@ -381,12 +408,12 @@ async function order_save(req, res) {
             },
             {
               // Cash
-              account_id: "69dfb06caed74f8292a611e3",
+              account_id: orderReq.body?.posPayMethod,
               type: "debit",
-              amount: record?.discount,
+              amount: record?.amount_received,
               reference_user_id: record?.customer_id,
-              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-              description: "Cash",
+              transaction_number,
+              description: "Mode of Payment",
               reference_id: {
                 module: "order",
                 ref_id: record._id,
@@ -400,6 +427,10 @@ async function order_save(req, res) {
             "⚠️ Post-order transaction bulk insert failed:",
             failed,
           );
+          await logOrderTransactionError(
+            req,
+            `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`,
+          );
         } else if (created[0]?.data?._id) {
           console.log(
             "✅ Transaction(s) created:",
@@ -408,6 +439,10 @@ async function order_save(req, res) {
         }
       } catch (e) {
         console.error("⚠️ Post-order transaction error:", e.message);
+        await logOrderTransactionError(
+          req,
+          `Post-order transaction error: ${e.message}`,
+        );
       }
     },
   });

@@ -19,6 +19,13 @@ async function getNextSequence(name) {
   return counter.seq;
 }
 
+function getCompanyInitials(companyName) {
+  const raw = String(companyName || "").toUpperCase();
+  const letters = raw.replace(/[^A-Z]/g, "");
+  if (!letters) return "GEN";
+  return letters.slice(0, 3).padEnd(3, "X");
+}
+
 const modelSchema = new mongoose.Schema(
   {
     name: {
@@ -58,13 +65,19 @@ const modelSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    shipment: {
+      type: Number,
+      default: 0,
+    },
     amount_received: {
       type: Number,
       field_name: "Amount Received",
+      default: 0,
     },
     change_given: {
       type: Number,
       field_name: "Change Given",
+      default: 0,
     },
     // total: {
     //   type: Number,
@@ -86,6 +99,10 @@ const modelSchema = new mongoose.Schema(
         "failed",
       ],
       default: "placed",
+    },
+    transaction_number: {
+      type: String,
+      field_name: "Transaction Number",
     },
     // default fields
     branch_id: {
@@ -146,12 +163,22 @@ modelSchema.pre("save", async function (next) {
 
   if (!this.order_no || this.order_no.trim() === "") {
     try {
-      const companyCounterKey =
-        this.company_id ?
-          `order_no_${this.company_id.toString()}`
-        : "order_no_global";
+      let initials = "GEN";
+      if (this.company_id) {
+        try {
+          const CompanyModel =
+            mongoose.models.company || mongoose.model("company");
+          const company = await CompanyModel.findById(this.company_id)
+            .select("company_name")
+            .lean();
+          initials = getCompanyInitials(company?.company_name);
+        } catch (_) {
+          initials = "GEN";
+        }
+      }
+      const companyCounterKey = `order_no_${initials}`;
       const seq = await getNextSequence(companyCounterKey);
-      this.order_no = `ORD-${String(seq).padStart(6, "0")}`;
+      this.order_no = `ORD-${initials}-${String(seq).padStart(4, "0")}`;
     } catch (error) {
       return next(error);
     }

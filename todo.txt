@@ -74,9 +74,20 @@ http://localhost:8000/admin/company/691b6e7c9e27374a2c97061f/edit
 
 
 //while creating company
+******
 create default accounts. with no delete change from the front.
 - cash
+- A/c receivable
 - sales
-- purchase
 - sales discount
+- purchase
 - purchase discount
+- Shipment
+- Expense
+- Salary
+- Utilities.
+- Other Expense.
+- Rent.
+
+******
+create one default walkin customer.
