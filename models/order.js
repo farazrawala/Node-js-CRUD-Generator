@@ -29,6 +29,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Order No",
     },
+    customer_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+    },
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",

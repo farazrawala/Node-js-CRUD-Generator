@@ -319,7 +319,7 @@ async function order_save(req, res) {
 
   const response = await handleGenericCreate(req, "order", {
     afterCreate: async (record, orderReq) => {
-      console.log("✅ Order created successfully:", record?._id);
+      console.log("✅ Order created successfully:", record);
 
       // Same insert path as POST /api/transaction/bulk-create (`createTransactionsFromItems`).
       try {
@@ -331,29 +331,80 @@ async function order_save(req, res) {
             )
             .toFixed(2),
         );
+
+        // cash 75
+        // discount 75
+        //     sales 100
+        //     shipment 50
         const { created, failed } = await transactionBulkCreate(
           orderReq,
           [
             {
+              // sales
               account_id: "69ea81245b47a0fc87931258",
               type: "credit",
               amount: orderTotal,
+              reference_user_id: record?.customer_id,
               transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
               description: "Sale Order",
               reference_id: {
                 module: "order",
                 ref_id: record._id,
-                field: "total",
-                amount: orderTotal,
+              },
+            },
+            {
+              // shipment
+              account_id: "69eb97d344e381d4fae19b71",
+              type: "credit",
+              amount: record?.shipment,
+              reference_user_id: record?.customer_id,
+              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              description: "Sale Order",
+              reference_id: {
+                module: "order",
+                ref_id: record._id,
+              },
+            },
+
+            {
+              // Sales Discount
+              account_id: "69ea81565b47a0fc87931260",
+              type: "debit",
+              amount: record?.discount,
+              reference_user_id: record?.customer_id,
+              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              description: "Sale Discount",
+              reference_id: {
+                module: "order",
+                ref_id: record._id,
+              },
+            },
+            {
+              // Cash
+              account_id: "69dfb06caed74f8292a611e3",
+              type: "debit",
+              amount: record?.discount,
+              reference_user_id: record?.customer_id,
+              transaction_number: `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              description: "Cash",
+              reference_id: {
+                module: "order",
+                ref_id: record._id,
               },
             },
           ],
           { stopOnError: true },
         );
         if (failed.length) {
-          console.error("⚠️ Post-order transaction bulk insert failed:", failed);
+          console.error(
+            "⚠️ Post-order transaction bulk insert failed:",
+            failed,
+          );
         } else if (created[0]?.data?._id) {
-          console.log("✅ Transaction(s) created:", created.map((c) => c.data._id));
+          console.log(
+            "✅ Transaction(s) created:",
+            created.map((c) => c.data._id),
+          );
         }
       } catch (e) {
         console.error("⚠️ Post-order transaction error:", e.message);

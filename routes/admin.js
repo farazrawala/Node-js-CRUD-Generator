@@ -258,6 +258,14 @@ const companyAdminCRUD = adminCrudGenerator(
     "company_email",
     "company_address",
     "company_logo",
+    "default_cash_account",
+    "default_sales_account",
+    "default_purchase_account",
+    "default_sales_discount_account",
+    "default_purchase_discount_account",
+    "default_account_receivable_account",
+    "default_account_payable_account",
+    "default_shipping_account",
     "warehouse_id",
     "status",
   ], // Headings.
@@ -269,6 +277,14 @@ const companyAdminCRUD = adminCrudGenerator(
       "company_email",
       "company_address",
       "company_logo",
+      "default_cash_account",
+      "default_sales_account",
+      "default_purchase_account",
+      "default_sales_discount_account",
+      "default_purchase_discount_account",
+      "default_account_receivable_account",
+      "default_account_payable_account",
+      "default_shipping_account",
       "warehouse_id",
     ],
     searchableFields: ["company_name", "company_email", "company_phone"],
@@ -281,6 +297,14 @@ const companyAdminCRUD = adminCrudGenerator(
       status: "select",
       deletedAt: "hidden",
       warehouse_id: "select",
+      default_cash_account: "select",
+      default_sales_account: "select",
+      default_purchase_account: "select",
+      default_sales_discount_account: "select",
+      default_purchase_discount_account: "select",
+      default_account_receivable_account: "select",
+      default_account_payable_account: "select",
+      default_shipping_account: "select",
     },
     fieldLabels: {
       company_logo: "Logo Image",
@@ -289,6 +313,14 @@ const companyAdminCRUD = adminCrudGenerator(
       company_email: "Email",
       company_address: "Address",
       warehouse_id: "Default Store",
+      default_cash_account: "Default Cash Account",
+      default_sales_account: "Default Sales Account",
+      default_purchase_account: "Default Purchase Account",
+      default_sales_discount_account: "Default Sales Discount Account",
+      default_purchase_discount_account: "Default Purchase Discount Account",
+      default_account_receivable_account: "Default Account Receivable Account",
+      default_account_payable_account: "Default Account Payable Account",
+      default_shipping_account: "Default Shipping Account",
     },
     fieldOptions: {
       status: [
@@ -369,6 +401,16 @@ const companyAdminCRUD = adminCrudGenerator(
       },
       beforeCreateForm: async (req, res) => {
         try {
+          const accountFields = [
+            "default_cash_account",
+            "default_sales_account",
+            "default_purchase_account",
+            "default_sales_discount_account",
+            "default_purchase_discount_account",
+            "default_account_receivable_account",
+            "default_account_payable_account",
+            "default_shipping_account",
+          ];
           console.log(
             "🔍 beforeCreateForm - req.fieldConfig exists:",
             !!req.fieldConfig,
@@ -427,6 +469,35 @@ const companyAdminCRUD = adminCrudGenerator(
             "Choose the warehouse for this company";
           req.warehouses = warehouses;
 
+          // Populate account dropdown options for all default account fields.
+          const accountFilter = {
+            status: "active",
+            $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
+          };
+          if (req.user?.company_id) {
+            accountFilter.company_id = req.user.company_id;
+          }
+          const accounts = await Account.find(accountFilter)
+            .select("name account_name account_number company_id")
+            .populate({ path: "company_id", select: "company_name" })
+            .sort({ name: 1 });
+          const accountOptions = accounts.map((account) => ({
+            value: account._id.toString(),
+            label: (() => {
+              const accountName =
+                account.name || account.account_name || "Unnamed Account";
+              const companyName =
+                account.company_id?.company_name || "No Company";
+              return `${accountName} (${companyName})`;
+            })(),
+          }));
+          accountFields.forEach((fieldName) => {
+            if (!req.fieldConfig[fieldName]) return;
+            req.fieldConfig[fieldName].type = "select";
+            req.fieldConfig[fieldName].options = accountOptions;
+            req.fieldConfig[fieldName].placeholder = `Select ${req.fieldConfig[fieldName].label}`;
+          });
+
           console.log(
             "✅ beforeCreateForm - warehouse_id options set:",
             req.fieldConfig.warehouse_id.options.length,
@@ -454,6 +525,16 @@ const companyAdminCRUD = adminCrudGenerator(
       },
       beforeEditForm: async (req, res) => {
         try {
+          const accountFields = [
+            "default_cash_account",
+            "default_sales_account",
+            "default_purchase_account",
+            "default_sales_discount_account",
+            "default_purchase_discount_account",
+            "default_account_receivable_account",
+            "default_account_payable_account",
+            "default_shipping_account",
+          ];
           console.log("🔍 beforeEditForm called for company");
           console.log(
             "🔍 beforeEditForm - req.fieldConfig exists:",
@@ -508,6 +589,34 @@ const companyAdminCRUD = adminCrudGenerator(
           req.fieldConfig.warehouse_id.placeholder = "Select Warehouse";
           req.fieldConfig.warehouse_id.helpText =
             "Choose the warehouse for this company";
+
+          const accountFilter = {
+            status: "active",
+            $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
+          };
+          if (req.user?.company_id) {
+            accountFilter.company_id = req.user.company_id;
+          }
+          const accounts = await Account.find(accountFilter)
+            .select("name account_name account_number company_id")
+            .populate({ path: "company_id", select: "company_name" })
+            .sort({ name: 1 });
+          const accountOptions = accounts.map((account) => ({
+            value: account._id.toString(),
+            label: (() => {
+              const accountName =
+                account.name || account.account_name || "Unnamed Account";
+              const companyName =
+                account.company_id?.company_name || "No Company";
+              return `${accountName} (${companyName})`;
+            })(),
+          }));
+          accountFields.forEach((fieldName) => {
+            if (!req.fieldConfig[fieldName]) return;
+            req.fieldConfig[fieldName].type = "select";
+            req.fieldConfig[fieldName].options = accountOptions;
+            req.fieldConfig[fieldName].placeholder = `Select ${req.fieldConfig[fieldName].label}`;
+          });
 
           console.log(
             "✅ beforeEditForm - warehouse_id options set:",

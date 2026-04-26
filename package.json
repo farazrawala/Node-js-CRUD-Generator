@@ -26,8 +26,9 @@
     "method-override": "^3.0.0",
     "mongoose": "^8.16.3",
     "multer": "^2.0.2",
-    "nodemon": "^3.1.10",
+    "mysql2": "^3.22.2",
     "node-fetch": "^3.3.2",
+    "nodemon": "^3.1.10",
     "shortid": "^2.2.17",
     "uuid": "^11.1.0"
   }

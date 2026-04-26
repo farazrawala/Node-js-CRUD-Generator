@@ -23,7 +23,49 @@ const modelSchema = new mongoose.Schema(
       field_name: "Logo Image",
       field_type: "image",
     },
-    // warehouse_id:{
+
+    default_cash_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Cash Account",
+    },
+    default_sales_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Sales Account",
+    },
+    default_purchase_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Purchase Account",
+    },
+    default_sales_discount_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Sales Discount Account",
+    },
+    default_purchase_discount_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Purchase Discount Account",
+    },
+    default_account_receivable_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Account Receivable Account",
+    },
+    default_account_payable_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Account Payable Account",
+    },
+    default_shipping_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Shipping Account",
+    },
+
+    // warehouse_id:{z
     //   type: mongoose.Schema.Types.ObjectId,
     //   ref: "warehouse",
     //   field_name: "Default Store",

@@ -66,3 +66,17 @@ if (
       ) {
         return false;
       }
+
+for temp.
+http://localhost:8000/admin/company/691b6e7c9e27374a2c97061f/edit
+
+
+
+
+//while creating company
+create default accounts. with no delete change from the front.
+- cash
+- sales
+- purchase
+- sales discount
+- purchase discount

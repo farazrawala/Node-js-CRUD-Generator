@@ -80,7 +80,7 @@ app.use(
     exposedHeaders: ["Content-Range", "X-Content-Range"],
     preflightContinue: false,
     optionsSuccessStatus: 204,
-  })
+  }),
 );
 
 app.use(cookieParser());
@@ -100,7 +100,7 @@ app.use(
       secure: false, // Set to true if using HTTPS
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
-  })
+  }),
 );
 
 // Flash messages middleware
@@ -126,14 +126,14 @@ app.use(
     useTempFiles: false, // Use memory instead of temp files
     debug: false,
     parseNested: true, // multipart keys like reference_id[module] → nested req.body
-  })
+  }),
 );
 
 // Method override for PUT/DELETE requests (MUST be before body parsing)
 app.use(
   methodOverride("_method", {
     methods: ["POST"],
-  })
+  }),
 );
 
 // Middleware to handle different content types AFTER file upload
