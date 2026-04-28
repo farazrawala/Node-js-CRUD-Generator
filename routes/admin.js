@@ -266,6 +266,7 @@ const companyAdminCRUD = adminCrudGenerator(
     "default_account_receivable_account",
     "default_account_payable_account",
     "default_shipping_account",
+    "default_equity_account_id",
     "warehouse_id",
     "status",
   ], // Headings.
@@ -285,6 +286,7 @@ const companyAdminCRUD = adminCrudGenerator(
       "default_account_receivable_account",
       "default_account_payable_account",
       "default_shipping_account",
+      "default_equity_account_id",
       "warehouse_id",
     ],
     searchableFields: ["company_name", "company_email", "company_phone"],
@@ -305,6 +307,7 @@ const companyAdminCRUD = adminCrudGenerator(
       default_account_receivable_account: "select",
       default_account_payable_account: "select",
       default_shipping_account: "select",
+      default_equity_account_id: "select",
     },
     fieldLabels: {
       company_logo: "Logo Image",
@@ -321,6 +324,7 @@ const companyAdminCRUD = adminCrudGenerator(
       default_account_receivable_account: "Default Account Receivable Account",
       default_account_payable_account: "Default Account Payable Account",
       default_shipping_account: "Default Shipping Account",
+      default_equity_account_id: "Default Equity Account",
     },
     fieldOptions: {
       status: [
@@ -410,6 +414,7 @@ const companyAdminCRUD = adminCrudGenerator(
             "default_account_receivable_account",
             "default_account_payable_account",
             "default_shipping_account",
+            "default_equity_account_id",
           ];
           console.log(
             "🔍 beforeCreateForm - req.fieldConfig exists:",
@@ -535,6 +540,7 @@ const companyAdminCRUD = adminCrudGenerator(
             "default_account_receivable_account",
             "default_account_payable_account",
             "default_shipping_account",
+            "default_equity_account_id",
           ];
           console.log("🔍 beforeEditForm called for company");
           console.log(

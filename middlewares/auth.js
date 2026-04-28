@@ -27,8 +27,9 @@ async function logApiRequest(req, user = null) {
       const authorizationHeaderValue = req.headers["authorization"];
       if (authorizationHeaderValue) {
         try {
-          const token = authorizationHeaderValue.startsWith("Bearer ")
-            ? authorizationHeaderValue.split("Bearer ")[1]
+          const token =
+            authorizationHeaderValue.startsWith("Bearer ") ?
+              authorizationHeaderValue.split("Bearer ")[1]
             : authorizationHeaderValue;
           const tokenUser = getUserToken(token);
           if (tokenUser) {
@@ -87,14 +88,42 @@ async function hydrateUserFromToken(token) {
           path: "company_id",
           // No select whitelist: include full company document.
           populate: [
-            { path: "default_cash_account", select: "name account_number company_id" },
-            { path: "default_sales_account", select: "name account_number company_id" },
-            { path: "default_purchase_account", select: "name account_number company_id" },
-            { path: "default_sales_discount_account", select: "name account_number company_id" },
-            { path: "default_purchase_discount_account", select: "name account_number company_id" },
-            { path: "default_account_receivable_account", select: "name account_number company_id" },
-            { path: "default_account_payable_account", select: "name account_number company_id" },
-            { path: "default_shipping_account", select: "name account_number company_id" },
+            {
+              path: "default_cash_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_sales_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_purchase_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_sales_discount_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_purchase_discount_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_account_receivable_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_account_payable_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_shipping_account",
+              select: "name account_number company_id",
+            },
+            {
+              path: "default_equity_account_id",
+              select: "name account_number company_id",
+            },
           ],
         },
       ])
@@ -173,11 +202,9 @@ async function checkHeaderAuthentication(req, res, next) {
   // Check if current route should be public
   const isPublicRoute = publicRoutePatterns.some((pattern) => {
     const match =
-      typeof pattern === "string"
-        ? req.path === pattern
-        : pattern instanceof RegExp
-        ? pattern.test(req.path)
-        : false;
+      typeof pattern === "string" ? req.path === pattern
+      : pattern instanceof RegExp ? pattern.test(req.path)
+      : false;
 
     // Debug logging for this specific route
     if (req.path === "/api/user/user_company") {
@@ -211,8 +238,9 @@ async function checkHeaderAuthentication(req, res, next) {
   }
 
   // Extract token from "Bearer TOKEN" format or just use the token directly
-  const token = authorizationHeaderValue.startsWith("Bearer ")
-    ? authorizationHeaderValue.split("Bearer ")[1]
+  const token =
+    authorizationHeaderValue.startsWith("Bearer ") ?
+      authorizationHeaderValue.split("Bearer ")[1]
     : authorizationHeaderValue;
 
   const user = await hydrateUserFromToken(token);
@@ -241,7 +269,7 @@ function restrictTo(roles) {
 
     // Check if user has any of the required roles (user.role is an array)
     const userHasRole = req.user.role.some((userRole) =>
-      roles.includes(userRole)
+      roles.includes(userRole),
     );
     if (!userHasRole) {
       return res.status(403).json({

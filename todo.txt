@@ -89,5 +89,40 @@ create default accounts. with no delete change from the front.
 - Other Expense.
 - Rent.
 
+//SPLENDING ACCOUNTS.
+  Bank Revaluations 
+  Exchange Gain or Loss 
+  Advertising 
+  Bank Fees 
+  Cleaning 
+  Consulting &amp; Accounting 
+  Depreciation 
+  Entertainment 
+  Freight &amp; Courier 
+  General Expenses 
+  Discounts Given 
+  Discounts Received 
+  Income Tax Expense 
+  Insurance 
+  Legal expenses 
+  Light, Power, Heating 
+  Motor Vehicle Expenses 
+  Office Expenses 
+  Printing &amp; Stationery 
+  Rent 
+  Repairs and Maintenance 
+  Subscriptions 
+  Provident Fund 
+  Telephone &amp; Internet 
+  Travel - International 
+  Travel - National 
+  Wages and Salaries 
+  Rounding 
+  Shipping Charges 
+  Cash Short / Excess 
+  Other Revenue 
+  Sales 
+  Sales Return 
+
 ******
 create one default walkin customer.

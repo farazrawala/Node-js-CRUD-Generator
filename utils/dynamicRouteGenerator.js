@@ -13,6 +13,8 @@ const {
   handleGenericDelete,
   parseSearchFieldsFromQuery,
   buildPopulateFromQuery,
+  getModelFromController,
+  shouldTreatQueryKeyAsPopulateOnly,
 } = require('./modelHelper');
 
 const RESERVED_QUERY_KEYS = new Set([
@@ -44,10 +46,21 @@ function parseQueryValue(raw) {
   return str;
 }
 
-function applyQueryFilters(baseFilter, query = {}) {
+function applyQueryFilters(baseFilter, query = {}, modelName = null) {
   const filter = { ...baseFilter };
+  let Model = null;
+  if (modelName) {
+    try {
+      Model = getModelFromController(modelName);
+    } catch (_) {
+      Model = null;
+    }
+  }
   Object.keys(query).forEach((key) => {
     if (RESERVED_QUERY_KEYS.has(key)) return;
+    if (shouldTreatQueryKeyAsPopulateOnly(Model, modelName, key, query[key])) {
+      return;
+    }
     const parsed = parseQueryValue(query[key]);
     if (parsed === '' || parsed === undefined) return;
     if (Array.isArray(parsed)) {
@@ -162,7 +175,7 @@ function generateControllerFunctions(modelName) {
         filter.company_id = req.user.company_id;
         console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
-      filter = applyQueryFilters(filter, req.query);
+      filter = applyQueryFilters(filter, req.query, modelName);
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       // console.log("filter", filter);
@@ -197,7 +210,7 @@ function generateControllerFunctions(modelName) {
         filter.company_id = req.user.company_id;
         console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
       }
-      filter = applyQueryFilters(filter, req.query);
+      filter = applyQueryFilters(filter, req.query, modelName);
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       const response = await handleGenericGetAll(req, modelName, {

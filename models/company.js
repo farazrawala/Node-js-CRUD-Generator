@@ -65,6 +65,12 @@ const modelSchema = new mongoose.Schema(
       field_name: "Default Shipping Account",
     },
 
+    default_equity_account_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Equity Account",
+    },
+
     // warehouse_id:{z
     //   type: mongoose.Schema.Types.ObjectId,
     //   ref: "warehouse",

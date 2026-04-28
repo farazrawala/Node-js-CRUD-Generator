@@ -79,6 +79,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "Change Given",
       default: 0,
     },
+    payment_method_accounts_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Payment Method Accounts",
+    },
     // total: {
     //   type: Number,
     //   required: true,

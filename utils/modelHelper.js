@@ -441,6 +441,31 @@ const handleGenericCreate = async (
       }
     });
 
+    // Mongoose `timestamps` add createdAt/updatedAt to `schema.paths` but not `schema.obj`,
+    // so they are skipped by the loop above. Accept them for backfills / historical rows.
+    const applyOptionalTimestamp = (tsKey) => {
+      if (!Model.schema.paths[tsKey]) return;
+      const raw = req.body[tsKey];
+      if (raw === undefined || raw === null || raw === "") return;
+      if (typeof raw === "string") {
+        const t = raw.trim();
+        if (t.length) modelData[tsKey] = t;
+      } else if (raw instanceof Date) {
+        modelData[tsKey] = raw;
+      } else if (typeof raw === "number" && Number.isFinite(raw)) {
+        modelData[tsKey] = new Date(raw);
+      }
+    };
+    applyOptionalTimestamp("createdAt");
+    applyOptionalTimestamp("updatedAt");
+    if (
+      modelData.createdAt != null &&
+      modelData.updatedAt === undefined &&
+      Model.schema.paths.updatedAt
+    ) {
+      modelData.updatedAt = modelData.createdAt;
+    }
+
     console.log("🔧 About to start nested array processing...");
 
     // Process nested array fields (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity], warehouse_inventory[0][warehouse_id])
@@ -2099,6 +2124,20 @@ function buildPopulateFromQuery(query, modelName) {
 }
 
 /**
+ * True when ?key=true|"true"|"1" only requests populate for that ref path (see buildPopulateFromQuery),
+ * and must not be merged into the MongoDB filter as a literal value.
+ */
+function shouldTreatQueryKeyAsPopulateOnly(Model, modelName, key, rawVal) {
+  if (!Model || modelName == null || modelName === "") return false;
+  if (QUERY_KEYS_SKIP_POPULATE_TRUE.has(key)) return false;
+  if (Array.isArray(rawVal)) return false;
+  if (rawVal !== true && rawVal !== "true" && rawVal !== "1") return false;
+  const pathKey =
+    modelName === "transaction" ? mapTransactionPopulatePath(key) : key;
+  return isPopulateablePath(Model, pathKey);
+}
+
+/**
  * Generic get all records function that works with any model
  * @param {Object} req - Express request object
  * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
@@ -2858,4 +2897,5 @@ module.exports = {
   handleImageUpload,
   parseSearchFieldsFromQuery,
   buildPopulateFromQuery,
+  shouldTreatQueryKeyAsPopulateOnly,
 };
