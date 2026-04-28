@@ -19,6 +19,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       //   required: true,
     },
+    transaction_number: {
+      type: String,
+      field_name: "Transaction Number",
+    },
 
     account_type: {
       type: String,

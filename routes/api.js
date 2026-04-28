@@ -268,6 +268,15 @@ registerAllModelRoutes(router, {
       enabled: true,
       excludedRoutes: [],
     },
+    // Use accountCreate (transaction_number + post-create transactions), not bare handleGenericCreate
+    account: {
+      enabled: true,
+      excludedRoutes: ["create"],
+      customRoutes: [
+        { method: "POST", path: "/account/create", handler: accountCreate },
+        { method: "POST", path: "/accounts/create", handler: accountCreate },
+      ],
+    },
     brands: {
       enabled: true,
       excludedRoutes: [],
