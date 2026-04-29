@@ -1,13 +1,59 @@
 const mongoose = require("mongoose");
 const PurchaseOrder = require("../models/purchase_order");
 const PurchaseOrderItem = require("../models/purchase_order_item");
+
+const Transaction = require("../models/transaction");
+
+const {
+  createTransactionsFromItems: transactionBulkCreate,
+} = require("./transaction");
+const { logControllerError } = require("../utils/logControllerError");
 const {
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
 
-/** e.g. product_id[0], qty[0], price[0] */
+const PURCHASE_ORDER_TRANSACTION_ERROR_LOG = {
+  action: "POST PURCHASE ORDER TRANSACTION ERROR",
+  tags: ["api", "purchase_order", "transaction", "error"],
+  fallbackUrl: "/api/purchase_order/save",
+};
+
+function purchaseOrderLinesSubtotalSum(lineItems) {
+  if (!Array.isArray(lineItems)) return 0;
+  return Number(
+    lineItems
+      .reduce(
+        (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
+        0,
+      )
+      .toFixed(2),
+  );
+}
+
+/** Same as order: qs / express-fileupload parseNested turn `product_id[0]` into nested structures. */
+function indexedContainerLength(v) {
+  if (v == null) return 0;
+  if (Array.isArray(v)) return v.length;
+  if (typeof v === "object") {
+    const nums = Object.keys(v)
+      .map((k) => parseInt(k, 10))
+      .filter((n) => !Number.isNaN(n));
+    if (nums.length === 0) return 0;
+    return Math.max(...nums) + 1;
+  }
+  return 0;
+}
+
+function indexedContainerGet(v, i) {
+  if (v == null) return undefined;
+  if (Array.isArray(v)) return v[i];
+  if (typeof v === "object") return v[i] ?? v[String(i)];
+  return undefined;
+}
+
+/** e.g. product_id[0], qty[0], price[0] — raw flat keys (some clients / multipart) */
 function parseBracketLineItems(body) {
   const byIndex = new Map();
   if (!body || typeof body !== "object") return [];
@@ -58,6 +104,50 @@ function parseBracketLineItems(body) {
       price,
       subtotal,
     });
+  }
+  return lines.filter(
+    (l) =>
+      l.product_id &&
+      String(l.product_id).trim() !== "" &&
+      mongoose.Types.ObjectId.isValid(String(l.product_id).trim()) &&
+      Number.isFinite(l.qty) &&
+      Number.isFinite(l.price) &&
+      Number.isFinite(l.subtotal),
+  );
+}
+
+/**
+ * `body.product_id` / `body.qty` / `body.price` as arrays or `{ 0: x, 1: y }`
+ * (typical after `application/x-www-form-urlencoded` with bracket notation).
+ */
+function parseLineItemsFromIndexedContainers(body) {
+  if (!body || typeof body !== "object") return [];
+  const p = body.product_id;
+  const q = body.qty;
+  const pr = body.price;
+  const t = body.total;
+  const len = Math.max(
+    indexedContainerLength(p),
+    indexedContainerLength(q),
+    indexedContainerLength(pr),
+    indexedContainerLength(t),
+  );
+  if (len === 0) return [];
+
+  const lines = [];
+  for (let i = 0; i < len; i++) {
+    const product_id = indexedContainerGet(p, i);
+    const qtyRaw = indexedContainerGet(q, i);
+    const priceRaw = indexedContainerGet(pr, i);
+    const totalRaw = indexedContainerGet(t, i);
+    const qty = parseFloat(String(qtyRaw ?? "").trim());
+    const price = parseFloat(String(priceRaw ?? "").trim());
+    const fromTotal = parseFloat(String(totalRaw ?? "").trim());
+    const subtotal =
+      Number.isFinite(fromTotal) ? fromTotal
+      : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
+      : NaN;
+    lines.push({ product_id, qty, price, subtotal });
   }
   return lines.filter(
     (l) =>
@@ -144,11 +234,32 @@ function stripLineItemKeysFromBody(body) {
     if (["product_id[]", "qty[]", "price[]", "total[]"].includes(k)) continue;
     out[k] = body[k];
   }
+  if (indexedContainerLength(out.product_id) > 0) {
+    delete out.product_id;
+    delete out.qty;
+    delete out.price;
+    delete out.total;
+  }
   return out;
+}
+
+/** Match order model required fields when the client omits them (e.g. line-item–only payloads). */
+function ensurePurchaseOrderHeaderFields(body, user) {
+  const b = body || {};
+  if (!String(b.name ?? "").trim()) {
+    b.name = "Purchase order";
+  }
+  if (!String(b.email ?? "").trim()) {
+    b.email = user?.email || "pending@example.com";
+  }
+  if (!String(b.phone ?? "").trim()) {
+    b.phone = String(user?.phone ?? "").trim() || "-";
+  }
 }
 
 function collectLineItems(body) {
   let lines = parseBracketLineItems(body);
+  if (lines.length === 0) lines = parseLineItemsFromIndexedContainers(body);
   if (lines.length === 0) lines = parseLegacyArrayLineItems(body);
   if (lines.length === 0) lines = parseProductIdsBodyArray(body);
   return lines;
@@ -342,16 +453,126 @@ async function purchaseOrderCreate(req, res) {
   try {
     req.body = stripLineItemKeysFromBody(originalBody);
     delete req.body._id;
+    ensurePurchaseOrderHeaderFields(req.body, req.user);
+
+    const transaction_number = `TXN-${Date.now()}-${Math.floor(
+      Math.random() * 1000000,
+    )
+      .toString()
+      .padStart(6, "0")}`;
+
+    req.body.transaction_number = transaction_number;
 
     const purchaseOrderResponse = await handleGenericCreate(
       req,
       "purchase_order",
       {
-        afterCreate: async (record) => {
-          console.log("✅ Purchase Order created:", record._id);
+        afterCreate: async (record, orderReq) => {
+          try {
+            const { created, failed } = await transactionBulkCreate(
+              orderReq,
+              [
+                {
+                  // purchases (`models/company.js`: default_purchase_account)
+                  account_id: orderReq.user.company_id.default_purchase_account,
+                  type: "debit",
+                  amount: req.body?.total_amount || 0,
+                  reference_user_id: record?.vendor_id,
+                  transaction_number,
+                  description: "Purchase Order",
+                  reference_id: {
+                    module: "purchase_order",
+                    ref_id: record._id,
+                  },
+                },
+
+                {
+                  // purchase discount
+                  account_id:
+                    orderReq.user.company_id.default_purchase_discount_account,
+                  type: "debit",
+                  amount: req.body?.discount || 0,
+                  reference_user_id: record?.vendor_id,
+                  transaction_number,
+                  description: "Purchase Discount",
+                },
+                {
+                  // Shipment
+                  account_id: orderReq.user.company_id.default_shipping_account,
+                  type: "debit",
+                  amount: req.body?.shipment || 0,
+                  reference_user_id: record?.vendor_id,
+                  transaction_number,
+                  description: "Purchase Shipment",
+                  reference_id: {
+                    module: "purchase_order",
+                    ref_id: record._id,
+                  },
+                },
+                {
+                  // Mode of payment
+                  account_id: record?.payment_method_accounts_id,
+                  type: "credit",
+                  amount: req.body?.amount_paid || 0,
+                  reference_user_id: record?.vendor_id,
+                  transaction_number,
+                  description: "Mode of Payment",
+                  reference_id: {
+                    module: "purchase_order",
+                    ref_id: record._id,
+                  },
+                },
+                {
+                  // A/c Payable
+                  account_id:
+                    orderReq.user.company_id.default_account_payable_account,
+                  type: "credit",
+                  amount: req.body?.remaining_amount || 0,
+                  reference_user_id: record?.vendor_id,
+                  transaction_number,
+                  description: "A/c Payable",
+                  reference_id: {
+                    module: "purchase_order",
+                    ref_id: record._id,
+                  },
+                },
+              ],
+              { stopOnError: true },
+            );
+            if (failed.length) {
+              console.error(
+                "⚠️ Post-purchase_order transaction bulk insert failed:",
+                failed,
+              );
+              await logControllerError(
+                orderReq,
+                `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`,
+                PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+              );
+            } else if (created[0]?.data?._id) {
+              console.log(
+                "✅ Transaction(s) created:",
+                created.map((c) => c.data._id),
+              );
+            }
+          } catch (e) {
+            console.error(
+              "⚠️ Post-purchase_order transaction error:",
+              e.message,
+            );
+            await logControllerError(
+              orderReq,
+              `Post-purchase_order transaction error: ${e.message}`,
+              PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+            );
+          }
         },
       },
     );
+    console.log("✅ Purchase Order created:", req.body);
+
+    // console.log("✅ Purchase Order created:", purchaseOrderResponse);
+    // return;
 
     req.body = originalBody;
 
@@ -435,7 +656,112 @@ async function purchase_order_update(req, res) {
   delete req.body._id;
 
   const response = await handleGenericUpdate(req, "purchase_order", {
-    afterUpdate: async () => {},
+    afterUpdate: async (record, orderReq) => {
+      const transaction_number = record?.transaction_number;
+      const deleteTransc =
+        transaction_number ?
+          await Transaction.deleteMany({ transaction_number })
+        : { deletedCount: 0 };
+      if (deleteTransc.deletedCount > 0) {
+        console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
+      }
+
+      try {
+        const { created, failed } = await transactionBulkCreate(
+          orderReq,
+          [
+            {
+              // purchases (`models/company.js`: default_purchase_account)
+              account_id: orderReq.user.company_id.default_purchase_account,
+              type: "debit",
+              amount: req.body?.total_amount || 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Purchase Order",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+
+            {
+              // purchase discount
+              account_id:
+                orderReq.user.company_id.default_purchase_discount_account,
+              type: "debit",
+              amount: req.body?.discount || 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Purchase Discount",
+            },
+            {
+              // Shipment
+              account_id: orderReq.user.company_id.default_shipping_account,
+              type: "debit",
+              amount: req.body?.shipment || 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Purchase Shipment",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+            {
+              // Mode of payment
+              account_id: record?.payment_method_accounts_id,
+              type: "credit",
+              amount: req.body?.amount_paid || 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Mode of Payment",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+            {
+              // A/c Payable
+              account_id:
+                orderReq.user.company_id.default_account_payable_account,
+              type: "credit",
+              amount: req.body?.remaining_amount || 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "A/c Payable",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+          ],
+          { stopOnError: true },
+        );
+        if (failed.length) {
+          console.error(
+            "⚠️ Post-purchase_order transaction bulk insert failed:",
+            failed,
+          );
+          await logControllerError(
+            orderReq,
+            `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`,
+            PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+          );
+        } else if (created[0]?.data?._id) {
+          console.log(
+            "✅ Transaction(s) created:",
+            created.map((c) => c.data._id),
+          );
+        }
+      } catch (e) {
+        console.error("⚠️ Post-purchase_order transaction error:", e.message);
+        await logControllerError(
+          orderReq,
+          `Post-purchase_order transaction error: ${e.message}`,
+          PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+        );
+      }
+    },
     filter: { status: "active", deletedAt: null },
   });
 
