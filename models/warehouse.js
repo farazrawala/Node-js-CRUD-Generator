@@ -6,10 +6,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
-    name: {
-      type: String,
-      // required: true,
-    },
+    // name: {
+    //   type: String,
+    //   // required: true,
+    // },
     code: {
       type: String,
       field_name: "Warehouse Code",

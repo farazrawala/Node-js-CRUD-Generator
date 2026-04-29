@@ -237,7 +237,10 @@ async function updateWarehouseDefault(req, res) {
     }
 
     if (targetIndex > 0) {
-      const [targetWarehouse] = product.warehouse_inventory.splice(targetIndex, 1);
+      const [targetWarehouse] = product.warehouse_inventory.splice(
+        targetIndex,
+        1,
+      );
       product.warehouse_inventory.unshift(targetWarehouse);
       product.markModified("warehouse_inventory");
       await product.save();
@@ -780,6 +783,22 @@ async function productCreate(req, res) {
   // If product_type is Single and parent_product_id is not provided, it will be set in the model hook
   // For variant products, parent_product_id should be explicitly provided
 
+  const warehouses = await handleGenericGetAll(req, "warehouse", {
+    excludeFields: [],
+    filter: {
+      status: "active",
+      deletedAt: null,
+      company_id: req.user.company_id,
+    },
+  });
+  const warehouseIds = warehouses.data.map((warehouse) => warehouse._id);
+  req.body.warehouse_inventory = warehouseIds.map((warehouseId, index) => ({
+    warehouse_id: warehouseId,
+    quantity: 0,
+    quantity_action: "add",
+    last_updated: new Date(),
+  }));
+
   const response = await handleGenericCreate(req, "product", {
     afterCreate: async (record, req) => {
       console.log("✅ Product created successfully:", record);
@@ -1137,7 +1156,15 @@ async function productDelete(req, res) {
 }
 
 async function getAllActiveProductsPOS(req, res) {
-  const filter = { status: "active", deletedAt: null, product_type: "Single" };
+  const filter = {
+    status: "active",
+    deletedAt: null,
+    // product_type: "Single",
+    $or: [
+      { parent_product_id: null },
+      { parent_product_id: { $exists: false } },
+    ],
+  };
   const response = await handleGenericGetAll(req, "product", {
     filter,
     excludeFields: [], // Don't exclude any fields
