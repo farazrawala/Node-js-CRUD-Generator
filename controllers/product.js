@@ -627,7 +627,6 @@ async function productUpdateVariation(req, res) {
           parent_product_id: record._id,
           _id: { $ne: record._id },
           deletedAt: null,
-          ...(req.user?.company_id ? { company_id: req.user.company_id } : {}),
         });
 
         let updatedChildCount = 0;
