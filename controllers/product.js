@@ -148,32 +148,6 @@ function getIncomingInventoryForMerge(updateData, reqBody) {
   return normalizeWarehouseInventoryInput(reqBody);
 }
 
-function addMissingWarehousesToInventory(inventory = [], warehouseIds = []) {
-  const normalizedInventory = Array.isArray(inventory) ? inventory : [];
-  const existingWarehouseIds = new Set(
-    normalizedInventory
-      .map((item) => item?.warehouse_id?.toString())
-      .filter(Boolean),
-  );
-
-  const missingWarehouses = warehouseIds
-    .filter((warehouseId) => !existingWarehouseIds.has(warehouseId.toString()))
-    .map((warehouseId) => ({
-      warehouse_id: warehouseId,
-      quantity: 0,
-      quantity_action: "add",
-      last_updated: new Date(),
-    }));
-
-  return {
-    updatedInventory:
-      missingWarehouses.length > 0 ?
-        [...normalizedInventory, ...missingWarehouses]
-      : normalizedInventory,
-    missingCount: missingWarehouses.length,
-  };
-}
-
 async function createWarehouseStockLogs(changes, req, productName) {
   if (!Array.isArray(changes) || changes.length === 0) return;
 
@@ -418,10 +392,6 @@ async function getProductVariationById(req, res) {
         path: "parent_product_id",
         select: "product_name",
       },
-      {
-        path: "warehouse_inventory.warehouse_id",
-        select: "name",
-      },
     ],
     sort: { createdAt: -1 }, // Sort by newest first
     limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
@@ -438,7 +408,7 @@ async function getProductVariationById(req, res) {
       },
       {
         path: "warehouse_inventory.warehouse_id",
-        select: "name",
+        select: "warehouse_name",
       },
       {
         path: "category_id",
@@ -496,16 +466,6 @@ async function productUpdateVariation(req, res) {
         message: "Company not found",
       });
     }
-
-    const warehouses = await handleGenericGetAll(req, "warehouse", {
-      excludeFields: [],
-      filter: {
-        status: "active",
-        deletedAt: null,
-        company_id: req.user.company_id,
-      },
-    });
-    const warehouseIds = warehouses.data.map((warehouse) => warehouse._id);
 
     /**
      * Step 2: Parse variations from req.body
@@ -598,19 +558,6 @@ async function productUpdateVariation(req, res) {
             mergedInventory,
           );
         }
-
-        const currentInventory =
-          updateData.warehouse_inventory ||
-          existingRecord?.warehouse_inventory ||
-          [];
-        const { updatedInventory, missingCount } =
-          addMissingWarehousesToInventory(currentInventory, warehouseIds);
-        if (missingCount > 0) {
-          updateData.warehouse_inventory = updatedInventory;
-          console.log(
-            `✅ Added ${missingCount} missing warehouse(s) to parent variation product inventory.`,
-          );
-        }
       },
       /**
        * afterUpdate hook: Log successful update
@@ -622,33 +569,6 @@ async function productUpdateVariation(req, res) {
           req,
           record.product_name || "Product",
         );
-
-        const childProducts = await Product.find({
-          parent_product_id: record._id,
-          _id: { $ne: record._id },
-          deletedAt: null,
-        });
-
-        let updatedChildCount = 0;
-        for (const childProduct of childProducts) {
-          const { updatedInventory, missingCount } =
-            addMissingWarehousesToInventory(
-              childProduct.warehouse_inventory || [],
-              warehouseIds,
-            );
-
-          if (missingCount > 0) {
-            childProduct.warehouse_inventory = updatedInventory;
-            await childProduct.save({ validateBeforeSave: false });
-            updatedChildCount += 1;
-          }
-        }
-
-        if (updatedChildCount > 0) {
-          console.log(
-            `✅ Synced missing warehouses to ${updatedChildCount} child variation product(s).`,
-          );
-        }
       },
     });
 
@@ -722,16 +642,14 @@ async function productUpdateVariation(req, res) {
            * - parent_product_id: Link to parent product
            */
           variationReq.body.company_id = company.data._id.toString();
-          if (!normalizeWarehouseInventoryInput(variationReq.body)) {
-            variationReq.body.warehouse_inventory = warehouseIds.map(
-              (warehouseId) => ({
-                warehouse_id: warehouseId,
-                quantity: 0,
-                quantity_action: "add",
-                last_updated: new Date(),
-              }),
-            );
-          }
+          variationReq.body.warehouse_inventory = [
+            {
+              warehouse_id: company.data.warehouse_id,
+              quantity: variation.quantity || 0,
+              quantity_action: variation.quantity_action || "add",
+              last_updated: new Date(),
+            },
+          ];
           variationReq.body.parent_product_id = parentProductId;
 
           // Update the variation using handleGenericUpdate
@@ -788,16 +706,14 @@ async function productUpdateVariation(req, res) {
            * - parent_product_id: Link to parent product (required for variations)
            */
           variantReq.body.company_id = company.data._id.toString();
-          if (!normalizeWarehouseInventoryInput(variantReq.body)) {
-            variantReq.body.warehouse_inventory = warehouseIds.map(
-              (warehouseId) => ({
-                warehouse_id: warehouseId,
-                quantity: 0,
-                quantity_action: "add",
-                last_updated: new Date(),
-              }),
-            );
-          }
+          variantReq.body.warehouse_inventory = [
+            {
+              warehouse_id: company.data.warehouse_id,
+              quantity: variation.quantity || 0,
+              quantity_action: variation.quantity_action || "add",
+              last_updated: new Date(),
+            },
+          ];
           variantReq.body.parent_product_id = parentProductId;
 
           // Create the variation using handleGenericCreate
@@ -892,16 +808,18 @@ async function productCreate(req, res) {
 }
 
 async function productUpdate(req, res) {
-  const warehouses = await handleGenericGetAll(req, "warehouse", {
-    excludeFields: [],
-    filter: {
-      status: "active",
-      deletedAt: null,
-      company_id: req.user.company_id,
-    },
-  });
-  const warehouseIds = warehouses.data.map((warehouse) => warehouse._id);
 
+   const warehouses = await handleGenericGetAll(req, "warehouse", {
+     excludeFields: [],
+     filter: {
+       status: "active",
+       deletedAt: null,
+       company_id: req.user.company_id,
+     },
+   });
+   const warehouseIds = warehouses.data.map((warehouse) => warehouse._id);
+
+   
   const response = await handleGenericUpdate(req, "product", {
     beforeUpdate: async (updateData, req, existingRecord) => {
       console.log("🔧 Product update - beforeUpdate hook called");
@@ -927,17 +845,28 @@ async function productUpdate(req, res) {
         );
       }
 
-      const currentInventory =
-        updateData.warehouse_inventory ||
-        existingRecord?.warehouse_inventory ||
-        [];
-      const { updatedInventory, missingCount } =
-        addMissingWarehousesToInventory(currentInventory, warehouseIds);
+      const currentInventory = updateData.warehouse_inventory || existingRecord?.warehouse_inventory || [];
+      const existingWarehouseIds = new Set(
+        currentInventory
+          .map((item) => item?.warehouse_id?.toString())
+          .filter(Boolean),
+      );
+      const missingWarehouses = warehouseIds
+        .filter((warehouseId) => !existingWarehouseIds.has(warehouseId.toString()))
+        .map((warehouseId) => ({
+          warehouse_id: warehouseId,
+          quantity: 0,
+          quantity_action: "add",
+          last_updated: new Date(),
+        }));
 
-      if (missingCount > 0) {
-        updateData.warehouse_inventory = updatedInventory;
+      if (missingWarehouses.length > 0) {
+        updateData.warehouse_inventory = [
+          ...currentInventory,
+          ...missingWarehouses,
+        ];
         console.log(
-          `✅ Added ${missingCount} missing warehouse(s) to product inventory.`,
+          `✅ Added ${missingWarehouses.length} missing warehouse(s) to product inventory.`,
         );
       }
     },
@@ -948,34 +877,6 @@ async function productUpdate(req, res) {
         req,
         record.product_name || "Product",
       );
-
-      const childProducts = await Product.find({
-        parent_product_id: record._id,
-        _id: { $ne: record._id },
-        deletedAt: null,
-        ...(req.user?.company_id ? { company_id: req.user.company_id } : {}),
-      });
-
-      let updatedChildCount = 0;
-      for (const childProduct of childProducts) {
-        const { updatedInventory, missingCount } =
-          addMissingWarehousesToInventory(
-            childProduct.warehouse_inventory || [],
-            warehouseIds,
-          );
-
-        if (missingCount > 0) {
-          childProduct.warehouse_inventory = updatedInventory;
-          await childProduct.save({ validateBeforeSave: false });
-          updatedChildCount += 1;
-        }
-      }
-
-      if (updatedChildCount > 0) {
-        console.log(
-          `✅ Synced missing warehouses to ${updatedChildCount} child product(s).`,
-        );
-      }
     },
   });
   return res.status(response.status).json(response);
@@ -998,7 +899,7 @@ async function getAllProducts(req, res) {
       },
       {
         path: "warehouse_inventory.warehouse_id",
-        select: "name",
+        select: "warehouse_name",
       },
       {
         path: "category_id",
@@ -1030,7 +931,7 @@ async function getAllActiveProducts(req, res) {
       },
       {
         path: "warehouse_inventory.warehouse_id",
-        select: "name",
+        select: "warehouse_name",
       },
       {
         path: "category_id",
