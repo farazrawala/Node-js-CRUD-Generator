@@ -808,18 +808,6 @@ async function productCreate(req, res) {
 }
 
 async function productUpdate(req, res) {
-
-   const warehouses = await handleGenericGetAll(req, "warehouse", {
-     excludeFields: [],
-     filter: {
-       status: "active",
-       deletedAt: null,
-       company_id: req.user.company_id,
-     },
-   });
-   const warehouseIds = warehouses.data.map((warehouse) => warehouse._id);
-
-   
   const response = await handleGenericUpdate(req, "product", {
     beforeUpdate: async (updateData, req, existingRecord) => {
       console.log("🔧 Product update - beforeUpdate hook called");
@@ -842,31 +830,6 @@ async function productUpdate(req, res) {
         console.log(
           "✅ Merged warehouse inventory in controller:",
           mergedInventory,
-        );
-      }
-
-      const currentInventory = updateData.warehouse_inventory || existingRecord?.warehouse_inventory || [];
-      const existingWarehouseIds = new Set(
-        currentInventory
-          .map((item) => item?.warehouse_id?.toString())
-          .filter(Boolean),
-      );
-      const missingWarehouses = warehouseIds
-        .filter((warehouseId) => !existingWarehouseIds.has(warehouseId.toString()))
-        .map((warehouseId) => ({
-          warehouse_id: warehouseId,
-          quantity: 0,
-          quantity_action: "add",
-          last_updated: new Date(),
-        }));
-
-      if (missingWarehouses.length > 0) {
-        updateData.warehouse_inventory = [
-          ...currentInventory,
-          ...missingWarehouses,
-        ];
-        console.log(
-          `✅ Added ${missingWarehouses.length} missing warehouse(s) to product inventory.`,
         );
       }
     },
