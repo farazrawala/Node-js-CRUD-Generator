@@ -63,54 +63,87 @@ async function applyWarehouseInventoryDelta({
   return inventory;
 }
 
+/**
+ * Same behavior as POST /api/stock_movement/create (inventory + movement).
+ * Use from other controllers instead of HTTP self-calls.
+ *
+ * @param {{ body: object, user?: object }} params
+ * @returns {Promise<{ success: boolean, status?: number, data?: object, message?: string }>}
+ */
+async function createStockMovementRecord({ body, user }) {
+  const productId = toObjectId(body.product_id || body.productId);
+  const warehouseId = toObjectId(body.warehouse_id || body.warehouseId);
+  const quantity = Number(body.quantity);
+  const direction = normalizeDirection(body.direction);
+  const type = body.type;
+  const referenceId = toObjectId(body.reference_id);
+
+  if (
+    !productId ||
+    !warehouseId ||
+    !type ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0
+  ) {
+    return {
+      success: false,
+      status: 400,
+      message:
+        "product_id, warehouse_id, type, direction and positive quantity are required",
+    };
+  }
+
+  const doc = {
+    product_id: productId,
+    warehouse_id: warehouseId,
+    type,
+    quantity,
+    direction,
+    reason: body.reason || undefined,
+    company_id: user?.company_id || body.company_id || undefined,
+    created_by: user?._id || undefined,
+    updated_by: user?._id || undefined,
+    status: body.status || "active",
+  };
+  if (referenceId) {
+    doc.reference_id = referenceId;
+  }
+
+  const movement = await StockMovement.create(doc);
+
+  await applyWarehouseInventoryDelta({
+    productId,
+    warehouseId,
+    quantityDelta: getSignedQuantity(direction, quantity),
+    user,
+  });
+
+  return {
+    success: true,
+    status: 201,
+    data: movement,
+    message: "Stock movement created and warehouse inventory updated",
+  };
+}
+
 async function createStockMovement(req, res) {
   try {
-    const productId = toObjectId(req.body.product_id || req.body.productId);
-    const warehouseId = toObjectId(
-      req.body.warehouse_id || req.body.warehouseId,
-    );
-    const quantity = Number(req.body.quantity);
-    const direction = normalizeDirection(req.body.direction);
-    const type = req.body.type;
-
-    if (
-      !productId ||
-      !warehouseId ||
-      !type ||
-      !Number.isFinite(quantity) ||
-      quantity <= 0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "product_id, warehouse_id, type, direction and positive quantity are required",
-      });
-    }
-
-    const movement = await StockMovement.create({
-      product_id: productId,
-      warehouse_id: warehouseId,
-      type,
-      quantity,
-      direction,
-      reason: req.body.reason || undefined,
-      company_id: req.user?.company_id || req.body.company_id || undefined,
-      created_by: req.user?._id || undefined,
-      updated_by: req.user?._id || undefined,
-      status: req.body.status || "active",
-    });
-
-    await applyWarehouseInventoryDelta({
-      productId,
-      warehouseId,
-      quantityDelta: getSignedQuantity(direction, quantity),
+    const result = await createStockMovementRecord({
+      body: req.body || {},
       user: req.user,
     });
 
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
     return res.status(201).json({
       success: true,
-      message: "Stock movement created and warehouse inventory updated",
-      data: movement,
+      message: result.message,
+      data: result.data,
     });
   } catch (error) {
     console.error("❌ createStockMovement error:", error);
@@ -329,6 +362,7 @@ async function getAllStockMovements(req, res) {
 
 module.exports = {
   createStockMovement,
+  createStockMovementRecord,
   updateStockMovement,
   deleteStockMovement,
   getStockMovementById,

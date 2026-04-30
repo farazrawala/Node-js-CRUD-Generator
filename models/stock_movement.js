@@ -34,6 +34,11 @@ const modelSchema = new mongoose.Schema(
       enum: ["in", "out"],
       required: true,
     },
+    reference_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "purchase_order_item",
+      // optional: manual movements; set when tied to a PO line
+    },
     // default fields
     company_id: {
       type: mongoose.Schema.Types.ObjectId,

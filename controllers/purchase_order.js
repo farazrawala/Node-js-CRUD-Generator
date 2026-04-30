@@ -13,6 +13,7 @@ const {
   handleGenericUpdate,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
+const { createStockMovementRecord } = require("./stock_movement");
 
 const PURCHASE_ORDER_TRANSACTION_ERROR_LOG = {
   action: "POST PURCHASE ORDER TRANSACTION ERROR",
@@ -86,6 +87,13 @@ function parseBracketLineItems(body) {
       byIndex.get(i).total = body[key];
       continue;
     }
+    m = key.match(/^warehouse_id\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).warehouse_id = body[key];
+      continue;
+    }
   }
   const sorted = [...byIndex.keys()].sort((a, b) => a - b);
   const lines = [];
@@ -103,6 +111,7 @@ function parseBracketLineItems(body) {
       qty,
       price,
       subtotal,
+      warehouse_id: row.warehouse_id,
     });
   }
   return lines.filter(
@@ -126,11 +135,13 @@ function parseLineItemsFromIndexedContainers(body) {
   const q = body.qty;
   const pr = body.price;
   const t = body.total;
+  const w = body.warehouse_id;
   const len = Math.max(
     indexedContainerLength(p),
     indexedContainerLength(q),
     indexedContainerLength(pr),
     indexedContainerLength(t),
+    indexedContainerLength(w),
   );
   if (len === 0) return [];
 
@@ -140,6 +151,7 @@ function parseLineItemsFromIndexedContainers(body) {
     const qtyRaw = indexedContainerGet(q, i);
     const priceRaw = indexedContainerGet(pr, i);
     const totalRaw = indexedContainerGet(t, i);
+    const warehouse_id = indexedContainerGet(w, i);
     const qty = parseFloat(String(qtyRaw ?? "").trim());
     const price = parseFloat(String(priceRaw ?? "").trim());
     const fromTotal = parseFloat(String(totalRaw ?? "").trim());
@@ -147,7 +159,7 @@ function parseLineItemsFromIndexedContainers(body) {
       Number.isFinite(fromTotal) ? fromTotal
       : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
       : NaN;
-    lines.push({ product_id, qty, price, subtotal });
+    lines.push({ product_id, qty, price, subtotal, warehouse_id });
   }
   return lines.filter(
     (l) =>
@@ -177,17 +189,22 @@ function parseLegacyArrayLineItems(body) {
     Array.isArray(body["total[]"]) ?
       body["total[]"]
     : [body["total[]"]].filter(Boolean);
+  const warehouseIdArray =
+    Array.isArray(body["warehouse_id[]"]) ?
+      body["warehouse_id[]"]
+    : [body["warehouse_id[]"]].filter(Boolean);
   if (productIdArray.length === 0) return [];
   return productIdArray
     .map((productId, index) => {
       const qty = parseFloat(String(qtyArray[index] ?? "").trim());
       const price = parseFloat(String(priceArray[index] ?? "").trim());
       const fromTotal = parseFloat(String(totalArray[index] ?? "").trim());
+      const warehouse_id = warehouseIdArray[index];
       const subtotal =
         Number.isFinite(fromTotal) ? fromTotal
         : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
         : NaN;
-      return { product_id: productId, qty, price, subtotal };
+      return { product_id: productId, qty, price, subtotal, warehouse_id };
     })
     .filter(
       (l) =>
@@ -215,6 +232,7 @@ function parseProductIdsBodyArray(body) {
         qty,
         price,
         subtotal,
+        warehouse_id: row.warehouse_id,
       };
     })
     .filter(
@@ -230,8 +248,17 @@ function parseProductIdsBodyArray(body) {
 function stripLineItemKeysFromBody(body) {
   const out = {};
   for (const k of Object.keys(body || {})) {
-    if (/^(product_id|qty|price|total)\[\d+\]$/.test(k)) continue;
-    if (["product_id[]", "qty[]", "price[]", "total[]"].includes(k)) continue;
+    if (/^(product_id|qty|price|total|warehouse_id)\[\d+\]$/.test(k)) continue;
+    if (
+      [
+        "product_id[]",
+        "qty[]",
+        "price[]",
+        "total[]",
+        "warehouse_id[]",
+      ].includes(k)
+    )
+      continue;
     out[k] = body[k];
   }
   if (indexedContainerLength(out.product_id) > 0) {
@@ -239,6 +266,7 @@ function stripLineItemKeysFromBody(body) {
     delete out.qty;
     delete out.price;
     delete out.total;
+    delete out.warehouse_id;
   }
   return out;
 }
@@ -279,6 +307,11 @@ function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
       status: "active",
       deletedAt: null,
     };
+    const wid =
+      line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+    if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+      doc.warehouse_id = wid;
+    }
     if (companyId) doc.company_id = companyId;
     if (userId) {
       doc.created_by = userId;
@@ -604,6 +637,13 @@ async function purchaseOrderCreate(req, res) {
         subtotal: line.subtotal,
         status: "active",
       };
+
+      // warehouse_id
+      const wid =
+        line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+      if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+        itemData.warehouse_id = wid;
+      }
       if (companyId) itemData.company_id = companyId;
 
       const savedItemBody = req.body;
@@ -612,6 +652,7 @@ async function purchaseOrderCreate(req, res) {
         req,
         "purchase_order_item",
       );
+
       req.body = savedItemBody;
 
       if (!itemResponse.success || !itemResponse.data) {
@@ -625,6 +666,44 @@ async function purchaseOrderCreate(req, res) {
           lineItem: itemResponse,
         });
       }
+
+      // Same logic as POST /api/stock_movement/create (movement + warehouse_inventory)
+      if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+        let stockMovementResult;
+        try {
+          stockMovementResult = await createStockMovementRecord({
+            body: {
+              product_id: String(line.product_id).trim(),
+              warehouse_id: wid,
+              quantity: line.qty,
+              direction: "in",
+              type: "purchase",
+              reference_id: itemResponse.data._id,
+              reason: "Purchase order",
+              company_id: companyId,
+            },
+            user: req.user,
+          });
+        } catch (e) {
+          stockMovementResult = {
+            success: false,
+            status: 500,
+            message: e.message,
+          };
+        }
+        if (!stockMovementResult.success || !stockMovementResult.data) {
+          await PurchaseOrderItem.deleteMany({ purchase_order_id: poId });
+          await PurchaseOrder.findByIdAndDelete(poId);
+          return res.status(stockMovementResult.status || 400).json({
+            success: false,
+            status: stockMovementResult.status || 400,
+            error: "Purchase order rolled back: stock movement failed",
+            details: stockMovementResult.message,
+            stockMovement: stockMovementResult,
+          });
+        }
+      }
+
       purchaseOrderItems.push(itemResponse.data);
     }
 
