@@ -237,7 +237,10 @@ async function updateWarehouseDefault(req, res) {
     }
 
     if (targetIndex > 0) {
-      const [targetWarehouse] = product.warehouse_inventory.splice(targetIndex, 1);
+      const [targetWarehouse] = product.warehouse_inventory.splice(
+        targetIndex,
+        1,
+      );
       product.warehouse_inventory.unshift(targetWarehouse);
       product.markModified("warehouse_inventory");
       await product.save();
@@ -1137,7 +1140,7 @@ async function productDelete(req, res) {
 }
 
 async function getAllActiveProductsPOS(req, res) {
-  const filter = { status: "active", deletedAt: null, product_type: "Single" };
+  const filter = { status: "active", deletedAt: null, product_parent_id: null };
   const response = await handleGenericGetAll(req, "product", {
     filter,
     excludeFields: [], // Don't exclude any fields
