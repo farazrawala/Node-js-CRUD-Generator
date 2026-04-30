@@ -57,6 +57,13 @@ const {
   apiCreateStockTransfer,
   apiGetStockTransfers,
 } = require("../controllers/stockTransfer");
+const {
+  createStockMovement,
+  updateStockMovement,
+  deleteStockMovement,
+  getStockMovementById,
+  getAllStockMovements,
+} = require("../controllers/stock_movement");
 
 const {
   purchaseOrderCreate,
@@ -178,6 +185,19 @@ router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
 // Stock transfer routes
 router.get("/stock-transfer", apiGetStockTransfers);
 router.post("/stock-transfer", apiCreateStockTransfer);
+
+// Stock movement routes (auto sync warehouse_inventory)
+router.post("/stock-movement", createStockMovement);
+router.patch("/stock-movement/:id", updateStockMovement);
+router.delete("/stock-movement/:id", deleteStockMovement);
+router.get("/stock-movement/:id", getStockMovementById);
+router.get("/stock-movement", getAllStockMovements);
+// Backward-compatible aliases for dynamic-route style endpoints
+router.post("/stock_movement/create", createStockMovement);
+router.patch("/stock_movement/update/:id", updateStockMovement);
+router.delete("/stock_movement/delete/:id", deleteStockMovement);
+router.get("/stock_movement/get/:id", getStockMovementById);
+router.get("/stock_movement/get-all", getAllStockMovements);
 
 // Category routes - Custom CRUD
 router.post("/product/create-product-variation", productCreateVariation);
