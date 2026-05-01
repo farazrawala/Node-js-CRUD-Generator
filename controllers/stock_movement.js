@@ -1,6 +1,11 @@
 const mongoose = require("mongoose");
 const StockMovement = require("../models/stock_movement");
 const WarehouseInventory = require("../models/warehouse_inventory");
+const {
+  handleGenericGetAll,
+  buildPopulateFromQuery,
+  parseSearchFieldsFromQuery,
+} = require("../utils/modelHelper");
 
 function toObjectId(id) {
   if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
@@ -360,6 +365,65 @@ async function getAllStockMovements(req, res) {
   }
 }
 
+/**
+ * Active stock movements only; populate from query (same rules as dynamic CRUD).
+ *
+ * Examples:
+ * - ?populate=product_id,warehouse_id
+ * - ?product_id=true&warehouse_id=true  (populate only; use real id in filter another way — prefer populate=)
+ * - Filter by warehouse: ?warehouse_id=507f1f77bcf86cd799439011 (24-char ObjectId)
+ */
+async function getAllStockMovementsActive(req, res) {
+  try {
+    const filter = {
+      status: "active",
+      $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
+    };
+
+    if (req.user?.company_id) {
+      filter.company_id = req.user.company_id;
+    }
+    if (
+      req.query.product_id &&
+      mongoose.Types.ObjectId.isValid(String(req.query.product_id).trim())
+    ) {
+      filter.product_id = String(req.query.product_id).trim();
+    }
+    if (
+      req.query.warehouse_id &&
+      mongoose.Types.ObjectId.isValid(String(req.query.warehouse_id).trim())
+    ) {
+      filter.warehouse_id = String(req.query.warehouse_id).trim();
+    }
+    if (req.query.direction) {
+      filter.direction = normalizeDirection(req.query.direction);
+    }
+    if (req.query.type) {
+      filter.type = req.query.type;
+    }
+
+    const populate = buildPopulateFromQuery(req.query, "stock_movement");
+
+    const response = await handleGenericGetAll(req, "stock_movement", {
+      filter,
+      populate,
+      sort: { createdAt: -1 },
+      limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+      skip: req.query.skip ? parseInt(req.query.skip, 10) || 0 : 0,
+      search: req.query.search,
+      searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+    });
+
+    return res.status(response.status || 200).json(response);
+  } catch (error) {
+    console.error("❌ getAllStockMovementsActive error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   createStockMovement,
   createStockMovementRecord,
@@ -367,4 +431,5 @@ module.exports = {
   deleteStockMovement,
   getStockMovementById,
   getAllStockMovements,
+  getAllStockMovementsActive,
 };

@@ -63,6 +63,7 @@ const {
   deleteStockMovement,
   getStockMovementById,
   getAllStockMovements,
+  getAllStockMovementsActive,
 } = require("../controllers/stock_movement");
 
 const {
@@ -192,12 +193,14 @@ router.patch("/stock-movement/:id", updateStockMovement);
 router.delete("/stock-movement/:id", deleteStockMovement);
 router.get("/stock-movement/:id", getStockMovementById);
 router.get("/stock-movement", getAllStockMovements);
+router.get("/stock-movement/get-all-active", getAllStockMovementsActive);
 // Backward-compatible aliases for dynamic-route style endpoints
 router.post("/stock_movement/create", createStockMovement);
 router.patch("/stock_movement/update/:id", updateStockMovement);
 router.delete("/stock_movement/delete/:id", deleteStockMovement);
 router.get("/stock_movement/get/:id", getStockMovementById);
 router.get("/stock_movement/get-all", getAllStockMovements);
+router.get("/stock_movement/get-all-active", getAllStockMovementsActive);
 
 // Category routes - Custom CRUD
 router.post("/product/create-product-variation", productCreateVariation);
