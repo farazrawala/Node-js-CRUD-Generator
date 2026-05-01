@@ -1,6 +1,8 @@
 const {
   handleGenericCreate,
   handleGenericUpdate,
+  handleGenericGetAll,
+  parseSearchFieldsFromQuery,
 } = require("../utils/modelHelper");
 const Transaction = require("../models/transaction");
 const { logControllerError } = require("../utils/logControllerError");
@@ -13,6 +15,19 @@ const ACCOUNT_TRANSACTION_ERROR_LOG = {
   tags: ["api", "account", "transaction", "error"],
   fallbackUrl: "/api/account",
 };
+
+/** Must match `models/account.js` account_type enum */
+const ACCOUNT_TYPES = new Set([
+  "current_asset",
+  "fixed_asset",
+  "revenue",
+  "cost of goods sold",
+  "operating expense",
+  "other expense",
+  "equity",
+  "liability",
+  "other",
+]);
 
 function makeNumberPositive(number) {
   return Math.abs(number);
@@ -177,7 +192,54 @@ async function accountUpdate(req, res) {
   return res.status(response.status).json(response);
 }
 
+/**
+ * GET ?account_type=current_asset
+ * Optional: limit, skip, search, searchFields (via handleGenericGetAll)
+ */
+async function fetchAccountsByType(req, res) {
+  const accountType = String(
+    req.query.account_type ?? req.query.type ?? "",
+  ).trim();
+
+  if (!accountType) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Query parameter account_type is required (e.g. account_type=current_asset)",
+    });
+  }
+
+  if (!ACCOUNT_TYPES.has(accountType)) {
+    return res.status(400).json({
+      success: false,
+      message: `Invalid account_type. Allowed values: ${[...ACCOUNT_TYPES].join(", ")}`,
+    });
+  }
+
+  const filter = {
+    account_type: accountType,
+    status: "active",
+    deletedAt: null,
+  };
+
+  if (req.user?.company_id) {
+    filter.company_id = req.user.company_id;
+  }
+
+  const response = await handleGenericGetAll(req, "account", {
+    filter,
+    sort: { name: 1 },
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) || 0 : 0,
+    search: req.query.search,
+    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+  });
+
+  return res.status(response.status || 200).json(response);
+}
+
 module.exports = {
   accountCreate,
   accountUpdate,
+  fetchAccountsByType,
 };

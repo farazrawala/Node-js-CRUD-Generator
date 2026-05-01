@@ -73,8 +73,15 @@ const {
   getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
 const { getMyBranches } = require("../controllers/company");
-const { transactionBulkCreate } = require("../controllers/transaction");
-const { accountCreate, accountUpdate } = require("../controllers/account");
+const {
+  transactionBulkCreate,
+  getTransactionsListWithDebitCreditSummary,
+} = require("../controllers/transaction");
+const {
+  accountCreate,
+  accountUpdate,
+  fetchAccountsByType,
+} = require("../controllers/account");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
 // const {
@@ -214,6 +221,7 @@ router.patch("/product/:id/update-default-warehouse", updateWarehouseDefault);
 // Account routes
 router.post("/account/custom-create", accountCreate);
 router.patch("/account/custom-update/:id", accountUpdate);
+router.get("/account/fetch-account-by-type", fetchAccountsByType);
 
 // Order routes
 router.post("/order/order_save", order_save);
@@ -224,6 +232,14 @@ router.patch("/order/invoice-update/:id", invoiceUpdate);
 
 router.post("/transaction/bulk-create", transactionBulkCreate);
 router.post("/transactions/bulk-create", transactionBulkCreate);
+router.get(
+  "/transaction/list-with-summary",
+  getTransactionsListWithDebitCreditSummary,
+);
+router.get(
+  "/transactions/list-with-summary",
+  getTransactionsListWithDebitCreditSummary,
+);
 
 router.post("/test", (req, res) => {
   console.log("Test route hit");
