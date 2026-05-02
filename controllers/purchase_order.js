@@ -33,6 +33,28 @@ function purchaseOrderLinesSubtotalSum(lineItems) {
   );
 }
 
+function normalizePurchaseOrderNumericFields(obj) {
+  const out = { ...obj };
+  for (const key of [
+    "discount",
+    "shipment",
+    "lines_subtotal",
+    "total_amount",
+    "amount_paid",
+  ]) {
+    if (!(key in out)) continue;
+    const v = out[key];
+    if (v === "" || v === null || v === undefined) {
+      delete out[key];
+      continue;
+    }
+    const n = typeof v === "number" ? v : Number(String(v).trim());
+    if (Number.isFinite(n)) out[key] = n;
+    else delete out[key];
+  }
+  return out;
+}
+
 /** Same as order: qs / express-fileupload parseNested turn `product_id[0]` into nested structures. */
 function indexedContainerLength(v) {
   if (v == null) return 0;
@@ -295,6 +317,13 @@ function collectLineItems(body) {
 
 function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
   const companyId = poSnapshot.company_id || req.user?.company_id;
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return {
+      docs: [],
+      error:
+        "company_id is required on purchase order line items (set on the PO or authenticated user)",
+    };
+  }
   const userId = req.user?._id;
   const docs = [];
   for (const line of lines) {
@@ -306,13 +335,13 @@ function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
       subtotal: line.subtotal,
       status: "active",
       deletedAt: null,
+      company_id: companyId,
     };
     const wid =
       line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
     if (wid && mongoose.Types.ObjectId.isValid(wid)) {
       doc.warehouse_id = wid;
     }
-    if (companyId) doc.company_id = companyId;
     if (userId) {
       doc.created_by = userId;
       doc.updated_by = userId;
@@ -484,9 +513,16 @@ async function purchaseOrderCreate(req, res) {
   const lines = collectLineItems(originalBody);
 
   try {
-    req.body = stripLineItemKeysFromBody(originalBody);
+    req.body = normalizePurchaseOrderNumericFields(
+      stripLineItemKeysFromBody(originalBody),
+    );
     delete req.body._id;
     ensurePurchaseOrderHeaderFields(req.body, req.user);
+
+    req.body.lines_subtotal =
+      lines.length > 0 ?
+        purchaseOrderLinesSubtotalSum(lines)
+      : purchaseOrderLinesSubtotalSum([]);
 
     const transaction_number = `TXN-${Date.now()}-${Math.floor(
       Math.random() * 1000000,
@@ -496,128 +532,220 @@ async function purchaseOrderCreate(req, res) {
 
     req.body.transaction_number = transaction_number;
 
-    const purchaseOrderResponse = await handleGenericCreate(
-      req,
-      "purchase_order",
-      {
-        afterCreate: async (record, orderReq) => {
-          try {
-            const { created, failed } = await transactionBulkCreate(
-              orderReq,
-              [
-                {
-                  // purchases (`models/company.js`: default_purchase_account)
-                  account_id: orderReq.user.company_id.default_purchase_account,
-                  type: "debit",
-                  amount: req.body?.total_amount || 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Purchase Order",
-                  reference_id: {
-                    module: "purchase_order",
-                    ref_id: record._id,
-                  },
-                },
+    const session = await mongoose.startSession();
+    let purchaseOrderResponse = null;
+    const purchaseOrderItems = [];
+    let txnError = null;
 
-                {
-                  // purchase discount
-                  account_id:
-                    orderReq.user.company_id.default_purchase_discount_account,
-                  type: "debit",
-                  amount: req.body?.discount || 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Purchase Discount",
-                },
-                {
-                  // Shipment
-                  account_id: orderReq.user.company_id.default_shipping_account,
-                  type: "debit",
-                  amount: req.body?.shipment || 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Purchase Shipment",
-                  reference_id: {
-                    module: "purchase_order",
-                    ref_id: record._id,
-                  },
-                },
-                {
-                  // Mode of payment
-                  account_id: record?.payment_method_accounts_id,
-                  type: "credit",
-                  amount: req.body?.amount_paid || 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Mode of Payment",
-                  reference_id: {
-                    module: "purchase_order",
-                    ref_id: record._id,
-                  },
-                },
-                {
-                  // A/c Payable
-                  account_id:
-                    orderReq.user.company_id.default_account_payable_account,
-                  type: "credit",
-                  amount: req.body?.remaining_amount || 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "A/c Payable",
-                  reference_id: {
-                    module: "purchase_order",
-                    ref_id: record._id,
-                  },
-                },
-              ],
-              { stopOnError: true },
-            );
-            if (failed.length) {
-              console.error(
-                "⚠️ Post-purchase_order transaction bulk insert failed:",
-                failed,
-              );
-              await logControllerError(
+    try {
+      await session.withTransaction(async () => {
+        purchaseOrderResponse = await handleGenericCreate(
+          req,
+          "purchase_order",
+          {
+            session,
+            afterCreate: async (record, orderReq, sess) => {
+              const { created, failed } = await transactionBulkCreate(
                 orderReq,
-                `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`,
-                PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+                [
+                  {
+                    account_id:
+                      orderReq.user.company_id.default_purchase_account,
+                    type: "debit",
+                    amount: record?.total_amount ?? 0,
+                    reference_user_id: record?.vendor_id,
+                    transaction_number,
+                    description: "Purchase Order",
+                    reference_id: {
+                      module: "purchase_order",
+                      ref_id: record._id,
+                    },
+                  },
+                  {
+                    account_id:
+                      orderReq.user.company_id
+                        .default_purchase_discount_account,
+                    type: "debit",
+                    amount: record?.discount ?? 0,
+                    reference_user_id: record?.vendor_id,
+                    transaction_number,
+                    description: "Purchase Discount",
+                  },
+                  {
+                    account_id:
+                      orderReq.user.company_id.default_shipping_account,
+                    type: "debit",
+                    amount: record?.shipment ?? 0,
+                    reference_user_id: record?.vendor_id,
+                    transaction_number,
+                    description: "Purchase Shipment",
+                    reference_id: {
+                      module: "purchase_order",
+                      ref_id: record._id,
+                    },
+                  },
+                  {
+                    account_id: record?.payment_method_accounts_id,
+                    type: "credit",
+                    amount: record?.amount_paid ?? 0,
+                    reference_user_id: record?.vendor_id,
+                    transaction_number,
+                    description: "Mode of Payment",
+                    reference_id: {
+                      module: "purchase_order",
+                      ref_id: record._id,
+                    },
+                  },
+                  {
+                    account_id:
+                      orderReq.user.company_id.default_account_payable_account,
+                    type: "credit",
+                    amount: req.body?.remaining_amount || 0,
+                    reference_user_id: record?.vendor_id,
+                    transaction_number,
+                    description: "A/c Payable",
+                    reference_id: {
+                      module: "purchase_order",
+                      ref_id: record._id,
+                    },
+                  },
+                ],
+                { stopOnError: true, session: sess },
               );
-            } else if (created[0]?.data?._id) {
-              console.log(
-                "✅ Transaction(s) created:",
-                created.map((c) => c.data._id),
-              );
-            }
-          } catch (e) {
-            console.error(
-              "⚠️ Post-purchase_order transaction error:",
-              e.message,
-            );
-            await logControllerError(
-              orderReq,
-              `Post-purchase_order transaction error: ${e.message}`,
-              PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+              if (failed.length) {
+                const msg = `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`;
+                console.error("⚠️ Post-purchase_order transaction bulk insert failed:", failed);
+                await logControllerError(
+                  orderReq,
+                  msg,
+                  PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+                );
+                throw new Error(msg);
+              }
+              if (created[0]?.data?._id) {
+                console.log(
+                  "✅ Transaction(s) created:",
+                  created.map((c) => c.data._id),
+                );
+              }
+            },
+          },
+        );
+
+        if (!purchaseOrderResponse?.success || !purchaseOrderResponse.data) {
+          throw new Error(
+            purchaseOrderResponse?.error ||
+              purchaseOrderResponse?.message ||
+              "Purchase order create failed",
+          );
+        }
+
+        const poId = purchaseOrderResponse.data._id;
+        const companyId =
+          purchaseOrderResponse.data.company_id || req.user?.company_id;
+
+        if (lines.length === 0) {
+          return;
+        }
+
+        if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+          throw new Error(
+            "company_id is required to create purchase order line items",
+          );
+        }
+
+        for (const line of lines) {
+          const itemData = {
+            purchase_order_id: poId,
+            product_id: String(line.product_id).trim(),
+            qty: line.qty,
+            price: line.price,
+            subtotal: line.subtotal,
+            status: "active",
+            company_id: companyId,
+          };
+
+          const wid =
+            line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+          if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+            itemData.warehouse_id = wid;
+          }
+
+          const savedItemBody = req.body;
+          req.body = itemData;
+          const itemResponse = await handleGenericCreate(
+            req,
+            "purchase_order_item",
+            { session },
+          );
+          req.body = savedItemBody;
+
+          if (!itemResponse.success || !itemResponse.data) {
+            throw new Error(
+              itemResponse.error ||
+                (Array.isArray(itemResponse.missing) ?
+                  itemResponse.missing.join(", ")
+                : "Purchase order line item failed"),
             );
           }
-        },
-      },
-    );
-    console.log("✅ Purchase Order created:", req.body);
 
-    // console.log("✅ Purchase Order created:", purchaseOrderResponse);
-    // return;
+          if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+            const stockMovementResult = await createStockMovementRecord({
+              body: {
+                product_id: String(line.product_id).trim(),
+                warehouse_id: wid,
+                quantity: line.qty,
+                direction: "in",
+                type: "purchase",
+                reference_id: itemResponse.data._id,
+                reason: "Purchase order",
+                company_id: companyId,
+              },
+              user: req.user,
+              session,
+            });
+            if (!stockMovementResult.success || !stockMovementResult.data) {
+              throw new Error(
+                stockMovementResult.message ||
+                  "Purchase order stock movement failed",
+              );
+            }
+          }
+
+          purchaseOrderItems.push(itemResponse.data);
+        }
+
+        await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, { session });
+      });
+    } catch (e) {
+      txnError = e;
+    } finally {
+      session.endSession();
+    }
 
     req.body = originalBody;
 
-    if (!purchaseOrderResponse.success || !purchaseOrderResponse.data) {
+    if (txnError) {
+      console.error("Purchase Order creation error:", txnError);
+      const msg = String(txnError.message || "");
+      const isGl =
+        msg.includes("Post-purchase_order") ||
+        msg.includes("company_id is required");
+      return res.status(isGl ? 400 : 500).json({
+        success: false,
+        status: isGl ? 400 : 500,
+        error: isGl ? "Purchase order creation rolled back" : "Failed to create purchase order",
+        details: txnError.message,
+      });
+    }
+
+    if (!purchaseOrderResponse?.success || !purchaseOrderResponse.data) {
       return res
-        .status(purchaseOrderResponse.status || 400)
+        .status(purchaseOrderResponse?.status || 400)
         .json(purchaseOrderResponse);
     }
 
     const poId = purchaseOrderResponse.data._id;
-    const companyId =
-      purchaseOrderResponse.data.company_id || req.user?.company_id;
 
     if (lines.length === 0) {
       return res.status(201).json({
@@ -627,94 +755,17 @@ async function purchaseOrderCreate(req, res) {
       });
     }
 
-    const purchaseOrderItems = [];
-    for (const line of lines) {
-      const itemData = {
-        purchase_order_id: poId,
-        product_id: String(line.product_id).trim(),
-        qty: line.qty,
-        price: line.price,
-        subtotal: line.subtotal,
-        status: "active",
-      };
-
-      // warehouse_id
-      const wid =
-        line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-      if (wid && mongoose.Types.ObjectId.isValid(wid)) {
-        itemData.warehouse_id = wid;
-      }
-      if (companyId) itemData.company_id = companyId;
-
-      const savedItemBody = req.body;
-      req.body = itemData;
-      const itemResponse = await handleGenericCreate(
-        req,
-        "purchase_order_item",
-      );
-
-      req.body = savedItemBody;
-
-      if (!itemResponse.success || !itemResponse.data) {
-        await PurchaseOrderItem.deleteMany({ purchase_order_id: poId });
-        await PurchaseOrder.findByIdAndDelete(poId);
-        return res.status(itemResponse.status || 400).json({
-          success: false,
-          status: itemResponse.status || 400,
-          error: "Purchase order rolled back: line item failed",
-          details: itemResponse.error || itemResponse.missing,
-          lineItem: itemResponse,
-        });
-      }
-
-      // Same logic as POST /api/stock_movement/create (movement + warehouse_inventory)
-      if (wid && mongoose.Types.ObjectId.isValid(wid)) {
-        let stockMovementResult;
-        try {
-          stockMovementResult = await createStockMovementRecord({
-            body: {
-              product_id: String(line.product_id).trim(),
-              warehouse_id: wid,
-              quantity: line.qty,
-              direction: "in",
-              type: "purchase",
-              reference_id: itemResponse.data._id,
-              reason: "Purchase order",
-              company_id: companyId,
-            },
-            user: req.user,
-          });
-        } catch (e) {
-          stockMovementResult = {
-            success: false,
-            status: 500,
-            message: e.message,
-          };
-        }
-        if (!stockMovementResult.success || !stockMovementResult.data) {
-          await PurchaseOrderItem.deleteMany({ purchase_order_id: poId });
-          await PurchaseOrder.findByIdAndDelete(poId);
-          return res.status(stockMovementResult.status || 400).json({
-            success: false,
-            status: stockMovementResult.status || 400,
-            error: "Purchase order rolled back: stock movement failed",
-            details: stockMovementResult.message,
-            stockMovement: stockMovementResult,
-          });
-        }
-      }
-
-      purchaseOrderItems.push(itemResponse.data);
-    }
-
     const items_total = purchaseOrderItems.reduce(
       (s, it) => s + (Number(it.subtotal) || 0),
       0,
     );
 
+    const poFresh = await PurchaseOrder.findById(poId).lean();
+
     return res.status(201).json({
       ...purchaseOrderResponse,
       status: 201,
+      data: { ...purchaseOrderResponse.data, ...poFresh },
       items: purchaseOrderItems,
       items_total,
     });
@@ -731,120 +782,181 @@ async function purchaseOrderCreate(req, res) {
 async function purchase_order_update(req, res) {
   const lines = collectLineItems(req.body);
   const originalBody = req.body;
-  req.body = stripLineItemKeysFromBody(originalBody);
+  req.body = normalizePurchaseOrderNumericFields(
+    stripLineItemKeysFromBody(originalBody),
+  );
   delete req.body._id;
 
-  const response = await handleGenericUpdate(req, "purchase_order", {
-    afterUpdate: async (record, orderReq) => {
-      const transaction_number = record?.transaction_number;
-      const deleteTransc =
-        transaction_number ?
-          await Transaction.deleteMany({ transaction_number })
-        : { deletedCount: 0 };
-      if (deleteTransc.deletedCount > 0) {
-        console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
-      }
+  const recordId = String(req.params?.id || "").trim();
+  if (lines.length > 0) {
+    req.body.lines_subtotal = purchaseOrderLinesSubtotalSum(lines);
+  } else if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
+    const existingItems = await PurchaseOrderItem.find({
+      purchase_order_id: recordId,
+      status: "active",
+      deletedAt: null,
+    })
+      .select("subtotal")
+      .lean();
+    req.body.lines_subtotal =
+      purchaseOrderLinesSubtotalSum(existingItems);
+  }
 
-      try {
-        const { created, failed } = await transactionBulkCreate(
-          orderReq,
-          [
-            {
-              // purchases (`models/company.js`: default_purchase_account)
-              account_id: orderReq.user.company_id.default_purchase_account,
-              type: "debit",
-              amount: req.body?.total_amount || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Order",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
+  const session = await mongoose.startSession();
+  let response = null;
+  let txnError = null;
 
-            {
-              // purchase discount
-              account_id:
-                orderReq.user.company_id.default_purchase_discount_account,
-              type: "debit",
-              amount: req.body?.discount || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Discount",
-            },
-            {
-              // Shipment
-              account_id: orderReq.user.company_id.default_shipping_account,
-              type: "debit",
-              amount: req.body?.shipment || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Shipment",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-            {
-              // Mode of payment
-              account_id: record?.payment_method_accounts_id,
-              type: "credit",
-              amount: req.body?.amount_paid || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Mode of Payment",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-            {
-              // A/c Payable
-              account_id:
-                orderReq.user.company_id.default_account_payable_account,
-              type: "credit",
-              amount: req.body?.remaining_amount || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "A/c Payable",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-          ],
-          { stopOnError: true },
-        );
-        if (failed.length) {
-          console.error(
-            "⚠️ Post-purchase_order transaction bulk insert failed:",
-            failed,
-          );
-          await logControllerError(
+  try {
+    await session.withTransaction(async () => {
+      response = await handleGenericUpdate(req, "purchase_order", {
+        session,
+        afterUpdate: async (record, orderReq, _existing, sess) => {
+          const transaction_number = record?.transaction_number;
+          if (transaction_number) {
+            const deleteTransc = await Transaction.deleteMany(
+              { transaction_number },
+              { session: sess },
+            );
+            if (deleteTransc.deletedCount > 0) {
+              console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
+            }
+          }
+
+          const { created, failed } = await transactionBulkCreate(
             orderReq,
-            `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`,
-            PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+            [
+              {
+                account_id: orderReq.user.company_id.default_purchase_account,
+                type: "debit",
+                amount: record?.total_amount ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Order",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id:
+                  orderReq.user.company_id.default_purchase_discount_account,
+                type: "debit",
+                amount: record?.discount ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Discount",
+              },
+              {
+                account_id: orderReq.user.company_id.default_shipping_account,
+                type: "debit",
+                amount: record?.shipment ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Shipment",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id: record?.payment_method_accounts_id,
+                type: "credit",
+                amount: record?.amount_paid ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Mode of Payment",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id:
+                  orderReq.user.company_id.default_account_payable_account,
+                type: "credit",
+                amount: req.body?.remaining_amount || 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "A/c Payable",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+            ],
+            { stopOnError: true, session: sess },
           );
-        } else if (created[0]?.data?._id) {
-          console.log(
-            "✅ Transaction(s) created:",
-            created.map((c) => c.data._id),
-          );
-        }
-      } catch (e) {
-        console.error("⚠️ Post-purchase_order transaction error:", e.message);
-        await logControllerError(
-          orderReq,
-          `Post-purchase_order transaction error: ${e.message}`,
-          PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+          if (failed.length) {
+            const msg = `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`;
+            console.error(
+              "⚠️ Post-purchase_order transaction bulk insert failed:",
+              failed,
+            );
+            await logControllerError(
+              orderReq,
+              msg,
+              PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
+            );
+            throw new Error(msg);
+          }
+          if (created[0]?.data?._id) {
+            console.log(
+              "✅ Transaction(s) created:",
+              created.map((c) => c.data._id),
+            );
+          }
+        },
+        filter: { status: "active", deletedAt: null },
+      });
+
+      if (!response?.success || !response?.data) {
+        throw new Error(
+          response?.error || response?.message || "Purchase order update failed",
         );
       }
-    },
-    filter: { status: "active", deletedAt: null },
-  });
+
+      const poId = response.data._id;
+
+      if (lines.length > 0) {
+        const built = buildPurchaseOrderItemDocuments(
+          poId,
+          response.data,
+          lines,
+          req,
+        );
+        if (built.error) {
+          throw new Error(built.error);
+        }
+        await PurchaseOrderItem.deleteMany(
+          { purchase_order_id: poId },
+          { session },
+        );
+        await PurchaseOrderItem.insertMany(built.docs, { session });
+        await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, { session });
+      } else {
+        await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, { session });
+      }
+    });
+  } catch (e) {
+    txnError = e;
+  } finally {
+    session.endSession();
+  }
 
   req.body = originalBody;
+
+  if (txnError) {
+    const msg = String(txnError.message || "");
+    const is400 =
+      msg.includes("Post-purchase_order") ||
+      msg.includes("company_id is required");
+    return res.status(is400 ? 400 : 500).json({
+      success: false,
+      status: is400 ? 400 : 500,
+      error: "Purchase order update rolled back",
+      details: txnError.message,
+    });
+  }
 
   if (!response || !response.success || !response.data) {
     return res
@@ -853,46 +965,6 @@ async function purchase_order_update(req, res) {
   }
 
   const poId = response.data._id;
-
-  if (lines.length > 0) {
-    const built = buildPurchaseOrderItemDocuments(
-      poId,
-      response.data,
-      lines,
-      req,
-    );
-    const previousItems = await PurchaseOrderItem.find({
-      purchase_order_id: poId,
-    }).lean();
-    try {
-      await PurchaseOrderItem.deleteMany({ purchase_order_id: poId });
-      const inserted = await PurchaseOrderItem.insertMany(built.docs);
-      const items = inserted.map((d) => d.toObject({ flattenMaps: true }));
-      const data = shapePurchaseOrderWithItems(response.data, items);
-      return res.status(200).json({
-        success: true,
-        status: 200,
-        data,
-      });
-    } catch (err) {
-      if (previousItems.length > 0) {
-        try {
-          await PurchaseOrderItem.insertMany(previousItems, {
-            ordered: false,
-          });
-        } catch (restoreErr) {
-          console.error("Purchase order item restore failed:", restoreErr);
-        }
-      }
-      return res.status(500).json({
-        success: false,
-        status: 500,
-        error: "Failed to replace purchase order line items",
-        details: err.message,
-        type: "purchase_order_item_insert",
-      });
-    }
-  }
 
   const items = await PurchaseOrderItem.find({
     purchase_order_id: poId,
@@ -903,7 +975,8 @@ async function purchase_order_update(req, res) {
     .sort({ createdAt: 1 })
     .lean();
 
-  const data = shapePurchaseOrderWithItems(response.data, items);
+  const poFresh = await PurchaseOrder.findById(poId).lean();
+  const data = shapePurchaseOrderWithItems(poFresh || response.data, items);
   return res.status(200).json({
     success: true,
     status: 200,

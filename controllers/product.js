@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -7,6 +8,7 @@ const {
   parseSearchFieldsFromQuery,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
@@ -184,7 +186,9 @@ async function createWarehouseStockLogs(changes, req, productName) {
   }));
 
   try {
-    await Logs.insertMany(logsToCreate);
+    await Logs.insertMany(
+      logsToCreate.map((row) => Logs.sanitizeLogPlainObject(row)),
+    );
   } catch (error) {
     console.error("❌ Failed to create warehouse stock logs:", error);
   }
@@ -903,204 +907,72 @@ async function getAllActiveProducts(req, res) {
 }
 
 /**
- * Update warehouse quantity for a product
- * Body: { warehouse_id, quantity, operation: "set" | "increase" | "decrease" }
- */
-async function updateWarehouseQuantity(req, res) {
-  try {
-    const { id: productId } = req.params;
-    const { warehouse_id, quantity, operation = "set" } = req.body;
-
-    console.log("🏪 Updating warehouse quantity:", {
-      productId,
-      warehouse_id,
-      quantity,
-      operation,
-    });
-
-    // Validation
-    if (!warehouse_id || quantity === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: "warehouse_id and quantity are required",
-      });
-    }
-
-    if (quantity < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity cannot be negative",
-      });
-    }
-
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    // Perform the operation
-    switch (operation) {
-      case "set":
-        product.setWarehouseQuantity(warehouse_id, quantity);
-        break;
-      case "increase":
-        product.increaseWarehouseQuantity(warehouse_id, quantity);
-        break;
-      case "decrease":
-        product.decreaseWarehouseQuantity(warehouse_id, quantity);
-        break;
-      default:
-        return res.status(400).json({
-          success: false,
-          message: "Invalid operation. Use 'set', 'increase', or 'decrease'",
-        });
-    }
-
-    await product.save();
-
-    console.log("✅ Warehouse quantity updated successfully");
-
-    return res.status(200).json({
-      success: true,
-      message: "Warehouse quantity updated successfully",
-      data: product,
-    });
-  } catch (error) {
-    console.error("❌ Update warehouse quantity error:", error);
-
-    // Handle specific errors
-    if (error.message.includes("Insufficient quantity")) {
-      return res.status(400).json({
-        success: false,
-        message: error.message,
-      });
-    } else if (error.message.includes("Warehouse not found")) {
-      return res.status(404).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Internal server error",
-    });
-  }
-}
-
-/**
- * Get warehouse inventory for a product
- */
-async function getProductWarehouseInventory(req, res) {
-  try {
-    const { id: productId } = req.params;
-
-    const product = await Product.findById(productId).populate(
-      "warehouse_inventory.warehouse_id",
-      "warehouse_name warehouse_address status",
-    );
-
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    const totalQuantity = product.getTotalQuantity();
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        product_id: product._id,
-        product_name: product.product_name,
-        warehouse_inventory: product.warehouse_inventory,
-        total_quantity: totalQuantity,
-      },
-    });
-  } catch (error) {
-    console.error("❌ Get warehouse inventory error:", error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Internal server error",
-    });
-  }
-}
-
-/**
- * Check product availability at a specific warehouse
- */
-async function checkWarehouseStock(req, res) {
-  try {
-    const { id: productId } = req.params;
-    const { warehouse_id, quantity = 1 } = req.query;
-
-    if (!warehouse_id) {
-      return res.status(400).json({
-        success: false,
-        message: "warehouse_id is required",
-      });
-    }
-
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    const availableQuantity = product.getWarehouseQuantity(warehouse_id);
-    const isAvailable = product.isInStock(warehouse_id, parseInt(quantity));
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        product_id: product._id,
-        product_name: product.product_name,
-        warehouse_id,
-        available_quantity: availableQuantity,
-        requested_quantity: parseInt(quantity),
-        is_available: isAvailable,
-      },
-    });
-  } catch (error) {
-    console.error("❌ Check warehouse stock error:", error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Internal server error",
-    });
-  }
-}
-
-/**
- * Get products by warehouse
+ * GET /api/warehouse/:warehouseId/products — products with stock in this warehouse
+ * (reads `warehouse_inventory` collection, not embedded product arrays).
  */
 async function getProductsByWarehouse(req, res) {
   try {
     const { warehouseId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid warehouse id",
+      });
+    }
 
-    const products = await Product.find({
-      "warehouse_inventory.warehouse_id": warehouseId,
-      "warehouse_inventory.quantity": { $gt: 0 },
-    }).populate(
-      "warehouse_inventory.warehouse_id",
-      "warehouse_name warehouse_address",
-    );
+    const filter = {
+      warehouse_id: warehouseId,
+      quantity: { $gt: 0 },
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+    if (req.user && req.user.company_id) {
+      filter.company_id = req.user.company_id;
+    }
+
+    const rows = await WarehouseInventory.find(filter)
+      .populate("product_id", "product_name product_code product_price status")
+      .lean();
+
+    const productIds = rows
+      .map((r) => r.product_id && r.product_id._id)
+      .filter(Boolean);
+
+    let totalsByProduct = new Map();
+    if (productIds.length > 0) {
+      const aggFilter = {
+        product_id: { $in: productIds },
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      };
+      if (req.user && req.user.company_id) {
+        aggFilter.company_id = req.user.company_id;
+      }
+      const agg = await WarehouseInventory.aggregate([
+        { $match: aggFilter },
+        { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
+      ]);
+      totalsByProduct = new Map(agg.map((t) => [String(t._id), t.total]));
+    }
+
+    const data = rows
+      .filter((r) => r.product_id)
+      .map((r) => {
+        const pid = String(r.product_id._id);
+        return {
+          _id: r.product_id._id,
+          product_name: r.product_id.product_name,
+          product_code: r.product_id.product_code,
+          product_price: r.product_id.product_price,
+          warehouse_quantity: r.quantity,
+          total_quantity: totalsByProduct.get(pid) ?? r.quantity,
+        };
+      });
 
     return res.status(200).json({
       success: true,
-      count: products.length,
-      data: products.map((product) => ({
-        _id: product._id,
-        product_name: product.product_name,
-        product_price: product.product_price,
-        warehouse_quantity: product.getWarehouseQuantity(warehouseId),
-        total_quantity: product.getTotalQuantity(),
-      })),
+      count: data.length,
+      data,
     });
   } catch (error) {
     console.error("❌ Get products by warehouse error:", error);
@@ -1174,9 +1046,6 @@ module.exports = {
   productById,
   getAllProducts,
   getAllActiveProducts,
-  updateWarehouseQuantity,
-  getProductWarehouseInventory,
-  checkWarehouseStock,
   getProductsByWarehouse,
   productCreateVariation,
   productUpdateVariation,

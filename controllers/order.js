@@ -157,9 +157,31 @@ function stripLineItemKeys(body) {
   return out;
 }
 
+function roundMoney2(n) {
+  const x = typeof n === "number" ? n : Number(String(n ?? "").trim());
+  if (!Number.isFinite(x)) return 0;
+  return Math.round(x * 100) / 100;
+}
+
+/** Sum of parsed POS line subtotals (matches persisted order_item.subtotal). */
+function sumParsedLinesSubtotal(lines) {
+  return roundMoney2(
+    lines.reduce(
+      (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
+      0,
+    ),
+  );
+}
+
 function normalizeOrderNumericFields(obj) {
   const out = { ...obj };
-  for (const key of ["discount", "amount_received", "change_given"]) {
+  for (const key of [
+    "discount",
+    "shipment",
+    "lines_subtotal",
+    "amount_received",
+    "change_given",
+  ]) {
     if (!(key in out)) continue;
     const v = out[key];
     if (v === "" || v === null || v === undefined) {
@@ -324,6 +346,7 @@ async function order_save(req, res) {
   const originalBody = req.body;
   req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
   delete req.body._id;
+  req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
 
   const transaction_number = `TXN-${Date.now()}-${Math.floor(
     Math.random() * 1000000,
@@ -334,114 +357,151 @@ async function order_save(req, res) {
   req.body.payment_method_accounts_id = req.body?.posPayMethod;
   req.body.transaction_number = transaction_number;
 
-  const response = await handleGenericCreate(req, "order", {
-    afterCreate: async (record, orderReq) => {
-      console.log("✅ Order created successfully:", record);
+  const session = await mongoose.startSession();
+  let response = null;
+  let insertedItemsPlain = [];
+  let txnError = null;
 
-      // Same insert path as POST /api/transaction/bulk-create (`createTransactionsFromItems`).
-      try {
-        const orderTotal = Number(
-          lines
-            .reduce(
-              (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
-              0,
-            )
-            .toFixed(2),
-        );
-
-        // cash 75
-        // discount 75
-        //     sales 100
-        //     shipment 50
-
-        const { created, failed } = await transactionBulkCreate(
-          orderReq,
-          [
-            {
-              // sales
-              account_id: orderReq.user.company_id.default_sales_account,
-              type: "credit",
-              amount: orderTotal,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Sale Order",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-            },
-            {
-              // shipment
-              account_id: orderReq.user.company_id.default_shipping_account,
-              type: "credit",
-              amount: record?.shipment,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Sale Order",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-            },
-
-            {
-              // Sales Discount
-              account_id:
-                orderReq.user.company_id.default_sales_discount_account,
-              type: "debit",
-              amount: record?.discount,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Sale Discount",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-            },
-            {
-              // Cash
-              account_id: orderReq.body?.posPayMethod,
-              type: "debit",
-              amount: record?.amount_received,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Mode of Payment",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-            },
-          ],
-          { stopOnError: true },
-        );
-        if (failed.length) {
-          console.error(
-            "⚠️ Post-order transaction bulk insert failed:",
-            failed,
+  try {
+    await session.withTransaction(async () => {
+      response = await handleGenericCreate(req, "order", {
+        session,
+        afterCreate: async (record, orderReq, sess) => {
+          const orderTotal = Number(
+            lines
+              .reduce(
+                (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
+                0,
+              )
+              .toFixed(2),
           );
-          await logControllerError(
-            req,
-            `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`,
-            ORDER_TRANSACTION_ERROR_LOG,
+
+          const { created, failed } = await transactionBulkCreate(
+            orderReq,
+            [
+              {
+                account_id: orderReq.user.company_id.default_sales_account,
+                type: "credit",
+                amount: orderTotal,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Sale Order",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id: orderReq.user.company_id.default_shipping_account,
+                type: "credit",
+                amount: record?.shipment,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Sale Order",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id:
+                  orderReq.user.company_id.default_sales_discount_account,
+                type: "debit",
+                amount: record?.discount,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Sale Discount",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id: orderReq.body?.posPayMethod,
+                type: "debit",
+                amount: record?.amount_received,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Mode of Payment",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+              },
+            ],
+            { stopOnError: true, session: sess },
           );
-        } else if (created[0]?.data?._id) {
-          console.log(
-            "✅ Transaction(s) created:",
-            created.map((c) => c.data._id),
-          );
-        }
-      } catch (e) {
-        console.error("⚠️ Post-order transaction error:", e.message);
-        await logControllerError(
-          req,
-          `Post-order transaction error: ${e.message}`,
-          ORDER_TRANSACTION_ERROR_LOG,
+          if (failed.length) {
+            const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`;
+            console.error("⚠️ Post-order transaction bulk insert failed:", failed);
+            await logControllerError(
+              req,
+              msg,
+              ORDER_TRANSACTION_ERROR_LOG,
+            );
+            throw new Error(msg);
+          }
+          if (created[0]?.data?._id) {
+            console.log(
+              "✅ Transaction(s) created:",
+              created.map((c) => c.data._id),
+            );
+          }
+        },
+      });
+
+      if (!response?.success || !response?.data) {
+        throw new Error(
+          response?.error ||
+            response?.message ||
+            "Order create failed",
         );
       }
-    },
-  });
+
+      const orderId = response.data._id;
+      const built = await buildOrderItemDocuments(
+        orderId,
+        response.data,
+        lines,
+        req,
+      );
+      if (built.error) {
+        throw new Error(JSON.stringify(built.error));
+      }
+
+      const inserted = await OrderItem.insertMany(built.docs, { session });
+      insertedItemsPlain = inserted.map((d) =>
+        d.toObject({ flattenMaps: true }),
+      );
+      await Order.syncHeaderTotalsFromLineItems(orderId, { session });
+    });
+  } catch (e) {
+    txnError = e;
+  } finally {
+    session.endSession();
+  }
 
   req.body = originalBody;
+
+  if (txnError) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(txnError.message);
+    } catch (_) {
+      /* not JSON */
+    }
+    if (parsed && typeof parsed === "object" && parsed.status) {
+      return res.status(parsed.status).json(parsed);
+    }
+    const msg = String(txnError.message || "");
+    const isGl = msg.includes("Post-order");
+    return res.status(isGl ? 400 : 500).json({
+      success: false,
+      status: isGl ? 400 : 500,
+      error: isGl ? "Order creation rolled back" : "Failed to create order",
+      details: txnError.message,
+    });
+  }
 
   if (!response || !response.success || !response.data) {
     return res
@@ -450,36 +510,16 @@ async function order_save(req, res) {
   }
 
   const orderId = response.data._id;
-  const built = await buildOrderItemDocuments(
-    orderId,
-    response.data,
-    lines,
-    req,
+  const orderFresh = await Order.findById(orderId).lean();
+  const data = shapeOrderWithItems(
+    orderFresh || response.data,
+    insertedItemsPlain,
   );
-  if (built.error) {
-    await Order.findByIdAndDelete(orderId);
-    return res.status(built.error.status).json(built.error);
-  }
-
-  try {
-    const inserted = await OrderItem.insertMany(built.docs);
-    const items = inserted.map((d) => d.toObject({ flattenMaps: true }));
-    const data = shapeOrderWithItems(response.data, items);
-    return res.status(201).json({
-      success: true,
-      status: 201,
-      data,
-    });
-  } catch (err) {
-    await Order.findByIdAndDelete(orderId);
-    return res.status(500).json({
-      success: false,
-      status: 500,
-      error: "Failed to create order line items",
-      details: err.message,
-      type: "order_item_insert",
-    });
-  }
+  return res.status(201).json({
+    success: true,
+    status: 201,
+    data,
+  });
 }
 
 async function order_update(req, res) {
@@ -488,127 +528,185 @@ async function order_update(req, res) {
   req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
   delete req.body._id;
 
-  /** Filled inside `afterUpdate` when post-order `transactionBulkCreate` runs */
+  const recordId = String(req.params?.id || "").trim();
+  if (lines.length > 0) {
+    req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
+  } else if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
+    const items = await OrderItem.find({
+      order_id: recordId,
+      status: "active",
+      deletedAt: null,
+    })
+      .select("subtotal")
+      .lean();
+    req.body.lines_subtotal = roundMoney2(
+      items.reduce((s, i) => s + (Number(i.subtotal) || 0), 0),
+    );
+  }
+
   const postUpdateTransactions = { created: [], failed: [] };
 
-  const response = await handleGenericUpdate(req, "order", {
-    afterUpdate: async (record, orderReq) => {
-      try {
-        const transaction_number = record?.transaction_number;
-        const deleteTransc =
-          transaction_number ?
-            await Transaction.deleteMany({ transaction_number })
-          : { deletedCount: 0 };
-        if (deleteTransc.deletedCount > 0) {
-          console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
-        }
-        const orderTotal = Number(
-          lines
-            .reduce(
-              (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
-              0,
-            )
-            .toFixed(2),
-        );
+  const session = await mongoose.startSession();
+  let response = null;
+  let txnError = null;
 
-        const { created, failed } = await transactionBulkCreate(
-          req,
-          [
-            {
-              // sales
-              account_id: req.user.company_id.default_sales_account,
-              type: "credit",
-              amount: orderTotal,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Sale Order",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-              createdAt: record.createdAt,
-            },
-            {
-              // shipment
-              account_id: req.user.company_id.default_shipping_account,
-              type: "credit",
-              amount: record?.shipment,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Sale Order",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-              createdAt: record.createdAt,
-            },
-
-            {
-              // Sales Discount
-              account_id: req.user.company_id.default_sales_discount_account,
-              type: "debit",
-              amount: record?.discount,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Sale Discount",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-              createdAt: record.createdAt,
-            },
-            {
-              // accounts_id
-              account_id: req.body?.posPayMethod,
-              type: "debit",
-              amount: record?.amount_received,
-              reference_user_id: record?.customer_id,
-              transaction_number,
-              description: "Mode of Payment",
-              reference_id: {
-                module: "order",
-                ref_id: record._id,
-              },
-              createdAt: record.createdAt,
-            },
-          ],
-          { stopOnError: true },
-        );
-        postUpdateTransactions.created = created;
-        postUpdateTransactions.failed = failed;
-        if (failed.length) {
-          console.error(
-            "⚠️ Post-order transaction bulk insert failed:",
-            failed,
+  try {
+    await session.withTransaction(async () => {
+      response = await handleGenericUpdate(req, "order", {
+        session,
+        afterUpdate: async (record, orderReq, _existing, sess) => {
+          const transaction_number = record?.transaction_number;
+          if (transaction_number) {
+            const deleteTransc = await Transaction.deleteMany(
+              { transaction_number },
+              { session: sess },
+            );
+            if (deleteTransc.deletedCount > 0) {
+              console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
+            }
+          }
+          const orderTotal = Number(
+            lines
+              .reduce(
+                (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
+                0,
+              )
+              .toFixed(2),
           );
-          await logControllerError(
+
+          const { created, failed } = await transactionBulkCreate(
             req,
-            `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`,
-            ORDER_TRANSACTION_ERROR_LOG,
+            [
+              {
+                account_id: req.user.company_id.default_sales_account,
+                type: "credit",
+                amount: orderTotal,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Sale Order",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+                createdAt: record.createdAt,
+              },
+              {
+                account_id: req.user.company_id.default_shipping_account,
+                type: "credit",
+                amount: record?.shipment,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Sale Order",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+                createdAt: record.createdAt,
+              },
+              {
+                account_id:
+                  req.user.company_id.default_sales_discount_account,
+                type: "debit",
+                amount: record?.discount,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Sale Discount",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+                createdAt: record.createdAt,
+              },
+              {
+                account_id: req.body?.posPayMethod,
+                type: "debit",
+                amount: record?.amount_received,
+                reference_user_id: record?.customer_id,
+                transaction_number,
+                description: "Mode of Payment",
+                reference_id: {
+                  module: "order",
+                  ref_id: record._id,
+                },
+                createdAt: record.createdAt,
+              },
+            ],
+            { stopOnError: true, session: sess },
           );
-        } else if (created[0]?.data?._id) {
-          console.log(
-            "✅ Transaction(s) created:",
-            created.map((c) => c.data._id),
-          );
-        }
-      } catch (e) {
-        console.error("⚠️ Post-order transaction error:", e.message);
-        await logControllerError(
-          req,
-          `Post-order transaction error: ${e.message}`,
-          ORDER_TRANSACTION_ERROR_LOG,
+          postUpdateTransactions.created = created;
+          postUpdateTransactions.failed = failed;
+          if (failed.length) {
+            const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`;
+            console.error("⚠️ Post-order transaction bulk insert failed:", failed);
+            await logControllerError(
+              req,
+              msg,
+              ORDER_TRANSACTION_ERROR_LOG,
+            );
+            throw new Error(msg);
+          }
+          if (created[0]?.data?._id) {
+            console.log(
+              "✅ Transaction(s) created:",
+              created.map((c) => c.data._id),
+            );
+          }
+        },
+        filter: { status: "active", deletedAt: null },
+      });
+
+      if (!response?.success || !response?.data) {
+        throw new Error(
+          response?.error || response?.message || "Order update failed",
         );
       }
-    },
-    filter: { status: "active", deletedAt: null },
-  });
 
-  //response?.data?.transaction_number
-  // console.log("___data_update", response?.data?.transaction_number);
-  // return;
+      const orderId = response.data._id;
+
+      if (lines.length > 0) {
+        const built = await buildOrderItemDocuments(
+          orderId,
+          response.data,
+          lines,
+          req,
+        );
+        if (built.error) {
+          throw new Error(JSON.stringify(built.error));
+        }
+        await OrderItem.deleteMany({ order_id: orderId }, { session });
+        await OrderItem.insertMany(built.docs, { session });
+        await Order.syncHeaderTotalsFromLineItems(orderId, { session });
+      } else {
+        await Order.syncHeaderTotalsFromLineItems(orderId, { session });
+      }
+    });
+  } catch (e) {
+    txnError = e;
+  } finally {
+    session.endSession();
+  }
 
   req.body = originalBody;
+
+  if (txnError) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(txnError.message);
+    } catch (_) {
+      /* not JSON */
+    }
+    if (parsed && typeof parsed === "object" && parsed.status) {
+      return res.status(parsed.status).json(parsed);
+    }
+    const msg = String(txnError.message || "");
+    const isGl = msg.includes("Post-order");
+    return res.status(isGl ? 400 : 500).json({
+      success: false,
+      status: isGl ? 400 : 500,
+      error: "Order update rolled back",
+      details: txnError.message,
+    });
+  }
 
   if (!response || !response.success || !response.data) {
     return res
@@ -617,47 +715,6 @@ async function order_update(req, res) {
   }
 
   const orderId = response.data._id;
-
-  if (lines.length > 0) {
-    const built = await buildOrderItemDocuments(
-      orderId,
-      response.data,
-      lines,
-      req,
-    );
-    if (built.error) {
-      return res.status(built.error.status).json(built.error);
-    }
-    const previousItems = await OrderItem.find({ order_id: orderId }).lean();
-    try {
-      await OrderItem.deleteMany({ order_id: orderId });
-      const inserted = await OrderItem.insertMany(built.docs);
-      const items = inserted.map((d) => d.toObject({ flattenMaps: true }));
-      const data = shapeOrderWithItems(response.data, items);
-      return res.status(200).json({
-        success: true,
-        status: 200,
-        data,
-        created: postUpdateTransactions.created,
-        failed: postUpdateTransactions.failed,
-      });
-    } catch (err) {
-      if (previousItems.length > 0) {
-        try {
-          await OrderItem.insertMany(previousItems, { ordered: false });
-        } catch (restoreErr) {
-          console.error("Order item restore failed:", restoreErr);
-        }
-      }
-      return res.status(500).json({
-        success: false,
-        status: 500,
-        error: "Failed to replace order line items",
-        details: err.message,
-        type: "order_item_insert",
-      });
-    }
-  }
 
   const items = await OrderItem.find({
     order_id: orderId,
@@ -668,7 +725,8 @@ async function order_update(req, res) {
     .sort({ createdAt: 1 })
     .lean();
 
-  const data = shapeOrderWithItems(response.data, items);
+  const orderFresh = await Order.findById(orderId).lean();
+  const data = shapeOrderWithItems(orderFresh || response.data, items);
 
   return res.status(200).json({
     success: true,

@@ -92,7 +92,7 @@ const {
 async function getMyBranches(req, res) {
   const filter = { status: "active", deletedAt: null };
 
-  // Return assigned company and legacy creator-owned records.
+  // Tenant root (`_id`) plus subsidiary `Company` rows whose `company_id` parent points at that tenant.
   if (req.user?.company_id || req.user?._id) {
     filter.$or = [];
     if (req.user?.company_id) {

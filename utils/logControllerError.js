@@ -1,4 +1,5 @@
 const { handleGenericCreate } = require("./modelHelper");
+const Logs = require("../models/logs");
 
 /**
  * Best-effort write of a controller/API failure to the `logs` model via handleGenericCreate.
@@ -22,17 +23,16 @@ async function logControllerError(req, description, options = {}) {
     const companyId =
       req.user?.company_id?._id || req.user?.company_id || undefined;
     const createdBy = req.user?._id || undefined;
-    const logReq = Object.create(Object.getPrototypeOf(req));
-    Object.assign(logReq, req, {
-      body: {
-        action,
-        url: req.originalUrl || req.path || fallbackUrl,
-        tags,
-        description,
-        company_id: companyId,
-        created_by: createdBy,
-      },
+    const body = Logs.sanitizeLogPlainObject({
+      action,
+      url: req.originalUrl || req.path || fallbackUrl,
+      tags,
+      description,
+      company_id: companyId,
+      created_by: createdBy,
     });
+    const logReq = Object.create(Object.getPrototypeOf(req));
+    Object.assign(logReq, req, { body });
     await handleGenericCreate(logReq, "logs", {});
   } catch (logErr) {
     console.error("⚠️ Failed to write controller error log:", logErr.message);

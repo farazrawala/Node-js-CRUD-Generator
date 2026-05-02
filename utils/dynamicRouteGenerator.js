@@ -110,8 +110,8 @@ function generateControllerFunctions(modelName) {
       
       const response = await handleGenericCreate(req, modelName, {
         afterCreate: async (record, req) => {
-          // Special case: when creating a company, link it back to the creator user.
-          // Company documents do not have `company_id`, but user documents do.
+          // When creating a company, link the creator user to the new tenant root (`user.company_id`).
+          // `Company.company_id` on the schema is an optional **parent** ref (branch rows); generic create may set it from `req.user.company_id` above for subsidiary flows.
           if (modelName === 'company' && req.user && req.user._id) {
             try {
               const UserModel = require(path.join(__dirname, '..', 'models', 'user'));

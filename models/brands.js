@@ -19,10 +19,10 @@ const modelSchema = new mongoose.Schema(
       field_name: "Brand Image",
     },
     // default fields
-    company_id:{
+    company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     created_by:{

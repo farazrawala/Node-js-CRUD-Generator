@@ -34,7 +34,7 @@ const modelSchema = new mongoose.Schema(
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     created_by: {
@@ -61,6 +61,21 @@ const modelSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// One live stock row per company + product + warehouse (avoids split quantities).
+// Partial index: only rows with company_id and not soft-deleted participate.
+modelSchema.index(
+  { company_id: 1, product_id: 1, warehouse_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      company_id: { $exists: true, $ne: null },
+      deletedAt: null,
+    },
+  },
+);
+
+modelSchema.index({ company_id: 1, warehouse_id: 1 });
 
 const MODEL = mongoose.model("warehouse_inventory", modelSchema);
 

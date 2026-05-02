@@ -1,21 +1,19 @@
 const mongoose = require("mongoose");
 const Product = require("../models/product");
 const Warehouse = require("../models/warehouse");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const StockTransfer = require("../models/stock_transfer");
 const routeRegistry = require("../utils/routeRegistry");
 
 function buildActiveFilter(companyId) {
   const baseFilter = {
-    $or: [
-      { deletedAt: { $exists: false } },
-      { deletedAt: null }
-    ]
+    $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
   };
 
   if (companyId) {
     return {
       ...baseFilter,
-      company_id: companyId
+      company_id: companyId,
     };
   }
 
@@ -35,14 +33,45 @@ function buildRedirectUrl(basePath, params = {}) {
 
 async function renderStockTransfer(req, res) {
   try {
-    const companyId = req.user && req.user.company_id ? req.user.company_id : null;
+    const companyId =
+      req.user && req.user.company_id ? req.user.company_id : null;
     const companyFilter = buildActiveFilter(companyId);
 
     const productDocs = await Product.find(companyFilter)
-      .populate("warehouse_inventory.warehouse_id", "warehouse_name status")
       .sort({ product_name: 1 })
-      .select("product_name product_code warehouse_inventory company_id")
+      .select("product_name product_code company_id")
       .lean();
+
+    const invMatch = {
+      quantity: { $gt: 0 },
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+    if (companyId) {
+      invMatch.company_id = companyId;
+    }
+
+    const invRows = await WarehouseInventory.find(invMatch)
+      .populate("warehouse_id", "name code status")
+      .populate("product_id", "product_name product_code")
+      .lean();
+
+    const invByProduct = new Map();
+    for (const row of invRows) {
+      if (!row.product_id) continue;
+      const pid = row.product_id._id.toString();
+      if (!invByProduct.has(pid)) invByProduct.set(pid, []);
+      const wid = row.warehouse_id;
+      invByProduct.get(pid).push({
+        warehouse_id:
+          wid && wid._id ? wid._id.toString()
+          : row.warehouse_id ? row.warehouse_id.toString()
+          : "",
+        warehouse_name: wid && wid.name ? wid.name : "Unknown Warehouse",
+        quantity: row.quantity || 0,
+        last_updated: row.updatedAt,
+      });
+    }
 
     const warehouseDocs = await Warehouse.find(companyFilter)
       .sort({ warehouse_name: 1 })
@@ -57,54 +86,55 @@ async function renderStockTransfer(req, res) {
       .populate("to_warehouse_id", "warehouse_name")
       .lean();
 
-    const products = productDocs.map(doc => ({
+    const products = productDocs.map((doc) => ({
       ...doc,
       _id: doc._id.toString(),
-      warehouse_inventory: (doc.warehouse_inventory || []).map(entry => ({
-        warehouse_id: entry.warehouse_id && entry.warehouse_id._id
-          ? entry.warehouse_id._id.toString()
-          : entry.warehouse_id
-            ? entry.warehouse_id.toString()
-            : "",
-        warehouse_name: entry.warehouse_id && entry.warehouse_id.warehouse_name
-          ? entry.warehouse_id.warehouse_name
-          : "Unknown Warehouse",
-        quantity: entry.quantity || 0,
-        last_updated: entry.last_updated
-      }))
+      warehouse_inventory: invByProduct.get(doc._id.toString()) || [],
     }));
 
-    const warehouses = warehouseDocs.map(doc => ({
+    const warehouses = warehouseDocs.map((doc) => ({
       ...doc,
-      _id: doc._id.toString()
+      _id: doc._id.toString(),
     }));
 
     const productInventoryMap = {};
-    products.forEach(product => {
+    products.forEach((product) => {
       productInventoryMap[product._id] = product.warehouse_inventory || [];
     });
 
-    const recentTransfers = recentTransfersDocs.map(transfer => ({
+    const recentTransfers = recentTransfersDocs.map((transfer) => ({
       ...transfer,
       _id: transfer._id.toString(),
-      product_id: transfer.product_id
-        ? {
+      product_id:
+        transfer.product_id ?
+          {
             ...transfer.product_id,
-            _id: transfer.product_id._id ? transfer.product_id._id.toString() : transfer.product_id.toString()
+            _id:
+              transfer.product_id._id ?
+                transfer.product_id._id.toString()
+              : transfer.product_id.toString(),
           }
         : null,
-      from_warehouse_id: transfer.from_warehouse_id
-        ? {
+      from_warehouse_id:
+        transfer.from_warehouse_id ?
+          {
             ...transfer.from_warehouse_id,
-            _id: transfer.from_warehouse_id._id ? transfer.from_warehouse_id._id.toString() : transfer.from_warehouse_id.toString()
+            _id:
+              transfer.from_warehouse_id._id ?
+                transfer.from_warehouse_id._id.toString()
+              : transfer.from_warehouse_id.toString(),
           }
         : null,
-      to_warehouse_id: transfer.to_warehouse_id
-        ? {
+      to_warehouse_id:
+        transfer.to_warehouse_id ?
+          {
             ...transfer.to_warehouse_id,
-            _id: transfer.to_warehouse_id._id ? transfer.to_warehouse_id._id.toString() : transfer.to_warehouse_id.toString()
+            _id:
+              transfer.to_warehouse_id._id ?
+                transfer.to_warehouse_id._id.toString()
+              : transfer.to_warehouse_id.toString(),
           }
-        : null
+        : null,
     }));
 
     const formDefaults = {
@@ -112,7 +142,7 @@ async function renderStockTransfer(req, res) {
       from_warehouse_id: req.query.from_warehouse_id || "",
       to_warehouse_id: req.query.to_warehouse_id || "",
       quantity: req.query.quantity || "",
-      notes: req.query.notes || ""
+      notes: req.query.notes || "",
     };
 
     const customTabs = routeRegistry.getCustomTabs("products");
@@ -130,7 +160,7 @@ async function renderStockTransfer(req, res) {
       productInventoryMap,
       formDefaults,
       customTabs,
-      customTabsActivePath: "/admin/products/stock-transfer"
+      customTabsActivePath: "/admin/products/stock-transfer",
     });
   } catch (error) {
     console.error("❌ Stock transfer page error:", error);
@@ -139,84 +169,13 @@ async function renderStockTransfer(req, res) {
   }
 }
 
-async function updateParentWarehouseInventory(product) {
-  const parentId =
-    product.parent_product_id &&
-    product.parent_product_id.toString() !== product._id.toString()
-      ? product.parent_product_id.toString()
-      : null;
-
-  if (!parentId) {
-    return;
-  }
-
-  const [parentProduct, variantProducts] = await Promise.all([
-    Product.findById(parentId),
-    Product.find({
-      parent_product_id: parentId,
-      $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }]
-    }).select("warehouse_inventory")
-  ]);
-
-  if (!parentProduct) {
-    return;
-  }
-
-  const aggregateMap = new Map();
-
-  variantProducts.forEach(variant => {
-    (variant.warehouse_inventory || []).forEach(entry => {
-      const warehouseId = entry.warehouse_id
-        ? entry.warehouse_id.toString()
-        : null;
-      if (!warehouseId) {
-        return;
-      }
-
-      const record = aggregateMap.get(warehouseId) || {
-        quantity: 0,
-        last_updated: entry.last_updated || new Date()
-      };
-
-      record.quantity += entry.quantity || 0;
-
-      if (
-        entry.last_updated &&
-        (!record.last_updated || entry.last_updated > record.last_updated)
-      ) {
-        record.last_updated = entry.last_updated;
-      }
-
-      aggregateMap.set(warehouseId, record);
-    });
-  });
-
-  parentProduct.warehouse_inventory = Array.from(aggregateMap.entries()).map(
-    ([warehouseId, data]) => ({
-      warehouse_id: mongoose.Types.ObjectId.isValid(warehouseId)
-        ? new mongoose.Types.ObjectId(warehouseId)
-        : warehouseId,
-      quantity: data.quantity,
-      last_updated: data.last_updated || new Date()
-    })
-  );
-
-  parentProduct.markModified("warehouse_inventory");
-
-  if (product.updated_by && parentProduct.schema.paths.updated_by) {
-    parentProduct.updated_by = product.updated_by;
-  }
-
-  await parentProduct.save();
-}
-
 async function processStockTransfer({
   productId,
   fromWarehouseId,
   toWarehouseId,
   quantity,
   notes,
-  user
+  user,
 }) {
   const errors = [];
   const transferQty = parseInt(quantity, 10);
@@ -250,125 +209,174 @@ async function processStockTransfer({
   }
 
   const companyId = user && user.company_id ? user.company_id : null;
-  const companyFilter = companyId ? { company_id: companyId } : {};
+  if (!companyId) {
+    return {
+      success: false,
+      errors: [
+        "Company context is required. Log in with a user that has company_id set.",
+      ],
+    };
+  }
+  const companyFilter = { company_id: companyId };
 
   const product = await Product.findOne({
     _id: productId,
     ...companyFilter,
-    $or: [
-      { deletedAt: { $exists: false } },
-      { deletedAt: null }
-    ]
+    $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
   });
 
   if (!product) {
     return {
       success: false,
-      errors: ["Selected product was not found or is inactive."]
+      errors: ["Selected product was not found or is inactive."],
     };
   }
 
   const [fromWarehouse, toWarehouse] = await Promise.all([
     Warehouse.findOne({
       _id: fromWarehouseId,
-      // ...companyFilter,
-      $or: [
-        { deletedAt: { $exists: false } },
-        { deletedAt: null }
-      ]
+      $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
     }),
     Warehouse.findOne({
       _id: toWarehouseId,
-      // ...companyFilter,
-      $or: [
-        { deletedAt: { $exists: false } },
-        { deletedAt: null }
-      ]
-    })
+      $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
+    }),
   ]);
 
   if (!fromWarehouse) {
     return {
       success: false,
       errors: ["Source warehouse was not found or is inactive."],
-      data: {
-        fromWarehouse: fromWarehouse
-      }
     };
   }
 
   if (!toWarehouse) {
     return {
       success: false,
-      errors: ["Destination warehouse was not found or is inactive."]
+      errors: ["Destination warehouse was not found or is inactive."],
     };
   }
 
-  const fromBalanceBefore = product.getWarehouseQuantity(fromWarehouseId);
+  const invBase = {
+    product_id: productId,
+    $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
+    status: "active",
+    ...companyFilter,
+  };
+
+  const fromInv = await WarehouseInventory.findOne({
+    ...invBase,
+    warehouse_id: fromWarehouseId,
+  });
+
+  const fromBalanceBefore = fromInv ? Number(fromInv.quantity) : 0;
+
   if (fromBalanceBefore < transferQty) {
+    const fromLabel = fromWarehouse.name || "source warehouse";
     return {
       success: false,
       errors: [
-        `Insufficient quantity in ${fromWarehouse.warehouse_name}. Available: ${fromBalanceBefore}`
-      ]
+        `Insufficient quantity in ${fromLabel}. Available: ${fromBalanceBefore}`,
+      ],
     };
   }
 
-  const toBalanceBefore = product.getWarehouseQuantity(toWarehouseId);
-
-  product.decreaseWarehouseQuantity(fromWarehouseId, transferQty);
-  product.increaseWarehouseQuantity(toWarehouseId, transferQty);
-  product.markModified("warehouse_inventory");
-
-  if (user && user._id && product.schema.paths.updated_by) {
-    product.updated_by = user._id;
-  }
-
-  await product.save();
-  await updateParentWarehouseInventory(product);
-  await product.populate("warehouse_inventory.warehouse_id", "warehouse_name");
-
-  const transferRecord = await StockTransfer.create({
-    product_id: productId,
-    from_warehouse_id: fromWarehouseId,
-    to_warehouse_id: toWarehouseId,
-    quantity: transferQty,
-    notes,
-    transfer_status: "Completed",
-    transfer_date: new Date(),
-    from_balance_before: fromBalanceBefore,
-    from_balance_after: fromBalanceBefore - transferQty,
-    to_balance_before: toBalanceBefore,
-    to_balance_after: toBalanceBefore + transferQty,
-    company_id: companyId || undefined,
-    created_by: user && user._id ? user._id : undefined,
-    updated_by: user && user._id ? user._id : undefined
+  let toInv = await WarehouseInventory.findOne({
+    ...invBase,
+    warehouse_id: toWarehouseId,
   });
+
+  const toBalanceBefore = toInv ? Number(toInv.quantity) : 0;
+
+  let transferRecord;
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      fromInv.quantity = fromBalanceBefore - transferQty;
+      if (user && user._id) {
+        fromInv.updated_by = user._id;
+      }
+      await fromInv.save({ session });
+
+      if (!toInv) {
+        toInv = new WarehouseInventory({
+          product_id: productId,
+          warehouse_id: toWarehouseId,
+          quantity: 0,
+          company_id: companyId,
+          created_by: user && user._id ? user._id : undefined,
+          updated_by: user && user._id ? user._id : undefined,
+        });
+      }
+      toInv.quantity = toBalanceBefore + transferQty;
+      if (user && user._id) {
+        toInv.updated_by = user._id;
+      }
+      await toInv.save({ session });
+
+      const [created] = await StockTransfer.create(
+        [
+          {
+            product_id: productId,
+            from_warehouse_id: fromWarehouseId,
+            to_warehouse_id: toWarehouseId,
+            quantity: transferQty,
+            notes,
+            transfer_status: "completed",
+            transfer_date: new Date(),
+            from_balance_before: fromBalanceBefore,
+            from_balance_after: fromBalanceBefore - transferQty,
+            to_balance_before: toBalanceBefore,
+            to_balance_after: toBalanceBefore + transferQty,
+            company_id: companyId,
+            created_by: user && user._id ? user._id : undefined,
+            updated_by: user && user._id ? user._id : undefined,
+          },
+        ],
+        { session },
+      );
+      transferRecord = created;
+    });
+  } catch (err) {
+    console.error("❌ Stock transfer transaction error:", err);
+    return {
+      success: false,
+      errors: [
+        err.message ||
+          "Transfer could not be completed. Use a MongoDB replica set if transaction support is required.",
+      ],
+    };
+  } finally {
+    session.endSession();
+  }
 
   const populatedTransfer = await StockTransfer.findById(transferRecord._id)
     .populate("product_id", "product_name product_code")
-    .populate("from_warehouse_id", "warehouse_name")
-    .populate("to_warehouse_id", "warehouse_name")
+    .populate("from_warehouse_id", "name")
+    .populate("to_warehouse_id", "name")
     .lean();
 
-  const message = `Moved ${transferQty} ${transferQty === 1 ? "unit" : "units"} from ${fromWarehouse.warehouse_name} to ${toWarehouse.warehouse_name}.`;
+  const fromLabel = fromWarehouse.name || "source";
+  const toLabel = toWarehouse.name || "destination";
+  const message = `Moved ${transferQty} ${transferQty === 1 ? "unit" : "units"} from ${fromLabel} to ${toLabel}.`;
 
   return {
     success: true,
     message,
     transfer: populatedTransfer,
-    product: product.toObject()
+    product: product.toObject(),
   };
 }
 
 async function handleStockTransfer(req, res) {
-  const { product_id, from_warehouse_id, to_warehouse_id, quantity, notes } = req.body;
+  const { product_id, from_warehouse_id, to_warehouse_id, quantity, notes } =
+    req.body;
   const redirectUrl = buildRedirectUrl("/admin/products/stock-transfer", {
     product_id,
     from_warehouse_id,
     to_warehouse_id,
     quantity,
-    notes
+    notes,
   });
 
   try {
@@ -378,7 +386,7 @@ async function handleStockTransfer(req, res) {
       toWarehouseId: to_warehouse_id,
       quantity,
       notes,
-      user: req.user
+      user: req.user,
     });
 
     if (!result.success) {
@@ -387,10 +395,15 @@ async function handleStockTransfer(req, res) {
     }
 
     req.flash("success", result.message);
-    return res.redirect(buildRedirectUrl("/admin/products/stock-transfer", { product_id }));
+    return res.redirect(
+      buildRedirectUrl("/admin/products/stock-transfer", { product_id }),
+    );
   } catch (error) {
     console.error("❌ Stock transfer error:", error);
-    req.flash("error", error.message || "Unable to complete stock transfer. Please try again.");
+    req.flash(
+      "error",
+      error.message || "Unable to complete stock transfer. Please try again.",
+    );
     return res.redirect(redirectUrl);
   }
 }
@@ -403,14 +416,14 @@ async function apiCreateStockTransfer(req, res) {
       toWarehouseId: req.body.to_warehouse_id || req.body.toWarehouseId,
       quantity: req.body.quantity,
       notes: req.body.notes,
-      user: req.user
+      user: req.user,
     });
 
     if (!result.success) {
       return res.status(400).json({
         success: false,
         message: "Unable to complete stock transfer",
-        errors: result.errors
+        errors: result.errors,
       });
     }
 
@@ -419,28 +432,29 @@ async function apiCreateStockTransfer(req, res) {
       message: result.message,
       data: {
         transfer: result.transfer,
-        product: result.product
-      }
+        product: result.product,
+      },
     });
   } catch (error) {
     console.error("❌ API stock transfer error:", error);
     return res.status(500).json({
       success: false,
-      message: error.message || "Internal server error"
+      message: error.message || "Internal server error",
     });
   }
 }
 
 async function apiGetStockTransfers(req, res) {
   try {
-    const companyId = req.user && req.user.company_id ? req.user.company_id : null;
+    const companyId =
+      req.user && req.user.company_id ? req.user.company_id : null;
     const filter = buildActiveFilter(companyId);
 
     if (req.query.product_id) {
       if (!mongoose.Types.ObjectId.isValid(req.query.product_id)) {
         return res.status(400).json({
           success: false,
-          message: "Invalid product_id provided"
+          message: "Invalid product_id provided",
         });
       }
       filter.product_id = req.query.product_id;
@@ -450,7 +464,7 @@ async function apiGetStockTransfers(req, res) {
       if (!mongoose.Types.ObjectId.isValid(req.query.from_warehouse_id)) {
         return res.status(400).json({
           success: false,
-          message: "Invalid from_warehouse_id provided"
+          message: "Invalid from_warehouse_id provided",
         });
       }
       filter.from_warehouse_id = req.query.from_warehouse_id;
@@ -460,7 +474,7 @@ async function apiGetStockTransfers(req, res) {
       if (!mongoose.Types.ObjectId.isValid(req.query.to_warehouse_id)) {
         return res.status(400).json({
           success: false,
-          message: "Invalid to_warehouse_id provided"
+          message: "Invalid to_warehouse_id provided",
         });
       }
       filter.to_warehouse_id = req.query.to_warehouse_id;
@@ -479,7 +493,7 @@ async function apiGetStockTransfers(req, res) {
         .populate("from_warehouse_id", "warehouse_name")
         .populate("to_warehouse_id", "warehouse_name")
         .lean(),
-      StockTransfer.countDocuments(filter)
+      StockTransfer.countDocuments(filter),
     ]);
 
     return res.status(200).json({
@@ -490,14 +504,14 @@ async function apiGetStockTransfers(req, res) {
         page,
         limit,
         hasNextPage: skip + transfers.length < total,
-        hasPrevPage: page > 1
-      }
+        hasPrevPage: page > 1,
+      },
     });
   } catch (error) {
     console.error("❌ API get stock transfers error:", error);
     return res.status(500).json({
       success: false,
-      message: error.message || "Internal server error"
+      message: error.message || "Internal server error",
     });
   }
 }
@@ -507,5 +521,5 @@ module.exports = {
   handleStockTransfer,
   processStockTransfer,
   apiCreateStockTransfer,
-  apiGetStockTransfers
+  apiGetStockTransfers,
 };

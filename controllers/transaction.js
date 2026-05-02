@@ -8,12 +8,13 @@ const MAX_BULK_ITEMS = 500;
  * Create many transactions using the same rules as the bulk HTTP API (cloned req + handleGenericCreate).
  * @param {import("express").Request} req - Original request (for user / headers)
  * @param {object[]} items - Plain objects, same shape as each `items[]` entry in POST /transaction/bulk-create
- * @param {{ stopOnError?: boolean }} [options]
+ * @param {{ stopOnError?: boolean, session?: import("mongoose").ClientSession | null }} [options]
  * @returns {Promise<{ created: { index: number, data: object }[], failed: object[], summary: { total: number, inserted: number, failed: number } }>}
  */
 async function createTransactionsFromItems(req, items, options = {}) {
   const raw = items;
   const stopOnError = options.stopOnError === true;
+  const session = options.session || null;
 
   if (!Array.isArray(raw) || raw.length === 0) {
     return {
@@ -71,7 +72,9 @@ async function createTransactionsFromItems(req, items, options = {}) {
       itemReq.body.company_id = req.user.company_id;
     }
 
-    const response = await handleGenericCreate(itemReq, "transaction", {});
+    const response = await handleGenericCreate(itemReq, "transaction", {
+      ...(session ? { session } : {}),
+    });
     if (response.success) {
       created.push({ index: i, data: response.data });
     } else {

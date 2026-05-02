@@ -1,4 +1,8 @@
+const crypto = require("crypto");
 const mongoose = require("mongoose");
+
+/** Lowercase to match other models (e.g. order.order_status, stock_movement.type). */
+const TRANSFER_STATUSES = ["pending", "completed", "failed"];
 
 const stockTransferSchema = new mongoose.Schema(
   {
@@ -28,9 +32,9 @@ const stockTransferSchema = new mongoose.Schema(
     },
     transfer_status: {
       type: String,
-      enum: ["Pending", "Completed", "Failed"],
-      default: "Completed",
-      field_name: "Status"
+      enum: TRANSFER_STATUSES,
+      default: "pending",
+      field_name: "Status",
     },
     transfer_date: {
       type: Date,
@@ -68,7 +72,8 @@ const stockTransferSchema = new mongoose.Schema(
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      field_name: "Company"
+      required: true,
+      field_name: "Company",
     },
     created_by: {
       type: mongoose.Schema.Types.ObjectId,
@@ -89,10 +94,24 @@ const stockTransferSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-stockTransferSchema.pre("save", function(next) {
+/** Accept legacy Title Case values from DB or old clients until data is migrated. */
+stockTransferSchema.pre("validate", function (next) {
+  const v = this.transfer_status;
+  if (typeof v !== "string") return next();
+  const legacy = {
+    Pending: "pending",
+    Completed: "completed",
+    Failed: "failed",
+  };
+  if (legacy[v]) {
+    this.transfer_status = legacy[v];
+  }
+  next();
+});
+
+stockTransferSchema.pre("save", function (next) {
   if (!this.reference_code) {
-    const suffix = Math.floor(Math.random() * 9000) + 1000;
-    this.reference_code = `ST-${Date.now()}-${suffix}`;
+    this.reference_code = `ST-${crypto.randomUUID()}`;
   }
   if (!this.transfer_date) {
     this.transfer_date = new Date();

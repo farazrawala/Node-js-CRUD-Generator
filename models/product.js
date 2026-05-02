@@ -101,7 +101,7 @@ const modelSchema = new mongoose.Schema(
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     product_slug: {
@@ -123,45 +123,13 @@ const modelSchema = new mongoose.Schema(
         return null;
       },
     },
-    // warehouse_inventory: {
-    //   type: [
-    //     {
-    //       warehouse_id: {
-    //         type: mongoose.Schema.Types.ObjectId,
-    //         ref: "warehouse",
-    //         required: true,
-    //         field_name: "Warehouse"
-    //       },
-    //       quantity: {
-    //         type: Number,
-    //         required: true,
-    //         default: 0,
-    //         min: 0,
-    //         field_name: "Quantity"
-    //       },
-    //       quantity_action: {
-    //         type: String,
-    //         enum: ["add", "subtract"],
-    //         default: "add",
-    //         field_type: "select",
-    //         field_name: "Quantity Action"
-    //       },
-    //       last_updated: {
-    //         type: Date,
-    //         default: Date.now,
-    //         field_name: "Last Updated"
-    //       }
-    //     }
-    //   ],
-    //   default: [],
-    //   field_name: "Warehouse Inventory"
-    // },
     wholesale_price: {
       type: Number,
       field_name: "Wholesale Price",
     },
     product_price: {
-      type: String,
+      type: Number,
+      default: 0,
       required: true,
       field_name: "Product Price",
     },
@@ -206,8 +174,6 @@ const modelSchema = new mongoose.Schema(
 
 // Pre-validate hook to handle slug generation before validation (runs first)
 modelSchema.pre("validate", function (next) {
-  console.log("🔧 Pre-validate hook - product_name:", this.product_name);
-  console.log("🔧 Pre-validate hook - product_slug before:", this.product_slug);
   if (
     !this.product_type ||
     this.product_type === "" ||
@@ -224,7 +190,6 @@ modelSchema.pre("validate", function (next) {
     this.product_name
   ) {
     const newSlug = generateSlug(this.product_name);
-    console.log("✅ Generated new slug in validate:", newSlug);
     this.product_slug = newSlug;
   }
   next();
@@ -233,13 +198,6 @@ modelSchema.pre("validate", function (next) {
 // Pre-save hook to ensure slug is always generated from product_name if empty (backup)
 // Also ensure parent_product_id always exists
 modelSchema.pre("save", function (next) {
-  console.log("🔧 Pre-save hook - product_name:", this.product_name);
-  console.log("🔧 Pre-save hook - product_slug before:", this.product_slug);
-  console.log(
-    "🔧 Pre-save hook - parent_product_id before:",
-    this.parent_product_id,
-  );
-  console.log("🔧 Pre-save hook - product_type:", this.product_type);
   if (
     !this.product_type ||
     this.product_type === "" ||
@@ -256,7 +214,6 @@ modelSchema.pre("save", function (next) {
     this.product_name
   ) {
     const newSlug = generateSlug(this.product_name);
-    console.log("✅ Generated new slug in save:", newSlug);
     this.product_slug = newSlug;
   }
 
@@ -272,24 +229,11 @@ modelSchema.pre("save", function (next) {
       // For single products, set to own ID (if exists) or null (will be updated in post-save)
       if (this._id) {
         this.parent_product_id = this._id;
-        console.log(
-          "✅ Set parent_product_id to own ID for single product:",
-          this._id,
-        );
-      } else {
-        // Will be set in post-save hook
-        console.log(
-          "⏳ Will set parent_product_id to own ID after save (new product)",
-        );
       }
+      // else: post-save hook sets parent_product_id after _id exists
     }
   }
 
-  console.log("🔧 Pre-save hook - product_slug after:", this.product_slug);
-  console.log(
-    "🔧 Pre-save hook - parent_product_id after:",
-    this.parent_product_id,
-  );
   next();
 });
 
@@ -311,10 +255,6 @@ modelSchema.post("save", function (doc, next) {
     doc
       .save({ validateBeforeSave: false })
       .then(() => {
-        console.log(
-          "✅ Set parent_product_id to own ID for single product in post-save:",
-          doc._id,
-        );
         doc._settingParentId = false;
       })
       .catch((err) => {
@@ -325,98 +265,31 @@ modelSchema.post("save", function (doc, next) {
   next();
 });
 
-// Instance method to add or update warehouse inventory
-modelSchema.methods.setWarehouseQuantity = function (warehouseId, quantity) {
-  const existingIndex = this.warehouse_inventory.findIndex(
-    (item) => item.warehouse_id.toString() === warehouseId.toString(),
-  );
-
-  if (existingIndex >= 0) {
-    // Update existing warehouse quantity
-    this.warehouse_inventory[existingIndex].quantity = quantity;
-    this.warehouse_inventory[existingIndex].quantity_action = "add";
-    this.warehouse_inventory[existingIndex].last_updated = new Date();
-  } else {
-    // Add new warehouse inventory entry
-    this.warehouse_inventory.push({
-      warehouse_id: warehouseId,
-      quantity: quantity,
-      quantity_action: "add",
-      last_updated: new Date(),
-    });
-  }
-  return this;
-};
-
-// Instance method to get quantity for a specific warehouse
-modelSchema.methods.getWarehouseQuantity = function (warehouseId) {
-  const inventory = this.warehouse_inventory.find(
-    (item) => item.warehouse_id.toString() === warehouseId.toString(),
-  );
-  return inventory ? inventory.quantity : 0;
-};
-
-// Instance method to get total quantity across all warehouses
-modelSchema.methods.getTotalQuantity = function () {
-  return this.warehouse_inventory.reduce(
-    (total, item) => total + item.quantity,
-    0,
-  );
-};
-
-// Instance method to check if product is in stock at a specific warehouse
-modelSchema.methods.isInStock = function (warehouseId, requiredQuantity = 1) {
-  const availableQuantity = this.getWarehouseQuantity(warehouseId);
-  return availableQuantity >= requiredQuantity;
-};
-
-// Instance method to decrease quantity (for orders)
-modelSchema.methods.decreaseWarehouseQuantity = function (
-  warehouseId,
-  quantity,
-) {
-  const existingIndex = this.warehouse_inventory.findIndex(
-    (item) => item.warehouse_id.toString() === warehouseId.toString(),
-  );
-
-  if (existingIndex >= 0) {
-    const currentQty = this.warehouse_inventory[existingIndex].quantity;
-    if (currentQty >= quantity) {
-      this.warehouse_inventory[existingIndex].quantity -= quantity;
-      this.warehouse_inventory[existingIndex].quantity_action = "subtract";
-      this.warehouse_inventory[existingIndex].last_updated = new Date();
-      return true;
-    }
-    throw new Error(
-      `Insufficient quantity. Available: ${currentQty}, Requested: ${quantity}`,
-    );
-  }
-  throw new Error("Warehouse not found in inventory");
-};
-
-// Instance method to increase quantity (for restocking)
-modelSchema.methods.increaseWarehouseQuantity = function (
-  warehouseId,
-  quantity,
-) {
-  const existingIndex = this.warehouse_inventory.findIndex(
-    (item) => item.warehouse_id.toString() === warehouseId.toString(),
-  );
-
-  if (existingIndex >= 0) {
-    this.warehouse_inventory[existingIndex].quantity += quantity;
-    this.warehouse_inventory[existingIndex].quantity_action = "add";
-    this.warehouse_inventory[existingIndex].last_updated = new Date();
-  } else {
-    this.warehouse_inventory.push({
-      warehouse_id: warehouseId,
-      quantity: quantity,
-      quantity_action: "add",
-      last_updated: new Date(),
-    });
-  }
-  return this;
-};
+// Tenant-scoped uniqueness for POS lookup (only non-empty values, active rows)
+modelSchema.index(
+  { company_id: 1, sku: 1 },
+  {
+    unique: true,
+    name: "product_company_sku_1",
+    partialFilterExpression: {
+      deletedAt: null,
+      company_id: { $exists: true, $ne: null },
+      sku: { $exists: true, $nin: [null, ""] },
+    },
+  },
+);
+modelSchema.index(
+  { company_id: 1, barcode: 1 },
+  {
+    unique: true,
+    name: "product_company_barcode_1",
+    partialFilterExpression: {
+      deletedAt: null,
+      company_id: { $exists: true, $ne: null },
+      barcode: { $exists: true, $nin: [null, ""] },
+    },
+  },
+);
 
 const MODEL = mongoose.model("product", modelSchema);
 

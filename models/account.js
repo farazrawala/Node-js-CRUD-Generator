@@ -13,7 +13,7 @@ const modelSchema = new mongoose.Schema(
     },
     initial_balance: {
       type: Number,
-      //   required: true,
+      default: 0,
     },
     description: {
       type: String,
@@ -44,7 +44,7 @@ const modelSchema = new mongoose.Schema(
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     created_by: {
@@ -71,6 +71,35 @@ const modelSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+const activeAccountPartial = {
+  status: "active",
+  deletedAt: null,
+  company_id: { $exists: true, $ne: null },
+};
+
+modelSchema.index(
+  { company_id: 1, name: 1 },
+  { unique: true, partialFilterExpression: activeAccountPartial },
+);
+
+modelSchema.index(
+  { company_id: 1, account_number: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      ...activeAccountPartial,
+      account_number: { $exists: true, $nin: [null, ""] },
+    },
+  },
+);
+
+modelSchema.pre("validate", function (next) {
+  if (this.initial_balance === null || this.initial_balance === undefined) {
+    this.initial_balance = 0;
+  }
+  next();
+});
 
 const MODEL = mongoose.model("account", modelSchema);
 

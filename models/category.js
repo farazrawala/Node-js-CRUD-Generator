@@ -1,5 +1,9 @@
 const mongoose = require("mongoose");
 
+/**
+ * `isActive` is catalog visibility (boolean). Other models often use string `status` (active/inactive)
+ * for record lifecycle / soft delete — different meaning; keep both patterns unless you run a migration.
+ */
 const categorySchema = new mongoose.Schema(
   {
     parent_id: {
@@ -24,7 +28,7 @@ const categorySchema = new mongoose.Schema(
       required: [true, "Category name is required"],
       trim: true,
       minlength: [2, "Category name must be at least 2 characters long"],
-      maxlength: [100, "Category name cannot exceed 50 characters"],
+      maxlength: [100, "Category name cannot exceed 100 characters"],
     },
     slug: {
       type: String,
@@ -35,6 +39,7 @@ const categorySchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    /** Show/hide in storefront or pickers; not the same as collection-level `status` on order, product, etc. */
     isActive: {
       type: Boolean,
       default: true,
@@ -60,7 +65,7 @@ const categorySchema = new mongoose.Schema(
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     created_by: {
@@ -102,10 +107,10 @@ categorySchema.virtual("formattedUpdatedAt").get(function () {
   return this.updatedAt ? this.updatedAt.toLocaleDateString() : "";
 });
 
-// Index for better query performance
-categorySchema.index({ name: 1 });
-categorySchema.index({ isActive: 1 });
-categorySchema.index({ sort_order: 1 });
+// Tenant-scoped indexes (avoid full scans / cross-company name collisions)
+categorySchema.index({ company_id: 1, name: 1 });
+categorySchema.index({ company_id: 1, sort_order: 1 });
+categorySchema.index({ company_id: 1, isActive: 1 });
 
 // Pre-save middleware
 categorySchema.pre("save", function (next) {

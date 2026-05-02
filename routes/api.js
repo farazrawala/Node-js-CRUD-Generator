@@ -24,9 +24,9 @@ const {
   productById,
   getAllProducts,
   getAllActiveProducts,
-  updateWarehouseQuantity,
-  getProductWarehouseInventory,
-  checkWarehouseStock,
+  // updateWarehouseQuantity,
+  // getProductWarehouseInventory,
+  // checkWarehouseStock,
   getProductsByWarehouse,
   productCreateVariation,
   productUpdateVariation,
@@ -185,9 +185,9 @@ router.get("/process/execute-process", execute_process);
 router.get("/company/get-my-branches", getMyBranches);
 
 // Product warehouse inventory management routes
-router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
-router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
-router.get("/product/:id/check-stock", checkWarehouseStock);
+// router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
+// router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
+// router.get("/product/:id/check-stock", checkWarehouseStock);
 router.get("/warehouse/:warehouseId/products", getProductsByWarehouse);
 
 // Stock transfer routes

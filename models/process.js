@@ -52,10 +52,10 @@ const modelSchema = new mongoose.Schema(
     
 
     // default fields
-    company_id:{
+    company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     created_by:{

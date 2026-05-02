@@ -3311,7 +3311,7 @@ router.get("/dashboard", async (req, res) => {
     const recentOrders = await Order.find()
       .sort({ createdAt: -1 })
       .limit(5)
-      .select("order_number total_amount status createdAt");
+      .select("order_no total_amount status createdAt");
 
     // Get dynamic routes for sidebar  //posPayAmount
     const enabledRoutes = routeRegistry.getEnabledRoutes();

@@ -323,8 +323,9 @@ const handleGenericCreate = async (
     excludeFields = [], // Fields to exclude from response
     customValidation = null, // Custom validation function
     beforeCreate = null, // Function to run before creating
-    afterCreate = null, // Function to run after creating
+    afterCreate = null, // Function to run after creating (third arg: mongoose ClientSession when passed in options)
     errorHandlers = {}, // Custom error handlers
+    session = null, // Optional Mongo session (caller-owned); use with session.withTransaction
   } = options;
 
   if (!req.body || Object.keys(req.body).length === 0) {
@@ -874,7 +875,9 @@ const handleGenericCreate = async (
       password: modelData.password ? "[HIDDEN]" : undefined,
     });
 
-    const result = await Model.create(modelData);
+    const result = session ?
+      (await Model.create([modelData], { session }))[0]
+    : await Model.create(modelData);
 
     // Now handle image uploads with the record ID
     for (const imageField of imageFields) {
@@ -897,7 +900,7 @@ const handleGenericCreate = async (
               : [uploaded]
             : Array.isArray(uploaded) ? uploaded[0]
             : uploaded;
-          await result.save();
+          await result.save(session ? { session } : {});
         }
       } catch (error) {
         console.error(
@@ -910,7 +913,7 @@ const handleGenericCreate = async (
 
     // Run afterCreate hook if provided
     if (afterCreate) {
-      await afterCreate(result, req);
+      await afterCreate(result, req, session);
     }
 
     // Prepare response data (exclude specified fields and transform image URLs)
@@ -1148,10 +1151,11 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     excludeFields = [], // Fields to exclude from response
     customValidation = null, // Custom validation function
     beforeUpdate = null, // Function to run before updating
-    afterUpdate = null, // Function to run after updating
+    afterUpdate = null, // Function to run after updating (fourth arg: ClientSession when in options)
     errorHandlers = {}, // Custom error handlers
     allowedFields = [], // Fields that can be updated (empty = all fields)
     filter = {}, // Additional filters (e.g., { company_id: req.user.company_id })
+    session = null, // Optional Mongo session (caller-owned)
   } = options;
 
   // Get ID from URL parameters
@@ -1182,7 +1186,9 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     const modelSchema = Model.schema.obj;
 
     // Find the existing record
-    const existingRecord = await Model.findOne({ _id: recordId, ...filter });
+    let existingQ = Model.findOne({ _id: recordId, ...filter });
+    if (session) existingQ = existingQ.session(session);
+    const existingRecord = await existingQ;
     if (!existingRecord) {
       return {
         success: false,
@@ -1642,6 +1648,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     const updatedRecord = await Model.findByIdAndUpdate(recordId, updateData, {
       new: true,
       runValidators: true,
+      ...(session ? { session } : {}),
     });
 
     // Handle image uploads for update
@@ -1664,7 +1671,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
               : [uploaded]
             : Array.isArray(uploaded) ? uploaded[0]
             : uploaded;
-          await updatedRecord.save();
+          await updatedRecord.save(session ? { session } : {});
         }
       } catch (error) {
         console.error(
@@ -1677,7 +1684,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 
     // Run afterUpdate hook if provided
     if (afterUpdate) {
-      await afterUpdate(updatedRecord, req, existingRecord);
+      await afterUpdate(updatedRecord, req, existingRecord, session);
     }
 
     // Prepare response data (exclude specified fields and transform image URLs)
@@ -2007,6 +2014,12 @@ async function hydrateTransactionPolymorphicRef(data) {
     return;
   }
   if (!isPlainObjectIdOnly(ref.ref_id)) {
+    return;
+  }
+
+  const TransactionModel = require("../models/transaction");
+  const allowed = TransactionModel.TRANSACTION_REFERENCE_MODULES;
+  if (!Array.isArray(allowed) || !allowed.includes(ref.module)) {
     return;
   }
 

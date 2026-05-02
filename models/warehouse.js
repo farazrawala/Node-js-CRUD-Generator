@@ -4,11 +4,7 @@ const modelSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      // required: true,
-    },
-    name: {
-      type: String,
-      // required: true,
+      required: true,
     },
     code: {
       type: String,
@@ -42,7 +38,7 @@ const modelSchema = new mongoose.Schema(
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      // required: true,
+      required: true,
       field_name: "Company",
     },
     created_by: {

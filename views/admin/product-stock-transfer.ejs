@@ -299,8 +299,9 @@
                                         </span>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm">
-                                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium <%= transfer.transfer_status === 'Completed' ? 'bg-green-100 text-green-800' : (transfer.transfer_status === 'Pending' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800') %>">
-                                            <%= transfer.transfer_status %>
+                                        <% const _ts = String((transfer && transfer.transfer_status) || '').toLowerCase(); %>
+                                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium <%= _ts === 'completed' ? 'bg-green-100 text-green-800' : (_ts === 'pending' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800') %>">
+                                            <%= _ts || '—' %>
                                         </span>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
