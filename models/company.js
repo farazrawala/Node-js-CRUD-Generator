@@ -142,11 +142,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "Default Equity Account",
     },
 
-    // warehouse_id:{z
-    //   type: mongoose.Schema.Types.ObjectId,
-    //   ref: "warehouse",
-    //   field_name: "Default Store",
-    // },
+    warehouse_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "warehouse",
+      field_name: "Default Store",
+    },
     // default fields
     /** Parent company `_id` when this row is a branch/subsidiary; omit for root tenant companies. */
     company_id: {

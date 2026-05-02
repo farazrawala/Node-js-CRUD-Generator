@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const User = require("../models/user");
 const { setUserToken } = require("../service/auth");
 const {
@@ -75,7 +76,8 @@ async function handleUserLogin(req, res) {
     }).populate({
       path: "company_id",
       // `warehouse_id` is not defined in company schema, so avoid nested populate.
-      select: "company_name company_email company_phone company_address company_logo",
+      select:
+        "company_name company_email company_phone company_address company_logo",
     });
 
     if (!user) {
@@ -141,24 +143,61 @@ async function getAllUser(req, res) {
   return res.status(response.status).json(response);
 }
 
+function safeBodyPreview(body) {
+  try {
+    return JSON.stringify(body, null, 2);
+  } catch (e) {
+    return `[body not JSON-serializable: ${e.message}]`;
+  }
+}
+
+/** Clone-like request so `body`/`params` overrides are visible to modelHelper (some parsers ignore `req.body = …`). */
+function requestWithOverrides(req, overrides) {
+  return Object.assign(
+    Object.create(Object.getPrototypeOf(req)),
+    req,
+    overrides,
+  );
+}
+
 async function handleUserSignupCompany(req, res) {
   try {
     console.log("🚀 Starting handleUserSignupCompany function...");
-    console.log("📧 Request body:", JSON.stringify(req.body, null, 2));
+    console.log("📧 Request body:", safeBodyPreview(req.body));
 
-    // Check if email already exists
+    const emailRaw = req.body && req.body.email;
+    const email =
+      typeof emailRaw === "string" ? emailRaw.trim().toLowerCase() : "";
+    if (!email || !req.body.password || !String(req.body.password).length) {
+      return res.status(400).json({
+        success: false,
+        message: "email and password are required",
+      });
+    }
+    if (!req.body.company_name || !String(req.body.company_name).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "company_name is required",
+      });
+    }
+
+    // Check if email already exists (handleGenericFindOne returns 404 when not found)
     const find_email = await handleGenericFindOne(req, "user", {
-      searchCriteria: {
-        email: req.body.email.toLowerCase(),
-      },
+      searchCriteria: { email },
     });
 
-    // Correct way to check if email exists
     if (find_email.success && find_email.data) {
-      console.log("❌ Email already exists:", req.body.email);
+      console.log("❌ Email already exists:", email);
       return res.status(400).json({
         success: false,
         message: "Email already exists",
+      });
+    }
+    if (!find_email.success && find_email.status !== 404) {
+      return res.status(find_email.status || 500).json({
+        success: false,
+        message: "Could not verify email",
+        details: find_email,
       });
     }
 
@@ -167,52 +206,67 @@ async function handleUserSignupCompany(req, res) {
     const create_company = await handleGenericCreate(req, "company", {
       beforeCreate: async (data, req) => {
         console.log("🏢 Company beforeCreate hook called");
-        // Add required fields for company
-        data.company_name =
-          req.body.company_name + req.body.email ||
-          "Default Company Name for " + req.body.email;
+        const cn = String(req.body.company_name || "").trim();
+        const em = String(req.body.email || "").trim();
+        data.company_name = cn ? `${cn} (${em})` : `Company (${em})`;
         data.company_email = req.body.company_email || req.body.email;
         data.company_phone = req.body.company_phone || "N/A";
-        data.company_address = req.body.company_address || "Default Address";
+        data.company_address =
+          req.body.company_address || req.body.address || "Default Address";
         data.status = "active";
         console.log(
           "🏢 Company data after setting:",
-          JSON.stringify(data, null, 2)
+          JSON.stringify(data, null, 2),
         );
       },
     });
 
     if (!create_company.success) {
       console.log("❌ Company creation failed:", create_company);
-      return res.status(500).json({
+      return res.status(create_company.status || 500).json({
         success: false,
         message: "Company creation failed",
         details: create_company,
       });
     }
 
-    console.log("✅ Company created:", create_company.data._id);
+    const companyIdRaw = create_company.data && create_company.data._id;
+    if (!companyIdRaw) {
+      return res.status(500).json({
+        success: false,
+        message: "Company created but response had no _id",
+        details: create_company,
+      });
+    }
+    const companyId =
+      companyIdRaw instanceof mongoose.Types.ObjectId ?
+        companyIdRaw
+      : new mongoose.Types.ObjectId(String(companyIdRaw));
+
+    console.log("✅ Company created:", companyId);
     console.log("🏪 About to create warehouse...");
 
-    const create_warehouse = await handleGenericCreate(req, "warehouse", {
-      beforeCreate: async (data, req) => {
-        console.log("🏪 Warehouse beforeCreate hook called");
-        data.warehouse_name =
-          req.body.warehouse_name || "Current Store for " + req.body.email;
-        data.warehouse_address =
-          req.body.warehouse_address || "Default Address";
-        data.company_id = create_company.data._id;
-        data.status = "active";
-        console.log(
-          "🏪 Warehouse data after setting:",
-          JSON.stringify(data, null, 2)
-        );
-      },
-    });
+    const signupBodySnapshot = { ...req.body };
+    const warehouseName = "Head Office " + (req.body.company_name || "");
+    // Only warehouse schema fields — avoids form permissions / extra keys breaking generic create
+    const warehousePayload = {
+      name: warehouseName,
+      company_id: companyId,
+      status: "active",
+    };
+    console.log("🏪 Warehouse create payload:", warehousePayload);
+
+    const create_warehouse = await handleGenericCreate(
+      requestWithOverrides(req, { body: warehousePayload }),
+      "warehouse",
+      {},
+    );
+
+    req.body = signupBodySnapshot;
 
     if (!create_warehouse.success) {
       console.log("❌ Warehouse creation failed:", create_warehouse);
-      return res.status(500).json({
+      return res.status(create_warehouse.status || 500).json({
         success: false,
         message: "Warehouse creation failed",
         details: create_warehouse,
@@ -223,12 +277,14 @@ async function handleUserSignupCompany(req, res) {
       const originalBody = { ...req.body };
       const originalParams = { ...req.params };
 
-      // Set req.params.id for the company ID
-      req.params.id = create_company.data._id;
-      // Set req.body to only contain warehouse_id for the update
-      req.body = { warehouse_id: create_warehouse.data._id };
-
-      const updateCompany = await handleGenericUpdate(req, "company", {});
+      const updateCompany = await handleGenericUpdate(
+        requestWithOverrides(req, {
+          params: { ...originalParams, id: companyId },
+          body: { warehouse_id: create_warehouse.data._id },
+        }),
+        "company",
+        {},
+      );
 
       // Restore original req.body and req.params for subsequent operations (user creation)
       req.body = originalBody;
@@ -245,7 +301,7 @@ async function handleUserSignupCompany(req, res) {
 
       console.log(
         "✅ Company updated with warehouse_id:",
-        create_warehouse.data._id
+        create_warehouse.data._id,
       );
     }
 
@@ -253,12 +309,13 @@ async function handleUserSignupCompany(req, res) {
     console.log("👤 About to create user...");
 
     const user_created = await handleGenericCreate(req, "user", {
+      excludeFields: ["password"],
       beforeCreate: async (data, req) => {
         console.log("👤 User beforeCreate hook called");
-        data.email = req.body.email;
-        data.name = req.body.name || "User";
+        data.email = email;
+        data.name = (req.body.name && String(req.body.name).trim()) || "User";
         data.password = req.body.password;
-        data.company_id = create_company.data._id;
+        data.company_id = companyId;
         data.role = ["USER", "ADMIN"];
         console.log("👤 User data:", JSON.stringify(data, null, 2));
       },
@@ -266,7 +323,7 @@ async function handleUserSignupCompany(req, res) {
 
     if (!user_created.success) {
       console.log("❌ User creation failed:", user_created);
-      return res.status(500).json({
+      return res.status(user_created.status || 500).json({
         success: false,
         message: "User creation failed",
         details: user_created,
@@ -289,6 +346,7 @@ async function handleUserSignupCompany(req, res) {
     return res.status(500).json({
       success: false,
       message: error.message || "Internal server error during company signup",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   }
 }

@@ -339,6 +339,7 @@ const handleGenericCreate = async (
   }
 
   try {
+    const mongoose = require("mongoose");
     // Dynamically get the model
     const Model = getModelFromController(modelName);
     const modelSchema = Model.schema.obj;
@@ -353,53 +354,6 @@ const handleGenericCreate = async (
       "🔍 handleGenericCreate - modelSchema keys:",
       Object.keys(modelSchema),
     );
-
-    const requiredFields = Object.keys(modelSchema).filter((field) => {
-      const fieldConfig = modelSchema[field];
-      return fieldConfig.required === true && !fieldConfig.default;
-    });
-
-    // Validate required fields dynamically
-    const missingFields = requiredFields.filter((field) => {
-      // These are injected later from req.user (see below). Do not require them
-      // in req.body or validation fails before that assignment runs.
-      if (field === "created_by" && modelSchema.created_by && req.user?._id) {
-        return false;
-      }
-      if (field === "user_id" && modelSchema.user_id && req.user?._id) {
-        return false;
-      }
-      if (
-        field === "company_id" &&
-        modelSchema.company_id &&
-        req.user?.company_id
-      ) {
-        return false;
-      }
-
-      const value = req.body[field];
-      // Check if field is missing or empty
-      if (value === undefined || value === null) {
-        return true; // Field is missing
-      }
-      // For strings, check if empty after trimming
-      if (typeof value === "string") {
-        return value.trim().length === 0;
-      }
-      // For other types (numbers, booleans, objects, arrays), just check if falsy
-      return !value;
-    });
-
-    if (missingFields.length > 0) {
-      return {
-        success: false,
-        status: 400,
-        error: "Missing required fields",
-        required: requiredFields,
-        missing: missingFields,
-        received: Object.keys(req.body),
-      };
-    }
 
     // Run custom validation if provided
     if (customValidation) {
@@ -603,7 +557,6 @@ const handleGenericCreate = async (
 
     // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
     // These fields come as indexed format or already parsed into arrays/objects
-    const mongoose = require("mongoose");
     Object.keys(modelSchema).forEach((fieldName) => {
       const fieldConfig = modelSchema[fieldName];
 
@@ -868,6 +821,40 @@ const handleGenericCreate = async (
     // Run beforeCreate hook if provided
     if (beforeCreate) {
       await beforeCreate(modelData, req);
+    }
+
+    const requiredFields = Object.keys(modelSchema).filter((field) => {
+      const fieldConfig = modelSchema[field];
+      return fieldConfig.required === true && !fieldConfig.default;
+    });
+    const missingFields = requiredFields.filter((field) => {
+      const value = modelData[field];
+      if (value === undefined || value === null) {
+        return true;
+      }
+      if (typeof value === "string") {
+        return value.trim().length === 0;
+      }
+      if (value instanceof mongoose.Types.ObjectId) {
+        return false;
+      }
+      if (value instanceof Date) {
+        return false;
+      }
+      if (Buffer.isBuffer(value)) {
+        return value.length === 0;
+      }
+      return !value;
+    });
+    if (missingFields.length > 0) {
+      return {
+        success: false,
+        status: 400,
+        error: "Missing required fields",
+        required: requiredFields,
+        missing: missingFields,
+        received: Object.keys(modelData),
+      };
     }
 
     console.log(`✅ Creating ${modelName} with data:`, {

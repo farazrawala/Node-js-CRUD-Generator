@@ -191,35 +191,33 @@ async function checkHeaderAuthentication(req, res, next) {
     "/api/blog/get-all-active", // Public blog routes
     // '/api/product/get-all',            // Public product routes
     // '/api/user/get-all',               // Public user routes
-    "/user/user_company", // Public user routes
-    // '/api/user/user_company',               // Public user routes
+    "/user/user_company",
+    "/api/user/user_company",
     /^\/api\/blog\/get\/.*/, // /api/blog/get/:id
     // /^\/api\/product\/get\/.*/, // /api/product/get/:id
     /^\/api\/user\/get\/.*/, // /api/user/get/:id
     "/api/test", // Test route
   ];
 
+  const pathCandidates = [
+    req.path,
+    `${req.baseUrl || ""}${req.path || ""}`,
+    (req.originalUrl || "").split("?")[0],
+  ].filter(Boolean);
+
   // Check if current route should be public
   const isPublicRoute = publicRoutePatterns.some((pattern) => {
-    const match =
-      typeof pattern === "string" ? req.path === pattern
-      : pattern instanceof RegExp ? pattern.test(req.path)
-      : false;
-
-    // Debug logging for this specific route
-    if (req.path === "/api/user/user_company") {
-      console.log(`🔍 Checking pattern: ${pattern} -> Match: ${match}`);
+    if (typeof pattern === "string") {
+      return pathCandidates.some((p) => p === pattern);
     }
-
-    return match;
+    if (pattern instanceof RegExp) {
+      return pathCandidates.some((p) => pattern.test(p));
+    }
+    return false;
   });
 
-  // Debug logging for this specific route
-  if (
-    req.path === "/api/user/user_company" ||
-    req.path === "/api/user/create"
-  ) {
-    console.log("🔍 Route check:", req.path, "isPublicRoute:", isPublicRoute);
+  if (pathCandidates.some((p) => p.includes("/user/user_company"))) {
+    console.log("🔍 Route check:", pathCandidates, "isPublicRoute:", isPublicRoute);
   }
 
   if (isPublicRoute) {
