@@ -23,7 +23,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Transaction Number",
     },
-
+    is_editable: {
+      type: Boolean,
+      default: false,
+    },
     account_type: {
       type: String,
       required: true,
