@@ -135,11 +135,31 @@ const modelSchema = new mongoose.Schema(
       ref: "account",
       field_name: "Default Shipping Account",
     },
+    default_expense_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Expense Account",
+    },
+    default_salary_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Salary Account",
+    },
 
     default_equity_account_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "account",
       field_name: "Default Equity Account",
+    },
+    default_other_expense_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Other Expense Account",
+    },
+    default_utilities_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Utilities Account",
     },
 
     warehouse_id: {

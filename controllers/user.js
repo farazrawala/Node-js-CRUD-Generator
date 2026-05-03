@@ -262,8 +262,6 @@ async function handleUserSignupCompany(req, res) {
       {},
     );
 
-    req.body = signupBodySnapshot;
-
     if (!create_warehouse.success) {
       console.log("❌ Warehouse creation failed:", create_warehouse);
       return res.status(create_warehouse.status || 500).json({
@@ -271,39 +269,100 @@ async function handleUserSignupCompany(req, res) {
         message: "Warehouse creation failed",
         details: create_warehouse,
       });
-    } else {
-      // Update company with warehouse_id
-      // Save original req.body and req.params for later use
-      const originalBody = { ...req.body };
-      const originalParams = { ...req.params };
+    }
 
-      const updateCompany = await handleGenericUpdate(
-        requestWithOverrides(req, {
-          params: { ...originalParams, id: companyId },
-          body: { warehouse_id: create_warehouse.data._id },
-        }),
-        "company",
+    // account_type must match models/account.js enum exactly
+    const accounts = [
+      { name: "Cash", account_type: "current_asset" },
+      { name: "Accounts Receivable", account_type: "current_asset" },
+      { name: "Sales", account_type: "revenue" },
+      { name: "Purchase", account_type: "cost_of_goods_sold_account" },
+      { name: "Purchase Discount", account_type: "other" },
+      { name: "Accounts Payable", account_type: "liability" },
+      { name: "Sales Discount", account_type: "other" },
+      { name: "Shipping", account_type: "operating_expense" },
+      { name: "Expense", account_type: "operating_expense" },
+      { name: "Salary", account_type: "operating_expense" },
+      { name: "Equity", account_type: "equity" },
+      { name: "Other Expense", account_type: "other_expense" },
+      { name: "Utilities", account_type: "operating_expense" },
+    ];
+
+    const createdAccountsData = [];
+    for (const account of accounts) {
+      const accountPayload = {
+        name: account.name,
+        account_type: account.account_type,
+        company_id: companyId,
+        status: "active",
+      };
+      const accountResult = await handleGenericCreate(
+        requestWithOverrides(req, { body: accountPayload }),
+        "account",
         {},
       );
-
-      // Restore original req.body and req.params for subsequent operations (user creation)
-      req.body = originalBody;
-      req.params = originalParams;
-
-      if (!updateCompany.success) {
-        console.log("❌ Company warehouse_id update failed:", updateCompany);
-        return res.status(200).json({
+      if (!accountResult.success) {
+        console.log(
+          "❌ Default account creation failed:",
+          account.name,
+          accountResult,
+        );
+        return res.status(accountResult.status || 500).json({
           success: false,
-          message: "Failed to update company with warehouse_id",
-          details: updateCompany,
+          message: "Default chart of accounts creation failed",
+          details: { account: account.name, result: accountResult },
         });
       }
-
-      console.log(
-        "✅ Company updated with warehouse_id:",
-        create_warehouse.data._id,
-      );
+      createdAccountsData.push(accountResult.data);
     }
+
+    req.body = signupBodySnapshot;
+
+    // Update company with warehouse_id
+    const originalBody = { ...req.body };
+    const originalParams = { ...req.params };
+
+    const updateCompany = await handleGenericUpdate(
+      requestWithOverrides(req, {
+        params: { ...originalParams, id: companyId },
+        body: {
+          warehouse_id: create_warehouse.data._id,
+          default_cash_account: createdAccountsData[0]._id,
+          default_account_receivable_account: createdAccountsData[1]._id,
+          default_sales_account: createdAccountsData[2]._id,
+          default_purchase_account: createdAccountsData[3]._id,
+          default_purchase_discount_account: createdAccountsData[4]._id,
+          default_account_payable_account: createdAccountsData[5]._id,
+          default_sales_discount_account: createdAccountsData[6]._id,
+          default_shipping_account: createdAccountsData[7]._id,
+          default_expense_account: createdAccountsData[8]._id,
+          default_salary_account: createdAccountsData[9]._id,
+          default_equity_account_id: createdAccountsData[10]._id,
+          default_other_expense_account: createdAccountsData[11]._id,
+          default_utilities_account: createdAccountsData[12]._id,
+        },
+      }),
+      "company",
+      {},
+    );
+
+    // Restore original req.body and req.params for subsequent operations (user creation)
+    req.body = originalBody;
+    req.params = originalParams;
+
+    if (!updateCompany.success) {
+      console.log("❌ Company warehouse_id update failed:", updateCompany);
+      return res.status(200).json({
+        success: false,
+        message: "Failed to update company with warehouse_id",
+        details: updateCompany,
+      });
+    }
+
+    console.log(
+      "✅ Company updated with warehouse_id:",
+      create_warehouse.data._id,
+    );
 
     console.log("✅ Warehouse created:", create_warehouse.data._id);
     console.log("👤 About to create user...");
@@ -339,6 +398,7 @@ async function handleUserSignupCompany(req, res) {
         company: create_company.data,
         warehouse: create_warehouse.data,
         user: user_created.data,
+        accounts: createdAccountsData,
       },
     });
   } catch (error) {
