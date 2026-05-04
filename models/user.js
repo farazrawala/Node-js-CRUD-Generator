@@ -12,12 +12,17 @@ function companyIdRequiredForRoles(roles) {
 
 /**
  * Whitelist: keep in sync with `routes/admin.js` → userAdminCRUD fieldOptions.permissions.modules[].key
+ * Includes `order` (SPA) alongside `orders`; `proces` tolerates a common client typo for `process`.
  */
 const PERMISSION_MODULE_KEYS = [
   "integration",
   "orders",
+  "order",
   "analytics",
   "inventory",
+  "category",
+  "process",
+  "proces",
 ];
 
 /** Keys allowed on each permission row (matches permissionSetSchema). */
@@ -89,6 +94,10 @@ const userSchema = new mongoose.Schema(
     profile_image: {
       type: String,
       field_type: "image",
+    },
+    initial_balance: {
+      type: Number,
+      default: 0,
     },
     role: {
       type: [String],
@@ -172,7 +181,8 @@ userSchema.pre(["findOneAndUpdate", "findByIdAndUpdate"], function (next) {
   if (!raw || Array.isArray(raw)) return next();
 
   const patchPermissions = (obj) => {
-    if (!obj || typeof obj !== "object" || obj.permissions === undefined) return;
+    if (!obj || typeof obj !== "object" || obj.permissions === undefined)
+      return;
     const plain = permissionsInputToPlain(obj.permissions);
     obj.permissions = sanitizeUserPermissions(plain);
   };

@@ -111,11 +111,14 @@ const userAdminCRUD = adminCrudGenerator(
         modules: [
           { key: "integration", label: "Integration" },
           { key: "orders", label: "Orders" },
+          { key: "category", label: "Category" },
+          { key: "process", label: "Process" },
           { key: "analytics", label: "Analytics" },
           { key: "inventory", label: "Inventory" },
         ],
         actions: [
           { key: "view", label: "View" },
+          { key: "add", label: "Add" },
           { key: "edit", label: "Edit" },
           { key: "delete", label: "Delete" },
         ],

@@ -555,8 +555,8 @@ const handleGenericCreate = async (
       );
     });
 
-    // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
-    // These fields come as indexed format or already parsed into arrays/objects
+    // Handle multiselect fields (ObjectId[] and String[]).
+    // These fields come as indexed format or already parsed into arrays/objects.
     Object.keys(modelSchema).forEach((fieldName) => {
       const fieldConfig = modelSchema[fieldName];
 
@@ -567,16 +567,18 @@ const handleGenericCreate = async (
         schemaPath.instance === "Array" &&
         schemaPath.caster &&
         schemaPath.caster.instance === "ObjectID";
+      const isStringArray =
+        schemaPath &&
+        schemaPath.instance === "Array" &&
+        schemaPath.caster &&
+        schemaPath.caster.instance === "String";
 
       // Also check field_type for multiselect
       const isMultiselect = fieldConfig.field_type === "multiselect";
 
-      if (
-        isObjectIdArray ||
-        (isMultiselect && Array.isArray(fieldConfig.type))
-      ) {
+      if (isObjectIdArray || isStringArray || isMultiselect) {
         console.log(
-          `🔍 Processing multiselect ObjectId array field: ${fieldName}`,
+          `🔍 Processing multiselect array field: ${fieldName}`,
         );
 
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
@@ -629,12 +631,21 @@ const handleGenericCreate = async (
             : Array.isArray(values) ? values
             : [values];
 
-          // Convert to ObjectIds
+          // Convert to the expected array element type.
           const processedValues = [];
           values.forEach((val, idx) => {
             if (!val || val === "" || val === null || val === undefined) return;
 
-            if (val instanceof mongoose.Types.ObjectId) {
+            if (isStringArray || (isMultiselect && !isObjectIdArray)) {
+              if (typeof val === "string") {
+                const trimmedVal = val.trim();
+                if (trimmedVal.length > 0) {
+                  processedValues.push(trimmedVal);
+                }
+              } else {
+                processedValues.push(String(val));
+              }
+            } else if (val instanceof mongoose.Types.ObjectId) {
               processedValues.push(val);
             } else if (typeof val === "string") {
               const trimmedVal = val.trim();
@@ -727,7 +738,16 @@ const handleGenericCreate = async (
           indexedValues
             .filter((v) => v !== undefined && v !== null)
             .forEach((val) => {
-              if (val instanceof mongoose.Types.ObjectId) {
+              if (isStringArray || (isMultiselect && !isObjectIdArray)) {
+                if (typeof val === "string") {
+                  const trimmedVal = val.trim();
+                  if (trimmedVal.length > 0) {
+                    processedValues.push(trimmedVal);
+                  }
+                } else {
+                  processedValues.push(String(val));
+                }
+              } else if (val instanceof mongoose.Types.ObjectId) {
                 processedValues.push(val);
               } else if (
                 typeof val === "string" &&
@@ -1319,8 +1339,8 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
       }
     });
 
-    // Handle multiselect fields with ObjectId arrays (e.g., category_id[0], category_id[1])
-    // These fields come as indexed format or already parsed into arrays/objects
+    // Handle multiselect fields (ObjectId[] and String[]) — e.g. role[0], category_id[0].
+    // These fields come as indexed format or already parsed into arrays/objects.
     const mongoose = require("mongoose");
     Object.keys(modelSchema).forEach((fieldName) => {
       const fieldConfig = modelSchema[fieldName];
@@ -1332,17 +1352,19 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         schemaPath.instance === "Array" &&
         schemaPath.caster &&
         schemaPath.caster.instance === "ObjectID";
+      const isStringArray =
+        schemaPath &&
+        schemaPath.instance === "Array" &&
+        schemaPath.caster &&
+        schemaPath.caster.instance === "String";
 
       // Also check field_type for multiselect
       const isMultiselect =
         fieldConfig && fieldConfig.field_type === "multiselect";
 
-      if (
-        isObjectIdArray ||
-        (isMultiselect && Array.isArray(fieldConfig.type))
-      ) {
+      if (isObjectIdArray || isStringArray || isMultiselect) {
         console.log(
-          `🔍 Processing multiselect ObjectId array field (UPDATE): ${fieldName}`,
+          `🔍 Processing multiselect array field (UPDATE): ${fieldName}`,
         );
 
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
@@ -1395,12 +1417,21 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
             : Array.isArray(values) ? values
             : [values];
 
-          // Convert to ObjectIds
+          // Convert to the expected array element type.
           const processedValues = [];
           values.forEach((val, idx) => {
             if (!val || val === "" || val === null || val === undefined) return;
 
-            if (val instanceof mongoose.Types.ObjectId) {
+            if (isStringArray || (isMultiselect && !isObjectIdArray)) {
+              if (typeof val === "string") {
+                const trimmedVal = val.trim();
+                if (trimmedVal.length > 0) {
+                  processedValues.push(trimmedVal);
+                }
+              } else {
+                processedValues.push(String(val));
+              }
+            } else if (val instanceof mongoose.Types.ObjectId) {
               processedValues.push(val);
             } else if (typeof val === "string") {
               const trimmedVal = val.trim();
@@ -1493,7 +1524,16 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           indexedValues
             .filter((v) => v !== undefined && v !== null)
             .forEach((val) => {
-              if (val instanceof mongoose.Types.ObjectId) {
+              if (isStringArray || (isMultiselect && !isObjectIdArray)) {
+                if (typeof val === "string") {
+                  const trimmedVal = val.trim();
+                  if (trimmedVal.length > 0) {
+                    processedValues.push(trimmedVal);
+                  }
+                } else {
+                  processedValues.push(String(val));
+                }
+              } else if (val instanceof mongoose.Types.ObjectId) {
                 processedValues.push(val);
               } else if (
                 typeof val === "string" &&
