@@ -5,6 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const mongoose = require('mongoose');
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -82,6 +83,40 @@ function buildSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
   return { [sortBy]: direction };
 }
 
+/** Standalone MongoDB has no replica-set transactions — session-based ops fail until we retry without `session`. */
+function mongoTransactionsProbablyUnsupported(err, handlerFailureDetails = '') {
+  const combined = [
+    err?.message,
+    err?.details,
+    handlerFailureDetails,
+    String(err?.code ?? ''),
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return /replica set|Transaction numbers|Sessions are not supported|transaction.*not supported|multidocument transaction|cannot use session|Snapshot session|IllegalOperation/i.test(
+    combined,
+  );
+}
+
+/**
+ * Run `fn(session)` inside a Mongo transaction; if the deployment does not support
+ * transactions, retry `fn(null)` once without a session.
+ */
+async function withTxnFallback(fn) {
+  try {
+    return await mongoose.connection.transaction((session) => fn(session));
+  } catch (err) {
+    if (err.retryWithoutSession || mongoTransactionsProbablyUnsupported(err)) {
+      console.warn(
+        '[dynamicRoute] Mongo transactions unavailable; retrying without session:',
+        err.message,
+      );
+      return fn(null);
+    }
+    throw err;
+  }
+}
+
 /**
  * Get all model names from the models directory
  */
@@ -107,9 +142,10 @@ function generateControllerFunctions(modelName) {
       } else {
         console.log(`⚠️  No company_id found in req.user for ${modelName} create`);
       }
-      
-      const response = await handleGenericCreate(req, modelName, {
-        afterCreate: async (record, req) => {
+
+      const userControllerPath = path.join(__dirname, '..', 'controllers', 'user');
+
+      const afterCreate = async (record, req, session) => {
           // When creating a company, link the creator user to the new tenant root (`user.company_id`).
           // `Company.company_id` on the schema is an optional **parent** ref (branch rows); generic create may set it from `req.user.company_id` above for subsidiary flows.
           if (modelName === 'company' && req.user && req.user._id) {
@@ -118,7 +154,7 @@ function generateControllerFunctions(modelName) {
               await UserModel.findByIdAndUpdate(
                 req.user._id,
                 { company_id: record._id },
-                { new: true }
+                { new: true, ...(session ? { session } : {}) }
               );
               console.log(`🔗 Linked user ${req.user._id} to company ${record._id}`);
             } catch (linkErr) {
@@ -126,10 +162,54 @@ function generateControllerFunctions(modelName) {
             }
           }
 
+          if (modelName === 'user') {
+            try {
+              const { postTransactionsForUserInitialBalance } = require(userControllerPath);
+              await postTransactionsForUserInitialBalance(record, req, session);
+            } catch (glErr) {
+              console.error(
+                `⚠️ postTransactionsForUserInitialBalance:`,
+                glErr.message,
+              );
+              throw glErr;
+            }
+          }
+
           console.log(`✅ ${modelName} created successfully:`, record._id);
-        },
-      });
-      return res.status(response.status).json(response);
+      };
+
+      try {
+        if (modelName === 'user') {
+          const response = await withTxnFallback(async (session) => {
+            const out = await handleGenericCreate(req, modelName, {
+              ...(session ? { session } : {}),
+              afterCreate,
+            });
+            if (!out.success) {
+              const det = String(out.details || '');
+              if (session && mongoTransactionsProbablyUnsupported({ message: det }, det)) {
+                const e = new Error(det);
+                e.retryWithoutSession = true;
+                throw e;
+              }
+              throw new Error(det || out.error || 'User create failed');
+            }
+            return out;
+          });
+          return res.status(response.status).json(response);
+        }
+
+        const response = await handleGenericCreate(req, modelName, {
+          afterCreate,
+        });
+        return res.status(response.status).json(response);
+      } catch (err) {
+        console.error(`❌ ${modelName} create error:`, err.message);
+        return res.status(500).json({
+          success: false,
+          message: err.message || 'Create transaction aborted',
+        });
+      }
     },
 
     // Update
@@ -142,11 +222,65 @@ function generateControllerFunctions(modelName) {
         console.log(`🔍 Filtering ${modelName} update by company_id:`, req.user.company_id);
       }
       
-      const response = await handleGenericUpdate(req, modelName, {
+      const userControllerPath = path.join(__dirname, '..', 'controllers', 'user');
+
+      const updateOptions = {
         excludeFields: ['password'], // Don't return password in response
         filter: filter,
-      });
-      return res.status(response.status).json(response);
+      };
+
+      if (modelName === 'user') {
+        updateOptions.afterUpdate = async (
+          updatedRecord,
+          req,
+          existingRecord,
+          session,
+        ) => {
+          try {
+            const { reconcileUserInitialBalanceOnUpdate } = require(userControllerPath);
+            await reconcileUserInitialBalanceOnUpdate(
+              updatedRecord,
+              req,
+              existingRecord,
+              session,
+            );
+          } catch (e) {
+            console.error('⚠️ reconcileUserInitialBalanceOnUpdate:', e.message);
+            throw e;
+          }
+        };
+      }
+
+      try {
+        if (modelName === 'user') {
+          const response = await withTxnFallback(async (session) => {
+            const out = await handleGenericUpdate(req, modelName, {
+              ...updateOptions,
+              ...(session ? { session } : {}),
+            });
+            if (!out.success) {
+              const det = String(out.details || '');
+              if (session && mongoTransactionsProbablyUnsupported({ message: det }, det)) {
+                const e = new Error(det);
+                e.retryWithoutSession = true;
+                throw e;
+              }
+              throw new Error(det || out.error || 'User update failed');
+            }
+            return out;
+          });
+          return res.status(response.status).json(response);
+        }
+
+        const response = await handleGenericUpdate(req, modelName, updateOptions);
+        return res.status(response.status).json(response);
+      } catch (err) {
+        console.error(`❌ ${modelName} update error:`, err.message);
+        return res.status(500).json({
+          success: false,
+          message: err.message || 'Update transaction aborted',
+        });
+      }
     },
 
     // Get by ID

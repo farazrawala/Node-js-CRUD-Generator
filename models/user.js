@@ -113,6 +113,10 @@ const userSchema = new mongoose.Schema(
       },
       field_type: "multiselect",
     },
+    transaction_number: {
+      type: String,
+      field_name: "Transaction Number",
+    },
     // assign_company_id: {
     //   type: mongoose.Schema.Types.ObjectId,
     //   ref: "company",

@@ -9,6 +9,187 @@ const {
   handleGenericFindOne,
 } = require("../utils/modelHelper");
 const { performAccountCreate } = require("./account");
+const Company = require("../models/company");
+const Transaction = require("../models/transaction");
+const { createTransactionsFromItems } = require("./transaction");
+
+/**
+ * Build & post the 2-line user opening journal. Does not touch `user.transaction_number`.
+ * @param {import("mongoose").ClientSession | null} [session]
+ * @returns {{ ok: boolean, transaction_number: string | null, skipped: boolean }}
+ */
+async function executeUserInitialBalanceJournal(userDoc, req, session = null) {
+  const openingRaw = Number(userDoc?.initial_balance ?? 0);
+  if (Number.isNaN(openingRaw) || openingRaw === 0) {
+    return { ok: true, transaction_number: null, skipped: true };
+  }
+
+  const companyId = userDoc.company_id;
+  if (!companyId) {
+    console.warn(
+      "⚠️ Skipping user initial_balance GL: user has no company_id",
+    );
+    return { ok: true, transaction_number: null, skipped: true };
+  }
+
+  let companyQ = Company.findById(companyId).select(
+    "default_account_receivable_account default_account_payable_account default_equity_account_id",
+  );
+  if (session) {
+    companyQ = companyQ.session(session);
+  }
+  const company = await companyQ.lean();
+
+  const arId = company?.default_account_receivable_account;
+  const apId = company?.default_account_payable_account;
+  const equityId = company?.default_equity_account_id;
+
+  if (openingRaw > 0) {
+    if (!arId || !equityId) {
+      console.warn(
+        "⚠️ Skipping user initial_balance GL: company missing default_account_receivable_account or default_equity_account_id",
+      );
+      return { ok: false, transaction_number: null, skipped: false };
+    }
+  } else {
+    if (!equityId || !apId) {
+      console.warn(
+        "⚠️ Skipping user initial_balance GL: company missing default_equity_account_id or default_account_payable_account",
+      );
+      return { ok: false, transaction_number: null, skipped: false };
+    }
+  }
+
+  const posterId = userDoc._id;
+  if (!posterId) {
+    return { ok: false, transaction_number: null, skipped: false };
+  }
+
+  const transaction_number = `TXN-${Date.now()}-${Math.floor(
+    Math.random() * 1000000,
+  )
+    .toString()
+    .padStart(6, "0")}`;
+  const amount = Math.abs(openingRaw);
+
+  const transcReq = Object.assign(
+    Object.create(Object.getPrototypeOf(req)),
+    req,
+    { user: { _id: posterId, company_id: companyId } },
+  );
+
+  const postingBase = {
+    company_id: companyId,
+    user_id: posterId,
+    transaction_number,
+    description: "User initial balance",
+    amount,
+  };
+
+  const transactionData =
+    openingRaw > 0 ?
+      [
+        { ...postingBase, account_id: arId, type: "debit" },
+        { ...postingBase, account_id: equityId, type: "credit" },
+      ]
+    : [
+        { ...postingBase, account_id: equityId, type: "debit" },
+        { ...postingBase, account_id: apId, type: "credit" },
+      ];
+
+  const bulkOpts = { stopOnError: true };
+  if (session) {
+    bulkOpts.session = session;
+  }
+  const { failed, created } = await createTransactionsFromItems(
+    transcReq,
+    transactionData,
+    bulkOpts,
+  );
+
+  if (failed.length) {
+    console.error(
+      "⚠️ Post-user initial_balance transaction bulk insert failed:",
+      JSON.stringify(failed),
+    );
+    return { ok: false, transaction_number: null, skipped: false };
+  }
+
+  if (!created.length) {
+    return { ok: false, transaction_number: null, skipped: false };
+  }
+
+  return {
+    ok: true,
+    transaction_number,
+    skipped: false,
+  };
+}
+
+/**
+ * Called after dynamic `POST /api/user/create` when `initial_balance` is non-zero.
+ * Positive: debit A/R, credit equity. Negative: debit equity, credit A/P.
+ */
+async function postTransactionsForUserInitialBalance(record, req, session = null) {
+  const result = await executeUserInitialBalanceJournal(record, req, session);
+  if (!result.ok || result.skipped || !result.transaction_number) {
+    return;
+  }
+
+  if (record && typeof record.save === "function") {
+    record.transaction_number = result.transaction_number;
+    await record.save(session ? { session } : {});
+  }
+}
+
+/**
+ * On user update: post new journal first (or none if balance is 0), then delete the
+ * previous batch by `transaction_number` so a failed re-post does not wipe old GL lines.
+ */
+async function reconcileUserInitialBalanceOnUpdate(
+  updatedRecord,
+  req,
+  existingRecord,
+  session = null,
+) {
+  const prevTn = existingRecord.transaction_number;
+
+  const result = await executeUserInitialBalanceJournal(
+    updatedRecord,
+    req,
+    session,
+  );
+
+  if (!result.ok) {
+    return;
+  }
+
+  const deleteOpts = session ? { session } : {};
+
+  if (result.skipped || !result.transaction_number) {
+    if (prevTn) {
+      const q = { transaction_number: prevTn };
+      if (existingRecord.company_id) {
+        q.company_id = existingRecord.company_id;
+      }
+      await Transaction.deleteMany(q, deleteOpts);
+    }
+    updatedRecord.transaction_number = null;
+    await updatedRecord.save(session ? { session } : {});
+    return;
+  }
+
+  if (prevTn && prevTn !== result.transaction_number) {
+    const q = { transaction_number: prevTn };
+    if (existingRecord.company_id) {
+      q.company_id = existingRecord.company_id;
+    }
+    await Transaction.deleteMany(q, deleteOpts);
+  }
+
+  updatedRecord.transaction_number = result.transaction_number;
+  await updatedRecord.save(session ? { session } : {});
+}
 
 async function handleUserSignup(req, res) {
   const response = await handleGenericCreate(req, "user", {
@@ -563,4 +744,6 @@ module.exports = {
   findUserByEmail,
   findUserByCompany,
   findActiveUserByRole,
+  postTransactionsForUserInitialBalance,
+  reconcileUserInitialBalanceOnUpdate,
 };
