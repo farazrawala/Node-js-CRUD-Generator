@@ -8,6 +8,7 @@ const {
   handleGenericGetById,
   handleGenericFindOne,
 } = require("../utils/modelHelper");
+const { performAccountCreate } = require("./account");
 
 async function handleUserSignup(req, res) {
   const response = await handleGenericCreate(req, "user", {
@@ -271,6 +272,35 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
+    console.log("👤 Creating user before chart (GL postings need user_id)...");
+
+    const user_created = await handleGenericCreate(req, "user", {
+      excludeFields: ["password"],
+      beforeCreate: async (data, req) => {
+        console.log("👤 User beforeCreate hook called");
+        data.email = email;
+        data.name = (req.body.name && String(req.body.name).trim()) || "User";
+        data.password = req.body.password;
+        data.company_id = companyId;
+        data.role = ["USER", "ADMIN"];
+        console.log("👤 User data:", JSON.stringify(data, null, 2));
+      },
+    });
+
+    if (!user_created.success) {
+      console.log("❌ User creation failed:", user_created);
+      return res.status(user_created.status || 500).json({
+        success: false,
+        message: "User creation failed",
+        details: user_created,
+      });
+    }
+
+    const postingUser = {
+      _id: user_created.data._id,
+      company_id: companyId,
+    };
+
     // account_type must match models/account.js enum exactly
     const accounts = [
       { name: "Cash", account_type: "current_asset" },
@@ -288,18 +318,28 @@ async function handleUserSignupCompany(req, res) {
       { name: "Utilities", account_type: "operating_expense" },
     ];
 
-    const createdAccountsData = [];
-    for (const account of accounts) {
+    // Create Equity first so opening-balance journals can resolve the contra account;
+    // keep `createdAccountsData` in the original order for company default_* fields.
+    const equitySpec = accounts.find((a) => a.account_type === "equity");
+    const accountCreateOrder =
+      equitySpec ?
+        [equitySpec, ...accounts.filter((a) => a.account_type !== "equity")]
+      : [...accounts];
+
+    const createdByName = Object.create(null);
+    for (const account of accountCreateOrder) {
       const accountPayload = {
         name: account.name,
         account_type: account.account_type,
         company_id: companyId,
         status: "active",
       };
-      const accountResult = await handleGenericCreate(
-        requestWithOverrides(req, { body: accountPayload }),
-        "account",
-        {},
+      const accountResult = await performAccountCreate(
+        requestWithOverrides(req, {
+          body: accountPayload,
+          user: postingUser,
+        }),
+        true,
       );
       if (!accountResult.success) {
         console.log(
@@ -313,8 +353,10 @@ async function handleUserSignupCompany(req, res) {
           details: { account: account.name, result: accountResult },
         });
       }
-      createdAccountsData.push(accountResult.data);
+      createdByName[account.name] = accountResult.data;
     }
+
+    const createdAccountsData = accounts.map((a) => createdByName[a.name]);
 
     req.body = signupBodySnapshot;
 
@@ -365,30 +407,6 @@ async function handleUserSignupCompany(req, res) {
     );
 
     console.log("✅ Warehouse created:", create_warehouse.data._id);
-    console.log("👤 About to create user...");
-
-    const user_created = await handleGenericCreate(req, "user", {
-      excludeFields: ["password"],
-      beforeCreate: async (data, req) => {
-        console.log("👤 User beforeCreate hook called");
-        data.email = email;
-        data.name = (req.body.name && String(req.body.name).trim()) || "User";
-        data.password = req.body.password;
-        data.company_id = companyId;
-        data.role = ["USER", "ADMIN"];
-        console.log("👤 User data:", JSON.stringify(data, null, 2));
-      },
-    });
-
-    if (!user_created.success) {
-      console.log("❌ User creation failed:", user_created);
-      return res.status(user_created.status || 500).json({
-        success: false,
-        message: "User creation failed",
-        details: user_created,
-      });
-    }
-
     console.log("✅ User created:", user_created.data._id);
 
     return res.status(200).json({

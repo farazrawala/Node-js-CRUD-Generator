@@ -322,7 +322,7 @@ const handleGenericCreate = async (
   const {
     excludeFields = [], // Fields to exclude from response
     customValidation = null, // Custom validation function
-    beforeCreate = null, // Function to run before creating
+    beforeCreate = null, // (modelData, req) => void | false | { success: false, status?, error?, message?, details? }
     afterCreate = null, // Function to run after creating (third arg: mongoose ClientSession when passed in options)
     errorHandlers = {}, // Custom error handlers
     session = null, // Optional Mongo session (caller-owned); use with session.withTransaction
@@ -802,10 +802,14 @@ const handleGenericCreate = async (
       modelDataFields: Object.keys(modelData),
     });
 
-    // Add default values for fields with defaults
+    // Add default values for fields with defaults (only when absent from modelData).
+    // Do not use `!modelData[field]` — `false`, `0`, and `""` are valid explicit values.
     Object.keys(modelSchema).forEach((field) => {
       const fieldConfig = modelSchema[field];
-      if (fieldConfig.default && !modelData[field]) {
+      if (
+        fieldConfig.default !== undefined &&
+        modelData[field] === undefined
+      ) {
         const def = fieldConfig.default;
         modelData[field] =
           typeof def === "function" ? def.call(modelData) : def;
@@ -818,9 +822,30 @@ const handleGenericCreate = async (
       return fieldConfig.field_type === "image";
     });
 
-    // Run beforeCreate hook if provided
+    // Run beforeCreate hook if provided (may abort: return `false` or `{ success: false, ... }`)
     if (beforeCreate) {
-      await beforeCreate(modelData, req);
+      const beforeResult = await beforeCreate(modelData, req);
+      if (beforeResult === false) {
+        return {
+          success: false,
+          status: 400,
+          error: "Creation aborted",
+          message: "beforeCreate returned false",
+        };
+      }
+      if (
+        beforeResult &&
+        typeof beforeResult === "object" &&
+        beforeResult.success === false
+      ) {
+        return {
+          success: false,
+          status: beforeResult.status || 400,
+          error: beforeResult.error || "Creation aborted",
+          message: beforeResult.message,
+          details: beforeResult.details,
+        };
+      }
     }
 
     const requiredFields = Object.keys(modelSchema).filter((field) => {
@@ -844,6 +869,10 @@ const handleGenericCreate = async (
       if (Buffer.isBuffer(value)) {
         return value.length === 0;
       }
+      // `0` is valid for numeric required fields (e.g. transaction amount); `!0` is wrongly "missing"
+      if (typeof value === "number") {
+        return Number.isNaN(value);
+      }
       return !value;
     });
     if (missingFields.length > 0) {
@@ -862,9 +891,10 @@ const handleGenericCreate = async (
       password: modelData.password ? "[HIDDEN]" : undefined,
     });
 
-    const result = session ?
-      (await Model.create([modelData], { session }))[0]
-    : await Model.create(modelData);
+    const result =
+      session ?
+        (await Model.create([modelData], { session }))[0]
+      : await Model.create(modelData);
 
     // Now handle image uploads with the record ID
     for (const imageField of imageFields) {
@@ -2191,11 +2221,9 @@ const handleGenericGetAll = async (
       normalizeTransactionPopulateList(modelName, populate);
 
     const searchFromOptions =
-      search == null ? "" : (
-        typeof search === "string" ?
-          search.trim()
-        : String(search).trim()
-      );
+      search == null ? ""
+      : typeof search === "string" ? search.trim()
+      : String(search).trim();
     const searchFromQuery =
       req.query && req.query.search != null ?
         String(req.query.search).trim()

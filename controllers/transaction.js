@@ -210,7 +210,10 @@ async function getTransactionsListWithDebitCreditSummary(req, res) {
       req.query.limit != null && String(req.query.limit).trim() !== "" ?
         parseInt(req.query.limit, 10)
       : 200;
-    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 200, 1), 2000);
+    const limit = Math.min(
+      Math.max(Number.isFinite(rawLimit) ? rawLimit : 200, 1),
+      2000,
+    );
 
     const [agg] = await Transaction.aggregate([
       { $match: filter },

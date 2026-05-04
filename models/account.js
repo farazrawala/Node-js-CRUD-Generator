@@ -23,15 +23,12 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Transaction Number",
     },
-    is_editable: {
-      type: Boolean,
-      default: false,
-    },
     account_type: {
       type: String,
       required: true,
       enum: [
         "current_asset",
+        "account_receivable",
         "fixed_asset",
         "revenue",
         "cost_of_goods_sold_account",
@@ -65,6 +62,15 @@ const modelSchema = new mongoose.Schema(
       required: true,
       enum: ["active", "inactive"],
       default: "active",
+    },
+    /** When false, account should not be deleted (e.g. system / default GL). */
+    is_deletable: {
+      type: Boolean,
+      default: true,
+    },
+    is_editable: {
+      type: Boolean,
+      default: true,
     },
     deletedAt: {
       type: Date,
