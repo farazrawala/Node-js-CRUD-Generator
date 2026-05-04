@@ -29,6 +29,7 @@ const RESERVED_QUERY_KEYS = new Set([
   'sortOrder',
   'page',
   'deleted',
+  'include_inactive',
 ]);
 
 function parseQueryValue(raw) {
@@ -337,8 +338,20 @@ function generateControllerFunctions(modelName) {
 
     // Get all active (if status field exists)
     getAllActive: async (req, res) => {
-      let filter = { status: 'active', deletedAt: null };
-      
+      // `user`: "active" = not soft-deleted and not explicitly `inactive` (legacy docs may omit `status`).
+      // Pass `?include_inactive=true` to list every non-deleted user for the tenant (admin-style directory).
+      let filter = { deletedAt: null };
+      if (modelName === 'user') {
+        const includeInactive =
+          req.query.include_inactive === 'true' ||
+          req.query.include_inactive === '1';
+        if (!includeInactive) {
+          filter.status = { $ne: 'inactive' };
+        }
+      } else {
+        filter.status = 'active';
+      }
+
       // Always filter by company_id if user has one
       if (req.user && req.user.company_id) {
         filter.company_id = req.user.company_id;

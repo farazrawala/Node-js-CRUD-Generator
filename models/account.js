@@ -35,7 +35,7 @@ const modelSchema = new mongoose.Schema(
         "operating_expense",
         "other_expense",
         "equity",
-        "liability",
+        "current_liability",
         "other",
       ],
       field_name: "Account Type",
