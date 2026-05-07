@@ -78,12 +78,22 @@ async function executeUserInitialBalanceJournal(userDoc, req, session = null) {
     { user: { _id: posterId, company_id: companyId } },
   );
 
+  const userCreatedAt = userDoc?.createdAt;
   const postingBase = {
     company_id: companyId,
     user_id: posterId,
+    reference_user_id: posterId,
     transaction_number,
     description: "User initial balance",
     amount,
+    ...(userCreatedAt ?
+      {
+        createdAt:
+          userCreatedAt instanceof Date ?
+            userCreatedAt
+          : new Date(userCreatedAt),
+      }
+    : {}),
   };
 
   const transactionData =
@@ -489,7 +499,7 @@ async function handleUserSignupCompany(req, res) {
       { name: "Sales", account_type: "revenue" },
       { name: "Purchase", account_type: "cost_of_goods_sold_account" },
       { name: "Purchase Discount", account_type: "other" },
-      { name: "Accounts Payable", account_type: "liability" },
+      { name: "Accounts Payable", account_type: "current_liability" },
       { name: "Sales Discount", account_type: "other" },
       { name: "Shipping", account_type: "operating_expense" },
       { name: "Expense", account_type: "operating_expense" },

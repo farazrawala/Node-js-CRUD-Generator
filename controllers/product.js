@@ -1012,7 +1012,12 @@ async function productDelete(req, res) {
 }
 
 async function getAllActiveProductsPOS(req, res) {
-  const filter = { status: "active", deletedAt: null, product_parent_id: null };
+  const filter = {
+    status: "active",
+    deletedAt: null,
+    product_parent_id: null,
+    company_id: req.user.company_id,
+  };
   const response = await handleGenericGetAll(req, "product", {
     filter,
     excludeFields: [], // Don't exclude any fields

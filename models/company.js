@@ -94,6 +94,10 @@ const modelSchema = new mongoose.Schema(
       field_name: "Logo Image",
       field_type: "image",
     },
+    barcode_settings: {
+      type: String,
+      field_name: "Barcode Settings",
+    },
 
     default_cash_account: {
       type: mongoose.Schema.Types.ObjectId,

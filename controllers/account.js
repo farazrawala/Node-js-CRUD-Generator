@@ -211,7 +211,11 @@ async function performAccountCreate(req, comp_create = false) {
             account_id: equityAccountId,
             type: record?.initial_balance >= 0 ? "credit" : "debit",
           });
-        } else if (record?.account_type == "liability") {
+        } else if (
+          record?.account_type === "current_liability" ||
+          record?.account_type === "long_term_liability" ||
+          record?.account_type === "short_term_liability"
+        ) {
           transactionData.push({
             ...posting,
             account_id: record._id,
