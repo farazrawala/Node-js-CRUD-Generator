@@ -8,7 +8,7 @@ const {
   handleGenericUpdate,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
-const { logControllerError } = require("../utils/logControllerError");
+const { logControllerError, logRollbackFailure } = require("../utils/logControllerError");
 const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
@@ -484,6 +484,11 @@ async function order_save(req, res) {
   req.body = originalBody;
 
   if (txnError) {
+    await logRollbackFailure(req, txnError, {
+      action: "ORDER CREATE ROLLBACK",
+      tags: ["api", "order", "rollback", "create"],
+      fallbackUrl: "/api/order/order_save",
+    });
     let parsed = null;
     try {
       parsed = JSON.parse(txnError.message);
@@ -689,6 +694,11 @@ async function order_update(req, res) {
   req.body = originalBody;
 
   if (txnError) {
+    await logRollbackFailure(req, txnError, {
+      action: "ORDER UPDATE ROLLBACK",
+      tags: ["api", "order", "rollback", "update"],
+      fallbackUrl: "/api/order/order_update",
+    });
     let parsed = null;
     try {
       parsed = JSON.parse(txnError.message);

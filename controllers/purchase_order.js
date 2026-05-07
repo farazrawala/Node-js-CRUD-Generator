@@ -7,19 +7,172 @@ const Transaction = require("../models/transaction");
 const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
-const { logControllerError } = require("../utils/logControllerError");
+const { logRollbackFailure } = require("../utils/logControllerError");
 const {
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericGetAll,
+  coalesceObjectId,
+  buildPopulateFromQuery,
 } = require("../utils/modelHelper");
 const { createStockMovementRecord } = require("./stock_movement");
+const {
+  isMongoTransactionUnsupportedError,
+} = require("../utils/mongoTransactionSupport");
 
-const PURCHASE_ORDER_TRANSACTION_ERROR_LOG = {
-  action: "POST PURCHASE ORDER TRANSACTION ERROR",
-  tags: ["api", "purchase_order", "transaction", "error"],
-  fallbackUrl: "/api/purchase_order/save",
-};
+/**
+ * Purchase order HTTP handlers: header + line items, optional stock movements,
+ * and five GL postings per PO (same shape as order flow — see transactionBulkCreate payloads).
+ *
+ * Standalone MongoDB: tries `withTransaction` first; on replica-set–only errors, retries without a session.
+ */
+
+/**
+ * One entry per row sent to `transactionBulkCreate` in afterCreate/afterUpdate (order matters).
+ * - `companyAccountField`: populated on `req.user.company_id` (auth middleware).
+ * - `poAccountField`: optional field on the purchase_order document for that row’s `account_id`.
+ */
+const PURCHASE_ORDER_GL_LINE_META = [
+  {
+    description: "Purchase Order (debit)",
+    // Expense / inventory capitalization — company default only
+    poAccountField: null,
+    companyAccountField: "default_purchase_account",
+  },
+  {
+    description: "Purchase Discount (credit)",
+    poAccountField: null,
+    companyAccountField: "default_purchase_discount_account",
+  },
+  {
+    description: "Purchase Shipment (debit)",
+    poAccountField: null,
+    companyAccountField: "default_shipping_account",
+  },
+  {
+    description: "Mode of Payment (credit)",
+    // Cash/bank account for amount_paid — PO field or company default_cash_account
+    poAccountField: "payment_method_accounts_id",
+    companyAccountField: "default_cash_account",
+  },
+  {
+    description: "Accounts Payable (credit)",
+    poAccountField: null,
+    companyAccountField: "default_account_payable_account",
+  },
+];
+
+/** Human-readable hint for API errors: which company / body fields to set for a failed GL row. */
+function purchaseOrderGlLineFixHint(meta) {
+  if (!meta) {
+    return "Configure company default GL accounts and PO payment fields.";
+  }
+  const parts = [];
+  if (meta.companyAccountField) {
+    parts.push(`company.${meta.companyAccountField}`);
+  }
+  if (meta.poAccountField) {
+    parts.push(`purchase_order.body.${meta.poAccountField}`);
+  }
+  return parts.length ? `Set ${parts.join(" or ")}.` : "Configure GL accounts.";
+}
+
+/**
+ * Augment bulk-create `failed` entries with line label, normalized missing list, and fix hints.
+ * Keeps original keys (`index`, `missing`, …) for backward compatibility.
+ */
+function enrichPurchaseOrderGlFailures(failed) {
+  if (!Array.isArray(failed)) return [];
+  return failed.map((f) => {
+    const idx = Number(f.index);
+    const meta =
+      Number.isFinite(idx) && idx >= 0 ?
+        PURCHASE_ORDER_GL_LINE_META[idx]
+      : null;
+    const missing = Array.isArray(f.missing) ? f.missing : [];
+    return {
+      ...f,
+      gl_line_index: idx,
+      gl_line_description: meta?.description ?? `GL row ${idx}`,
+      missing_fields: missing,
+      where_to_fix: purchaseOrderGlLineFixHint(meta),
+    };
+  });
+}
+
+/** Single readable sentence for logs and `Error.message` (API error field). */
+function formatPurchaseOrderGlBulkErrorMessage(enriched) {
+  const lines = enriched.map((e) => {
+    const miss =
+      e.missing_fields?.length ?
+        ` — missing: ${e.missing_fields.join(", ")}`
+      : "";
+    return `index ${e.gl_line_index} «${e.gl_line_description}»${miss}. ${e.where_to_fix}`;
+  });
+  return `Post-purchase_order transaction bulk insert failed. ${lines.join(" | ")}`;
+}
+
+/** GL lines failed: throw with statusCode 400 (rolled back + reason logged via `logRollbackFailure`). */
+async function throwPurchaseOrderGlBulkFailed(_orderReq, failed) {
+  const enriched = enrichPurchaseOrderGlFailures(failed);
+  const msg = formatPurchaseOrderGlBulkErrorMessage(enriched);
+  console.error(
+    "⚠️ Post-purchase_order transaction bulk insert failed:",
+    enriched,
+  );
+  const err = new Error(msg);
+  err.statusCode = 400;
+  err.details = enriched;
+  err.responseType = "transaction_bulk";
+  throw err;
+}
+
+/** Map handleGenericCreate failure objects to API JSON (keeps validation `details`, `missing`, etc.). */
+function clientErrorFromGenericResponse(response, fallbackError) {
+  if (response?.success && response?.data) return null;
+  if (!response) {
+    return {
+      success: false,
+      status: 500,
+      error: fallbackError || "Request failed",
+    };
+  }
+  const status = response.status || 400;
+  const out = {
+    success: false,
+    status,
+    error: response.error || fallbackError || "Request failed",
+  };
+  if (response.message != null) out.message = response.message;
+  if (response.details != null) out.details = response.details;
+  if (response.type != null) out.type = response.type;
+  if (response.missing != null) out.missing = response.missing;
+  if (response.required != null) out.required = response.required;
+  if (response.received != null) out.received = response.received;
+  return out;
+}
+
+/** Prefer validation `details` / `missing` strings for thrown Error.message (retry detection looks at message too). */
+function logMessageFromGenericFailure(response, fallbackError) {
+  const r = response || {};
+  if (Array.isArray(r.details) && r.details.length) {
+    return r.details.join("; ");
+  }
+  if (Array.isArray(r.missing) && r.missing.length) {
+    return `Missing required fields: ${r.missing.join(", ")}`;
+  }
+  return r.error || r.message || fallbackError || "Request failed";
+}
+
+/** Preserve full handleGenericCreate failure shape on the error for txn catch blocks (`clientErrorPayload`). */
+function throwWithGenericFailure(response, fallbackError) {
+  const err = new Error(logMessageFromGenericFailure(response, fallbackError));
+  err.clientErrorPayload = clientErrorFromGenericResponse(
+    response,
+    fallbackError,
+  );
+  throw err;
+}
 
 function purchaseOrderLinesSubtotalSum(lineItems) {
   if (!Array.isArray(lineItems)) return 0;
@@ -293,7 +446,7 @@ function stripLineItemKeysFromBody(body) {
   return out;
 }
 
-/** Match order model required fields when the client omits them (e.g. line-item–only payloads). */
+/** Defaults for minimal POS-style payloads (name/email/phone are required somewhere upstream). */
 function ensurePurchaseOrderHeaderFields(body, user) {
   const b = body || {};
   if (!String(b.name ?? "").trim()) {
@@ -304,6 +457,28 @@ function ensurePurchaseOrderHeaderFields(body, user) {
   }
   if (!String(b.phone ?? "").trim()) {
     b.phone = String(user?.phone ?? "").trim() || "-";
+  }
+}
+
+/**
+ * Fills `payment_method_accounts_id` from `company.default_cash_account` when absent/invalid,
+ * so the “Mode of Payment” transaction (bulk index 3) always has an `account_id` when possible.
+ */
+function resolvePoPaymentMethodAccount(body, user) {
+  const b = body || {};
+  if (!user?.company_id) return;
+  const company = user.company_id;
+  const raw = b.payment_method_accounts_id;
+  if (
+    raw != null &&
+    raw !== "" &&
+    mongoose.Types.ObjectId.isValid(String(raw).trim())
+  ) {
+    return;
+  }
+  const def = company.default_cash_account;
+  if (def != null && mongoose.Types.ObjectId.isValid(String(def))) {
+    b.payment_method_accounts_id = def;
   }
 }
 
@@ -378,7 +553,11 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
     });
   }
 
-  const filter = { status: "active", deletedAt: null };
+  const filter = {
+    status: "active",
+    deletedAt: null,
+    company_id: req.user.company_id,
+  };
   if (idParam) {
     filter._id = idParam;
   }
@@ -387,6 +566,9 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
     filter,
     excludeFields: [],
     sort: { createdAt: -1 },
+    // ?populate=vendor_id:name → populated vendor with only `name` (+ _id). Comma-separate paths; use path:fields for projection.
+    populate: buildPopulateFromQuery(req.query || {}, "purchase_order"),
+
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
   });
@@ -468,13 +650,22 @@ async function getPurchaseOrderByOrderNo(req, res) {
   }
 
   const filter = { status: "active", deletedAt: null };
+  const popFields = buildPopulateFromQuery(req.query || {}, "purchase_order");
+  const findOnePo = (extraFilter) => {
+    let q = PurchaseOrder.findOne({ ...extraFilter, ...filter });
+    for (const spec of popFields) {
+      if (typeof spec === "string") {
+        q = q.populate(spec);
+      } else if (spec && typeof spec === "object" && spec.path) {
+        q = q.populate(spec);
+      }
+    }
+    return q;
+  };
 
-  let po = await PurchaseOrder.findOne({
-    purchase_order_no: param,
-    ...filter,
-  });
+  let po = await findOnePo({ purchase_order_no: param });
   if (!po && mongoose.Types.ObjectId.isValid(param)) {
-    po = await PurchaseOrder.findOne({ _id: param, ...filter });
+    po = await findOnePo({ _id: param });
   }
 
   if (!po) {
@@ -508,6 +699,7 @@ async function getPurchaseOrderByOrderNo(req, res) {
   });
 }
 
+/** POST /api/purchase_order/purchase_order_create — header, GL lines, optional PO lines + stock movements. */
 async function purchaseOrderCreate(req, res) {
   const originalBody = req.body;
   const lines = collectLineItems(originalBody);
@@ -518,6 +710,8 @@ async function purchaseOrderCreate(req, res) {
     );
     delete req.body._id;
     ensurePurchaseOrderHeaderFields(req.body, req.user);
+    // Mode-of-payment GL row needs payment_method_accounts_id; fallback matches order + posPayMethod pattern.
+    resolvePoPaymentMethodAccount(req.body, req.user);
 
     req.body.lines_subtotal =
       lines.length > 0 ?
@@ -532,201 +726,240 @@ async function purchaseOrderCreate(req, res) {
 
     req.body.transaction_number = transaction_number;
 
-    const session = await mongoose.startSession();
+    let clientSession = null;
     let purchaseOrderResponse = null;
     const purchaseOrderItems = [];
     let txnError = null;
 
-    try {
-      await session.withTransaction(async () => {
-        purchaseOrderResponse = await handleGenericCreate(
-          req,
-          "purchase_order",
-          {
-            session,
-            afterCreate: async (record, orderReq, sess) => {
-              const { created, failed } = await transactionBulkCreate(
-                orderReq,
-                [
-                  {
-                    account_id:
-                      orderReq.user.company_id.default_purchase_account,
-                    type: "debit",
-                    amount: record?.total_amount ?? 0,
-                    reference_user_id: record?.vendor_id,
-                    transaction_number,
-                    description: "Purchase Order",
-                    reference_id: {
-                      module: "purchase_order",
-                      ref_id: record._id,
-                    },
-                  },
-                  {
-                    account_id:
-                      orderReq.user.company_id
-                        .default_purchase_discount_account,
-                    type: "debit",
-                    amount: record?.discount ?? 0,
-                    reference_user_id: record?.vendor_id,
-                    transaction_number,
-                    description: "Purchase Discount",
-                  },
-                  {
-                    account_id:
-                      orderReq.user.company_id.default_shipping_account,
-                    type: "debit",
-                    amount: record?.shipment ?? 0,
-                    reference_user_id: record?.vendor_id,
-                    transaction_number,
-                    description: "Purchase Shipment",
-                    reference_id: {
-                      module: "purchase_order",
-                      ref_id: record._id,
-                    },
-                  },
-                  {
-                    account_id: record?.payment_method_accounts_id,
-                    type: "credit",
-                    amount: record?.amount_paid ?? 0,
-                    reference_user_id: record?.vendor_id,
-                    transaction_number,
-                    description: "Mode of Payment",
-                    reference_id: {
-                      module: "purchase_order",
-                      ref_id: record._id,
-                    },
-                  },
-                  {
-                    account_id:
-                      orderReq.user.company_id.default_account_payable_account,
-                    type: "credit",
-                    amount: req.body?.remaining_amount || 0,
-                    reference_user_id: record?.vendor_id,
-                    transaction_number,
-                    description: "A/c Payable",
-                    reference_id: {
-                      module: "purchase_order",
-                      ref_id: record._id,
-                    },
-                  },
-                ],
-                { stopOnError: true, session: sess },
-              );
-              if (failed.length) {
-                const msg = `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`;
-                console.error("⚠️ Post-purchase_order transaction bulk insert failed:", failed);
-                await logControllerError(
-                  orderReq,
-                  msg,
-                  PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
-                );
-                throw new Error(msg);
-              }
-              if (created[0]?.data?._id) {
-                console.log(
-                  "✅ Transaction(s) created:",
-                  created.map((c) => c.data._id),
-                );
-              }
-            },
-          },
-        );
+    const sessionOpts = (sess) => (sess ? { session: sess } : {});
 
-        if (!purchaseOrderResponse?.success || !purchaseOrderResponse.data) {
-          throw new Error(
-            purchaseOrderResponse?.error ||
-              purchaseOrderResponse?.message ||
-              "Purchase order create failed",
+    /**
+     * Core create: persist PO, post five GL transactions, then line items + stock + header totals.
+     * `mongoSession` is null when Mongo runs standalone (no replica set) — see outer try/catch.
+     */
+    const runPurchaseOrderCreateBody = async (mongoSession) => {
+      purchaseOrderResponse = await handleGenericCreate(req, "purchase_order", {
+        ...sessionOpts(mongoSession),
+        afterCreate: async (record, orderReq, sess) => {
+          const { created, failed } = await transactionBulkCreate(
+            orderReq,
+            [
+              // [0]–[4] must stay aligned with PURCHASE_ORDER_GL_LINE_META for error messages.
+              {
+                account_id: orderReq.user.company_id.default_purchase_account,
+                type: "debit",
+                amount: record?.lines_subtotal ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Order",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id:
+                  orderReq.user.company_id.default_purchase_discount_account,
+                type: "credit",
+                amount: record?.discount ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Discount",
+              },
+              {
+                account_id: orderReq.user.company_id.default_shipping_account,
+                type: "debit",
+                amount: record?.shipment ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Shipment",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id: record?.payment_method_accounts_id,
+                type: "credit",
+                amount: record?.amount_paid ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Mode of Payment",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+              {
+                account_id:
+                  orderReq.user.company_id.default_account_payable_account,
+                type: "credit",
+                amount: req.body?.remaining_amount || 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "A/c Payable",
+                reference_id: {
+                  module: "purchase_order",
+                  ref_id: record._id,
+                },
+              },
+            ],
+            { stopOnError: true, session: sess },
           );
-        }
-
-        const poId = purchaseOrderResponse.data._id;
-        const companyId =
-          purchaseOrderResponse.data.company_id || req.user?.company_id;
-
-        if (lines.length === 0) {
-          return;
-        }
-
-        if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
-          throw new Error(
-            "company_id is required to create purchase order line items",
-          );
-        }
-
-        for (const line of lines) {
-          const itemData = {
-            purchase_order_id: poId,
-            product_id: String(line.product_id).trim(),
-            qty: line.qty,
-            price: line.price,
-            subtotal: line.subtotal,
-            status: "active",
-            company_id: companyId,
-          };
-
-          const wid =
-            line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-          if (wid && mongoose.Types.ObjectId.isValid(wid)) {
-            itemData.warehouse_id = wid;
+          if (failed.length) {
+            await throwPurchaseOrderGlBulkFailed(orderReq, failed);
           }
-
-          const savedItemBody = req.body;
-          req.body = itemData;
-          const itemResponse = await handleGenericCreate(
-            req,
-            "purchase_order_item",
-            { session },
-          );
-          req.body = savedItemBody;
-
-          if (!itemResponse.success || !itemResponse.data) {
-            throw new Error(
-              itemResponse.error ||
-                (Array.isArray(itemResponse.missing) ?
-                  itemResponse.missing.join(", ")
-                : "Purchase order line item failed"),
+          if (created[0]?.data?._id) {
+            console.log(
+              "✅ Transaction(s) created:",
+              created.map((c) => c.data._id),
             );
           }
+        },
+      });
 
-          if (wid && mongoose.Types.ObjectId.isValid(wid)) {
-            const stockMovementResult = await createStockMovementRecord({
-              body: {
-                product_id: String(line.product_id).trim(),
-                warehouse_id: wid,
-                quantity: line.qty,
-                direction: "in",
-                type: "purchase",
-                reference_id: itemResponse.data._id,
-                reason: "Purchase order",
-                company_id: companyId,
-              },
-              user: req.user,
-              session,
-            });
-            if (!stockMovementResult.success || !stockMovementResult.data) {
-              throw new Error(
-                stockMovementResult.message ||
-                  "Purchase order stock movement failed",
-              );
-            }
-          }
+      if (!purchaseOrderResponse?.success || !purchaseOrderResponse.data) {
+        throwWithGenericFailure(
+          purchaseOrderResponse,
+          "Purchase order create failed",
+        );
+      }
 
-          purchaseOrderItems.push(itemResponse.data);
+      const poId = purchaseOrderResponse.data._id;
+      // `req.user.company_id` may be populated `{ _id, ... }` from auth — normalize for line items / stock.
+      const companyId =
+        coalesceObjectId(purchaseOrderResponse.data.company_id) ||
+        coalesceObjectId(req.user?.company_id);
+
+      if (lines.length === 0) {
+        return;
+      }
+
+      if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+        throw new Error(
+          "company_id is required to create purchase order line items",
+        );
+      }
+
+      for (const line of lines) {
+        const itemData = {
+          purchase_order_id: poId,
+          product_id: String(line.product_id).trim(),
+          qty: line.qty,
+          price: line.price,
+          subtotal: line.subtotal,
+          status: "active",
+          company_id: companyId,
+        };
+
+        const wid =
+          line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+        if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+          itemData.warehouse_id = wid;
         }
 
-        await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, { session });
+        const savedItemBody = req.body;
+        req.body = itemData;
+        const itemResponse = await handleGenericCreate(
+          req,
+          "purchase_order_item",
+          sessionOpts(mongoSession),
+        );
+        req.body = savedItemBody;
+
+        if (!itemResponse.success || !itemResponse.data) {
+          throwWithGenericFailure(
+            itemResponse,
+            "Purchase order line item failed",
+          );
+        }
+
+        if (wid && mongoose.Types.ObjectId.isValid(wid)) {
+          const stockMovementResult = await createStockMovementRecord({
+            body: {
+              product_id: String(line.product_id).trim(),
+              warehouse_id: wid,
+              quantity: line.qty,
+              direction: "in",
+              type: "purchase",
+              reference_id: itemResponse.data._id,
+              reason: "Purchase order",
+              company_id: companyId,
+            },
+            user: req.user,
+            session: mongoSession,
+          });
+          if (!stockMovementResult.success || !stockMovementResult.data) {
+            throw new Error(
+              stockMovementResult.message ||
+                "Purchase order stock movement failed",
+            );
+          }
+        }
+
+        purchaseOrderItems.push(itemResponse.data);
+      }
+
+      await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, {
+        session: mongoSession,
+      });
+    };
+
+    // Prefer a single multi-document transaction when the deployment supports it (replica set / Atlas).
+    try {
+      clientSession = await mongoose.startSession();
+      await clientSession.withTransaction(async () => {
+        await runPurchaseOrderCreateBody(clientSession);
       });
     } catch (e) {
-      txnError = e;
+      // Standalone mongod cannot start transactions; same work without session (see utils/mongoTransactionSupport).
+      if (isMongoTransactionUnsupportedError(e)) {
+        if (clientSession) {
+          try {
+            clientSession.endSession();
+          } catch (_) {
+            /* ignore */
+          }
+          clientSession = null;
+        }
+        console.warn(
+          "[purchase_order] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
+        );
+        try {
+          purchaseOrderItems.length = 0;
+          purchaseOrderResponse = null;
+          await runPurchaseOrderCreateBody(null);
+        } catch (e2) {
+          txnError = e2;
+        }
+      } else {
+        txnError = e;
+      }
     } finally {
-      session.endSession();
+      if (clientSession) {
+        try {
+          clientSession.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+      }
     }
 
     req.body = originalBody;
 
+    // afterCreate errors with statusCode 400 are returned by handleGenericCreate; txn throw paths land here too.
     if (txnError) {
       console.error("Purchase Order creation error:", txnError);
+      await logRollbackFailure(req, txnError, {
+        action: "PURCHASE ORDER CREATE ROLLBACK",
+        tags: ["api", "purchase_order", "rollback", "create"],
+        fallbackUrl: "/api/purchase_order/purchase_order_create",
+      });
+      if (txnError.clientErrorPayload) {
+        return res
+          .status(txnError.clientErrorPayload.status)
+          .json(txnError.clientErrorPayload);
+      }
       const msg = String(txnError.message || "");
       const isGl =
         msg.includes("Post-purchase_order") ||
@@ -734,7 +967,10 @@ async function purchaseOrderCreate(req, res) {
       return res.status(isGl ? 400 : 500).json({
         success: false,
         status: isGl ? 400 : 500,
-        error: isGl ? "Purchase order creation rolled back" : "Failed to create purchase order",
+        error:
+          isGl ?
+            "Purchase order creation rolled back"
+          : "Failed to create purchase order",
         details: txnError.message,
       });
     }
@@ -771,6 +1007,11 @@ async function purchaseOrderCreate(req, res) {
     });
   } catch (error) {
     console.error("Purchase Order creation error:", error);
+    await logRollbackFailure(req, error, {
+      action: "PURCHASE ORDER CREATE ROLLBACK",
+      tags: ["api", "purchase_order", "rollback", "create", "outer"],
+      fallbackUrl: "/api/purchase_order/purchase_order_create",
+    });
     return res.status(500).json({
       success: false,
       message: "Failed to create purchase order",
@@ -779,6 +1020,7 @@ async function purchaseOrderCreate(req, res) {
   }
 }
 
+/** PUT/update purchase_order: replace GL rows for `transaction_number` after header save. */
 async function purchase_order_update(req, res) {
   const lines = collectLineItems(req.body);
   const originalBody = req.body;
@@ -786,6 +1028,8 @@ async function purchase_order_update(req, res) {
     stripLineItemKeysFromBody(originalBody),
   );
   delete req.body._id;
+  // So the “Mode of Payment” GL line gets account_id when the client omits it on update payload.
+  resolvePoPaymentMethodAccount(req.body, req.user);
 
   const recordId = String(req.params?.id || "").trim();
   if (lines.length > 0) {
@@ -798,8 +1042,7 @@ async function purchase_order_update(req, res) {
     })
       .select("subtotal")
       .lean();
-    req.body.lines_subtotal =
-      purchaseOrderLinesSubtotalSum(existingItems);
+    req.body.lines_subtotal = purchaseOrderLinesSubtotalSum(existingItems);
   }
 
   const session = await mongoose.startSession();
@@ -825,6 +1068,7 @@ async function purchase_order_update(req, res) {
           const { created, failed } = await transactionBulkCreate(
             orderReq,
             [
+              // Same five rows / index order as create — keep in sync with PURCHASE_ORDER_GL_LINE_META.
               {
                 account_id: orderReq.user.company_id.default_purchase_account,
                 type: "debit",
@@ -887,17 +1131,7 @@ async function purchase_order_update(req, res) {
             { stopOnError: true, session: sess },
           );
           if (failed.length) {
-            const msg = `Post-purchase_order transaction bulk insert failed: ${JSON.stringify(failed)}`;
-            console.error(
-              "⚠️ Post-purchase_order transaction bulk insert failed:",
-              failed,
-            );
-            await logControllerError(
-              orderReq,
-              msg,
-              PURCHASE_ORDER_TRANSACTION_ERROR_LOG,
-            );
-            throw new Error(msg);
+            await throwPurchaseOrderGlBulkFailed(orderReq, failed);
           }
           if (created[0]?.data?._id) {
             console.log(
@@ -911,7 +1145,9 @@ async function purchase_order_update(req, res) {
 
       if (!response?.success || !response?.data) {
         throw new Error(
-          response?.error || response?.message || "Purchase order update failed",
+          response?.error ||
+            response?.message ||
+            "Purchase order update failed",
         );
       }
 
@@ -946,6 +1182,11 @@ async function purchase_order_update(req, res) {
   req.body = originalBody;
 
   if (txnError) {
+    await logRollbackFailure(req, txnError, {
+      action: "PURCHASE ORDER UPDATE ROLLBACK",
+      tags: ["api", "purchase_order", "rollback", "update"],
+      fallbackUrl: "/api/purchase_order/update",
+    });
     const msg = String(txnError.message || "");
     const is400 =
       msg.includes("Post-purchase_order") ||

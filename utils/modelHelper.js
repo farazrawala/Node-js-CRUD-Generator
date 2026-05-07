@@ -24,6 +24,34 @@ const generateSlug = (text) => {
     .replace(/-+$/, ""); // Trim - from end of text
 };
 
+/** Errors with numeric `statusCode` or `status` (400–599) map to API JSON instead of generic 500 internal. */
+function responseFromExplicitHttpError(error) {
+  const code = error?.statusCode ?? error?.status;
+  if (typeof code !== "number" || code < 400 || code >= 600) return null;
+  const msg =
+    error &&
+    typeof error.message === "string" &&
+    error.message.trim().length > 0 ?
+      error.message.trim()
+    : "Request failed";
+  const det = error.details;
+  return {
+    success: false,
+    status: code,
+    error: msg,
+    details:
+      det !== undefined ?
+        det
+      : process.env.NODE_ENV === "development" && error.stack ?
+        `${msg}\n${error.stack}`
+      : msg,
+    type:
+      typeof error.responseType === "string" ?
+        error.responseType
+      : "application",
+  };
+}
+
 /**
  * Get the controller name from the calling file
  * @returns {string} The controller name
@@ -1085,6 +1113,10 @@ const handleGenericCreate = async (
 
       default:
         // Handle unknown errors
+        {
+          const httpHandled = responseFromExplicitHttpError(error);
+          if (httpHandled) return httpHandled;
+        }
         if (error.code) {
           // Handle HTTP status codes
           const statusCode =
@@ -1142,18 +1174,26 @@ const handleGenericCreate = async (
           };
         }
 
-        // Generic error handler
-        return {
-          success: false,
-          status: 500,
-          error: "Internal server error",
-          details:
-            process.env.NODE_ENV === "development" ?
-              error.stack
-            : "Something went wrong",
-          type: "internal",
-          timestamp: new Date().toISOString(),
-        };
+        // Generic error handler — always expose the real message; append stack in development
+        {
+          const msg =
+            error &&
+            typeof error.message === "string" &&
+            error.message.trim().length > 0 ?
+              error.message.trim()
+            : String(error);
+          return {
+            success: false,
+            status: 500,
+            error: msg,
+            details:
+              process.env.NODE_ENV === "development" && error.stack ?
+                `${msg}\n${error.stack}`
+              : msg,
+            type: "internal",
+            timestamp: new Date().toISOString(),
+          };
+        }
     }
   }
 };
@@ -1886,6 +1926,10 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 
       default:
         // Handle unknown errors
+        {
+          const httpHandled = responseFromExplicitHttpError(error);
+          if (httpHandled) return httpHandled;
+        }
         if (error.code) {
           // Handle HTTP status codes
           const statusCode =
@@ -1943,18 +1987,26 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
           };
         }
 
-        // Generic error handler
-        return {
-          success: false,
-          status: 500,
-          error: "Internal server error",
-          details:
-            process.env.NODE_ENV === "development" ?
-              error.stack
-            : "Something went wrong",
-          type: "internal",
-          timestamp: new Date().toISOString(),
-        };
+        // Generic error handler — always expose the real message; append stack in development
+        {
+          const msg =
+            error &&
+            typeof error.message === "string" &&
+            error.message.trim().length > 0 ?
+              error.message.trim()
+            : String(error);
+          return {
+            success: false,
+            status: 500,
+            error: msg,
+            details:
+              process.env.NODE_ENV === "development" && error.stack ?
+                `${msg}\n${error.stack}`
+              : msg,
+            type: "internal",
+            timestamp: new Date().toISOString(),
+          };
+        }
     }
   }
 };
@@ -2140,8 +2192,55 @@ function normalizeTransactionPopulateList(modelName, populate) {
 }
 
 /**
+ * Parse one `populate` query segment. Supports optional field projection:
+ * - `vendor_id` → populate full ref
+ * - `vendor_id:name` or `vendor_id:name,email` → `{ path, select }` (`_id` is still returned by Mongoose unless excluded)
+ */
+function parsePopulateQuerySegment(segment, modelName) {
+  const raw = String(segment).trim();
+  if (!raw) return null;
+  const colon = raw.indexOf(":");
+  let pathPart = raw;
+  let selectPart = "";
+  if (colon > 0 && colon < raw.length - 1) {
+    pathPart = raw.slice(0, colon).trim();
+    selectPart = raw.slice(colon + 1).trim();
+  }
+  const path =
+    modelName === "transaction" ?
+      mapTransactionPopulatePath(pathPart)
+    : pathPart;
+  if (!path) return null;
+  if (!selectPart) {
+    return { kind: "path", path };
+  }
+  const select = selectPart
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!select) {
+    return { kind: "path", path };
+  }
+  return { kind: "spec", path, select };
+}
+
+function populateEntryFromParsed(Model, parsed) {
+  if (!parsed || parsed.kind === "path") {
+    const path = parsed?.path;
+    if (!path || !isPopulateablePath(Model, path)) return null;
+    return path;
+  }
+  if (parsed.kind === "spec" && parsed.path && isPopulateablePath(Model, parsed.path)) {
+    return { path: parsed.path, select: parsed.select };
+  }
+  return null;
+}
+
+/**
  * Build populate list from query:
  * - ?populate=created_by,company_id
+ * - ?populate=vendor_id:name (only `name` (+ _id) on populated vendor user)
  * - ?created_by=true (any top-level ref/array-of-refs path; value must be true / "true" / "1")
  * - transaction: ?populate=ref_id → reference_id.ref_id (order, etc.); account_id is auto-added when ref_id is requested
  */
@@ -2152,18 +2251,18 @@ function buildPopulateFromQuery(query, modelName) {
 
   const pop = query.populate;
   if (pop != null && String(pop).trim() !== "") {
-    String(pop)
-      .split(",")
-      .map((s) => s.trim())
+    const segments = Array.isArray(pop) ? pop : String(pop).split(",");
+    segments
+      .map((s) => String(s).trim())
       .filter(Boolean)
-      .map((field) =>
-        modelName === "transaction" ? mapTransactionPopulatePath(field) : field,
-      )
-      .forEach((field) => {
-        if (!seen.has(field) && isPopulateablePath(Model, field)) {
-          populate.push(field);
-          seen.add(field);
-        }
+      .forEach((segment) => {
+        const parsed = parsePopulateQuerySegment(segment, modelName);
+        const entry = populateEntryFromParsed(Model, parsed);
+        if (!entry) return;
+        const key = typeof entry === "string" ? entry : entry.path;
+        if (seen.has(key)) return;
+        populate.push(entry);
+        seen.add(key);
       });
   }
 
@@ -2398,7 +2497,11 @@ const handleGenericGetAll = async (
     // Add population if specified
     if (populateForMongoose && populateForMongoose.length > 0) {
       populateForMongoose.forEach((field) => {
-        query = query.populate(field);
+        if (typeof field === "string") {
+          query = query.populate(field);
+        } else if (field && typeof field === "object" && field.path) {
+          query = query.populate(field);
+        }
       });
     }
 
@@ -2500,6 +2603,10 @@ const handleGenericGetAll = async (
 
       default:
         // Handle unknown errors
+        {
+          const httpHandled = responseFromExplicitHttpError(error);
+          if (httpHandled) return httpHandled;
+        }
         if (error.code) {
           // Handle HTTP status codes
           const statusCode =
@@ -2525,18 +2632,26 @@ const handleGenericGetAll = async (
           };
         }
 
-        // Generic error handler
-        return {
-          success: false,
-          status: 500,
-          error: "Internal server error",
-          details:
-            process.env.NODE_ENV === "development" ?
-              error.stack
-            : "Something went wrong",
-          type: "internal",
-          timestamp: new Date().toISOString(),
-        };
+        // Generic error handler — always expose the real message; append stack in development
+        {
+          const msg =
+            error &&
+            typeof error.message === "string" &&
+            error.message.trim().length > 0 ?
+              error.message.trim()
+            : String(error);
+          return {
+            success: false,
+            status: 500,
+            error: msg,
+            details:
+              process.env.NODE_ENV === "development" && error.stack ?
+                `${msg}\n${error.stack}`
+              : msg,
+            type: "internal",
+            timestamp: new Date().toISOString(),
+          };
+        }
     }
   }
 };
@@ -2604,7 +2719,11 @@ const handleGenericGetById = async (
     // Add population if specified
     if (populateForMongoose && populateForMongoose.length > 0) {
       populateForMongoose.forEach((field) => {
-        query = query.populate(field);
+        if (typeof field === "string") {
+          query = query.populate(field);
+        } else if (field && typeof field === "object" && field.path) {
+          query = query.populate(field);
+        }
       });
     }
 
@@ -2699,6 +2818,10 @@ const handleGenericGetById = async (
 
       default:
         // Handle unknown errors
+        {
+          const httpHandled = responseFromExplicitHttpError(error);
+          if (httpHandled) return httpHandled;
+        }
         if (error.code) {
           // Handle HTTP status codes
           const statusCode =
@@ -2724,18 +2847,26 @@ const handleGenericGetById = async (
           };
         }
 
-        // Generic error handler
-        return {
-          success: false,
-          status: 500,
-          error: "Internal server error",
-          details:
-            process.env.NODE_ENV === "development" ?
-              error.stack
-            : "Something went wrong",
-          type: "internal",
-          timestamp: new Date().toISOString(),
-        };
+        // Generic error handler — always expose the real message; append stack in development
+        {
+          const msg =
+            error &&
+            typeof error.message === "string" &&
+            error.message.trim().length > 0 ?
+              error.message.trim()
+            : String(error);
+          return {
+            success: false,
+            status: 500,
+            error: msg,
+            details:
+              process.env.NODE_ENV === "development" && error.stack ?
+                `${msg}\n${error.stack}`
+              : msg,
+            type: "internal",
+            timestamp: new Date().toISOString(),
+          };
+        }
     }
   }
 };
@@ -2957,6 +3088,7 @@ module.exports = {
   generateSlug,
   getControllerName,
   getModelFromController,
+  coalesceObjectId,
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericGetById,

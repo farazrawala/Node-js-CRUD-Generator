@@ -7,7 +7,11 @@ const {
   handleGenericGetAll,
   buildPopulateFromQuery,
   parseSearchFieldsFromQuery,
+  coalesceObjectId,
 } = require("../utils/modelHelper");
+const {
+  isMongoTransactionUnsupportedError,
+} = require("../utils/mongoTransactionSupport");
 
 function toObjectId(id) {
   if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
@@ -207,10 +211,12 @@ async function createStockMovementRecord({ body, user, session: outerSession }) 
     doc.adjustment_id = adjustmentIdFinal;
   }
 
-  const resolvedCompanyId = user?.company_id || body.company_id;
+  const userCompanyId = coalesceObjectId(user?.company_id);
+  const bodyCompanyId = coalesceObjectId(body?.company_id);
+  const resolvedCompanyId = userCompanyId || bodyCompanyId;
   if (
     !resolvedCompanyId ||
-    !mongoose.Types.ObjectId.isValid(resolvedCompanyId)
+    !mongoose.Types.ObjectId.isValid(String(resolvedCompanyId))
   ) {
     return {
       success: false,
@@ -219,9 +225,9 @@ async function createStockMovementRecord({ body, user, session: outerSession }) 
     };
   }
   if (
-    user?.company_id &&
-    body.company_id &&
-    String(user.company_id) !== String(body.company_id)
+    userCompanyId &&
+    bodyCompanyId &&
+    String(userCompanyId) !== String(bodyCompanyId)
   ) {
     return {
       success: false,
@@ -361,6 +367,58 @@ async function createStockMovementRecord({ body, user, session: outerSession }) 
       message: "Stock movement created and warehouse inventory updated",
     };
   } catch (err) {
+    if (isMongoTransactionUnsupportedError(err)) {
+      try {
+        const movement = await insertMovementAndInventory(undefined);
+        await hydrateMovementRefs(movement);
+        return {
+          success: true,
+          status: 201,
+          data: movement,
+          message: "Stock movement created and warehouse inventory updated",
+        };
+      } catch (errNt) {
+        if (errNt && errNt.code === 11000) {
+          if (idempotencyKey) {
+            const existing = await StockMovement.findOne({
+              company_id: resolvedCompanyId,
+              idempotency_key: idempotencyKey,
+              status: "active",
+              $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+            });
+            if (existing) {
+              await hydrateMovementRefs(existing);
+              return {
+                success: true,
+                status: 200,
+                data: existing,
+                message: "Stock movement already applied (idempotent)",
+              };
+            }
+          }
+          if (orderItemId && type && direction) {
+            const existingOi = await StockMovement.findOne({
+              company_id: resolvedCompanyId,
+              order_item_id: orderItemId,
+              type,
+              direction,
+              status: "active",
+              $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+            });
+            if (existingOi) {
+              await hydrateMovementRefs(existingOi);
+              return {
+                success: true,
+                status: 200,
+                data: existingOi,
+                message: "Stock movement already applied (idempotent)",
+              };
+            }
+          }
+        }
+        throw errNt;
+      }
+    }
     if (err && err.code === 11000) {
       if (idempotencyKey) {
         const existing = await StockMovement.findOne({

@@ -39,4 +39,59 @@ async function logControllerError(req, description, options = {}) {
   }
 }
 
-module.exports = { logControllerError };
+/**
+ * Build a multi-line description for `logs.description` from thrown errors / txn failures.
+ */
+function serializeErrorForLog(err) {
+  if (err == null) return "Unknown error (null)";
+  if (typeof err === "string") return err;
+  const parts = [];
+  if (err.message) parts.push(`message: ${err.message}`);
+  if (err.clientErrorPayload) {
+    try {
+      parts.push(`api_response: ${JSON.stringify(err.clientErrorPayload)}`);
+    } catch {
+      parts.push(`api_response: [unserializable]`);
+    }
+  }
+  if (err.statusCode != null) parts.push(`statusCode: ${err.statusCode}`);
+  if (err.responseType) parts.push(`responseType: ${err.responseType}`);
+  if (err.details != null && err.clientErrorPayload == null) {
+    parts.push(
+      typeof err.details === "string" ?
+        `details: ${err.details}`
+      : `details: ${JSON.stringify(err.details)}`,
+    );
+  }
+  if (process.env.NODE_ENV === "development" && err.stack) {
+    parts.push(`stack:\n${err.stack}`);
+  }
+  return parts.length ? parts.join("\n") : String(err);
+}
+
+/**
+ * Persist rollback / txn failure to `logs` (best-effort).
+ * Tags always include `api`, `error`, and `rollback`, plus any `options.tags`.
+ * @param {import("express").Request} req
+ * @param {unknown} err
+ * @param {{ action?: string, tags?: string[], fallbackUrl?: string }} [options]
+ */
+async function logRollbackFailure(req, err, options = {}) {
+  const {
+    action = "TRANSACTION ROLLBACK",
+    tags = [],
+    fallbackUrl = "/api",
+  } = options;
+  const tagsWithError = [...new Set(["api", "error", "rollback", ...tags])];
+  await logControllerError(req, serializeErrorForLog(err), {
+    action,
+    tags: tagsWithError,
+    fallbackUrl,
+  });
+}
+
+module.exports = {
+  logControllerError,
+  logRollbackFailure,
+  serializeErrorForLog,
+};
