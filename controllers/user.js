@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const User = require("../models/user");
 const { setUserToken } = require("../service/auth");
+const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -65,11 +66,7 @@ async function executeUserInitialBalanceJournal(userDoc, req, session = null) {
     return { ok: false, transaction_number: null, skipped: false };
   }
 
-  const transaction_number = `TXN-${Date.now()}-${Math.floor(
-    Math.random() * 1000000,
-  )
-    .toString()
-    .padStart(6, "0")}`;
+  const transaction_number = generateTransactionNumber();
   const amount = Math.abs(openingRaw);
 
   const transcReq = Object.assign(

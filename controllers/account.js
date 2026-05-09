@@ -9,6 +9,7 @@ const Transaction = require("../models/transaction");
 const Company = require("../models/company");
 const AccountModel = require("../models/account");
 const { logControllerError } = require("../utils/logControllerError");
+const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
@@ -136,11 +137,7 @@ async function resolveDefaultEquityAccountId(record, transcReq) {
  */
 async function performAccountCreate(req, comp_create = false) {
   console.log("🔐 Processing account creation...", req.user);
-  const transaction_number = `TXN-${Date.now()}-${Math.floor(
-    Math.random() * 1000000,
-  )
-    .toString()
-    .padStart(6, "0")}`;
+  const transaction_number = generateTransactionNumber();
 
   req.body.transaction_number = transaction_number;
   req.body.is_editable = true;
@@ -363,9 +360,37 @@ async function accountUpdate(req, res) {
   return res.status(response.status).json(response);
 }
 
+function truthyQuery(v) {
+  if (v === true || v === 1) return true;
+  const s = String(v ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "1" || s === "true" || s === "yes";
+}
+
+async function resolveCompanyDefaultReceivableId(user) {
+  const coRaw = user?.company_id;
+  if (!coRaw) return null;
+  if (
+    typeof coRaw === "object" &&
+    coRaw.default_account_receivable_account != null
+  ) {
+    return toObjectId(coRaw.default_account_receivable_account);
+  }
+  const companyId = toObjectId(coRaw);
+  if (!companyId) return null;
+  const row = await Company.findById(companyId)
+    .select("default_account_receivable_account")
+    .lean();
+  return toObjectId(row?.default_account_receivable_account);
+}
+
 /**
  * GET ?account_type=current_asset
  * Optional: limit, skip, search, searchFields (via handleGenericGetAll).
+ * Exclude company default A/R from the list:
+ *   ?exclude_default_account_receivable=true
+ *   (alias) ?neq_default_account_receivable=true
  * Each account includes `transactions_sum`: debit/credit totals, line_count,
  * `net_debit_minus_credit`, and `credit_minus_debit` for that GL.
  */
@@ -397,6 +422,16 @@ async function fetchAccountsByType(req, res) {
 
   if (req.user?.company_id) {
     filter.company_id = req.user.company_id;
+  }
+
+  const excludeDefReceivable =
+    truthyQuery(req.query.exclude_default_account_receivable) ||
+    truthyQuery(req.query.neq_default_account_receivable);
+  if (excludeDefReceivable) {
+    const arId = await resolveCompanyDefaultReceivableId(req.user);
+    if (arId) {
+      filter._id = { $ne: arId };
+    }
   }
 
   const response = await handleGenericGetAll(req, "account", {

@@ -4,7 +4,11 @@ const mongoose = require("mongoose");
  * Allowed `reference_id.module` values (Mongoose model names). Used with refPath on `ref_id`.
  * Keep in sync with controllers that post GL linkage (order, purchase_order).
  */
-const TRANSACTION_REFERENCE_MODULES = ["order", "purchase_order"];
+const TRANSACTION_REFERENCE_MODULES = [
+  "order",
+  "purchase_order",
+  "payment_receipt",
+];
 
 const referenceEmbedSchema = new mongoose.Schema(
   {
@@ -67,6 +71,10 @@ const modelSchema = new mongoose.Schema(
     description: {
       type: String,
       //   required: true,
+    },
+    transaction_number: {
+      type: String,
+      field_name: "Transaction Number",
     },
 
     // default fields
@@ -133,7 +141,9 @@ modelSchema.pre("validate", async function () {
 
   if (this.account_id) {
     const Account = mongoose.model("account");
-    const acc = await Account.findById(this.account_id).select("company_id").lean();
+    const acc = await Account.findById(this.account_id)
+      .select("company_id")
+      .lean();
     if (!acc) {
       throw new Error("account_id: referenced account not found");
     }
@@ -146,7 +156,9 @@ modelSchema.pre("validate", async function () {
 
   if (this.branch_id) {
     const Branch = mongoose.model("branch");
-    const br = await Branch.findById(this.branch_id).select("company_id").lean();
+    const br = await Branch.findById(this.branch_id)
+      .select("company_id")
+      .lean();
     if (!br) {
       throw new Error("branch_id: referenced branch not found");
     }
@@ -172,7 +184,9 @@ modelSchema.pre("validate", async function () {
     throw new Error(`reference_id.module: unknown model "${ref.module}"`);
   }
 
-  const target = await RefModel.findById(ref.ref_id).select("company_id").lean();
+  const target = await RefModel.findById(ref.ref_id)
+    .select("company_id")
+    .lean();
   if (!target) {
     throw new Error("reference_id.ref_id: referenced document not found");
   }

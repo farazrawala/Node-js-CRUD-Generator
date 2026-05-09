@@ -8,6 +8,7 @@ const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
 const { logRollbackFailure } = require("../utils/logControllerError");
+const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -718,11 +719,7 @@ async function purchaseOrderCreate(req, res) {
         purchaseOrderLinesSubtotalSum(lines)
       : purchaseOrderLinesSubtotalSum([]);
 
-    const transaction_number = `TXN-${Date.now()}-${Math.floor(
-      Math.random() * 1000000,
-    )
-      .toString()
-      .padStart(6, "0")}`;
+    const transaction_number = generateTransactionNumber();
 
     req.body.transaction_number = transaction_number;
 

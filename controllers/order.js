@@ -9,6 +9,7 @@ const {
   handleGenericGetAll,
 } = require("../utils/modelHelper");
 const { logControllerError, logRollbackFailure } = require("../utils/logControllerError");
+const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
@@ -348,11 +349,7 @@ async function order_save(req, res) {
   delete req.body._id;
   req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
 
-  const transaction_number = `TXN-${Date.now()}-${Math.floor(
-    Math.random() * 1000000,
-  )
-    .toString()
-    .padStart(6, "0")}`;
+  const transaction_number = generateTransactionNumber();
 
   req.body.payment_method_accounts_id = req.body?.posPayMethod;
   req.body.transaction_number = transaction_number;

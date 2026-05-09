@@ -71,7 +71,8 @@ for temp.
 http://localhost:8000/admin/company/691b6e7c9e27374a2c97061f/edit
 
 
-
+//session query:
+make session so if any any Transaction Failed it should rollback and add record actual error in logs table with error,rollback tag. 
 
 //while creating company
 ******
