@@ -73,27 +73,9 @@ async function paymentReceiptCreate(req, res) {
             {
               account_id:
                 record?.payment_type === "Send" ?
-                  companyObj.default_account_payable_account
-                : record?.payment_mode,
-              type: record?.payment_type === "Send" ? "credit" : "debit",
-              company_id: companyId,
-              amount: record?.amount,
-              reference_user_id: record?.user_id,
-              transaction_number,
-              description: `Payment Receipt (${record?.payment_type || ""})`,
-              reference_id: {
-                module: "payment_receipt",
-                ref_id: record._id,
-              },
-            },
-            // send: a/c payable / cash(mode)
-            // receive: cash(mode) / a/c receivable
-            {
-              account_id:
-                record?.payment_type === "Send" ?
                   record?.payment_mode
                 : companyObj.default_account_receivable_account,
-              type: record?.payment_type === "Send" ? "debit" : "credit",
+              type: "credit",
               company_id: companyId,
               amount: record?.amount,
               reference_user_id: record?.user_id,
@@ -102,6 +84,24 @@ async function paymentReceiptCreate(req, res) {
               reference_id: {
                 module: "payment_receipt",
                 ref_id: record?._id,
+              },
+            },
+            // send: a/c payable / cash(mode)
+            // receive: cash(mode) / a/c receivable
+            {
+              account_id:
+                record?.payment_type === "Send" ?
+                  companyObj.default_account_payable_account
+                : record?.payment_mode,
+              type: "debit",
+              company_id: companyId,
+              amount: record?.amount,
+              reference_user_id: record?.user_id,
+              transaction_number,
+              description: `Payment Receipt (${record?.payment_type || ""})`,
+              reference_id: {
+                module: "payment_receipt",
+                ref_id: record._id,
               },
             },
           ],
@@ -158,6 +158,15 @@ async function paymentReceiptCreate(req, res) {
       action: "PAYMENT RECEIPT CREATE ROLLBACK",
       tags: ["payment_receipt", "create"],
       fallbackUrl: "/api/payment_receipt/create",
+      context: {
+        transaction_number: req.body?.transaction_number,
+        payment_type: req.body?.payment_type,
+        payment_mode:
+          pickObjectId(req.body?.payment_mode) ?? req.body?.payment_mode,
+        amount: req.body?.amount,
+        user_id: pickObjectId(req.body?.user_id) ?? req.body?.user_id,
+        company_id: pickObjectId(req.body?.company_id) ?? req.body?.company_id,
+      },
     });
     if (txnError.clientErrorPayload) {
       return res

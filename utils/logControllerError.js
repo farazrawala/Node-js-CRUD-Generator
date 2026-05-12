@@ -1,5 +1,18 @@
-const { handleGenericCreate } = require("./modelHelper");
+const mongoose = require("mongoose");
+const { handleGenericCreate, coalesceObjectId } = require("./modelHelper");
 const Logs = require("../models/logs");
+
+function normalizeObjectIdMaybe(value) {
+  if (value == null || value === "") return null;
+  try {
+    const id = coalesceObjectId(value);
+    if (!id) return null;
+    const s = String(id);
+    return mongoose.Types.ObjectId.isValid(s) ? id : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Best-effort write of a controller/API failure to the `logs` model via handleGenericCreate.
@@ -11,18 +24,51 @@ const Logs = require("../models/logs");
  * @param {string} [options.action] - Stored log action label
  * @param {string[]} [options.tags] - Tags for filtering in admin/logs
  * @param {string} [options.fallbackUrl] - When req.originalUrl and req.path are empty
+ * @param {import("mongoose").Types.ObjectId|string} [options.fallbackCompanyId] - When `req.user.company_id` is missing (`logs.company_id` is required)
  */
+function safeJsonForLog(value, maxLen = 6000) {
+  try {
+    const s = JSON.stringify(value);
+    if (s.length <= maxLen) return s;
+    return `${s.slice(0, maxLen - 25)}…[truncated]`;
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+function truncateForLog(str, max) {
+  const s = String(str);
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 20)}…[truncated]`;
+}
+
 async function logControllerError(req, description, options = {}) {
   try {
     const {
       action = "CONTROLLER ERROR",
       tags = ["api", "error"],
       fallbackUrl = "/api",
+      fallbackCompanyId,
     } = options;
 
     const companyId =
-      req.user?.company_id?._id || req.user?.company_id || undefined;
-    const createdBy = req.user?._id || undefined;
+      normalizeObjectIdMaybe(fallbackCompanyId) ||
+      normalizeObjectIdMaybe(req.user?.company_id?._id) ||
+      normalizeObjectIdMaybe(req.user?.company_id);
+    const createdBy = normalizeObjectIdMaybe(req.user?._id);
+
+    if (!companyId) {
+      console.error(
+        "[logControllerError] logs row not inserted: missing company_id. Pass options.fallbackCompanyId or ensure req.user.company_id is set.",
+        {
+          action,
+          url: req.originalUrl || req.path || fallbackUrl,
+          descriptionPreview: String(description).slice(0, 400),
+        },
+      );
+      return;
+    }
+
     const body = Logs.sanitizeLogPlainObject({
       action,
       url: req.originalUrl || req.path || fallbackUrl,
@@ -30,41 +76,92 @@ async function logControllerError(req, description, options = {}) {
       description,
       company_id: companyId,
       created_by: createdBy,
+      status: "active",
     });
     const logReq = Object.create(Object.getPrototypeOf(req));
     Object.assign(logReq, req, { body });
-    await handleGenericCreate(logReq, "logs", {});
+    const createResult = await handleGenericCreate(logReq, "logs", {});
+    if (!createResult?.success) {
+      console.error(
+        "[logControllerError] handleGenericCreate(logs) returned failure:",
+        safeJsonForLog(createResult, 2500),
+        "\nOriginal description (first 600 chars):\n",
+        String(description).slice(0, 600),
+      );
+      try {
+        await Logs.create({
+          action: body.action,
+          url: body.url,
+          tags: body.tags,
+          description: body.description,
+          company_id: companyId,
+          created_by: createdBy || undefined,
+          status: "active",
+        });
+      } catch (directErr) {
+        console.error(
+          "[logControllerError] Direct Logs.create fallback failed:",
+          directErr.message,
+        );
+      }
+    }
   } catch (logErr) {
-    console.error("⚠️ Failed to write controller error log:", logErr.message);
+    console.error(
+      "⚠️ Failed to write controller error log:",
+      logErr.message,
+      "\nOriginal description (first 800 chars):\n",
+      String(description).slice(0, 800),
+    );
   }
 }
 
 /**
  * Build a multi-line description for `logs.description` from thrown errors / txn failures.
+ * Includes Mongo/Mongoose fields and stack (truncated) so production logs stay diagnosable.
  */
 function serializeErrorForLog(err) {
   if (err == null) return "Unknown error (null)";
   if (typeof err === "string") return err;
   const parts = [];
+  if (err.name) parts.push(`name: ${err.name}`);
   if (err.message) parts.push(`message: ${err.message}`);
+  if (err.statusCode != null) parts.push(`statusCode: ${err.statusCode}`);
+  if (err.responseType) parts.push(`responseType: ${err.responseType}`);
+  if (err.code != null) parts.push(`code: ${err.code}`);
+  if (err.codeName) parts.push(`codeName: ${err.codeName}`);
+  if (err.details != null) {
+    parts.push(
+      typeof err.details === "string" ?
+        `details: ${err.details}`
+      : `details: ${safeJsonForLog(err.details)}`,
+    );
+  }
+  if (err.errors && typeof err.errors === "object") {
+    parts.push(`mongoose_validation: ${safeJsonForLog(err.errors, 4000)}`);
+  }
+  if (err.writeErrors) {
+    parts.push(`writeErrors: ${safeJsonForLog(err.writeErrors, 4000)}`);
+  }
+  if (err.result) {
+    parts.push(`result: ${safeJsonForLog(err.result, 3000)}`);
+  }
   if (err.clientErrorPayload) {
     try {
-      parts.push(`api_response: ${JSON.stringify(err.clientErrorPayload)}`);
+      parts.push(`api_response: ${safeJsonForLog(err.clientErrorPayload, 5000)}`);
     } catch {
       parts.push(`api_response: [unserializable]`);
     }
   }
-  if (err.statusCode != null) parts.push(`statusCode: ${err.statusCode}`);
-  if (err.responseType) parts.push(`responseType: ${err.responseType}`);
-  if (err.details != null && err.clientErrorPayload == null) {
-    parts.push(
-      typeof err.details === "string" ?
-        `details: ${err.details}`
-      : `details: ${JSON.stringify(err.details)}`,
-    );
+  let depth = 0;
+  let c = err.cause;
+  while (c && depth < 4) {
+    const msg = c?.message || String(c);
+    parts.push(`cause[${depth}]: ${msg}`);
+    c = c.cause;
+    depth += 1;
   }
-  if (process.env.NODE_ENV === "development" && err.stack) {
-    parts.push(`stack:\n${err.stack}`);
+  if (err.stack) {
+    parts.push(`stack:\n${truncateForLog(err.stack, 4000)}`);
   }
   return parts.length ? parts.join("\n") : String(err);
 }
@@ -74,19 +171,31 @@ function serializeErrorForLog(err) {
  * Tags always include `api`, `error`, and `rollback`, plus any `options.tags`.
  * @param {import("express").Request} req
  * @param {unknown} err
- * @param {{ action?: string, tags?: string[], fallbackUrl?: string }} [options]
+ * @param {{ action?: string, tags?: string[], fallbackUrl?: string, context?: Record<string, unknown>, fallbackCompanyId?: import("mongoose").Types.ObjectId|string }} [options]
  */
 async function logRollbackFailure(req, err, options = {}) {
   const {
     action = "TRANSACTION ROLLBACK",
     tags = [],
     fallbackUrl = "/api",
+    context = null,
+    fallbackCompanyId: explicitFallbackCompanyId,
   } = options;
   const tagsWithError = [...new Set(["api", "error", "rollback", ...tags])];
-  await logControllerError(req, serializeErrorForLog(err), {
+  let description = serializeErrorForLog(err);
+  if (context != null && typeof context === "object") {
+    description += `\n\ncontext:\n${safeJsonForLog(context, 2500)}`;
+  }
+  const fallbackCompanyId =
+    explicitFallbackCompanyId ??
+    (context?.company_id != null ?
+      normalizeObjectIdMaybe(context.company_id)
+    : undefined);
+  await logControllerError(req, description, {
     action,
     tags: tagsWithError,
     fallbackUrl,
+    fallbackCompanyId,
   });
 }
 

@@ -1,5 +1,9 @@
 const mongoose = require("mongoose");
-const { handleGenericCreate } = require("../utils/modelHelper");
+const {
+  handleGenericCreate,
+  handleGenericGetAll,
+  buildPopulateFromQuery,
+} = require("../utils/modelHelper");
 const Transaction = require("../models/transaction");
 
 const MAX_BULK_ITEMS = 500;
@@ -101,6 +105,44 @@ async function createTransactionsFromItems(req, items, options = {}) {
       failed: failed.length,
     },
   };
+}
+
+async function getMyLedgerTransactions(req, res) {
+  const referenceUserId =
+    req.query?.reference_user_id && String(req.query.reference_user_id).trim()
+      ? String(req.query.reference_user_id).trim()
+      : req.user?._id;
+
+  const companyDoc =
+    req.user?.company_id && typeof req.user.company_id === "object" ?
+      req.user.company_id
+    : null;
+  const companyId = companyDoc?._id || req.user?.company_id;
+  const accountIds = [
+    companyDoc?.default_account_receivable_account,
+    companyDoc?.default_account_payable_account,
+  ].filter(Boolean);
+
+  const filter = {
+    status: "active",
+    deletedAt: null,
+    company_id: companyId,
+    reference_user_id: referenceUserId,
+  };
+
+  if (accountIds.length > 0) {
+    filter.account_id = { $in: accountIds };
+  }
+
+  const response = await handleGenericGetAll(req, "transaction", {
+    filter,
+    excludeFields: [], // Don't exclude any fields
+    populate: buildPopulateFromQuery(req.query, "transaction"),
+    sort: { createdAt: -1 }, // Sort by newest first
+    limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
+    skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
+  });
+  return res.status(response.status).json(response);
 }
 
 /**
@@ -306,4 +348,5 @@ module.exports = {
   transactionBulkCreate,
   createTransactionsFromItems,
   getTransactionsListWithDebitCreditSummary,
+  getMyLedgerTransactions,
 };

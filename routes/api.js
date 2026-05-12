@@ -3,7 +3,7 @@ const router = express.Router();
 
 // Dynamic route generator
 const { registerAllModelRoutes } = require("../utils/dynamicRouteGenerator");
-
+const { paymentReceiptCreate } = require("../controllers/payment_receipt");
 const {
   // handleUserSignup,
 
@@ -76,6 +76,7 @@ const { getMyBranches } = require("../controllers/company");
 const {
   transactionBulkCreate,
   getTransactionsListWithDebitCreditSummary,
+  getMyLedgerTransactions,
 } = require("../controllers/transaction");
 const {
   accountCreate,
@@ -229,13 +230,14 @@ router.patch("/order/order_update/:id", order_update);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
-
+router.post("/payment_receipt/save", paymentReceiptCreate);
 router.post("/transaction/bulk-create", transactionBulkCreate);
 router.post("/transactions/bulk-create", transactionBulkCreate);
 router.get(
   "/transaction/list-with-summary",
   getTransactionsListWithDebitCreditSummary,
 );
+router.get("/transaction/get-my-ledger-transaction", getMyLedgerTransactions);
 router.get(
   "/transactions/list-with-summary",
   getTransactionsListWithDebitCreditSummary,
