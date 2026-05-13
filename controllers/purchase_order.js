@@ -781,6 +781,9 @@ async function getPurchaseOrderByOrderNo(req, res) {
 
 /** POST /api/purchase_order/purchase_order_create — header, GL lines, optional PO lines + stock movements. */
 async function purchaseOrderCreate(req, res) {
+  // console.log("req.body", req.body);
+  // return;
+
   const originalBody = req.body;
   const lines = collectLineItems(originalBody);
 
@@ -1126,6 +1129,9 @@ async function purchaseOrderCreate(req, res) {
 
 /** PUT/update purchase_order: replace GL rows for `transaction_number` after header save. */
 async function purchase_order_update(req, res) {
+  // console.log(req.body);
+  // return;
+
   const lines = collectLineItems(req.body);
   const originalBody = req.body;
   req.body = normalizePurchaseOrderNumericFields(

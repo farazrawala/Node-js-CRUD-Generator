@@ -52,6 +52,33 @@ function responseFromExplicitHttpError(error) {
   };
 }
 
+/** Remove `password` from nested objects (e.g. populated `user_id`) before API JSON. */
+function stripPasswordFieldsDeep(value) {
+  if (value == null) return;
+  if (typeof value !== "object") return;
+  if (value instanceof Date || Buffer.isBuffer(value)) return;
+  if (value._bsontype === "ObjectId" || value.constructor?.name === "ObjectId") {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      stripPasswordFieldsDeep(item);
+    }
+    return;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, "password")) {
+    delete value.password;
+  }
+  for (const key of Object.keys(value)) {
+    const v = value[key];
+    if (v && typeof v === "object") {
+      stripPasswordFieldsDeep(v);
+    }
+  }
+}
+
 /**
  * Get the controller name from the calling file
  * @returns {string} The controller name
@@ -989,6 +1016,7 @@ const handleGenericCreate = async (
 
     // Transform image URLs to full URLs
     const transformedData = transformImageUrls(responseData, Model, req);
+    stripPasswordFieldsDeep(transformedData);
 
     return {
       success: true,
@@ -1792,6 +1820,7 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
 
     // Transform image URLs to full URLs
     const transformedData = transformImageUrls(responseData, Model, req);
+    stripPasswordFieldsDeep(transformedData);
 
     return {
       success: true,
@@ -2467,9 +2496,12 @@ const handleGenericGetAll = async (
             excludeFields.forEach((field) => {
               delete data[field];
             });
-            return transformImageUrls(data, Model, req);
+            const t = transformImageUrls(data, Model, req);
+            stripPasswordFieldsDeep(t);
+            return t;
           });
         }
+        stripPasswordFieldsDeep(shaped);
         return shaped;
       });
 
@@ -2535,7 +2567,9 @@ const handleGenericGetAll = async (
         if (shouldHydrateTxPolyRef) {
           await hydrateTransactionPolymorphicRef(data);
         }
-        return transformImageUrls(data, Model, req);
+        const t = transformImageUrls(data, Model, req);
+        stripPasswordFieldsDeep(t);
+        return t;
       }),
     );
 
@@ -2690,6 +2724,7 @@ const handleGenericGetById = async (
     populate = [], // Fields to populate (array of field names)
     filter = {}, // Additional filters (e.g., { company_id: req.user.company_id })
     errorHandlers = {}, // Custom error handlers
+    session = null, // Optional MongoDB client session (caller-owned transaction)
   } = options;
 
   // Get ID from URL parameters
@@ -2715,6 +2750,9 @@ const handleGenericGetById = async (
 
     // Build query
     let query = Model.findOne({ _id: recordId, ...filter });
+    if (session) {
+      query = query.session(session);
+    }
 
     // Add population if specified
     if (populateForMongoose && populateForMongoose.length > 0) {
@@ -2752,6 +2790,7 @@ const handleGenericGetById = async (
 
     // Transform image URLs to full URLs
     const transformedData = transformImageUrls(responseData, Model, req);
+    stripPasswordFieldsDeep(transformedData);
 
     console.log(`✅ Successfully fetched ${modelName} with ID: ${recordId}`);
 
@@ -3028,6 +3067,7 @@ const handleGenericFindOne = async (
 
     // Transform image URLs to full URLs
     const transformedData = transformImageUrls(responseData, Model, req);
+    stripPasswordFieldsDeep(transformedData);
 
     console.log(
       `✅ Successfully found ${modelName} with criteria:`,

@@ -417,10 +417,6 @@ async function getProductVariationById(req, res) {
         select: "product_name",
       },
       {
-        path: "warehouse_inventory.warehouse_id",
-        select: "warehouse_name",
-      },
-      {
         path: "category_id",
         select: "name",
       },
@@ -855,10 +851,6 @@ async function getAllProducts(req, res) {
         select: "product_name",
       },
       {
-        path: "warehouse_inventory.warehouse_id",
-        select: "warehouse_name",
-      },
-      {
         path: "category_id",
         select: "name",
       },
@@ -885,10 +877,6 @@ async function getAllActiveProducts(req, res) {
       {
         path: "parent_product_id",
         select: "product_name",
-      },
-      {
-        path: "warehouse_inventory.warehouse_id",
-        select: "warehouse_name",
       },
       {
         path: "category_id",
@@ -941,7 +929,7 @@ async function getProductsByWarehouse(req, res) {
       .lean();
 
     const productIds = rows
-      .map((r) => r.product_id && r.product_id._id)
+      .map((inventoryRow) => inventoryRow.product_id && inventoryRow.product_id._id)
       .filter(Boolean);
 
     let totalsByProduct = new Map();
@@ -958,20 +946,22 @@ async function getProductsByWarehouse(req, res) {
         { $match: aggFilter },
         { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
       ]);
-      totalsByProduct = new Map(agg.map((t) => [String(t._id), t.total]));
+      totalsByProduct = new Map(
+        agg.map((groupRow) => [String(groupRow._id), groupRow.total]),
+      );
     }
 
     const data = rows
-      .filter((r) => r.product_id)
-      .map((r) => {
-        const pid = String(r.product_id._id);
+      .filter((inventoryRow) => inventoryRow.product_id)
+      .map((inventoryRow) => {
+        const pid = String(inventoryRow.product_id._id);
         return {
-          _id: r.product_id._id,
-          product_name: r.product_id.product_name,
-          product_code: r.product_id.product_code,
-          product_price: r.product_id.product_price,
-          warehouse_quantity: r.quantity,
-          total_quantity: totalsByProduct.get(pid) ?? r.quantity,
+          _id: inventoryRow.product_id._id,
+          product_name: inventoryRow.product_id.product_name,
+          product_code: inventoryRow.product_id.product_code,
+          product_price: inventoryRow.product_id.product_price,
+          warehouse_quantity: inventoryRow.quantity,
+          total_quantity: totalsByProduct.get(pid) ?? inventoryRow.quantity,
         };
       });
 
@@ -1082,11 +1072,11 @@ async function cost_of_goods_available(req, res) {
         });
       }
       if (rows.length === 0) {
-        const p = await Product.findById(productIdFilter)
+        const productDoc = await Product.findById(productIdFilter)
           .select("product_name sku wholesale_price product_code")
           .lean();
-        const wp = Number(p?.wholesale_price);
-        const wholesale = Number.isFinite(wp) ? wp : 0;
+        const wholesaleUnit = Number(productDoc?.wholesale_price);
+        const wholesale_price = Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
         return res.status(200).json({
           success: true,
           count: 1,
@@ -1094,11 +1084,11 @@ async function cost_of_goods_available(req, res) {
           data: [
             {
               product_id: productIdFilter,
-              product_name: p?.product_name,
-              product_code: p?.product_code,
-              sku: p?.sku,
+              product_name: productDoc?.product_name,
+              product_code: productDoc?.product_code,
+              sku: productDoc?.sku,
               total_qty: 0,
-              wholesale_price: wholesale,
+              wholesale_price,
               cost_of_goods_available: 0,
             },
           ],
@@ -1115,7 +1105,7 @@ async function cost_of_goods_available(req, res) {
       });
     }
 
-    const productIds = rows.map((r) => r._id);
+    const productIds = rows.map((qtyRow) => qtyRow._id);
     const products = await Product.find({
       _id: { $in: productIds },
       company_id: companyId,
@@ -1125,24 +1115,24 @@ async function cost_of_goods_available(req, res) {
       .select("product_name sku wholesale_price product_code")
       .lean();
 
-    const byId = new Map(products.map((p) => [String(p._id), p]));
+    const productById = new Map(products.map((doc) => [String(doc._id), doc]));
 
     const data = [];
     for (const row of rows) {
-      const p = byId.get(String(row._id));
-      if (!p) continue;
+      const productDoc = productById.get(String(row._id));
+      if (!productDoc) continue;
       const qty = Math.max(0, Number(row.total_qty) || 0);
-      const wp = Number(p.wholesale_price);
-      const wholesale = Number.isFinite(wp) ? wp : 0;
+      const wholesaleUnit = Number(productDoc.wholesale_price);
+      const wholesale_price = Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
       const cost_of_goods_available =
-        Math.round(qty * wholesale * 100) / 100;
+        Math.round(qty * wholesale_price * 100) / 100;
       data.push({
         product_id: row._id,
-        product_name: p.product_name,
-        product_code: p.product_code,
-        sku: p.sku,
+        product_name: productDoc.product_name,
+        product_code: productDoc.product_code,
+        sku: productDoc.sku,
         total_qty: qty,
-        wholesale_price: wholesale,
+        wholesale_price,
         cost_of_goods_available,
       });
     }
@@ -1171,7 +1161,10 @@ async function cost_of_goods_available(req, res) {
 
     const grand_total_cost_of_goods =
       Math.round(
-        data.reduce((s, x) => s + x.cost_of_goods_available, 0) * 100,
+        data.reduce(
+          (runningTotal, line) => runningTotal + line.cost_of_goods_available,
+          0,
+        ) * 100,
       ) / 100;
 
     return res.status(200).json({
@@ -1189,65 +1182,214 @@ async function cost_of_goods_available(req, res) {
   }
 }
 
-/** Weighted average from PO lines → `wholesale_price` (PATCH …/update-cost/:id). */
+/** Warehouse qty × `wholesale_price`; optional PO sync; optional blend `?qty=&total=` — default: `total` = full dollar amount for that `qty` (line total). Use `total_mode=per_unit` if `total` is unit cost. PATCH …/update-cost/:id */
 async function productCostUpdate(req, res) {
-  const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid product id",
-    });
-  }
-
-  const r = await updateWholesalePriceForProduct(id, {
-    companyId: req.user?.company_id,
-    userId: req.user?._id,
-  });
-
-  if (!r.ok) {
-    if (r.skipped === "no_purchase_lines") {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(String(id).trim())) {
       return res.status(400).json({
         success: false,
-        message: "No purchase order items found for this product",
+        message: "Invalid product id",
       });
     }
-    if (r.skipped === "invalid_totals") {
+
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required",
+      });
+    }
+
+    const productId = new mongoose.Types.ObjectId(String(id).trim());
+
+    const invMatch = {
+      product_id: productId,
+      company_id: companyId,
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+
+    const agg = await WarehouseInventory.aggregate([
+      { $match: invMatch },
+      {
+        $group: {
+          _id: null,
+          total_warehouse_qty: { $sum: "$quantity" },
+        },
+      },
+    ]);
+
+    const totalWarehouseQty = Math.max(
+      0,
+      Number(agg[0]?.total_warehouse_qty) || 0,
+    );
+
+    let purchaseBasedWholesaleSync = null;
+    const wantPoSync =
+      req.query?.sync_from_purchases === "true" ||
+      req.query?.sync_from_purchases === "1";
+    if (wantPoSync) {
+      purchaseBasedWholesaleSync = await updateWholesalePriceForProduct(
+        productId,
+        {
+          companyId,
+          userId: req.user?._id,
+        },
+      );
+    }
+
+    let product = await Product.findOne({
+      _id: productId,
+      company_id: companyId,
+      deletedAt: null,
+    })
+      .select("product_name product_code sku wholesale_price status")
+      .lean();
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    const rawAddQty = req.query?.qty;
+    const rawAddTotal = req.query?.total;
+    const hasAddQty = rawAddQty !== undefined && String(rawAddQty).trim() !== "";
+    const hasAddTotal =
+      rawAddTotal !== undefined && String(rawAddTotal).trim() !== "";
+
+    if (hasAddQty !== hasAddTotal) {
       return res.status(400).json({
         success: false,
         message:
-          "Could not compute average purchase cost (invalid qty or line totals)",
+          "Provide both `qty` and `total` for a weighted blend, or omit both. Default: `total` = full line amount for that qty; use `total_mode=per_unit` if `total` is per-unit cost.",
       });
     }
-    if (r.skipped === "product_not_found") {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found or not in your company",
-      });
+
+    let wholesaleBlend = null;
+    if (hasAddQty && hasAddTotal) {
+      const addedQty = Number(String(rawAddQty).trim());
+      const addedTotalRaw = Number(String(rawAddTotal).trim());
+      if (!Number.isFinite(addedQty) || addedQty <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Query `qty` must be a positive number",
+        });
+      }
+      if (!Number.isFinite(addedTotalRaw) || addedTotalRaw < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Query `total` must be a finite number ≥ 0",
+        });
+      }
+
+      const totalModeRaw = String(req.query?.total_mode ?? "")
+        .trim()
+        .toLowerCase();
+      const usePerUnitTotal =
+        totalModeRaw === "per_unit" ||
+        totalModeRaw === "unit" ||
+        totalModeRaw === "each";
+
+      let addedUnitCost;
+      let newLotExtendedCost;
+      let blendTotalModeLabel;
+      if (usePerUnitTotal) {
+        addedUnitCost = addedTotalRaw;
+        newLotExtendedCost = addedQty * addedTotalRaw;
+        blendTotalModeLabel = "per_unit";
+      } else {
+        addedUnitCost = addedTotalRaw / addedQty;
+        if (!Number.isFinite(addedUnitCost) || addedUnitCost < 0) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "`total` must divide by `qty` to a valid implied per-unit cost ≥ 0 (send full line amount for `qty`, or use total_mode=per_unit)",
+          });
+        }
+        newLotExtendedCost = addedTotalRaw;
+        blendTotalModeLabel = "line_total";
+      }
+
+      const wholesaleBefore = Number.isFinite(Number(product.wholesale_price)) ?
+        Number(product.wholesale_price)
+      : 0;
+      const totalCostAvailable = totalWarehouseQty * wholesaleBefore;
+      const combinedExtendedCost = totalCostAvailable + newLotExtendedCost;
+      const denominatorQty = totalWarehouseQty + addedQty;
+      const newWholesaleRounded =
+        Math.round((combinedExtendedCost / denominatorQty) * 100) / 100;
+
+      const updateSet = { wholesale_price: newWholesaleRounded };
+      if (req.user?._id && mongoose.Types.ObjectId.isValid(String(req.user._id))) {
+        updateSet.updated_by = req.user._id;
+      }
+
+      await Product.updateOne(
+        {
+          _id: productId,
+          company_id: companyId,
+          deletedAt: null,
+        },
+        { $set: updateSet },
+      );
+
+      product = await Product.findOne({
+        _id: productId,
+        company_id: companyId,
+        deletedAt: null,
+      })
+        .select("product_name product_code sku wholesale_price status")
+        .lean();
+
+      wholesaleBlend = {
+        warehouse_qty: totalWarehouseQty,
+        wholesale_price_before: wholesaleBefore,
+        total_cost_available: Math.round(totalCostAvailable * 100) / 100,
+        added_qty: addedQty,
+        added_unit_cost: Math.round(addedUnitCost * 100) / 100,
+        total_mode: blendTotalModeLabel,
+        new_lot_extended_cost: Math.round(newLotExtendedCost * 100) / 100,
+        combined_extended_cost: Math.round(combinedExtendedCost * 100) / 100,
+        denominator_qty: denominatorQty,
+        new_wholesale: newWholesaleRounded,
+      };
     }
-    return res.status(400).json({
+
+    const wholesaleUnit = Number(product.wholesale_price);
+    const wholesale_price = Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
+    const cost_at_wholesale =
+      Math.round(totalWarehouseQty * wholesale_price * 100) / 100;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        product_id: productId,
+        product_name: product.product_name,
+        product_code: product.product_code,
+        sku: product.sku,
+        total_warehouse_qty: totalWarehouseQty,
+        wholesale_price,
+        cost_of_goods_available: cost_at_wholesale,
+      },
+      ...(purchaseBasedWholesaleSync != null ?
+        { wholesale_sync: purchaseBasedWholesaleSync }
+      : {}),
+      ...(wholesaleBlend != null ? { wholesale_blend: wholesaleBlend } : {}),
+    });
+  } catch (error) {
+    console.error("❌ productCostUpdate:", error);
+    return res.status(500).json({
       success: false,
-      message: "Could not update wholesale price",
-      details: r,
+      message: error.message || "Internal server error",
     });
   }
-
-  const response = await handleGenericGetById(req, "product", {
-    excludeFields: [],
-  });
-
-  if (!response?.success) {
-    return res.status(response?.status || 404).json(response);
-  }
-
-  return res.status(200).json({
-    ...response,
-    computed: {
-      wholesale_price: r.wholesale_price,
-      total_purchase_value: r.total_purchase_value,
-      total_qty: r.total_qty,
-      line_count: r.line_count,
-    },
-  });
 }
 
 async function getAllActiveProductsPOS(req, res) {

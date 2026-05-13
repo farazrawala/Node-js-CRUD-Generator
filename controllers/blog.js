@@ -38,7 +38,6 @@ async function blogUpdate(req, res) {
   return res.status(response.status).json(response);
 }
 
-
 async function blogById(req, res) {
   const response = await handleGenericGetById(req, "blog", {
     excludeFields: [], // Don't exclude any fields
@@ -49,7 +48,7 @@ async function blogById(req, res) {
 async function getAllblog(req, res) {
   const response = await handleGenericGetAll(req, "blog", {
     excludeFields: [], // Don't exclude any fields
-    populate: ["user_id"],  
+    populate: ["user_id"],
     sort: { createdAt: -1 }, // Sort by newest first
     limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
     skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
@@ -59,9 +58,9 @@ async function getAllblog(req, res) {
 
 async function getallblogactive(req, res) {
   const response = await handleGenericGetAll(req, "blog", {
-    filter: { status: "active" , deletedAt: null },
-    excludeFields: [], // Don't exclude any fields
-    populate: ["user_id"],  
+    filter: { status: "active", deletedAt: null },
+    excludeFields: ["password"],
+    populate: userPopulateNoPassword,
     sort: { createdAt: -1 }, // Sort by newest first
     limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
     skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
@@ -69,13 +68,12 @@ async function getallblogactive(req, res) {
   return res.status(response.status).json(response);
 }
 
-
 async function blogdelete(req, res) {
   console.log("🔐 Blog delete attempt:", {
     id: req.params.id,
     time: new Date().toISOString(),
   });
-  
+
   // Manually set the request body with deletedAt data
   req.body = { deletedAt: new Date().toISOString() };
   const response = await handleGenericUpdate(req, "blog", {
@@ -85,8 +83,6 @@ async function blogdelete(req, res) {
   });
   return res.status(response.status).json(response);
 }
-
-
 
 async function findOneblog(req, res) {
   const response = await handleGenericFindOne(req, "blog", {
@@ -110,10 +106,10 @@ async function findBlogBySlug(req, res) {
 // Example: Find active blog by title
 async function findActiveBlogByTitle(req, res) {
   const response = await handleGenericFindOne(req, "blog", {
-    searchCriteria: { 
+    searchCriteria: {
       title: req.body.title,
       active: true,
-      status: "published"
+      status: "published",
     },
     excludeFields: ["password"],
     beforeFind: async (criteria, req) => {
@@ -122,7 +118,7 @@ async function findActiveBlogByTitle(req, res) {
     },
     afterFind: async (record, req) => {
       console.log("✅ Found active blog:", record.title);
-    }
+    },
   });
   return res.status(response.status).json(response);
 }
@@ -130,14 +126,14 @@ async function findActiveBlogByTitle(req, res) {
 // Example: Find blog by custom parameters from request body
 async function findBlogByParams(req, res) {
   const { category, author, tags, status } = req.body;
-  
+
   // Build search criteria dynamically
   const searchCriteria = {};
   if (category) searchCriteria.category = category;
   if (author) searchCriteria.author = author;
   if (tags) searchCriteria.tags = { $in: tags }; // MongoDB operator for array contains
   if (status) searchCriteria.status = status;
-  
+
   const response = await handleGenericFindOne(req, "blog", {
     searchCriteria,
     includeFields: ["title", "slug", "createdAt", "author"], // Only return specific fields
@@ -146,8 +142,6 @@ async function findBlogByParams(req, res) {
   });
   return res.status(response.status).json(response);
 }
-
-
 
 module.exports = {
   blogCreate,

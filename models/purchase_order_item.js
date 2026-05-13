@@ -41,6 +41,12 @@ const modelSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    warehouse_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "warehouse_inventories",
+      required: true,
+      field_name: "Warehouse Inventory",
+    },
 
     // default fields
     company_id: {

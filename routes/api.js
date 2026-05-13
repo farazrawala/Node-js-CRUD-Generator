@@ -42,6 +42,10 @@ const {
 } = require("../controllers/product");
 
 const {
+  inventoryMovementsCreate,
+} = require("../controllers/inventory_movements");
+
+const {
   order_save,
   order_update,
   getOrderByorderItem,
@@ -168,6 +172,9 @@ router.get(
   "/purchase_order/get-purchase-order-by-order-no/:id",
   getPurchaseOrderByOrderNo,
 );
+
+// Inventory movements routes
+router.post("/inventory_movements/save", inventoryMovementsCreate);
 
 // Product routes - Custom CRUD + warehouse inventory management
 router.post("/product/create", productCreate);
