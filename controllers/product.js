@@ -12,6 +12,9 @@ const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
+const {
+  updateWholesalePriceForProduct,
+} = require("../utils/updateWholesaleFromPurchaseOrders");
 
 function normalizeWarehouseInventoryInput(reqBody) {
   if (reqBody.warehouse_inventory) {
@@ -335,7 +338,10 @@ async function productCreateVariation(req, res) {
       return res.status(parentProductResponse.status || 500).json({
         success: false,
         message: "Failed to create parent product",
-        error: parentProductResponse.error || parentProductResponse,
+        error: parentProductResponse.error,
+        details: parentProductResponse.details,
+        missing: parentProductResponse.missing,
+        type: parentProductResponse.type,
       });
     }
 
@@ -1011,6 +1017,239 @@ async function productDelete(req, res) {
   return res.status(response.status).json(response);
 }
 
+/**
+ * Inventory value at wholesale (COGS basis on hand): sum over warehouses of
+ * `quantity * wholesale_price` per active product. Optional `GET …/:id` for one product.
+ */
+async function cost_of_goods_available(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required",
+      });
+    }
+
+    const { id } = req.params;
+    const productIdFilter =
+      id && mongoose.Types.ObjectId.isValid(String(id).trim()) ?
+        new mongoose.Types.ObjectId(String(id).trim())
+      : null;
+
+    if (id && !productIdFilter) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid product id",
+      });
+    }
+
+    const invMatch = {
+      company_id: companyId,
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      quantity: { $gt: 0 },
+    };
+    if (productIdFilter) {
+      invMatch.product_id = productIdFilter;
+    }
+
+    const rows = await WarehouseInventory.aggregate([
+      { $match: invMatch },
+      {
+        $group: {
+          _id: "$product_id",
+          total_qty: { $sum: "$quantity" },
+        },
+      },
+      { $sort: { total_qty: -1 } },
+    ]);
+
+    if (productIdFilter) {
+      const exists = await Product.exists({
+        _id: productIdFilter,
+        company_id: companyId,
+        deletedAt: null,
+      });
+      if (!exists) {
+        return res.status(404).json({
+          success: false,
+          message: "Product not found",
+        });
+      }
+      if (rows.length === 0) {
+        const p = await Product.findById(productIdFilter)
+          .select("product_name sku wholesale_price product_code")
+          .lean();
+        const wp = Number(p?.wholesale_price);
+        const wholesale = Number.isFinite(wp) ? wp : 0;
+        return res.status(200).json({
+          success: true,
+          count: 1,
+          grand_total_cost_of_goods: 0,
+          data: [
+            {
+              product_id: productIdFilter,
+              product_name: p?.product_name,
+              product_code: p?.product_code,
+              sku: p?.sku,
+              total_qty: 0,
+              wholesale_price: wholesale,
+              cost_of_goods_available: 0,
+            },
+          ],
+        });
+      }
+    }
+
+    if (!rows.length) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        grand_total_cost_of_goods: 0,
+        data: [],
+      });
+    }
+
+    const productIds = rows.map((r) => r._id);
+    const products = await Product.find({
+      _id: { $in: productIds },
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    })
+      .select("product_name sku wholesale_price product_code")
+      .lean();
+
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+
+    const data = [];
+    for (const row of rows) {
+      const p = byId.get(String(row._id));
+      if (!p) continue;
+      const qty = Math.max(0, Number(row.total_qty) || 0);
+      const wp = Number(p.wholesale_price);
+      const wholesale = Number.isFinite(wp) ? wp : 0;
+      const cost_of_goods_available =
+        Math.round(qty * wholesale * 100) / 100;
+      data.push({
+        product_id: row._id,
+        product_name: p.product_name,
+        product_code: p.product_code,
+        sku: p.sku,
+        total_qty: qty,
+        wholesale_price: wholesale,
+        cost_of_goods_available,
+      });
+    }
+
+    if (productIdFilter && data.length === 0 && rows.length > 0) {
+      const row = rows[0];
+      const qty = Math.max(0, Number(row.total_qty) || 0);
+      return res.status(200).json({
+        success: true,
+        count: 1,
+        grand_total_cost_of_goods: 0,
+        data: [
+          {
+            product_id: row._id,
+            product_name: null,
+            product_code: null,
+            sku: null,
+            total_qty: qty,
+            wholesale_price: 0,
+            cost_of_goods_available: 0,
+            note: "Inventory exists but product is missing or inactive for this company",
+          },
+        ],
+      });
+    }
+
+    const grand_total_cost_of_goods =
+      Math.round(
+        data.reduce((s, x) => s + x.cost_of_goods_available, 0) * 100,
+      ) / 100;
+
+    return res.status(200).json({
+      success: true,
+      count: data.length,
+      grand_total_cost_of_goods,
+      data,
+    });
+  } catch (error) {
+    console.error("❌ cost_of_goods_available:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error",
+    });
+  }
+}
+
+/** Weighted average from PO lines → `wholesale_price` (PATCH …/update-cost/:id). */
+async function productCostUpdate(req, res) {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid product id",
+    });
+  }
+
+  const r = await updateWholesalePriceForProduct(id, {
+    companyId: req.user?.company_id,
+    userId: req.user?._id,
+  });
+
+  if (!r.ok) {
+    if (r.skipped === "no_purchase_lines") {
+      return res.status(400).json({
+        success: false,
+        message: "No purchase order items found for this product",
+      });
+    }
+    if (r.skipped === "invalid_totals") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Could not compute average purchase cost (invalid qty or line totals)",
+      });
+    }
+    if (r.skipped === "product_not_found") {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found or not in your company",
+      });
+    }
+    return res.status(400).json({
+      success: false,
+      message: "Could not update wholesale price",
+      details: r,
+    });
+  }
+
+  const response = await handleGenericGetById(req, "product", {
+    excludeFields: [],
+  });
+
+  if (!response?.success) {
+    return res.status(response?.status || 404).json(response);
+  }
+
+  return res.status(200).json({
+    ...response,
+    computed: {
+      wholesale_price: r.wholesale_price,
+      total_purchase_value: r.total_purchase_value,
+      total_qty: r.total_qty,
+      line_count: r.line_count,
+    },
+  });
+}
+
 async function getAllActiveProductsPOS(req, res) {
   const filter = {
     status: "active",
@@ -1056,6 +1295,8 @@ module.exports = {
   productUpdateVariation,
   getProductVariationById,
   productDelete,
+  productCostUpdate,
+  cost_of_goods_available,
   getAllActiveProductsPOS,
   updateWarehouseDefault,
 };

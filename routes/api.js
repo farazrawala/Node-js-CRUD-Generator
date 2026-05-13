@@ -3,7 +3,10 @@ const router = express.Router();
 
 // Dynamic route generator
 const { registerAllModelRoutes } = require("../utils/dynamicRouteGenerator");
-const { paymentReceiptCreate } = require("../controllers/payment_receipt");
+const {
+  paymentReceiptCreate,
+  paymentReceiptUpdate,
+} = require("../controllers/payment_receipt");
 const {
   // handleUserSignup,
 
@@ -33,6 +36,8 @@ const {
   getProductVariationById,
   getAllActiveProductsPOS,
   productDelete,
+  productCostUpdate,
+  cost_of_goods_available,
   updateWarehouseDefault,
 } = require("../controllers/product");
 
@@ -167,9 +172,12 @@ router.get(
 // Product routes - Custom CRUD + warehouse inventory management
 router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
+router.patch("/product/update-cost/:id", productCostUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 router.get("/product/get-all-active", getAllActiveProducts);
+router.get("/product/cost-of-goods-available", cost_of_goods_available);
+router.get("/product/:id/cost-of-goods-available", cost_of_goods_available);
 router.delete("/product/delete/:id", productDelete);
 
 // Integration routes
@@ -231,6 +239,7 @@ router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
 router.post("/payment_receipt/save", paymentReceiptCreate);
+router.patch("/payment_receipt/update_receipt/:id", paymentReceiptUpdate);
 router.post("/transaction/bulk-create", transactionBulkCreate);
 router.post("/transactions/bulk-create", transactionBulkCreate);
 router.get(

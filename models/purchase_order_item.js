@@ -24,6 +24,19 @@ const modelSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+
+    shipping_per_unit: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+
+    total_shipping: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+
     subtotal: {
       type: Number,
       required: true,
@@ -98,7 +111,9 @@ modelSchema.pre(
         : Object.fromEntries(
             Object.entries(raw).filter(([k]) => !k.startsWith("$")),
           );
-      if (!moneyKeys.some((k) => Object.prototype.hasOwnProperty.call(plain, k))) {
+      if (
+        !moneyKeys.some((k) => Object.prototype.hasOwnProperty.call(plain, k))
+      ) {
         return next();
       }
 

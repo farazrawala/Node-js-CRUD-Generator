@@ -20,6 +20,9 @@ const { createStockMovementRecord } = require("./stock_movement");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  afterPurchaseOrderMutationSyncWholesale,
+} = require("../utils/updateWholesaleFromPurchaseOrders");
 
 /**
  * Purchase order HTTP handlers: header + line items, optional stock movements,
@@ -36,19 +39,18 @@ const {
 const PURCHASE_ORDER_GL_LINE_META = [
   {
     description: "Purchase Order (debit)",
-    // Expense / inventory capitalization — company default only
     poAccountField: null,
     companyAccountField: "default_purchase_account",
-  },
-  {
-    description: "Purchase Discount (credit)",
-    poAccountField: null,
-    companyAccountField: "default_purchase_discount_account",
   },
   {
     description: "Purchase Shipment (debit)",
     poAccountField: null,
     companyAccountField: "default_shipping_account",
+  },
+  {
+    description: "Purchase Discount (credit)",
+    poAccountField: null,
+    companyAccountField: "default_purchase_discount_account",
   },
   {
     description: "Mode of Payment (credit)",
@@ -162,6 +164,11 @@ function logMessageFromGenericFailure(response, fallbackError) {
   if (Array.isArray(r.missing) && r.missing.length) {
     return `Missing required fields: ${r.missing.join(", ")}`;
   }
+  if (typeof r.details === "string" && r.details.trim()) {
+    const headline = r.error || r.message || fallbackError || "Request failed";
+    const d = r.details.trim();
+    return headline !== d ? `${headline}: ${d}` : d;
+  }
   return r.error || r.message || fallbackError || "Request failed";
 }
 
@@ -185,6 +192,16 @@ function purchaseOrderLinesSubtotalSum(lineItems) {
       )
       .toFixed(2),
   );
+}
+
+/** `purchase_order_item` requires shipping fields; default when omitted (legacy payloads). */
+function normalizeLineShippingFields(line) {
+  const spu = parseFloat(String(line?.shipping_per_unit ?? "").trim());
+  const ts = parseFloat(String(line?.total_shipping ?? "").trim());
+  return {
+    shipping_per_unit: Number.isFinite(spu) ? spu : 0,
+    total_shipping: Number.isFinite(ts) ? ts : 0,
+  };
 }
 
 function normalizePurchaseOrderNumericFields(obj) {
@@ -270,6 +287,20 @@ function parseBracketLineItems(body) {
       byIndex.get(i).warehouse_id = body[key];
       continue;
     }
+    m = key.match(/^shipping_per_unit\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).shipping_per_unit = body[key];
+      continue;
+    }
+    m = key.match(/^total_shipping\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).total_shipping = body[key];
+      continue;
+    }
   }
   const sorted = [...byIndex.keys()].sort((a, b) => a - b);
   const lines = [];
@@ -288,6 +319,8 @@ function parseBracketLineItems(body) {
       price,
       subtotal,
       warehouse_id: row.warehouse_id,
+      shipping_per_unit: row.shipping_per_unit,
+      total_shipping: row.total_shipping,
     });
   }
   return lines.filter(
@@ -312,12 +345,16 @@ function parseLineItemsFromIndexedContainers(body) {
   const pr = body.price;
   const t = body.total;
   const w = body.warehouse_id;
+  const spu = body.shipping_per_unit;
+  const ts = body.total_shipping;
   const len = Math.max(
     indexedContainerLength(p),
     indexedContainerLength(q),
     indexedContainerLength(pr),
     indexedContainerLength(t),
     indexedContainerLength(w),
+    indexedContainerLength(spu),
+    indexedContainerLength(ts),
   );
   if (len === 0) return [];
 
@@ -328,6 +365,8 @@ function parseLineItemsFromIndexedContainers(body) {
     const priceRaw = indexedContainerGet(pr, i);
     const totalRaw = indexedContainerGet(t, i);
     const warehouse_id = indexedContainerGet(w, i);
+    const shipping_per_unit = indexedContainerGet(spu, i);
+    const total_shipping = indexedContainerGet(ts, i);
     const qty = parseFloat(String(qtyRaw ?? "").trim());
     const price = parseFloat(String(priceRaw ?? "").trim());
     const fromTotal = parseFloat(String(totalRaw ?? "").trim());
@@ -335,7 +374,15 @@ function parseLineItemsFromIndexedContainers(body) {
       Number.isFinite(fromTotal) ? fromTotal
       : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
       : NaN;
-    lines.push({ product_id, qty, price, subtotal, warehouse_id });
+    lines.push({
+      product_id,
+      qty,
+      price,
+      subtotal,
+      warehouse_id,
+      shipping_per_unit,
+      total_shipping,
+    });
   }
   return lines.filter(
     (l) =>
@@ -369,6 +416,14 @@ function parseLegacyArrayLineItems(body) {
     Array.isArray(body["warehouse_id[]"]) ?
       body["warehouse_id[]"]
     : [body["warehouse_id[]"]].filter(Boolean);
+  const shippingPerUnitArray =
+    Array.isArray(body["shipping_per_unit[]"]) ?
+      body["shipping_per_unit[]"]
+    : [body["shipping_per_unit[]"]].filter(Boolean);
+  const totalShippingArray =
+    Array.isArray(body["total_shipping[]"]) ?
+      body["total_shipping[]"]
+    : [body["total_shipping[]"]].filter(Boolean);
   if (productIdArray.length === 0) return [];
   return productIdArray
     .map((productId, index) => {
@@ -376,11 +431,21 @@ function parseLegacyArrayLineItems(body) {
       const price = parseFloat(String(priceArray[index] ?? "").trim());
       const fromTotal = parseFloat(String(totalArray[index] ?? "").trim());
       const warehouse_id = warehouseIdArray[index];
+      const shipping_per_unit = shippingPerUnitArray[index];
+      const total_shipping = totalShippingArray[index];
       const subtotal =
         Number.isFinite(fromTotal) ? fromTotal
         : Number.isFinite(qty) && Number.isFinite(price) ? qty * price
         : NaN;
-      return { product_id: productId, qty, price, subtotal, warehouse_id };
+      return {
+        product_id: productId,
+        qty,
+        price,
+        subtotal,
+        warehouse_id,
+        shipping_per_unit,
+        total_shipping,
+      };
     })
     .filter(
       (l) =>
@@ -409,6 +474,8 @@ function parseProductIdsBodyArray(body) {
         price,
         subtotal,
         warehouse_id: row.warehouse_id,
+        shipping_per_unit: row.shipping_per_unit,
+        total_shipping: row.total_shipping,
       };
     })
     .filter(
@@ -424,7 +491,12 @@ function parseProductIdsBodyArray(body) {
 function stripLineItemKeysFromBody(body) {
   const out = {};
   for (const k of Object.keys(body || {})) {
-    if (/^(product_id|qty|price|total|warehouse_id)\[\d+\]$/.test(k)) continue;
+    if (
+      /^(product_id|qty|price|total|warehouse_id|shipping_per_unit|total_shipping)\[\d+\]$/.test(
+        k,
+      )
+    )
+      continue;
     if (
       [
         "product_id[]",
@@ -432,6 +504,8 @@ function stripLineItemKeysFromBody(body) {
         "price[]",
         "total[]",
         "warehouse_id[]",
+        "shipping_per_unit[]",
+        "total_shipping[]",
       ].includes(k)
     )
       continue;
@@ -443,6 +517,8 @@ function stripLineItemKeysFromBody(body) {
     delete out.price;
     delete out.total;
     delete out.warehouse_id;
+    delete out.shipping_per_unit;
+    delete out.total_shipping;
   }
   return out;
 }
@@ -522,6 +598,9 @@ function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
       doc.created_by = userId;
       doc.updated_by = userId;
     }
+    const ship = normalizeLineShippingFields(line);
+    doc.shipping_per_unit = ship.shipping_per_unit;
+    doc.total_shipping = ship.total_shipping;
     docs.push(doc);
   }
   return { docs };
@@ -754,15 +833,7 @@ async function purchaseOrderCreate(req, res) {
                   ref_id: record._id,
                 },
               },
-              {
-                account_id:
-                  orderReq.user.company_id.default_purchase_discount_account,
-                type: "credit",
-                amount: record?.discount ?? 0,
-                reference_user_id: record?.vendor_id,
-                transaction_number,
-                description: "Purchase Discount",
-              },
+
               {
                 account_id: orderReq.user.company_id.default_shipping_account,
                 type: "debit",
@@ -774,6 +845,15 @@ async function purchaseOrderCreate(req, res) {
                   module: "purchase_order",
                   ref_id: record._id,
                 },
+              },
+              {
+                account_id:
+                  orderReq.user.company_id.default_purchase_discount_account,
+                type: "credit",
+                amount: record?.discount ?? 0,
+                reference_user_id: record?.vendor_id,
+                transaction_number,
+                description: "Purchase Discount",
               },
               {
                 account_id: record?.payment_method_accounts_id,
@@ -839,12 +919,15 @@ async function purchaseOrderCreate(req, res) {
       }
 
       for (const line of lines) {
+        const ship = normalizeLineShippingFields(line);
         const itemData = {
           purchase_order_id: poId,
           product_id: String(line.product_id).trim(),
           qty: line.qty,
           price: line.price,
           subtotal: line.subtotal,
+          shipping_per_unit: ship.shipping_per_unit,
+          total_shipping: ship.total_shipping,
           status: "active",
           company_id: companyId,
         };
@@ -985,7 +1068,30 @@ async function purchaseOrderCreate(req, res) {
         ...purchaseOrderResponse,
         status: 201,
         items: [],
+        wholesale_updates: [],
       });
+    }
+
+    let wholesale_updates = [];
+    try {
+      wholesale_updates = await afterPurchaseOrderMutationSyncWholesale({
+        lines,
+        poId,
+        companyId: coalesceObjectId(req.user?.company_id),
+        userId: req.user?._id,
+      });
+    } catch (syncErr) {
+      console.error(
+        "[purchase_order] wholesale-from-purchases sync failed:",
+        syncErr,
+      );
+      wholesale_updates = [
+        {
+          ok: false,
+          skipped: "batch_error",
+          error: syncErr?.message || String(syncErr),
+        },
+      ];
     }
 
     const items_total = purchaseOrderItems.reduce(
@@ -1001,6 +1107,7 @@ async function purchaseOrderCreate(req, res) {
       data: { ...purchaseOrderResponse.data, ...poFresh },
       items: purchaseOrderItems,
       items_total,
+      wholesale_updates,
     });
   } catch (error) {
     console.error("Purchase Order creation error:", error);
@@ -1042,138 +1149,171 @@ async function purchase_order_update(req, res) {
     req.body.lines_subtotal = purchaseOrderLinesSubtotalSum(existingItems);
   }
 
-  const session = await mongoose.startSession();
+  let clientSession = null;
   let response = null;
   let txnError = null;
 
-  try {
-    await session.withTransaction(async () => {
-      response = await handleGenericUpdate(req, "purchase_order", {
-        session,
-        afterUpdate: async (record, orderReq, _existing, sess) => {
-          const transaction_number = record?.transaction_number;
-          if (transaction_number) {
-            const deleteTransc = await Transaction.deleteMany(
-              { transaction_number },
-              { session: sess },
-            );
-            if (deleteTransc.deletedCount > 0) {
-              console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
-            }
-          }
+  const sessionOpts = (sess) => (sess ? { session: sess } : {});
 
-          const { created, failed } = await transactionBulkCreate(
-            orderReq,
-            [
-              // Same five rows / index order as create — keep in sync with PURCHASE_ORDER_GL_LINE_META.
-              {
-                account_id: orderReq.user.company_id.default_purchase_account,
-                type: "debit",
-                amount: record?.total_amount ?? 0,
-                reference_user_id: record?.vendor_id,
-                transaction_number,
-                description: "Purchase Order",
-                reference_id: {
-                  module: "purchase_order",
-                  ref_id: record._id,
-                },
-              },
-              {
-                account_id:
-                  orderReq.user.company_id.default_purchase_discount_account,
-                type: "debit",
-                amount: record?.discount ?? 0,
-                reference_user_id: record?.vendor_id,
-                transaction_number,
-                description: "Purchase Discount",
-              },
-              {
-                account_id: orderReq.user.company_id.default_shipping_account,
-                type: "debit",
-                amount: record?.shipment ?? 0,
-                reference_user_id: record?.vendor_id,
-                transaction_number,
-                description: "Purchase Shipment",
-                reference_id: {
-                  module: "purchase_order",
-                  ref_id: record._id,
-                },
-              },
-              {
-                account_id: record?.payment_method_accounts_id,
-                type: "credit",
-                amount: record?.amount_paid ?? 0,
-                reference_user_id: record?.vendor_id,
-                transaction_number,
-                description: "Mode of Payment",
-                reference_id: {
-                  module: "purchase_order",
-                  ref_id: record._id,
-                },
-              },
-              {
-                account_id:
-                  orderReq.user.company_id.default_account_payable_account,
-                type: "credit",
-                amount: req.body?.remaining_amount || 0,
-                reference_user_id: record?.vendor_id,
-                transaction_number,
-                description: "A/c Payable",
-                reference_id: {
-                  module: "purchase_order",
-                  ref_id: record._id,
-                },
-              },
-            ],
-            { stopOnError: true, session: sess },
+  const runPurchaseOrderUpdateBody = async (mongoSession) => {
+    response = await handleGenericUpdate(req, "purchase_order", {
+      ...(mongoSession ? { session: mongoSession } : {}),
+      afterUpdate: async (record, orderReq, _existing, sess) => {
+        const transaction_number = record?.transaction_number;
+        if (transaction_number) {
+          const deleteTransc = await Transaction.deleteMany(
+            { transaction_number },
+            sessionOpts(sess),
           );
-          if (failed.length) {
-            await throwPurchaseOrderGlBulkFailed(orderReq, failed);
+          if (deleteTransc.deletedCount > 0) {
+            console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
           }
-          if (created[0]?.data?._id) {
-            console.log(
-              "✅ Transaction(s) created:",
-              created.map((c) => c.data._id),
-            );
-          }
-        },
-        filter: { status: "active", deletedAt: null },
-      });
-
-      if (!response?.success || !response?.data) {
-        throw new Error(
-          response?.error ||
-            response?.message ||
-            "Purchase order update failed",
-        );
-      }
-
-      const poId = response.data._id;
-
-      if (lines.length > 0) {
-        const built = buildPurchaseOrderItemDocuments(
-          poId,
-          response.data,
-          lines,
-          req,
-        );
-        if (built.error) {
-          throw new Error(built.error);
         }
-        await PurchaseOrderItem.deleteMany(
-          { purchase_order_id: poId },
-          { session },
+
+        const { created, failed } = await transactionBulkCreate(
+          orderReq,
+          [
+            // Same five rows / index order as create — keep in sync with PURCHASE_ORDER_GL_LINE_META.
+            {
+              account_id: orderReq.user.company_id.default_purchase_account,
+              type: "debit",
+              amount: record?.lines_subtotal ?? 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Purchase Order",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+            {
+              account_id: orderReq.user.company_id.default_shipping_account,
+              type: "debit",
+              amount: record?.shipment ?? 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Purchase Shipment",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+            {
+              account_id:
+                orderReq.user.company_id.default_purchase_discount_account,
+              type: "credit",
+              amount: record?.discount ?? 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Purchase Discount",
+            },
+            {
+              account_id: record?.payment_method_accounts_id,
+              type: "credit",
+              amount: record?.amount_paid ?? 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "Mode of Payment",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+            {
+              account_id:
+                orderReq.user.company_id.default_account_payable_account,
+              type: "credit",
+              amount: req.body?.remaining_amount || 0,
+              reference_user_id: record?.vendor_id,
+              transaction_number,
+              description: "A/c Payable",
+              reference_id: {
+                module: "purchase_order",
+                ref_id: record._id,
+              },
+            },
+          ],
+          { stopOnError: true, session: sess },
         );
-        await PurchaseOrderItem.insertMany(built.docs, { session });
-        await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, { session });
-      } else {
-        await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, { session });
+        if (failed.length) {
+          await throwPurchaseOrderGlBulkFailed(orderReq, failed);
+        }
+        if (created[0]?.data?._id) {
+          console.log(
+            "✅ Transaction(s) created:",
+            created.map((c) => c.data._id),
+          );
+        }
+      },
+      filter: { status: "active", deletedAt: null },
+    });
+
+    if (!response?.success || !response?.data) {
+      throwWithGenericFailure(response, "Purchase order update failed");
+    }
+
+    const poId = response.data._id;
+
+    if (lines.length > 0) {
+      const built = buildPurchaseOrderItemDocuments(
+        poId,
+        response.data,
+        lines,
+        req,
+      );
+      if (built.error) {
+        throw new Error(built.error);
       }
+      await PurchaseOrderItem.deleteMany(
+        { purchase_order_id: poId },
+        sessionOpts(mongoSession),
+      );
+      await PurchaseOrderItem.insertMany(built.docs, sessionOpts(mongoSession));
+      await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, {
+        session: mongoSession || undefined,
+      });
+    } else {
+      await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, {
+        session: mongoSession || undefined,
+      });
+    }
+  };
+
+  try {
+    clientSession = await mongoose.startSession();
+    await clientSession.withTransaction(async () => {
+      await runPurchaseOrderUpdateBody(clientSession);
     });
   } catch (e) {
-    txnError = e;
+    if (isMongoTransactionUnsupportedError(e)) {
+      if (clientSession) {
+        try {
+          clientSession.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+        clientSession = null;
+      }
+      console.warn(
+        "[purchase_order] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
+      );
+      try {
+        response = null;
+        await runPurchaseOrderUpdateBody(null);
+      } catch (e2) {
+        txnError = e2;
+      }
+    } else {
+      txnError = e;
+    }
   } finally {
-    session.endSession();
+    if (clientSession) {
+      try {
+        clientSession.endSession();
+      } catch (_) {
+        /* ignore */
+      }
+    }
   }
 
   req.body = originalBody;
@@ -1184,10 +1324,20 @@ async function purchase_order_update(req, res) {
       tags: ["api", "purchase_order", "rollback", "update"],
       fallbackUrl: "/api/purchase_order/update",
     });
+    if (txnError.clientErrorPayload) {
+      const p = txnError.clientErrorPayload;
+      return res.status(p.status || 400).json({
+        success: false,
+        message: "Purchase order update rolled back",
+        ...p,
+      });
+    }
     const msg = String(txnError.message || "");
     const is400 =
       msg.includes("Post-purchase_order") ||
-      msg.includes("company_id is required");
+      msg.includes("company_id is required") ||
+      msg.includes("Validation failed") ||
+      msg.includes("Missing required fields");
     return res.status(is400 ? 400 : 500).json({
       success: false,
       status: is400 ? 400 : 500,
@@ -1215,10 +1365,34 @@ async function purchase_order_update(req, res) {
 
   const poFresh = await PurchaseOrder.findById(poId).lean();
   const data = shapePurchaseOrderWithItems(poFresh || response.data, items);
+
+  let wholesale_updates = [];
+  try {
+    wholesale_updates = await afterPurchaseOrderMutationSyncWholesale({
+      lines,
+      poId,
+      companyId: coalesceObjectId(req.user?.company_id),
+      userId: req.user?._id,
+    });
+  } catch (syncErr) {
+    console.error(
+      "[purchase_order] wholesale-from-purchases sync failed:",
+      syncErr,
+    );
+    wholesale_updates = [
+      {
+        ok: false,
+        skipped: "batch_error",
+        error: syncErr?.message || String(syncErr),
+      },
+    ];
+  }
+
   return res.status(200).json({
     success: true,
     status: 200,
     data,
+    wholesale_updates,
   });
 }
 

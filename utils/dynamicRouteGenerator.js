@@ -48,6 +48,9 @@ function parseQueryValue(raw) {
   return str;
 }
 
+/** `amount_gt=0` → `{ amount: { $gt: 0 } }` (see getAll / get-all-active query strings). */
+const QUERY_RANGE_FIELD_RE = /^([a-zA-Z][a-zA-Z0-9_]*)_(gt|gte|lt|lte)$/;
+
 function applyQueryFilters(baseFilter, query = {}, modelName = null) {
   const filter = { ...baseFilter };
   let Model = null;
@@ -63,6 +66,29 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
     if (shouldTreatQueryKeyAsPopulateOnly(Model, modelName, key, query[key])) {
       return;
     }
+
+    const rangeMatch = key.match(QUERY_RANGE_FIELD_RE);
+    if (rangeMatch) {
+      const field = rangeMatch[1];
+      const op = `$${rangeMatch[2]}`;
+      const parsed = parseQueryValue(query[key]);
+      const num = Number(parsed);
+      if (!Number.isFinite(num)) return;
+      const existing = filter[field];
+      const isOperatorBucket =
+        existing &&
+        typeof existing === 'object' &&
+        !Array.isArray(existing) &&
+        !(existing instanceof Date) &&
+        !mongoose.Types.ObjectId.isValid(String(existing));
+      if (isOperatorBucket) {
+        filter[field] = { ...existing, [op]: num };
+      } else if (existing === undefined || existing === null) {
+        filter[field] = { [op]: num };
+      }
+      return;
+    }
+
     const parsed = parseQueryValue(query[key]);
     if (parsed === '' || parsed === undefined) return;
     if (Array.isArray(parsed)) {
