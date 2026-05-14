@@ -127,3 +127,6 @@ create default accounts. with no delete change from the front.
 
 ******
 create one default walkin customer.
+
+// to check load on terminal
+& "E:\xampp\apache\bin\ab.exe" -n 1000 -c 10 http://localhost:8000/api/blog/get-all-active?name=apple

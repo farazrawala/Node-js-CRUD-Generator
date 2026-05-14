@@ -20,9 +20,6 @@ const { createStockMovementRecord } = require("./stock_movement");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
-const {
-  afterPurchaseOrderMutationSyncWholesale,
-} = require("../utils/updateWholesaleFromPurchaseOrders");
 
 /**
  * Purchase order HTTP handlers: header + line items, optional stock movements,
@@ -1075,28 +1072,6 @@ async function purchaseOrderCreate(req, res) {
       });
     }
 
-    let wholesale_updates = [];
-    try {
-      wholesale_updates = await afterPurchaseOrderMutationSyncWholesale({
-        lines,
-        poId,
-        companyId: coalesceObjectId(req.user?.company_id),
-        userId: req.user?._id,
-      });
-    } catch (syncErr) {
-      console.error(
-        "[purchase_order] wholesale-from-purchases sync failed:",
-        syncErr,
-      );
-      wholesale_updates = [
-        {
-          ok: false,
-          skipped: "batch_error",
-          error: syncErr?.message || String(syncErr),
-        },
-      ];
-    }
-
     const items_total = purchaseOrderItems.reduce(
       (s, it) => s + (Number(it.subtotal) || 0),
       0,
@@ -1110,7 +1085,7 @@ async function purchaseOrderCreate(req, res) {
       data: { ...purchaseOrderResponse.data, ...poFresh },
       items: purchaseOrderItems,
       items_total,
-      wholesale_updates,
+      wholesale_updates: [],
     });
   } catch (error) {
     console.error("Purchase Order creation error:", error);
@@ -1372,33 +1347,11 @@ async function purchase_order_update(req, res) {
   const poFresh = await PurchaseOrder.findById(poId).lean();
   const data = shapePurchaseOrderWithItems(poFresh || response.data, items);
 
-  let wholesale_updates = [];
-  try {
-    wholesale_updates = await afterPurchaseOrderMutationSyncWholesale({
-      lines,
-      poId,
-      companyId: coalesceObjectId(req.user?.company_id),
-      userId: req.user?._id,
-    });
-  } catch (syncErr) {
-    console.error(
-      "[purchase_order] wholesale-from-purchases sync failed:",
-      syncErr,
-    );
-    wholesale_updates = [
-      {
-        ok: false,
-        skipped: "batch_error",
-        error: syncErr?.message || String(syncErr),
-      },
-    ];
-  }
-
   return res.status(200).json({
     success: true,
     status: 200,
     data,
-    wholesale_updates,
+    wholesale_updates: [],
   });
 }
 

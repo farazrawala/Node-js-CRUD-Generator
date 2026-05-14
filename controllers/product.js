@@ -12,9 +12,6 @@ const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
-const {
-  updateWholesalePriceForProduct,
-} = require("../utils/updateWholesaleFromPurchaseOrders");
 
 function normalizeWarehouseInventoryInput(reqBody) {
   if (reqBody.warehouse_inventory) {
@@ -1182,7 +1179,7 @@ async function cost_of_goods_available(req, res) {
   }
 }
 
-/** Warehouse qty × `wholesale_price`; optional PO sync; optional blend `?qty=&total=` — default: `total` = full dollar amount for that `qty` (line total). Use `total_mode=per_unit` if `total` is unit cost. PATCH …/update-cost/:id */
+/** Warehouse qty × `wholesale_price` for COGS-style response; optional blend `?qty=&total=` returns `wholesale_blend` only (does not persist `wholesale_price`). Default: `total` = full line amount for that `qty`; use `total_mode=per_unit` if `total` is unit cost. PATCH …/update-cost/:id */
 async function productCostUpdate(req, res) {
   try {
     const { id } = req.params;
@@ -1229,21 +1226,7 @@ async function productCostUpdate(req, res) {
       Number(agg[0]?.total_warehouse_qty) || 0,
     );
 
-    let purchaseBasedWholesaleSync = null;
-    const wantPoSync =
-      req.query?.sync_from_purchases === "true" ||
-      req.query?.sync_from_purchases === "1";
-    if (wantPoSync) {
-      purchaseBasedWholesaleSync = await updateWholesalePriceForProduct(
-        productId,
-        {
-          companyId,
-          userId: req.user?._id,
-        },
-      );
-    }
-
-    let product = await Product.findOne({
+    const product = await Product.findOne({
       _id: productId,
       company_id: companyId,
       deletedAt: null,
@@ -1326,28 +1309,6 @@ async function productCostUpdate(req, res) {
       const newWholesaleRounded =
         Math.round((combinedExtendedCost / denominatorQty) * 100) / 100;
 
-      const updateSet = { wholesale_price: newWholesaleRounded };
-      if (req.user?._id && mongoose.Types.ObjectId.isValid(String(req.user._id))) {
-        updateSet.updated_by = req.user._id;
-      }
-
-      await Product.updateOne(
-        {
-          _id: productId,
-          company_id: companyId,
-          deletedAt: null,
-        },
-        { $set: updateSet },
-      );
-
-      product = await Product.findOne({
-        _id: productId,
-        company_id: companyId,
-        deletedAt: null,
-      })
-        .select("product_name product_code sku wholesale_price status")
-        .lean();
-
       wholesaleBlend = {
         warehouse_qty: totalWarehouseQty,
         wholesale_price_before: wholesaleBefore,
@@ -1378,9 +1339,6 @@ async function productCostUpdate(req, res) {
         wholesale_price,
         cost_of_goods_available: cost_at_wholesale,
       },
-      ...(purchaseBasedWholesaleSync != null ?
-        { wholesale_sync: purchaseBasedWholesaleSync }
-      : {}),
       ...(wholesaleBlend != null ? { wholesale_blend: wholesaleBlend } : {}),
     });
   } catch (error) {
