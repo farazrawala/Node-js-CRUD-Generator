@@ -6,12 +6,233 @@ const {
   coalesceObjectId,
 } = require("../utils/modelHelper");
 const { createApplicationLog } = require("../utils/applicationLogs");
-const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
+const {
+  isMongoTransactionUnsupportedError,
+} = require("../utils/mongoTransactionSupport");
 const InventoryMovements = require("../models/inventory_movements");
+const Product = require("../models/product");
 
 function toFiniteNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Net on-hand from **inventory_movements** (sum `in` qty − sum `out` qty) per `product_id`,
+ * times each product’s `wholesale_price`. Same response shape as `product` COGS helper.
+ *
+ * Optional filter: `?product_id=` or `?id=` (Mongo ObjectId).
+ */
+async function cost_of_goods_available(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required",
+      });
+    }
+
+    const rawProductFilter =
+      req.query?.product_id ?? req.query?.id ?? req.params?.id;
+    const productIdFilter =
+      (
+        rawProductFilter &&
+        mongoose.Types.ObjectId.isValid(String(rawProductFilter).trim())
+      ) ?
+        new mongoose.Types.ObjectId(String(rawProductFilter).trim())
+      : null;
+
+    if (rawProductFilter && !productIdFilter) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid product id",
+      });
+    }
+
+    const movementMatch = {
+      company_id: companyObjectId,
+      status: "active",
+      // Exclude soft-deleted rows (deletedAt is a Date). Plain operators — reliable in $aggregate $match.
+      $nor: [{ deletedAt: { $type: "date" } }],
+    };
+    if (productIdFilter) {
+      movementMatch.product_id = productIdFilter;
+    }
+
+    const rows = await InventoryMovements.aggregate([
+      { $match: movementMatch },
+      {
+        $group: {
+          _id: "$product_id",
+          qty_in: {
+            $sum: {
+              $cond: [
+                { $eq: ["$movement_type", "in"] },
+                { $ifNull: ["$quantity", 0] },
+                0,
+              ],
+            },
+          },
+          qty_out: {
+            $sum: {
+              $cond: [
+                { $eq: ["$movement_type", "out"] },
+                { $ifNull: ["$quantity", 0] },
+                0,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
+          net_qty: { $subtract: ["$qty_in", "$qty_out"] },
+        },
+      },
+      { $sort: { net_qty: -1 } },
+    ]);
+
+    if (productIdFilter) {
+      const exists = await Product.exists({
+        _id: productIdFilter,
+        company_id: companyObjectId,
+        deletedAt: null,
+      });
+      if (!exists) {
+        return res.status(404).json({
+          success: false,
+          message: "Product not found",
+        });
+      }
+      if (rows.length === 0) {
+        const productDoc = await Product.findById(productIdFilter)
+          .select("product_name sku wholesale_price product_code")
+          .lean();
+        const wholesaleUnit = Number(productDoc?.wholesale_price);
+        const wholesale_price =
+          Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
+        return res.status(200).json({
+          success: true,
+          count: 1,
+          grand_total_cost_of_goods: 0,
+          data: [
+            {
+              product_id: productIdFilter,
+              product_name: productDoc?.product_name,
+              product_code: productDoc?.product_code,
+              sku: productDoc?.sku,
+              total_qty: 0,
+              wholesale_price,
+              cost_of_goods_available: 0,
+            },
+          ],
+        });
+      }
+    }
+
+    if (!rows.length) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        grand_total_cost_of_goods: 0,
+        data: [],
+      });
+    }
+
+    const productIds = rows.map((r) => r._id).filter(Boolean);
+    const products = await Product.find({
+      _id: { $in: productIds },
+      company_id: companyObjectId,
+      status: "active",
+      deletedAt: null,
+    })
+      .select("product_name sku wholesale_price product_code")
+      .lean();
+
+    const productById = new Map(products.map((doc) => [String(doc._id), doc]));
+
+    const data = [];
+    for (const row of rows) {
+      const productDoc = productById.get(String(row._id));
+      if (!productDoc) continue;
+      const netQty = Number(row.net_qty);
+      const total_qty = Math.max(0, Number.isFinite(netQty) ? netQty : 0);
+      const wholesaleUnit = Number(productDoc.wholesale_price);
+      const wholesale_price =
+        Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
+      const cost_of_goods_available =
+        Math.round(total_qty * wholesale_price * 100) / 100;
+      data.push({
+        product_id: row._id,
+        product_name: productDoc.product_name,
+        product_code: productDoc.product_code,
+        sku: productDoc.sku,
+        total_qty,
+        wholesale_price,
+        cost_of_goods_available,
+      });
+    }
+
+    if (productIdFilter && data.length === 0 && rows.length > 0) {
+      const row = rows[0];
+      const netQty = Number(row.net_qty);
+      const total_qty = Math.max(0, Number.isFinite(netQty) ? netQty : 0);
+      return res.status(200).json({
+        success: true,
+        count: 1,
+        grand_total_cost_of_goods: 0,
+        data: [
+          {
+            product_id: row._id,
+            product_name: null,
+            product_code: null,
+            sku: null,
+            total_qty,
+            wholesale_price: 0,
+            cost_of_goods_available: 0,
+            note: "Movement ledger exists but product is missing or inactive for this company",
+          },
+        ],
+      });
+    }
+
+    const grand_total_cost_of_goods =
+      Math.round(
+        data.reduce(
+          (runningTotal, line) => runningTotal + line.cost_of_goods_available,
+          0,
+        ) * 100,
+      ) / 100;
+
+    return res.status(200).json({
+      success: true,
+      count: data.length,
+      grand_total_cost_of_goods,
+      data,
+    });
+  } catch (error) {
+    console.error("❌ cost_of_goods_available:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error",
+    });
+  }
 }
 
 /**
@@ -33,7 +254,7 @@ async function runInventoryMovementTxnBody(req, session) {
     const movementMatch = {
       product_id: pidResolved,
       status: "active",
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      $nor: [{ deletedAt: { $type: "date" } }],
     };
     if (
       companyId != null &&
@@ -124,6 +345,35 @@ async function runInventoryMovementTxnBody(req, session) {
     throw createFailure;
   }
 
+  const resolvedCompanyId = coalesceObjectId(
+    req.body.company_id ?? req.user?.company_id,
+  );
+  await createApplicationLog(
+    req,
+    {
+      action: "Inventory movement created",
+      url: req.originalUrl || req.path || "/api/inventory_movements/save",
+      tags: [
+        "inventory_movement",
+        String(req.body.movement_type || "").trim() || "movement",
+      ],
+      description: {
+        inventory_movement_id: response.data?._id,
+        product_id: req.body.product_id,
+        warehouse_id: req.body.warehouse_id,
+        movement_type: req.body.movement_type,
+        quantity: req.body.quantity,
+        unit_cost: req.body.unit_cost,
+        total_cost: req.body.total_cost,
+        reference_type: req.body.reference_type,
+        reference_id: req.body.reference_id,
+        reference_name: req.body.reference_name,
+      },
+      company_id: resolvedCompanyId,
+    },
+    { session, silent: true },
+  );
+
   let logWholesale = null;
 
   if (
@@ -161,6 +411,41 @@ async function runInventoryMovementTxnBody(req, session) {
       };
     } finally {
       req.body = previousBody;
+    }
+
+    if (logWholesale) {
+      const {
+        productName: wlName,
+        previousWholesale,
+        nextWholesale,
+      } = logWholesale;
+      const previousWholesaleText =
+        previousWholesale == null || previousWholesale === "" ?
+          "n/a"
+        : String(previousWholesale);
+      const nextWholesaleText =
+        nextWholesale == null || nextWholesale === "" ?
+          "n/a"
+        : String(nextWholesale);
+      const namePart = wlName ? ` "${wlName}"` : "";
+      const productIdForDescription =
+        req.body.product_id instanceof mongoose.Types.ObjectId ?
+          String(req.body.product_id)
+        : String(req.body.product_id).trim();
+      const description =
+        `wholesale_price for product${namePart} (id ${productIdForDescription}) ` +
+        `changed from ${previousWholesaleText} to ${nextWholesaleText}.`;
+      await createApplicationLog(
+        req,
+        {
+          action: "Product wholesale_price updated",
+          url: req.originalUrl || req.path || "/api/inventory_movements/save",
+          tags: ["wholesale_price", "product", "inventory_movement"],
+          description,
+          company_id: resolvedCompanyId,
+        },
+        { session, silent: true },
+      );
     }
   }
 
@@ -272,41 +557,12 @@ async function inventoryMovementsCreate(req, res) {
       errorResponsePayload &&
       typeof errorResponsePayload.status === "number"
     ) {
-      return res
-        .status(errorResponsePayload.status)
-        .json(errorResponsePayload);
+      return res.status(errorResponsePayload.status).json(errorResponsePayload);
     }
     return res.status(500).json({
       success: false,
       status: 500,
       error: txnError.message || "Inventory movement save failed",
-    });
-  }
-
-  if (txnResult?.logWholesale) {
-    const { productName, previousWholesale, nextWholesale } =
-      txnResult.logWholesale;
-    const previousWholesaleText =
-      previousWholesale == null || previousWholesale === "" ?
-        "n/a"
-      : String(previousWholesale);
-    const nextWholesaleText =
-      nextWholesale == null || nextWholesale === "" ? "n/a" : String(nextWholesale);
-    const namePart = productName ? ` "${productName}"` : "";
-    const productIdFromBody = req.body.product_id;
-    const productIdForDescription =
-      productIdFromBody instanceof mongoose.Types.ObjectId ?
-        String(productIdFromBody)
-      : String(productIdFromBody).trim();
-    const description =
-      `wholesale_price for product${namePart} (id ${productIdForDescription}) ` +
-      `changed from ${previousWholesaleText} to ${nextWholesaleText}.`;
-    await createApplicationLog(req, {
-      action: "Product wholesale_price updated",
-      url:
-        req.originalUrl || req.path || "/api/inventory_movements/save",
-      tags: ["wholesale_price", "product", "inventory_movement"],
-      description,
     });
   }
 
@@ -318,5 +574,7 @@ async function inventoryMovementsCreate(req, res) {
 }
 
 module.exports = {
+  cost_of_goods_available,
   inventoryMovementsCreate,
+  runInventoryMovementTxnBody,
 };

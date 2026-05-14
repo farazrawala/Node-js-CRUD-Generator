@@ -860,6 +860,7 @@ async function getAllStockMovementsActive(req, res) {
 module.exports = {
   createStockMovement,
   createStockMovementRecord,
+  applyWarehouseInventoryDelta,
   hydrateMovementRefs,
   updateStockMovement,
   deleteStockMovement,

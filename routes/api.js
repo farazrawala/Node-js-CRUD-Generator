@@ -37,10 +37,13 @@ const {
   getAllActiveProductsPOS,
   productDelete,
   productCostUpdate,
-  cost_of_goods_available,
+  // cost_of_goods_available,
   updateWarehouseDefault,
 } = require("../controllers/product");
 
+const {
+  cost_of_goods_available,
+} = require("../controllers/inventory_movements");
 const {
   inventoryMovementsCreate,
 } = require("../controllers/inventory_movements");
@@ -183,8 +186,12 @@ router.patch("/product/update-cost/:id", productCostUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 router.get("/product/get-all-active", getAllActiveProducts);
-router.get("/product/cost-of-goods-available", cost_of_goods_available);
-router.get("/product/:id/cost-of-goods-available", cost_of_goods_available);
+router.get(
+  "/inventory_movements/cost-of-goods-available",
+  cost_of_goods_available,
+);
+// router.get("/product/:id/cost-of-goods-available", cost_of_goods_available);
+
 router.delete("/product/delete/:id", productDelete);
 
 // Integration routes

@@ -47,11 +47,11 @@ function defaultRequestUrl(req, overrideUrl) {
  *   created_by?: unknown,
  *   status?: string,
  * }} entry
- * @param {{ silent?: boolean }} [options] silent=false rethrows after console.error
+ * @param {{ silent?: boolean, session?: import("mongoose").ClientSession | null }} [options] silent=false rethrows after console.error; session participates in the same Mongo transaction when set.
  * @returns {Promise<{ ok: true, _id?: import("mongoose").Types.ObjectId } | { ok: false, skipped?: string, error?: unknown }>}
  */
 async function createApplicationLog(req, entry, options = {}) {
-  const { silent = true } = options;
+  const { silent = true, session = null } = options;
   try {
     if (!entry || typeof entry.action !== "string" || !entry.action.trim()) {
       throw new Error("createApplicationLog: action is required");
@@ -92,7 +92,12 @@ async function createApplicationLog(req, entry, options = {}) {
       doc.created_by = created_by;
     }
 
-    const row = await Logs.create(Logs.sanitizeLogPlainObject(doc));
+    const createOptions =
+      session != null && typeof session === "object" ? { session } : {};
+    const row = await Logs.create(
+      Logs.sanitizeLogPlainObject(doc),
+      createOptions,
+    );
     return { ok: true, _id: row?._id };
   } catch (err) {
     console.error(
