@@ -196,8 +196,14 @@ const getBaseUrl = (req = null) => {
   // If request is provided, construct from request
   if (req) {
     const protocol = req.protocol || "http";
-    const host = req.get("host") || "localhost:8000";
-    return `${protocol}://${host}`;
+    const host =
+      typeof req.get === "function" ?
+        req.get("host") || ""
+      : String(
+          (req.headers && (req.headers.host || req.headers.Host)) || "",
+        ).trim();
+    const safeHost = host || "localhost:8000";
+    return `${protocol}://${safeHost}`;
   }
 
   // Default fallback
@@ -389,7 +395,10 @@ const handleGenericCreate = async (
       status: 400,
       error: "Request body is empty",
       message: "Please send form data with required fields",
-      contentType: req.get("Content-Type"),
+      contentType:
+        typeof req.get === "function" ?
+          req.get("Content-Type")
+        : req.headers?.["content-type"] || req.headers?.["Content-Type"],
     };
   }
 
@@ -1281,7 +1290,10 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
       status: 400,
       error: "Request body is empty",
       message: "Please send form data with fields to update",
-      contentType: req.get("Content-Type"),
+      contentType:
+        typeof req.get === "function" ?
+          req.get("Content-Type")
+        : req.headers?.["content-type"] || req.headers?.["Content-Type"],
     };
   }
 

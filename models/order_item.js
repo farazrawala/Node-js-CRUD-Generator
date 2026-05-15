@@ -26,6 +26,11 @@ const modelSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    cost_price_at_sale: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
     // image: {
     //   type: String,
     //   field_type: "image",
@@ -130,7 +135,9 @@ modelSchema.pre(
         : Object.fromEntries(
             Object.entries(raw).filter(([k]) => !k.startsWith("$")),
           );
-      if (!moneyKeys.some((k) => Object.prototype.hasOwnProperty.call(plain, k))) {
+      if (
+        !moneyKeys.some((k) => Object.prototype.hasOwnProperty.call(plain, k))
+      ) {
         return next();
       }
 

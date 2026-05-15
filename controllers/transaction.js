@@ -9,7 +9,9 @@ const Transaction = require("../models/transaction");
 const MAX_BULK_ITEMS = 500;
 
 /**
- * Create many transactions using the same rules as the bulk HTTP API (cloned req + handleGenericCreate).
+ * Create many transactions using the same rules as the bulk HTTP API.
+ * Temporarily sets `req.body` per row (then restores) so `handleGenericCreate` always receives the real
+ * Express `req` (`req.get`, `req.protocol`, etc.). A prototype-cloned fake `req` can lose `.get` in some stacks.
  * @param {import("express").Request} req - Original request (for user / headers)
  * @param {object[]} items - Plain objects, same shape as each `items[]` entry in POST /transaction/bulk-create
  * @param {{ stopOnError?: boolean, session?: import("mongoose").ClientSession | null }} [options]
@@ -66,20 +68,22 @@ async function createTransactionsFromItems(req, items, options = {}) {
       continue;
     }
 
-    const itemReq = Object.assign(
-      Object.create(Object.getPrototypeOf(req)),
-      req,
-      { body: { ...row } },
-    );
-
+    const savedBody = req.body;
+    req.body = { ...row };
     if (req.user && req.user.company_id) {
-      itemReq.body.company_id = req.user.company_id;
+      req.body.company_id = req.user.company_id;
     }
 
-    const response = await handleGenericCreate(itemReq, "transaction", {
-      ...(session ? { session } : {}),
-    });
-    if (response.success) {
+    let response;
+    try {
+      response = await handleGenericCreate(req, "transaction", {
+        ...(session ? { session } : {}),
+      });
+    } finally {
+      req.body = savedBody;
+    }
+
+    if (response?.success) {
       created.push({ index: i, data: response.data });
     } else {
       failed.push({
