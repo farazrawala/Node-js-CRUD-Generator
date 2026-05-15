@@ -323,16 +323,13 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
     : await Product.find({ _id: { $in: productIds } })
         .select("product_name wholesale_price")
         .lean();
-  const productById = new Map(
-    products.map((p) => [String(p._id), p]),
-  );
+  const productById = new Map(products.map((p) => [String(p._id), p]));
 
   const docs = [];
   for (const line of lines) {
     const pid = String(line.product_id ?? "").trim();
-    const product = mongoose.Types.ObjectId.isValid(pid) ?
-      productById.get(pid)
-    : null;
+    const product =
+      mongoose.Types.ObjectId.isValid(pid) ? productById.get(pid) : null;
     const name =
       product && String(product.product_name || "").trim() ?
         String(product.product_name).trim()
@@ -610,10 +607,7 @@ async function order_save(req, res) {
     for (const line of lines) {
       const warehouseIdStr =
         line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-      if (
-        !warehouseIdStr ||
-        !mongoose.Types.ObjectId.isValid(warehouseIdStr)
-      ) {
+      if (!warehouseIdStr || !mongoose.Types.ObjectId.isValid(warehouseIdStr)) {
         continue;
       }
       const unitCost = Number(line.price);
@@ -628,8 +622,7 @@ async function order_save(req, res) {
           "Each order line with a warehouse needs a finite unit price (price) and positive quantity for inventory movement",
         );
       }
-      const totalCostMovement =
-        Math.round(lineQtyNum * unitCost * 100) / 100;
+      const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
 
       const bodyBeforeInventoryMovement = req.body;
       const hadRouteParamId = Object.prototype.hasOwnProperty.call(
