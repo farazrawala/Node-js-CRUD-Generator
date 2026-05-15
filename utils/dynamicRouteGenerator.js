@@ -3,9 +3,9 @@
  * Automatically generates CRUD routes for all models
  */
 
-const fs = require('fs');
-const path = require('path');
-const mongoose = require('mongoose');
+const fs = require("fs");
+const path = require("path");
+const mongoose = require("mongoose");
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -16,36 +16,43 @@ const {
   buildPopulateFromQuery,
   getModelFromController,
   shouldTreatQueryKeyAsPopulateOnly,
-} = require('./modelHelper');
+  coalesceObjectId,
+} = require("./modelHelper");
 
 const RESERVED_QUERY_KEYS = new Set([
-  'limit',
-  'skip',
-  'search',
-  'searchFields',
-  'populate',
-  'sort',
-  'sortBy',
-  'sortOrder',
-  'page',
-  'deleted',
-  'include_inactive',
+  "limit",
+  "skip",
+  "search",
+  "searchFields",
+  "populate",
+  "sort",
+  "sortBy",
+  "sortOrder",
+  "page",
+  "deleted",
+  "include_inactive",
 ]);
 
 function parseQueryValue(raw) {
   if (raw === undefined || raw === null) return raw;
   if (Array.isArray(raw)) return raw.map(parseQueryValue);
   const str = String(raw).trim();
-  if (str.includes(',')) {
+  if (str.includes(",")) {
     return str
-      .split(',')
+      .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
   }
-  if (str === 'true') return true;
-  if (str === 'false') return false;
-  if (str !== '' && !Number.isNaN(Number(str))) return Number(str);
+  if (str === "true") return true;
+  if (str === "false") return false;
+  if (str !== "" && !Number.isNaN(Number(str))) return Number(str);
   return str;
+}
+
+/** Tenant id for filters / body when `req.user.company_id` is populated `{ _id, ... }` or raw ObjectId. */
+function tenantCompanyIdFromUser(user) {
+  if (!user?.company_id) return null;
+  return coalesceObjectId(user.company_id);
 }
 
 /** `amount_gt=0` → `{ amount: { $gt: 0 } }` (see getAll / get-all-active query strings). */
@@ -77,7 +84,7 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
       const existing = filter[field];
       const isOperatorBucket =
         existing &&
-        typeof existing === 'object' &&
+        typeof existing === "object" &&
         !Array.isArray(existing) &&
         !(existing instanceof Date) &&
         !mongoose.Types.ObjectId.isValid(String(existing));
@@ -90,7 +97,7 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
     }
 
     const parsed = parseQueryValue(query[key]);
-    if (parsed === '' || parsed === undefined) return;
+    if (parsed === "" || parsed === undefined) return;
     if (Array.isArray(parsed)) {
       filter[key] = { $in: parsed };
       return;
@@ -101,25 +108,28 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
 }
 
 function buildSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
-  const sortBy = typeof query.sortBy === 'string' ? query.sortBy.trim() : '';
-  const sortOrderRaw = typeof query.sortOrder === 'string' ? query.sortOrder.trim().toLowerCase() : '';
+  const sortBy = typeof query.sortBy === "string" ? query.sortBy.trim() : "";
+  const sortOrderRaw =
+    typeof query.sortOrder === "string" ?
+      query.sortOrder.trim().toLowerCase()
+    : "";
   if (!sortBy) {
     return fallback;
   }
-  const direction = sortOrderRaw === 'asc' || sortOrderRaw === '1' ? 1 : -1;
+  const direction = sortOrderRaw === "asc" || sortOrderRaw === "1" ? 1 : -1;
   return { [sortBy]: direction };
 }
 
 /** Standalone MongoDB has no replica-set transactions — session-based ops fail until we retry without `session`. */
-function mongoTransactionsProbablyUnsupported(err, handlerFailureDetails = '') {
+function mongoTransactionsProbablyUnsupported(err, handlerFailureDetails = "") {
   const combined = [
     err?.message,
     err?.details,
     handlerFailureDetails,
-    String(err?.code ?? ''),
+    String(err?.code ?? ""),
   ]
     .filter(Boolean)
-    .join(' ');
+    .join(" ");
   return /replica set|Transaction numbers|Sessions are not supported|transaction.*not supported|multidocument transaction|cannot use session|Snapshot session|IllegalOperation/i.test(
     combined,
   );
@@ -135,7 +145,7 @@ async function withTxnFallback(fn) {
   } catch (err) {
     if (err.retryWithoutSession || mongoTransactionsProbablyUnsupported(err)) {
       console.warn(
-        '[dynamicRoute] Mongo transactions unavailable; retrying without session:',
+        "[dynamicRoute] Mongo transactions unavailable; retrying without session:",
         err.message,
       );
       return fn(null);
@@ -148,9 +158,11 @@ async function withTxnFallback(fn) {
  * Get all model names from the models directory
  */
 function getAllModels() {
-  const modelsDir = path.join(__dirname, '..', 'models');
-  const modelFiles = fs.readdirSync(modelsDir).filter(file => file.endsWith('.js'));
-  return modelFiles.map(file => file.replace('.js', ''));
+  const modelsDir = path.join(__dirname, "..", "models");
+  const modelFiles = fs
+    .readdirSync(modelsDir)
+    .filter((file) => file.endsWith(".js"));
+  return modelFiles.map((file) => file.replace(".js", ""));
 }
 
 /**
@@ -160,66 +172,95 @@ function generateControllerFunctions(modelName) {
   return {
     // Create
     create: async (req, res) => {
-      console.log(`🚀 ${modelName} create called with req.user:`, req.user ? { _id: req.user._id, email: req.user.email, company_id: req.user.company_id } : 'NO USER');
-      
+      console.log(
+        `🚀 ${modelName} create called with req.user:`,
+        req.user ?
+          {
+            _id: req.user._id,
+            email: req.user.email,
+            company_id: req.user.company_id,
+          }
+        : "NO USER",
+      );
+
       // Always add company_id to req.body if user has one
-      if (req.user && req.user.company_id) {
-        req.body.company_id = req.user.company_id;
-        console.log(`🔍 Adding company_id to ${modelName} create:`, req.user.company_id);
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        req.body.company_id = tenantCo;
+        console.log(`🔍 Adding company_id to ${modelName} create:`, tenantCo);
       } else {
-        console.log(`⚠️  No company_id found in req.user for ${modelName} create`);
+        console.log(
+          `⚠️  No company_id found in req.user for ${modelName} create`,
+        );
       }
 
-      const userControllerPath = path.join(__dirname, '..', 'controllers', 'user');
+      const userControllerPath = path.join(
+        __dirname,
+        "..",
+        "controllers",
+        "user",
+      );
 
       const afterCreate = async (record, req, session) => {
-          // When creating a company, link the creator user to the new tenant root (`user.company_id`).
-          // `Company.company_id` on the schema is an optional **parent** ref (branch rows); generic create may set it from `req.user.company_id` above for subsidiary flows.
-          if (modelName === 'company' && req.user && req.user._id) {
-            try {
-              const UserModel = require(path.join(__dirname, '..', 'models', 'user'));
-              await UserModel.findByIdAndUpdate(
-                req.user._id,
-                { company_id: record._id },
-                { new: true, ...(session ? { session } : {}) }
-              );
-              console.log(`🔗 Linked user ${req.user._id} to company ${record._id}`);
-            } catch (linkErr) {
-              console.error(`⚠️ Failed to link user to company after create:`, linkErr.message);
-            }
+        // When creating a company, link the creator user to the new tenant root (`user.company_id`).
+        // `Company.company_id` on the schema is an optional **parent** ref (branch rows); generic create may set it from `req.user.company_id` above for subsidiary flows.
+        if (modelName === "company" && req.user && req.user._id) {
+          try {
+            const UserModel = require(
+              path.join(__dirname, "..", "models", "user"),
+            );
+            await UserModel.findByIdAndUpdate(
+              req.user._id,
+              { company_id: record._id },
+              { new: true, ...(session ? { session } : {}) },
+            );
+            console.log(
+              `🔗 Linked user ${req.user._id} to company ${record._id}`,
+            );
+          } catch (linkErr) {
+            console.error(
+              `⚠️ Failed to link user to company after create:`,
+              linkErr.message,
+            );
           }
+        }
 
-          if (modelName === 'user') {
-            try {
-              const { postTransactionsForUserInitialBalance } = require(userControllerPath);
-              await postTransactionsForUserInitialBalance(record, req, session);
-            } catch (glErr) {
-              console.error(
-                `⚠️ postTransactionsForUserInitialBalance:`,
-                glErr.message,
-              );
-              throw glErr;
-            }
+        if (modelName === "user") {
+          try {
+            const { postTransactionsForUserInitialBalance } = require(
+              userControllerPath,
+            );
+            await postTransactionsForUserInitialBalance(record, req, session);
+          } catch (glErr) {
+            console.error(
+              `⚠️ postTransactionsForUserInitialBalance:`,
+              glErr.message,
+            );
+            throw glErr;
           }
+        }
 
-          console.log(`✅ ${modelName} created successfully:`, record._id);
+        console.log(`✅ ${modelName} created successfully:`, record._id);
       };
 
       try {
-        if (modelName === 'user') {
+        if (modelName === "user") {
           const response = await withTxnFallback(async (session) => {
             const out = await handleGenericCreate(req, modelName, {
               ...(session ? { session } : {}),
               afterCreate,
             });
             if (!out.success) {
-              const det = String(out.details || '');
-              if (session && mongoTransactionsProbablyUnsupported({ message: det }, det)) {
+              const det = String(out.details || "");
+              if (
+                session &&
+                mongoTransactionsProbablyUnsupported({ message: det }, det)
+              ) {
                 const e = new Error(det);
                 e.retryWithoutSession = true;
                 throw e;
               }
-              throw new Error(det || out.error || 'User create failed');
+              throw new Error(det || out.error || "User create failed");
             }
             return out;
           });
@@ -234,7 +275,7 @@ function generateControllerFunctions(modelName) {
         console.error(`❌ ${modelName} create error:`, err.message);
         return res.status(500).json({
           success: false,
-          message: err.message || 'Create transaction aborted',
+          message: err.message || "Create transaction aborted",
         });
       }
     },
@@ -242,21 +283,30 @@ function generateControllerFunctions(modelName) {
     // Update
     update: async (req, res) => {
       const filter = {};
-      
+
       // Always filter by company_id if user has one
-      if (req.user && req.user.company_id) {
-        filter.company_id = req.user.company_id;
-        console.log(`🔍 Filtering ${modelName} update by company_id:`, req.user.company_id);
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        filter.company_id = tenantCo;
+        console.log(
+          `🔍 Filtering ${modelName} update by company_id:`,
+          tenantCo,
+        );
       }
-      
-      const userControllerPath = path.join(__dirname, '..', 'controllers', 'user');
+
+      const userControllerPath = path.join(
+        __dirname,
+        "..",
+        "controllers",
+        "user",
+      );
 
       const updateOptions = {
-        excludeFields: ['password'], // Don't return password in response
+        excludeFields: ["password"], // Don't return password in response
         filter: filter,
       };
 
-      if (modelName === 'user') {
+      if (modelName === "user") {
         updateOptions.afterUpdate = async (
           updatedRecord,
           req,
@@ -264,7 +314,9 @@ function generateControllerFunctions(modelName) {
           session,
         ) => {
           try {
-            const { reconcileUserInitialBalanceOnUpdate } = require(userControllerPath);
+            const { reconcileUserInitialBalanceOnUpdate } = require(
+              userControllerPath,
+            );
             await reconcileUserInitialBalanceOnUpdate(
               updatedRecord,
               req,
@@ -272,40 +324,47 @@ function generateControllerFunctions(modelName) {
               session,
             );
           } catch (e) {
-            console.error('⚠️ reconcileUserInitialBalanceOnUpdate:', e.message);
+            console.error("⚠️ reconcileUserInitialBalanceOnUpdate:", e.message);
             throw e;
           }
         };
       }
 
       try {
-        if (modelName === 'user') {
+        if (modelName === "user") {
           const response = await withTxnFallback(async (session) => {
             const out = await handleGenericUpdate(req, modelName, {
               ...updateOptions,
               ...(session ? { session } : {}),
             });
             if (!out.success) {
-              const det = String(out.details || '');
-              if (session && mongoTransactionsProbablyUnsupported({ message: det }, det)) {
+              const det = String(out.details || "");
+              if (
+                session &&
+                mongoTransactionsProbablyUnsupported({ message: det }, det)
+              ) {
                 const e = new Error(det);
                 e.retryWithoutSession = true;
                 throw e;
               }
-              throw new Error(det || out.error || 'User update failed');
+              throw new Error(det || out.error || "User update failed");
             }
             return out;
           });
           return res.status(response.status).json(response);
         }
 
-        const response = await handleGenericUpdate(req, modelName, updateOptions);
+        const response = await handleGenericUpdate(
+          req,
+          modelName,
+          updateOptions,
+        );
         return res.status(response.status).json(response);
       } catch (err) {
         console.error(`❌ ${modelName} update error:`, err.message);
         return res.status(500).json({
           success: false,
-          message: err.message || 'Update transaction aborted',
+          message: err.message || "Update transaction aborted",
         });
       }
     },
@@ -313,15 +372,16 @@ function generateControllerFunctions(modelName) {
     // Get by ID
     getById: async (req, res) => {
       const filter = {};
-      
+
       // Always filter by company_id if user has one
-      if (req.user && req.user.company_id) {
-        filter.company_id = req.user.company_id;
-        console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        filter.company_id = tenantCo;
+        console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
       }
-      
+
       const response = await handleGenericGetById(req, modelName, {
-        excludeFields: ['password'], // Don't exclude any fields except password
+        excludeFields: ["password"], // Don't exclude any fields except password
         filter: filter,
       });
       return res.status(response.status).json(response);
@@ -330,11 +390,12 @@ function generateControllerFunctions(modelName) {
     // Get all
     getAll: async (req, res) => {
       let filter = { deletedAt: null };
-      
+
       // Always filter by company_id if user has one
-      if (req.user && req.user.company_id) {
-        filter.company_id = req.user.company_id;
-        console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        filter.company_id = tenantCo;
+        console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
       }
       filter = applyQueryFilters(filter, req.query, modelName);
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
@@ -348,9 +409,9 @@ function generateControllerFunctions(modelName) {
       // console.log("req.query.populate", req.query.populate);
       // console.log("req.query.populate", req.query.populate);
       // exit();
-      
+
       const response = await handleGenericGetAll(req, modelName, {
-        excludeFields: ['password'], // Don't exclude any fields except password
+        excludeFields: ["password"], // Don't exclude any fields except password
         sort,
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
@@ -367,28 +428,29 @@ function generateControllerFunctions(modelName) {
       // `user`: "active" = not soft-deleted and not explicitly `inactive` (legacy docs may omit `status`).
       // Pass `?include_inactive=true` to list every non-deleted user for the tenant (admin-style directory).
       let filter = { deletedAt: null };
-      if (modelName === 'user') {
+      if (modelName === "user") {
         const includeInactive =
-          req.query.include_inactive === 'true' ||
-          req.query.include_inactive === '1';
+          req.query.include_inactive === "true" ||
+          req.query.include_inactive === "1";
         if (!includeInactive) {
-          filter.status = { $ne: 'inactive' };
+          filter.status = { $ne: "inactive" };
         }
       } else {
-        filter.status = 'active';
+        filter.status = "active";
       }
 
       // Always filter by company_id if user has one
-      if (req.user && req.user.company_id) {
-        filter.company_id = req.user.company_id;
-        console.log(`🔍 Filtering ${modelName} by company_id:`, req.user.company_id);
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        filter.company_id = tenantCo;
+        console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
       }
       filter = applyQueryFilters(filter, req.query, modelName);
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       const response = await handleGenericGetAll(req, modelName, {
         filter: filter,
-        excludeFields: ['password'],
+        excludeFields: ["password"],
         sort,
         limit: req.query.limit ? parseInt(req.query.limit) : null,
         skip: req.query.skip ? parseInt(req.query.skip) : 0,
@@ -405,15 +467,19 @@ function generateControllerFunctions(modelName) {
         id: req.params.id,
         time: new Date().toISOString(),
       });
-      
+
       const filter = {};
-      
+
       // Always filter by company_id if user has one
-      if (req.user && req.user.company_id) {
-        filter.company_id = req.user.company_id;
-        console.log(`🔍 Filtering ${modelName} delete by company_id:`, req.user.company_id);
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        filter.company_id = tenantCo;
+        console.log(
+          `🔍 Filtering ${modelName} delete by company_id:`,
+          tenantCo,
+        );
       }
-      
+
       // Manually set the request body with deletedAt data
       req.body = { deletedAt: new Date().toISOString() };
       const response = await handleGenericUpdate(req, modelName, {
@@ -423,7 +489,7 @@ function generateControllerFunctions(modelName) {
         },
       });
       return res.status(response.status).json(response);
-    }
+    },
   };
 }
 
@@ -433,7 +499,7 @@ function generateControllerFunctions(modelName) {
  */
 function getModelRouteNames(modelName) {
   const names = [modelName];
-  const pluralName = modelName.endsWith('s') ? modelName : `${modelName}s`;
+  const pluralName = modelName.endsWith("s") ? modelName : `${modelName}s`;
   if (!names.includes(pluralName)) {
     names.push(pluralName);
   }
@@ -460,42 +526,42 @@ function registerModelRoutes(router, modelName, options = {}) {
 
   routeNames.forEach((routeName) => {
     // Register standard CRUD routes for singular/plural aliases.
-    if (!excludedRoutes.includes('create')) {
+    if (!excludedRoutes.includes("create")) {
       router.post(`/${routeName}/create`, controller.create);
     }
 
-    if (!excludedRoutes.includes('update')) {
+    if (!excludedRoutes.includes("update")) {
       router.patch(`/${routeName}/update/:id`, controller.update);
     }
 
-    if (!excludedRoutes.includes('getById')) {
+    if (!excludedRoutes.includes("getById")) {
       router.get(`/${routeName}/get/:id`, controller.getById);
     }
 
-    if (!excludedRoutes.includes('getAll')) {
+    if (!excludedRoutes.includes("getAll")) {
       router.get(`/${routeName}/get-all`, controller.getAll);
     }
 
-    if (!excludedRoutes.includes('getAllActive')) {
+    if (!excludedRoutes.includes("getAllActive")) {
       router.get(`/${routeName}/get-all-active`, controller.getAllActive);
     }
 
-    if (!excludedRoutes.includes('delete')) {
+    if (!excludedRoutes.includes("delete")) {
       router.delete(`/${routeName}/delete/:id`, controller.delete);
     }
   });
 
   // Register custom routes
-  customRoutes.forEach(route => {
+  customRoutes.forEach((route) => {
     if (route.method && route.path && route.handler) {
       router[route.method.toLowerCase()](route.path, route.handler);
       console.log(`✅ Registered custom route: ${route.method} ${route.path}`);
     }
   });
 
-  const routeSummary = routeNames.map((name) => `/${name}`).join(', ');
+  const routeSummary = routeNames.map((name) => `/${name}`).join(", ");
   console.log(
-    `✅ Registered ${modelName} routes for ${routeSummary}: POST /create, PATCH /update/:id, GET /get/:id, GET /get-all, GET /get-all-active, DELETE /delete/:id`
+    `✅ Registered ${modelName} routes for ${routeSummary}: POST /create, PATCH /update/:id, GET /get/:id, GET /get-all, GET /get-all-active, DELETE /delete/:id`,
   );
 }
 
@@ -512,14 +578,16 @@ function registerAllModelRoutes(router, options = {}) {
   } = options;
 
   if (!enabled) {
-    console.log('⚠️  Dynamic route registration is disabled');
+    console.log("⚠️  Dynamic route registration is disabled");
     return;
   }
 
   const allModels = getAllModels();
-  console.log(`\n🚀 Starting dynamic route registration for ${allModels.length} models...\n`);
+  console.log(
+    `\n🚀 Starting dynamic route registration for ${allModels.length} models...\n`,
+  );
 
-  allModels.forEach(modelName => {
+  allModels.forEach((modelName) => {
     // Skip excluded models
     if (excludedModels.includes(modelName)) {
       console.log(`⏭️  Skipping ${modelName} (in excluded list)`);
@@ -528,7 +596,7 @@ function registerAllModelRoutes(router, options = {}) {
 
     // Get model-specific configuration
     const modelConfig = modelConfigs[modelName] || {};
-    
+
     // Register routes for this model
     registerModelRoutes(router, modelName, modelConfig);
   });
@@ -541,5 +609,5 @@ module.exports = {
   getModelRouteNames,
   generateControllerFunctions,
   registerModelRoutes,
-  registerAllModelRoutes
+  registerAllModelRoutes,
 };
