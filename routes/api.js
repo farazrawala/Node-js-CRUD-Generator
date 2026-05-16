@@ -48,7 +48,7 @@ const {
   inventoryMovementsCreate,
 } = require("../controllers/inventory_movements");
 
-const { expenseCreate } = require("../controllers/expense");
+const { expenseCreate, expenseUpdate } = require("../controllers/expense");
 
 const {
   order_save,
@@ -180,6 +180,7 @@ router.get(
 
 // Expense routes
 router.post("/expense/save", expenseCreate);
+router.patch("/expense/update/:id", expenseUpdate);
 // Inventory movements routes
 router.post("/inventory_movements/save", inventoryMovementsCreate);
 
