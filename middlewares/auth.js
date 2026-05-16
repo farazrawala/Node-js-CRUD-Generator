@@ -1,5 +1,9 @@
 const { getUserToken } = require("../service/auth");
 const { handleGenericCreate } = require("../utils/modelHelper");
+const {
+  buildUserCompanyPopulate,
+  COMPANY_DEFAULT_ACCOUNT_PATHS,
+} = require("../utils/userCompanyPopulate");
 const User = require("../models/user");
 
 /**
@@ -83,50 +87,7 @@ async function hydrateUserFromToken(token) {
 
   try {
     const dbUser = await User.findById(tokenUser._id)
-      .populate([
-        {
-          path: "company_id",
-          // No select whitelist: include full company document.
-          populate: [
-            {
-              path: "default_cash_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_sales_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_purchase_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_sales_discount_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_purchase_discount_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_account_receivable_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_account_payable_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_shipping_account",
-              select: "name account_number company_id",
-            },
-            {
-              path: "default_equity_account_id",
-              select: "name account_number company_id",
-            },
-          ],
-        },
-      ])
+      .populate([buildUserCompanyPopulate()])
       .lean();
     if (!dbUser) {
       return tokenUser;
@@ -134,14 +95,7 @@ async function hydrateUserFromToken(token) {
     if (dbUser.company_id && typeof dbUser.company_id === "object") {
       const company = dbUser.company_id;
       const companyDefaultAccountFields = [
-        "default_cash_account",
-        "default_sales_account",
-        "default_purchase_account",
-        "default_sales_discount_account",
-        "default_purchase_discount_account",
-        "default_account_receivable_account",
-        "default_account_payable_account",
-        "default_shipping_account",
+        ...COMPANY_DEFAULT_ACCOUNT_PATHS,
         "warehouse_id",
       ];
       companyDefaultAccountFields.forEach((field) => {

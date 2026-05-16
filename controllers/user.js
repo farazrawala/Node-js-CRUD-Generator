@@ -14,6 +14,7 @@ const { performAccountCreate } = require("./account");
 const Company = require("../models/company");
 const Transaction = require("../models/transaction");
 const { createTransactionsFromItems } = require("./transaction");
+const { buildUserCompanyPopulate } = require("../utils/userCompanyPopulate");
 
 /**
  * Build & post the 2-line user opening journal. Does not touch `user.transaction_number`.
@@ -265,12 +266,7 @@ async function handleUserLogin(req, res) {
       email: email.toLowerCase(),
       // role: { $in: ["ADMIN", "USER"] },
       // active: true,
-    }).populate({
-      path: "company_id",
-      // `warehouse_id` is not defined in company schema, so avoid nested populate.
-      select:
-        "company_name company_email company_phone company_address company_logo",
-    });
+    }).populate(buildUserCompanyPopulate());
 
     if (!user) {
       return res.status(401).json({

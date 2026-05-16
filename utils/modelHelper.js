@@ -2287,6 +2287,96 @@ const handleGenericSoftDelete = async (req, controllerName, options = {}) => {
 /** @deprecated Use `handleGenericSoftDelete` — same implementation. */
 const handleGenericDelete = handleGenericSoftDelete;
 
+/** Comma-separated query values → ObjectIds (`include_id`, `exclude_id`, etc.). */
+function parseObjectIdListFromQuery(raw) {
+  if (raw == null || raw === "") return [];
+  const parts = Array.isArray(raw) ? raw : String(raw).split(",");
+  return parts
+    .map((p) => coalesceObjectId(String(p).trim()))
+    .filter(Boolean);
+}
+
+const INCLUDE_EXCLUDE_ID_QUERY_KEYS = [
+  "include_id",
+  "include_ids",
+  "include_account_id",
+  "include_account_ids",
+  "exclude_id",
+  "exclude_ids",
+  "exclude_account_id",
+  "exclude_account_ids",
+  "remove_account_id",
+];
+
+/**
+ * Apply `include_id` / `exclude_id` (and account_* aliases) on a Mongo filter.
+ * - **exclude**: `_id` `$nin`
+ * - **include**: `$or` [current query constraints, `{ _id: { $in } }]` so a selected row
+ *   still appears when it fails `status` / `account_type` (edit forms).
+ * Tenant scope keys (`deletedAt`, `company_id`, `branch_id`) stay on the root filter.
+ */
+function applyIncludeExcludeIdQueryFilter(filter, query = {}) {
+  const includeIds = parseObjectIdListFromQuery(
+    query.include_id ??
+      query.include_ids ??
+      query.include_account_id ??
+      query.include_account_ids,
+  );
+  const excludeIds = parseObjectIdListFromQuery(
+    query.exclude_id ??
+      query.exclude_ids ??
+      query.exclude_account_id ??
+      query.exclude_account_ids ??
+      query.remove_account_id,
+  );
+
+  if (!includeIds.length && !excludeIds.length) {
+    return filter;
+  }
+
+  const out = { ...filter };
+  const scopeKeys = new Set([
+    "deletedAt",
+    "company_id",
+    "branch_id",
+    "$and",
+    "$or",
+  ]);
+  const andParts = Array.isArray(out.$and) ? [...out.$and] : [];
+  delete out.$and;
+  const typeMatch = {};
+
+  for (const [key, value] of Object.entries(out)) {
+    if (scopeKeys.has(key)) continue;
+    typeMatch[key] = value;
+    delete out[key];
+  }
+
+  if (includeIds.length > 0) {
+    andParts.push({
+      $or: [
+        Object.keys(typeMatch).length > 0 ? typeMatch : { _id: { $exists: true } },
+        { _id: { $in: includeIds } },
+      ],
+    });
+  } else if (Object.keys(typeMatch).length > 0) {
+    Object.assign(out, typeMatch);
+  }
+
+  const uniqueExclude = [
+    ...new Map(excludeIds.map((id) => [String(id), id])).values(),
+  ];
+  if (uniqueExclude.length > 0) {
+    andParts.push({ _id: { $nin: uniqueExclude } });
+  }
+
+  if (andParts.length > 0) {
+    out.$and = andParts;
+  }
+
+  return out;
+}
+
 /**
  * Escape regex metacharacters in a user-provided search string (safe $regex).
  */
@@ -3396,4 +3486,7 @@ module.exports = {
   buildPopulateFromQuery,
   shouldTreatQueryKeyAsPopulateOnly,
   activeNotDeletedCriteria,
+  parseObjectIdListFromQuery,
+  applyIncludeExcludeIdQueryFilter,
+  INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 };

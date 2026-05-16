@@ -17,6 +17,8 @@ const {
   getModelFromController,
   shouldTreatQueryKeyAsPopulateOnly,
   coalesceObjectId,
+  applyIncludeExcludeIdQueryFilter,
+  INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 } = require("./modelHelper");
 
 const RESERVED_QUERY_KEYS = new Set([
@@ -31,6 +33,7 @@ const RESERVED_QUERY_KEYS = new Set([
   "page",
   "deleted",
   "include_inactive",
+  ...INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 ]);
 
 function parseQueryValue(raw) {
@@ -446,6 +449,7 @@ function generateControllerFunctions(modelName) {
         console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
       }
       filter = applyQueryFilters(filter, req.query, modelName);
+      filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       const response = await handleGenericGetAll(req, modelName, {

@@ -368,6 +368,13 @@ function truthyQuery(v) {
   return s === "1" || s === "true" || s === "yes";
 }
 
+/** Comma-separated or repeated query values → valid ObjectIds. */
+function parseObjectIdList(raw) {
+  if (raw == null || raw === "") return [];
+  const parts = Array.isArray(raw) ? raw : String(raw).split(",");
+  return parts.map((p) => toObjectId(String(p).trim())).filter(Boolean);
+}
+
 async function resolveCompanyDefaultReceivableId(user) {
   const coRaw = user?.company_id;
   if (!coRaw) return null;
