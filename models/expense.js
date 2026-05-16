@@ -34,6 +34,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    image: {
+      type: String,
+      field_name: "Attachments",
+      field_type: "image",
+    },
 
     // default fields
     company_id: {

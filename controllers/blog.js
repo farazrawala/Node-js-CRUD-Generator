@@ -1,6 +1,7 @@
 const {
   handleGenericCreate,
   handleGenericUpdate,
+  handleGenericSoftDelete,
   handleGenericGetById,
   handleGenericGetAll,
   handleGenericFindOne,
@@ -74,13 +75,7 @@ async function blogdelete(req, res) {
     time: new Date().toISOString(),
   });
 
-  // Manually set the request body with deletedAt data
-  req.body = { deletedAt: new Date().toISOString() };
-  const response = await handleGenericUpdate(req, "blog", {
-    afterUpdate: async (record, req, existingRecord) => {
-      // console.log("✅ Blog soft deleted successfully. DeletedAt:", record.deletedAt);
-    },
-  });
+  const response = await handleGenericSoftDelete(req, "blog");
   return res.status(response.status).json(response);
 }
 

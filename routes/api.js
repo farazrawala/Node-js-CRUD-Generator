@@ -48,6 +48,8 @@ const {
   inventoryMovementsCreate,
 } = require("../controllers/inventory_movements");
 
+const { expenseCreate } = require("../controllers/expense");
+
 const {
   order_save,
   order_update,
@@ -176,6 +178,8 @@ router.get(
   getPurchaseOrderByOrderNo,
 );
 
+// Expense routes
+router.post("/expense/save", expenseCreate);
 // Inventory movements routes
 router.post("/inventory_movements/save", inventoryMovementsCreate);
 

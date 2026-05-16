@@ -9,9 +9,9 @@ const mongoose = require("mongoose");
 const {
   handleGenericCreate,
   handleGenericUpdate,
+  handleGenericSoftDelete,
   handleGenericGetById,
   handleGenericGetAll,
-  handleGenericDelete,
   parseSearchFieldsFromQuery,
   buildPopulateFromQuery,
   getModelFromController,
@@ -480,11 +480,9 @@ function generateControllerFunctions(modelName) {
         );
       }
 
-      // Manually set the request body with deletedAt data
-      req.body = { deletedAt: new Date().toISOString() };
-      const response = await handleGenericUpdate(req, modelName, {
-        filter: filter,
-        afterUpdate: async (record, req, existingRecord) => {
+      const response = await handleGenericSoftDelete(req, modelName, {
+        filter,
+        afterSoftDelete: async () => {
           console.log(`✅ ${modelName} soft deleted successfully.`);
         },
       });

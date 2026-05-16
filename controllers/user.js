@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const mongoose = require("mongoose");
 const User = require("../models/user");
 const { setUserToken } = require("../service/auth");
@@ -27,9 +28,7 @@ async function executeUserInitialBalanceJournal(userDoc, req, session = null) {
 
   const companyId = userDoc.company_id;
   if (!companyId) {
-    console.warn(
-      "⚠️ Skipping user initial_balance GL: user has no company_id",
-    );
+    console.warn("⚠️ Skipping user initial_balance GL: user has no company_id");
     return { ok: true, transaction_number: null, skipped: true };
   }
 
@@ -86,9 +85,9 @@ async function executeUserInitialBalanceJournal(userDoc, req, session = null) {
     ...(userCreatedAt ?
       {
         createdAt:
-          userCreatedAt instanceof Date ?
-            userCreatedAt
-          : new Date(userCreatedAt),
+          userCreatedAt instanceof Date ? userCreatedAt : (
+            new Date(userCreatedAt)
+          ),
       }
     : {}),
   };
@@ -137,7 +136,11 @@ async function executeUserInitialBalanceJournal(userDoc, req, session = null) {
  * Called after dynamic `POST /api/user/create` when `initial_balance` is non-zero.
  * Positive: debit A/R, credit equity. Negative: debit equity, credit A/P.
  */
-async function postTransactionsForUserInitialBalance(record, req, session = null) {
+async function postTransactionsForUserInitialBalance(
+  record,
+  req,
+  session = null,
+) {
   const result = await executeUserInitialBalanceJournal(record, req, session);
   if (!result.ok || result.skipped || !result.transaction_number) {
     return;
@@ -349,11 +352,25 @@ function requestWithOverrides(req, overrides) {
   );
 }
 
+/**
+ * POST /api/user/user_company — bootstrap a new tenant: company, default warehouse, first admin user,
+ * default chart of accounts, then wire `company` default GL / warehouse refs.
+ *
+ * Order of operations: validate input → ensure email unused → create `company` → create `warehouse` →
+ * create tenant admin `user` + synthetic "Default User" (`USER` only) → create each `account` via `performAccountCreate` (Equity first in
+ * DB order for opening-balance logic; response array `createdAccountsData` stays in the fixed list order
+ * so `default_*` indices match `models/company` expectations) → PATCH company with `warehouse_id` and
+ * all `default_*_account` fields.
+ *
+ * Not wrapped in a Mongo multi-document transaction; a mid-flight failure may leave partial rows (cleanup
+ * or idempotent retry is a separate concern).
+ */
 async function handleUserSignupCompany(req, res) {
   try {
     console.log("🚀 Starting handleUserSignupCompany function...");
     console.log("📧 Request body:", safeBodyPreview(req.body));
 
+    // --- Required fields (signup form) ---
     const emailRaw = req.body && req.body.email;
     const email =
       typeof emailRaw === "string" ? emailRaw.trim().toLowerCase() : "";
@@ -370,7 +387,7 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
-    // Check if email already exists (handleGenericFindOne returns 404 when not found)
+    // --- Email uniqueness (404 from find-one = OK to proceed) ---
     const find_email = await handleGenericFindOne(req, "user", {
       searchCriteria: { email },
     });
@@ -390,8 +407,7 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
-    console.log("🏢 Creating company...");
-
+    // --- 1) Company row (tenant root). `beforeCreate` maps signup fields into company schema. ---
     const create_company = await handleGenericCreate(req, "company", {
       beforeCreate: async (data, req) => {
         console.log("🏢 Company beforeCreate hook called");
@@ -432,9 +448,7 @@ async function handleUserSignupCompany(req, res) {
         companyIdRaw
       : new mongoose.Types.ObjectId(String(companyIdRaw));
 
-    console.log("✅ Company created:", companyId);
-    console.log("🏪 About to create warehouse...");
-
+    // --- 2) Default warehouse ("Head Office …") for this company only ---
     const signupBodySnapshot = { ...req.body };
     const warehouseName = "Head Office " + (req.body.company_name || "");
     // Only warehouse schema fields — avoids form permissions / extra keys breaking generic create
@@ -460,8 +474,7 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
-    console.log("👤 Creating user before chart (GL postings need user_id)...");
-
+    // --- 3a) First user for the tenant (roles include ADMIN). Password handled in beforeCreate. ---
     const user_created = await handleGenericCreate(req, "user", {
       excludeFields: ["password"],
       beforeCreate: async (data, req) => {
@@ -484,12 +497,44 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
+    // --- 3b) Extra tenant user: "Default User" (USER only); password equals random `@gmail.com` email. ---
+    const defaultUserEmail = `default.${crypto.randomBytes(8).toString("hex")}@gmail.com`;
+    const user_default_created = await handleGenericCreate(
+      requestWithOverrides(req, {
+        body: {
+          status: "active",
+          company_id: companyId,
+        },
+      }),
+      "user",
+      {
+        excludeFields: ["password"],
+        beforeCreate: async (data) => {
+          data.email = defaultUserEmail;
+          data.name = "Default User";
+          data.password = defaultUserEmail;
+          data.company_id = companyId;
+          data.role = ["USER"];
+        },
+      },
+    );
+
+    if (!user_default_created.success) {
+      console.log("❌ Default user creation failed:", user_default_created);
+      return res.status(user_default_created.status || 500).json({
+        success: false,
+        message: "Default user creation failed",
+        details: user_default_created,
+      });
+    }
+
+    // Minimal `req.user` for `performAccountCreate` (created_by / GL side effects).
     const postingUser = {
       _id: user_created.data._id,
       company_id: companyId,
     };
 
-    // account_type must match models/account.js enum exactly
+    // Default COA for POS / orders / PO flows. Names and `account_type` must match `models/account.js` enum.
     const accounts = [
       { name: "Cash", account_type: "current_asset" },
       { name: "Accounts Receivable", account_type: "current_asset" },
@@ -515,6 +560,7 @@ async function handleUserSignupCompany(req, res) {
       : [...accounts];
 
     const createdByName = Object.create(null);
+    // Insert order: Equity first (see `accountCreateOrder`); `createdAccountsData` order stays tied to `accounts[]` indices.
     for (const account of accountCreateOrder) {
       const accountPayload = {
         name: account.name,
@@ -548,7 +594,7 @@ async function handleUserSignupCompany(req, res) {
 
     req.body = signupBodySnapshot;
 
-    // Update company with warehouse_id
+    // --- 4) Patch company: `warehouse_id` + every `default_*` account ref (indices align with `accounts` array above). ---
     const originalBody = { ...req.body };
     const originalParams = { ...req.params };
 
@@ -576,12 +622,13 @@ async function handleUserSignupCompany(req, res) {
       {},
     );
 
-    // Restore original req.body and req.params for subsequent operations (user creation)
+    // Restore `req` for anything after this handler (middleware / logging).
     req.body = originalBody;
     req.params = originalParams;
 
     if (!updateCompany.success) {
       console.log("❌ Company warehouse_id update failed:", updateCompany);
+      // Status 200 preserves legacy clients; failure is indicated by `success: false` + `details`.
       return res.status(200).json({
         success: false,
         message: "Failed to update company with warehouse_id",
@@ -596,7 +643,9 @@ async function handleUserSignupCompany(req, res) {
 
     console.log("✅ Warehouse created:", create_warehouse.data._id);
     console.log("✅ User created:", user_created.data._id);
+    console.log("✅ Default user created:", user_default_created.data._id);
 
+    // 200: resource creation is split across several writes; caller inspects `data` for ids.
     return res.status(200).json({
       success: true,
       message: "Company signup completed successfully",
@@ -604,10 +653,12 @@ async function handleUserSignupCompany(req, res) {
         company: create_company.data,
         warehouse: create_warehouse.data,
         user: user_created.data,
+        default_user: user_default_created.data,
         accounts: createdAccountsData,
       },
     });
   } catch (error) {
+    // Unexpected throw (e.g. network); structured failures above return JSON without hitting this.
     console.error("❌ Company user signup error:", error);
     return res.status(500).json({
       success: false,

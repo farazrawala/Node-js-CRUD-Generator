@@ -29,9 +29,11 @@ function responseFromExplicitHttpError(error) {
   const code = error?.statusCode ?? error?.status;
   if (typeof code !== "number" || code < 400 || code >= 600) return null;
   const msg =
-    error &&
-    typeof error.message === "string" &&
-    error.message.trim().length > 0 ?
+    (
+      error &&
+      typeof error.message === "string" &&
+      error.message.trim().length > 0
+    ) ?
       error.message.trim()
     : "Request failed";
   const det = error.details;
@@ -40,8 +42,7 @@ function responseFromExplicitHttpError(error) {
     status: code,
     error: msg,
     details:
-      det !== undefined ?
-        det
+      det !== undefined ? det
       : process.env.NODE_ENV === "development" && error.stack ?
         `${msg}\n${error.stack}`
       : msg,
@@ -57,7 +58,10 @@ function stripPasswordFieldsDeep(value) {
   if (value == null) return;
   if (typeof value !== "object") return;
   if (value instanceof Date || Buffer.isBuffer(value)) return;
-  if (value._bsontype === "ObjectId" || value.constructor?.name === "ObjectId") {
+  if (
+    value._bsontype === "ObjectId" ||
+    value.constructor?.name === "ObjectId"
+  ) {
     return;
   }
 
@@ -641,9 +645,7 @@ const handleGenericCreate = async (
       const isMultiselect = fieldConfig.field_type === "multiselect";
 
       if (isObjectIdArray || isStringArray || isMultiselect) {
-        console.log(
-          `🔍 Processing multiselect array field: ${fieldName}`,
-        );
+        console.log(`🔍 Processing multiselect array field: ${fieldName}`);
 
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
         if (
@@ -890,10 +892,7 @@ const handleGenericCreate = async (
     // Do not use `!modelData[field]` — `false`, `0`, and `""` are valid explicit values.
     Object.keys(modelSchema).forEach((field) => {
       const fieldConfig = modelSchema[field];
-      if (
-        fieldConfig.default !== undefined &&
-        modelData[field] === undefined
-      ) {
+      if (fieldConfig.default !== undefined && modelData[field] === undefined) {
         const def = fieldConfig.default;
         modelData[field] =
           typeof def === "function" ? def.call(modelData) : def;
@@ -1214,9 +1213,11 @@ const handleGenericCreate = async (
         // Generic error handler — always expose the real message; append stack in development
         {
           const msg =
-            error &&
-            typeof error.message === "string" &&
-            error.message.trim().length > 0 ?
+            (
+              error &&
+              typeof error.message === "string" &&
+              error.message.trim().length > 0
+            ) ?
               error.message.trim()
             : String(error);
           return {
@@ -2031,9 +2032,11 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
         // Generic error handler — always expose the real message; append stack in development
         {
           const msg =
-            error &&
-            typeof error.message === "string" &&
-            error.message.trim().length > 0 ?
+            (
+              error &&
+              typeof error.message === "string" &&
+              error.message.trim().length > 0
+            ) ?
               error.message.trim()
             : String(error);
           return {
@@ -2051,6 +2054,238 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
     }
   }
 };
+
+/** Rows that are not soft-deleted (`deletedAt` null or unset). */
+function activeNotDeletedCriteria() {
+  return { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+}
+
+/**
+ * Soft-delete any model row that defines `deletedAt` on its schema.
+ * Sets `deletedAt` to now; when the schema has `status` with `inactive`, sets `status: "inactive"`.
+ *
+ * @param {import("express").Request} req
+ * @param {string} controllerName - Model/controller name (e.g. `"blog"`, `"expense"`)
+ * @param {Object} [options]
+ * @param {string} [options.idParam="id"] - URL param holding the record id
+ * @param {Object} [options.filter={}] - Extra find filters (e.g. `{ company_id }`)
+ * @param {string[]} [options.excludeFields=[]] - Fields omitted from the response payload
+ * @param {boolean} [options.requireNotDeleted=true] - Only match rows not already soft-deleted
+ * @param {boolean} [options.setStatusInactive=true] - Set `status: "inactive"` when enum allows it
+ * @param {Date|string|null} [options.deletedAt] - Override timestamp (default: `new Date()`)
+ * @param {(existing: import("mongoose").Document, req: import("express").Request) => void|Promise<void>} [options.beforeSoftDelete]
+ * @param {(record: import("mongoose").Document, req: import("express").Request, existing: import("mongoose").Document, session?: import("mongoose").ClientSession|null) => void|Promise<void>} [options.afterSoftDelete]
+ * @param {import("mongoose").ClientSession|null} [options.session]
+ * @returns {Promise<{success: boolean, status: number, data?: object, message?: string, error?: string, details?: unknown, type?: string}>}
+ */
+const handleGenericSoftDelete = async (req, controllerName, options = {}) => {
+  const modelName =
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
+
+  if (!modelName) {
+    return {
+      success: false,
+      status: 500,
+      error: "Controller name is required",
+      details: "Please provide the controller name as the second parameter",
+      type: "configuration",
+    };
+  }
+
+  const {
+    idParam = "id",
+    excludeFields = [],
+    filter = {},
+    requireNotDeleted = true,
+    setStatusInactive = true,
+    deletedAt: deletedAtOverride,
+    beforeSoftDelete = null,
+    afterSoftDelete = null,
+    errorHandlers = {},
+    session = null,
+  } = options;
+
+  const recordId = req.params[idParam];
+  if (!recordId) {
+    return {
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: `Please provide ${idParam} in the URL parameters`,
+      type: "missing_id",
+    };
+  }
+
+  try {
+    const Model = getModelFromController(modelName);
+    const modelSchema = Model.schema.obj;
+
+    if (!modelSchema.deletedAt) {
+      return {
+        success: false,
+        status: 400,
+        error: "Soft delete not supported",
+        details: `${modelName} schema has no deletedAt field`,
+        type: "configuration",
+      };
+    }
+
+    const baseCriteria = { _id: recordId, ...filter };
+    const findCriteria =
+      requireNotDeleted ?
+        { $and: [baseCriteria, activeNotDeletedCriteria()] }
+      : baseCriteria;
+
+    let existingQ = Model.findOne(findCriteria);
+    if (session) existingQ = existingQ.session(session);
+    const existingRecord = await existingQ;
+    if (!existingRecord) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with ID ${recordId} not found or already deleted`,
+        type: "not_found",
+      };
+    }
+
+    const deletedAt =
+      deletedAtOverride != null ? new Date(deletedAtOverride) : new Date();
+    if (Number.isNaN(deletedAt.getTime())) {
+      return {
+        success: false,
+        status: 400,
+        error: "Invalid deletedAt",
+        details: "deletedAt must be a valid date",
+        type: "validation",
+      };
+    }
+
+    const updateData = { deletedAt };
+
+    const statusEnum = modelSchema.status?.enum;
+    if (
+      setStatusInactive &&
+      modelSchema.status &&
+      Array.isArray(statusEnum) &&
+      statusEnum.includes("inactive")
+    ) {
+      updateData.status = "inactive";
+    }
+
+    if (req.user && req.user._id && modelSchema.updated_by) {
+      updateData.updated_by = req.user._id;
+    }
+
+    if (beforeSoftDelete) {
+      await beforeSoftDelete(existingRecord, req);
+    }
+
+    const updatedRecord = await Model.findByIdAndUpdate(recordId, updateData, {
+      new: true,
+      runValidators: true,
+      ...(session ? { session } : {}),
+    });
+
+    if (!updatedRecord) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with ID ${recordId} not found`,
+        type: "not_found",
+      };
+    }
+
+    if (afterSoftDelete) {
+      await afterSoftDelete(updatedRecord, req, existingRecord, session);
+    }
+
+    const responseData = { ...updatedRecord.toObject({ flattenMaps: true }) };
+    excludeFields.forEach((field) => {
+      delete responseData[field];
+    });
+
+    const transformedData = transformImageUrls(responseData, Model, req);
+    stripPasswordFieldsDeep(transformedData);
+
+    return {
+      success: true,
+      status: 200,
+      message: `${modelName} deleted successfully`,
+      data: transformedData,
+    };
+  } catch (error) {
+    console.error("❌ Soft delete error:", error);
+
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    switch (error.name) {
+      case "ValidationError": {
+        const validationErrors = Object.values(error.errors).map(
+          (err) => err.message,
+        );
+        return {
+          success: false,
+          status: 400,
+          error: "Validation failed",
+          details: validationErrors,
+          type: "validation",
+        };
+      }
+
+      case "CastError":
+        if (error.path === "_id") {
+          return {
+            success: false,
+            status: 400,
+            error: "Invalid ID format",
+            details: "The provided ID is not valid",
+            type: "invalid_id",
+          };
+        }
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data type",
+          details: `${error.path} should be ${error.kind}`,
+          type: "cast",
+        };
+
+      default: {
+        const httpHandled = responseFromExplicitHttpError(error);
+        if (httpHandled) return httpHandled;
+
+        const msg =
+          (
+            error &&
+            typeof error.message === "string" &&
+            error.message.trim().length > 0
+          ) ?
+            error.message.trim()
+          : String(error);
+        return {
+          success: false,
+          status: 500,
+          error: msg,
+          details:
+            process.env.NODE_ENV === "development" && error.stack ?
+              `${msg}\n${error.stack}`
+            : msg,
+          type: "internal",
+          timestamp: new Date().toISOString(),
+        };
+      }
+    }
+  }
+};
+
+/** @deprecated Use `handleGenericSoftDelete` — same implementation. */
+const handleGenericDelete = handleGenericSoftDelete;
 
 /**
  * Escape regex metacharacters in a user-provided search string (safe $regex).
@@ -2272,7 +2507,11 @@ function populateEntryFromParsed(Model, parsed) {
     if (!path || !isPopulateablePath(Model, path)) return null;
     return path;
   }
-  if (parsed.kind === "spec" && parsed.path && isPopulateablePath(Model, parsed.path)) {
+  if (
+    parsed.kind === "spec" &&
+    parsed.path &&
+    isPopulateablePath(Model, parsed.path)
+  ) {
     return { path: parsed.path, select: parsed.select };
   }
   return null;
@@ -2681,9 +2920,11 @@ const handleGenericGetAll = async (
         // Generic error handler — always expose the real message; append stack in development
         {
           const msg =
-            error &&
-            typeof error.message === "string" &&
-            error.message.trim().length > 0 ?
+            (
+              error &&
+              typeof error.message === "string" &&
+              error.message.trim().length > 0
+            ) ?
               error.message.trim()
             : String(error);
           return {
@@ -2901,9 +3142,11 @@ const handleGenericGetById = async (
         // Generic error handler — always expose the real message; append stack in development
         {
           const msg =
-            error &&
-            typeof error.message === "string" &&
-            error.message.trim().length > 0 ?
+            (
+              error &&
+              typeof error.message === "string" &&
+              error.message.trim().length > 0
+            ) ?
               error.message.trim()
             : String(error);
           return {
@@ -3143,6 +3386,8 @@ module.exports = {
   coalesceObjectId,
   handleGenericCreate,
   handleGenericUpdate,
+  handleGenericSoftDelete,
+  handleGenericDelete,
   handleGenericGetById,
   handleGenericGetAll,
   handleGenericFindOne,
@@ -3150,4 +3395,5 @@ module.exports = {
   parseSearchFieldsFromQuery,
   buildPopulateFromQuery,
   shouldTreatQueryKeyAsPopulateOnly,
+  activeNotDeletedCriteria,
 };
