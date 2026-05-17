@@ -36,6 +36,55 @@ async function getNextSequence(name) {
   return counter.seq;
 }
 
+/** Numeric suffix from standard tenant format `PO-####` (ignores legacy formats). */
+function parsePoNumericSuffix(purchaseOrderNo) {
+  const m = String(purchaseOrderNo ?? "").trim().match(/^PO-(\d+)$/i);
+  if (!m) return 0;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** Highest `PO-####` suffix for this company (active, non-deleted rows only). */
+async function getMaxPurchaseOrderSeqForCompany(companyId) {
+  if (!companyId) return 0;
+  const cid =
+    companyId instanceof mongoose.Types.ObjectId ?
+      companyId
+    : new mongoose.Types.ObjectId(String(companyId));
+  const PurchaseOrder = mongoose.model("purchase_order");
+  const rows = await PurchaseOrder.find({
+    company_id: cid,
+    deletedAt: null,
+    purchase_order_no: /^PO-\d+$/i,
+  })
+    .select("purchase_order_no")
+    .lean();
+  let max = 0;
+  for (const row of rows) {
+    max = Math.max(max, parsePoNumericSuffix(row.purchase_order_no));
+  }
+  return max;
+}
+
+/**
+ * Allocate next `PO-####` for one tenant. Syncs the counter to the DB max first so failed
+ * saves (duplicate index, rollback) do not burn sequence numbers.
+ */
+async function allocatePurchaseOrderNoForCompany(companyId) {
+  const counterKey =
+    companyId ?
+      `purchase_order_no_${companyId.toString()}`
+    : "purchase_order_no__no_company";
+  const maxFromDb = await getMaxPurchaseOrderSeqForCompany(companyId);
+  await Counter.findOneAndUpdate(
+    { _id: counterKey },
+    { $set: { seq: maxFromDb } },
+    { upsert: true },
+  );
+  const seq = await getNextSequence(counterKey);
+  return `PO-${String(seq).padStart(4, "0")}`;
+}
+
 /** Cross-tenant guard: optional `vendor_id` must reference a user with the same `company_id`. */
 async function assertVendorUserMatchesPoCompany(vendorId, companyId) {
   if (!vendorId || !companyId) return null;
@@ -436,7 +485,7 @@ modelSchema.index(
     unique: true,
     partialFilterExpression: {
       deletedAt: null,
-      company_id: { $exists: true, $ne: null },
+      company_id: { $exists: true },
     },
   },
 );
@@ -448,12 +497,24 @@ modelSchema.pre("save", async function (next) {
 
   if (!this.purchase_order_no || this.purchase_order_no.trim() === "") {
     try {
-      const counterKey =
-        this.company_id ?
-          `purchase_order_no_${this.company_id.toString()}`
-        : "purchase_order_no__no_company";
-      const seq = await getNextSequence(counterKey);
-      this.purchase_order_no = `PO-${String(seq).padStart(4, "0")}`;
+      const PurchaseOrder = this.constructor;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const candidate = await allocatePurchaseOrderNoForCompany(
+          this.company_id,
+        );
+        const exists = await PurchaseOrder.exists({
+          company_id: this.company_id,
+          purchase_order_no: candidate,
+          deletedAt: null,
+        });
+        if (!exists) {
+          this.purchase_order_no = candidate;
+          break;
+        }
+      }
+      if (!this.purchase_order_no || !this.purchase_order_no.trim()) {
+        return next(new Error("Could not allocate unique purchase_order_no"));
+      }
     } catch (error) {
       return next(error);
     }
@@ -462,5 +523,47 @@ modelSchema.pre("save", async function (next) {
 });
 
 const MODEL = mongoose.model("purchase_order", modelSchema);
+
+/**
+ * Drop legacy global unique index on `purchase_order_no` only. Numbering is per-tenant via
+ * `company_id_1_purchase_order_no_1` (partial).
+ */
+async function dropObsoletePurchaseOrderNoUniqueIndex() {
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return;
+    const coll = db.collection("purchase_orders");
+    const indexes = await coll.indexes();
+    for (const idx of indexes) {
+      const k = idx.key || {};
+      if (
+        idx.unique &&
+        Object.keys(k).length === 1 &&
+        k.purchase_order_no === 1
+      ) {
+        await coll.dropIndex(idx.name);
+        console.log(
+          "[purchase_order] Dropped obsolete global purchase_order_no unique index:",
+          idx.name,
+        );
+      }
+    }
+    const { dropped, created } = await MODEL.syncIndexes();
+    if (dropped?.length || created?.length) {
+      console.log("[purchase_order] syncIndexes:", { dropped, created });
+    }
+  } catch (err) {
+    console.warn("[purchase_order] index migration:", err.message);
+  }
+}
+
+if (mongoose.connection.readyState === 1) {
+  void dropObsoletePurchaseOrderNoUniqueIndex();
+} else {
+  mongoose.connection.once(
+    "connected",
+    dropObsoletePurchaseOrderNoUniqueIndex,
+  );
+}
 
 module.exports = MODEL;

@@ -84,6 +84,55 @@ async function getNextSequence(name) {
   return counter.seq;
 }
 
+/** Numeric suffix from standard tenant format `ORD-####` (ignores legacy formats like ORD-BRA-####). */
+function parseOrdNumericSuffix(orderNo) {
+  const m = String(orderNo ?? "").trim().match(/^ORD-(\d+)$/i);
+  if (!m) return 0;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** Highest `ORD-####` suffix for this company (active, non-deleted rows only). */
+async function getMaxOrderSeqForCompany(companyId) {
+  if (!companyId) return 0;
+  const cid =
+    companyId instanceof mongoose.Types.ObjectId ?
+      companyId
+    : new mongoose.Types.ObjectId(String(companyId));
+  const Order = mongoose.model("order");
+  const rows = await Order.find({
+    company_id: cid,
+    deletedAt: null,
+    order_no: /^ORD-\d+$/i,
+  })
+    .select("order_no")
+    .lean();
+  let max = 0;
+  for (const row of rows) {
+    max = Math.max(max, parseOrdNumericSuffix(row.order_no));
+  }
+  return max;
+}
+
+/**
+ * Allocate next `ORD-####` for one tenant. Syncs the counter to the DB max first so failed
+ * saves (duplicate index, rollback) do not burn sequence numbers.
+ */
+async function allocateOrderNoForCompany(companyId) {
+  const counterKey =
+    companyId ?
+      `order_no_${companyId.toString()}`
+    : "order_no__no_company";
+  const maxFromDb = await getMaxOrderSeqForCompany(companyId);
+  await Counter.findOneAndUpdate(
+    { _id: counterKey },
+    { $set: { seq: maxFromDb } },
+    { upsert: true },
+  );
+  const seq = await getNextSequence(counterKey);
+  return `ORD-${String(seq).padStart(4, "0")}`;
+}
+
 /** Cross-tenant guard: optional POS `customer_id` must reference a user with the same `company_id`. */
 async function assertCustomerUserMatchesOrderCompany(customerId, companyId) {
   if (!customerId || !companyId) return null;
@@ -243,7 +292,7 @@ modelSchema.index(
     unique: true,
     partialFilterExpression: {
       deletedAt: null,
-      company_id: { $exists: true, $ne: null },
+      company_id: { $exists: true },
     },
   },
 );
@@ -256,7 +305,7 @@ modelSchema.index(
     partialFilterExpression: {
       deletedAt: null,
       status: "active",
-      company_id: { $exists: true, $ne: null },
+      company_id: { $exists: true },
     },
   },
 );
@@ -510,13 +559,22 @@ modelSchema.pre("save", async function (next) {
 
   if (!this.order_no || this.order_no.trim() === "") {
     try {
-      // One Counter document per company ObjectId — each tenant gets 1, 2, 3, ...
-      const counterKey =
-        this.company_id ?
-          `order_no_${this.company_id.toString()}`
-        : "order_no__no_company";
-      const seq = await getNextSequence(counterKey);
-      this.order_no = `ORD-${String(seq).padStart(4, "0")}`;
+      const Order = this.constructor;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const candidate = await allocateOrderNoForCompany(this.company_id);
+        const exists = await Order.exists({
+          company_id: this.company_id,
+          order_no: candidate,
+          deletedAt: null,
+        });
+        if (!exists) {
+          this.order_no = candidate;
+          break;
+        }
+      }
+      if (!this.order_no || !this.order_no.trim()) {
+        return next(new Error("Could not allocate unique order_no"));
+      }
     } catch (error) {
       return next(error);
     }
@@ -572,5 +630,44 @@ const MODEL = mongoose.model("order", modelSchema);
 
 MODEL.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
 MODEL.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
+
+/**
+ * Drop legacy global unique index on `order_no` only. Numbering is per-tenant via
+ * `company_id_1_order_no_1` (partial); the old index blocked the same ORD-#### across companies.
+ */
+async function dropObsoleteOrderNoUniqueIndex() {
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return;
+    const coll = db.collection("orders");
+    const indexes = await coll.indexes();
+    for (const idx of indexes) {
+      const k = idx.key || {};
+      if (
+        idx.unique &&
+        Object.keys(k).length === 1 &&
+        k.order_no === 1
+      ) {
+        await coll.dropIndex(idx.name);
+        console.log(
+          "[order] Dropped obsolete global order_no unique index:",
+          idx.name,
+        );
+      }
+    }
+    const { dropped, created } = await MODEL.syncIndexes();
+    if (dropped?.length || created?.length) {
+      console.log("[order] syncIndexes:", { dropped, created });
+    }
+  } catch (err) {
+    console.warn("[order] index migration:", err.message);
+  }
+}
+
+if (mongoose.connection.readyState === 1) {
+  void dropObsoleteOrderNoUniqueIndex();
+} else {
+  mongoose.connection.once("connected", dropObsoleteOrderNoUniqueIndex);
+}
 
 module.exports = MODEL;

@@ -806,6 +806,9 @@ async function purchaseOrderCreate(req, res) {
       stripLineItemKeysFromBody(originalRequestBody),
     );
     delete req.body._id;
+    // Unique per company (partial index). Model pre-save assigns next `PO-####` when absent.
+    // Drop client `purchase_order_no` so double-submit / fixed defaults cannot collide.
+    delete req.body.purchase_order_no;
     ensurePurchaseOrderHeaderFields(req.body, req.user);
     // Mode-of-payment GL row needs `payment_method_accounts_id`; same fallback pattern as order / POS flows.
     resolvePoPaymentMethodAccount(req.body, req.user);
