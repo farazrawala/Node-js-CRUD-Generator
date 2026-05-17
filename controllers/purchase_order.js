@@ -18,13 +18,12 @@ const {
   buildPopulateFromQuery,
 } = require("../utils/modelHelper");
 const { runInventoryMovementTxnBody } = require("./inventory_movements");
-const { applyWarehouseInventoryDelta } = require("./stock_movement");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
 
 /**
- * Purchase order HTTP handlers: header + line items, inventory movement ledger + warehouse qty,
+ * Purchase order HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
  * and five GL postings per PO (same shape as order flow — see transactionBulkCreate payloads).
  *
  * Standalone MongoDB: tries `withTransaction` first; on replica-set–only errors, retries without a session.
@@ -793,7 +792,7 @@ async function getPurchaseOrderByOrderNo(req, res) {
  * POST /api/purchase_order/purchase_order_create
  *
  * Flow: (1) normalize header on `req.body`, (2) create PO + five GL rows inside a Mongo session when
- * possible, (3) create line items, inventory movements, and warehouse qty, (4) sync header totals from lines,
+ * possible, (3) create line items and inventory movements, (4) sync header totals from lines,
  * (5) return 201 with items and derived totals. On standalone MongoDB, the same steps run without a session.
  */
 async function purchaseOrderCreate(req, res) {
@@ -830,7 +829,7 @@ async function purchaseOrderCreate(req, res) {
       mongoSession ? { session: mongoSession } : {};
 
     /**
-     * Runs inside one logical unit: PO document, GL postings, each `purchase_order_item`, optional inbound inventory + warehouse qty,
+     * Runs inside one logical unit: PO document, GL postings, each `purchase_order_item`, optional inbound inventory ledger,
      * then header aggregate fields. Mutates outer `purchaseOrderCreateResult` and `persistedLineItems`.
      *
      * @param {object | null} mongoSession Mongoose client session when in a transaction; null on standalone mongod.
@@ -1042,17 +1041,6 @@ async function purchaseOrderCreate(req, res) {
               delete req.params.id;
             }
           }
-
-          await applyWarehouseInventoryDelta({
-            productId: new mongoose.Types.ObjectId(
-              String(line.product_id).trim(),
-            ),
-            warehouseId: new mongoose.Types.ObjectId(warehouseIdStr),
-            quantityDelta: lineQtyNum,
-            user: req.user,
-            companyId,
-            session: mongoSession,
-          });
         }
 
         persistedLineItems.push(lineItemCreateResult.data);
@@ -1387,7 +1375,7 @@ async function purchase_order_update(req, res) {
       );
       await PurchaseOrderItem.insertMany(built.docs, sessionOpts(mongoSession));
 
-      // Same as create: ledger row + warehouse qty for each line with `warehouse_id` (uses live `req` for modelHelper).
+      // Same as create: inbound ledger row per line with `warehouse_id` (`inventory_movements` only).
       const companyIdForMovement =
         coalesceObjectId(response.data.company_id) ||
         coalesceObjectId(req.user?.company_id);
@@ -1454,17 +1442,6 @@ async function purchase_order_update(req, res) {
             delete req.params.id;
           }
         }
-
-        await applyWarehouseInventoryDelta({
-          productId: new mongoose.Types.ObjectId(
-            String(line.product_id).trim(),
-          ),
-          warehouseId: new mongoose.Types.ObjectId(warehouseIdStr),
-          quantityDelta: lineQtyNum,
-          user: req.user,
-          companyId: companyIdForMovement,
-          session: mongoSession,
-        });
       }
 
       await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, {

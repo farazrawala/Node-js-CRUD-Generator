@@ -40,12 +40,10 @@ const {
   // cost_of_goods_available,
   updateWarehouseDefault,
 } = require("../controllers/product");
-
 const {
   cost_of_goods_available,
-} = require("../controllers/inventory_movements");
-const {
   inventoryMovementsCreate,
+  findStockByProductId,
 } = require("../controllers/inventory_movements");
 
 const { expenseCreate, expenseUpdate } = require("../controllers/expense");
@@ -55,6 +53,7 @@ const {
   order_update,
   getOrderByorderItem,
   getOrderByOrderNo,
+  findProfitByOrderItem,
   invoiceUpdate,
 } = require("../controllers/order");
 const {
@@ -195,6 +194,11 @@ router.get(
   "/inventory_movements/cost-of-goods-available",
   cost_of_goods_available,
 );
+router.get(
+  "/inventory_movements/stock-by-product/:product_id",
+  findStockByProductId,
+);
+router.get("/inventory_movements/stock-by-product", findStockByProductId);
 // router.get("/product/:id/cost-of-goods-available", cost_of_goods_available);
 
 router.delete("/product/delete/:id", productDelete);
@@ -255,6 +259,7 @@ router.get("/account/fetch-account-by-type", fetchAccountsByType);
 router.post("/order/order_save", order_save);
 router.patch("/order/order_update/:id", order_update);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
+router.get("/order/profit-by-order-item", findProfitByOrderItem);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
 router.post("/payment_receipt/save", paymentReceiptCreate);

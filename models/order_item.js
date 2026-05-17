@@ -28,7 +28,12 @@ const modelSchema = new mongoose.Schema(
     },
     cost_price_at_sale: {
       type: Number,
-      required: true,
+      // required: true,
+      min: 0,
+    },
+    profit: {
+      type: Number,
+      // required: true,
       min: 0,
     },
     // image: {

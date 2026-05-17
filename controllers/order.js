@@ -21,7 +21,10 @@ const {
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
-const { runInventoryMovementTxnBody } = require("./inventory_movements");
+const {
+  runInventoryMovementTxnBody,
+  aggregateNetQtyByWarehouse,
+} = require("./inventory_movements");
 
 const ORDER_TRANSACTION_ERROR_LOG = {
   action: "POST ORDER TRANSACTION ERROR",
@@ -51,6 +54,19 @@ function clientPayloadFromGenericCreateFailure(response, fallbackError) {
   if (response.missing != null) out.missing = response.missing;
   if (response.required != null) out.required = response.required;
   if (response.received != null) out.received = response.received;
+  if (response.qty_needed != null) out.qty_needed = response.qty_needed;
+  if (response.product_id != null) out.product_id = response.product_id;
+  if (response.company_id != null) out.company_id = response.company_id;
+  if (response.preferred_warehouse_id != null) {
+    out.preferred_warehouse_id = response.preferred_warehouse_id;
+  }
+  if (response.warehouse_id != null) out.warehouse_id = response.warehouse_id;
+  if (response.available_qty != null)
+    out.available_qty = response.available_qty;
+  if (Array.isArray(response.warehouses)) out.warehouses = response.warehouses;
+  if (Array.isArray(response.insufficient_warehouses)) {
+    out.insufficient_warehouses = response.insufficient_warehouses;
+  }
   return out;
 }
 
@@ -253,6 +269,139 @@ function sumParsedLinesSubtotal(lines) {
   );
 }
 
+/** Company default store from populated `req.user.company_id.warehouse_id`. */
+function resolveDefaultWarehouseId(req) {
+  const company = req.user?.company_id;
+  if (!company) return "";
+  const raw =
+    company && typeof company === "object" && company.warehouse_id != null ?
+      company.warehouse_id
+    : company;
+  if (raw instanceof mongoose.Types.ObjectId) return String(raw);
+  const s = String(raw ?? "").trim();
+  return mongoose.Types.ObjectId.isValid(s) ? s : "";
+}
+
+/** Per-line warehouse, else company default store (POS). */
+function resolveOrderLineWarehouseId(line, req) {
+  const fromLine =
+    line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+  if (fromLine && mongoose.Types.ObjectId.isValid(fromLine)) return fromLine;
+  return resolveDefaultWarehouseId(req);
+}
+
+/**
+ * Pick a warehouse with enough stock for this line (from `inventory_movements` in − out per warehouse).
+ * Prefers line/default warehouse when sufficient; otherwise highest available qty that can fulfill the sale.
+ */
+async function resolveWarehouseForOutboundLine({
+  productId,
+  companyId,
+  qtyNeeded,
+  preferredWarehouseId,
+}) {
+  const qty = Number(qtyNeeded);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new Error("Invalid quantity for warehouse resolution");
+  }
+  const pidRaw = coalesceObjectId(productId);
+  const cidRaw = coalesceObjectId(companyId);
+  const pid =
+    pidRaw && mongoose.Types.ObjectId.isValid(String(pidRaw)) ?
+      new mongoose.Types.ObjectId(String(pidRaw))
+    : null;
+  const cid =
+    cidRaw && mongoose.Types.ObjectId.isValid(String(cidRaw)) ?
+      new mongoose.Types.ObjectId(String(cidRaw))
+    : null;
+  if (!pid || !cid) {
+    const err = new Error(
+      "product_id and company_id are required to resolve warehouse stock",
+    );
+    err.clientPayload = {
+      success: false,
+      status: 400,
+      error: "Warehouse stock check failed",
+      details: err.message,
+      type: "validation",
+    };
+    throw err;
+  }
+
+  const avail = new Map();
+  // Committed ledger only — do not pass order txn session (snapshot may miss PO `in` rows).
+  const movRows = await aggregateNetQtyByWarehouse(pid, cid, null);
+  for (const row of movRows) {
+    const wid = String(row.warehouse_id);
+    const net = Math.max(0, Number(row.net_qty) || 0);
+    avail.set(wid, net);
+  }
+
+  const pref =
+    (
+      preferredWarehouseId &&
+      mongoose.Types.ObjectId.isValid(String(preferredWarehouseId))
+    ) ?
+      String(preferredWarehouseId)
+    : null;
+
+  if (pref && !avail.has(pref)) {
+    avail.set(pref, 0);
+  }
+
+  if (pref && (avail.get(pref) || 0) >= qty) {
+    return pref;
+  }
+
+  const candidates = [...avail.entries()]
+    .filter(([, onHand]) => onHand >= qty)
+    .sort((a, b) => b[1] - a[1]);
+
+  if (candidates.length > 0) {
+    return candidates[0][0];
+  }
+
+  const warehouseStock = [...avail.entries()]
+    .map(([warehouse_id, available_qty]) => ({
+      warehouse_id,
+      available_qty,
+      qty_needed: qty,
+      sufficient: available_qty >= qty,
+      short_by: Math.max(0, qty - available_qty),
+    }))
+    .sort((a, b) => b.available_qty - a.available_qty);
+
+  const insufficientWarehouses = warehouseStock.filter((w) => !w.sufficient);
+
+  const warehouseSummary =
+    warehouseStock.length === 0 ?
+      "No inventory_movements ledger stock for this product in any warehouse."
+    : insufficientWarehouses
+        .map(
+          (w) =>
+            `warehouse ${w.warehouse_id}: available ${w.available_qty}, need ${qty} (short by ${w.short_by})`,
+        )
+        .join("; ");
+
+  const err = new Error(
+    `Insufficient stock for product ${String(pid)}: need ${qty}. ${warehouseSummary}`,
+  );
+  err.clientPayload = {
+    success: false,
+    status: 400,
+    error: "Insufficient stock",
+    details: `No warehouse has at least ${qty} units in inventory_movements (in − out) for product ${String(pid)} and company ${String(cid)}. ${warehouseSummary}`,
+    type: "validation",
+    qty_needed: qty,
+    product_id: String(pid),
+    company_id: String(cid),
+    preferred_warehouse_id: pref,
+    warehouses: warehouseStock,
+    insufficient_warehouses: insufficientWarehouses,
+  };
+  throw err;
+}
+
 function normalizeOrderNumericFields(obj) {
   const out = { ...obj };
   for (const key of [
@@ -344,6 +493,7 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
       price: Number(line.price),
       subtotal: Number(line.subtotal),
       cost_price_at_sale,
+      profit: Number(line.subtotal) - Number(cost_price_at_sale * line.qty),
       company_id: companyId,
       branch_id: orderSnapshot.branch_id || undefined,
       created_by: createdBy,
@@ -367,6 +517,186 @@ function shapeOrderWithItems(orderPlain, items) {
   };
 }
 
+/**
+ * GET `SUM(profit)` from `order_item` for the authenticated user's `company_id` only.
+ * Includes lines that have a matching `inventory_movements` row with `movement_type: "out"`.
+ * Optional query: `order_id`, `product_id`, `from`, `to` (filters order line `createdAt`).
+ */
+async function findProfitByOrderItem(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    };
+
+    const rawOrderId = req.query?.order_id ?? req.params?.order_id;
+    if (rawOrderId != null && String(rawOrderId).trim() !== "") {
+      const orderIdStr = String(rawOrderId).trim();
+      if (!mongoose.Types.ObjectId.isValid(orderIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid order_id",
+        });
+      }
+      match.order_id = new mongoose.Types.ObjectId(orderIdStr);
+    }
+
+    const rawProductId = req.query?.product_id;
+    if (rawProductId != null && String(rawProductId).trim() !== "") {
+      const productIdStr = String(rawProductId).trim();
+      if (!mongoose.Types.ObjectId.isValid(productIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid product_id",
+        });
+      }
+      match.product_id = new mongoose.Types.ObjectId(productIdStr);
+    }
+
+    if (req.query?.from || req.query?.to) {
+      match.createdAt = {};
+      if (req.query.from) {
+        const fromDate = new Date(String(req.query.from).trim());
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid from date",
+          });
+        }
+        match.createdAt.$gte = fromDate;
+      }
+      if (req.query.to) {
+        const toDate = new Date(String(req.query.to).trim());
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid to date",
+          });
+        }
+        match.createdAt.$lte = toDate;
+      }
+    }
+
+    const rows = await OrderItem.aggregate([
+      { $match: match },
+      {
+        $lookup: {
+          from: "inventory_movements",
+          let: {
+            orderId: "$order_id",
+            productId: "$product_id",
+            companyId: "$company_id",
+          },
+          pipeline: [
+            {
+              $match: {
+                status: "active",
+                $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+              },
+            },
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$company_id", "$$companyId"] },
+                    { $eq: ["$product_id", "$$productId"] },
+                    { $eq: ["$reference_id", "$$orderId"] },
+                    { $eq: ["$reference_type", "order"] },
+                    {
+                      $eq: [
+                        { $toLower: { $ifNull: ["$movement_type", ""] } },
+                        "out",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $limit: 1 },
+          ],
+          as: "out_movements",
+        },
+      },
+      { $match: { "out_movements.0": { $exists: true } } },
+      {
+        $group: {
+          _id: null,
+          profit: { $sum: { $ifNull: ["$profit", 0] } },
+          line_count: { $sum: 1 },
+          order_item_ids: { $push: "$_id" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          profit: { $round: ["$profit", 2] },
+          line_count: 1,
+          order_item_ids: {
+            $map: {
+              input: "$order_item_ids",
+              as: "id",
+              in: { $toString: "$$id" },
+            },
+          },
+        },
+      },
+    ]);
+
+    const profit = rows[0]?.profit ?? 0;
+    const line_count = rows[0]?.line_count ?? 0;
+    const order_item_ids = rows[0]?.order_item_ids ?? [];
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      profit,
+      line_count,
+      order_item_ids,
+    });
+  } catch (error) {
+    console.error("❌ findProfitByOrderItem:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 // async function orderCreate(req, res) {
 //   const response = await handleGenericCreate(req, "order", {
 //     afterCreate: async (record, req) => {
@@ -377,7 +707,11 @@ function shapeOrderWithItems(orderPlain, items) {
 // }
 
 async function getOrderByorderItem(req, res) {
-  const filter = { status: "active", deletedAt: null };
+  const filter = {
+    status: "active",
+    deletedAt: null,
+    company_id: req.user?.company_id,
+  };
   const response = await handleGenericGetAll(req, "order", {
     filter,
     excludeFields: [],
@@ -444,7 +778,8 @@ async function getOrderByorderItem(req, res) {
  * `handleGenericCreate` (restore original afterward), (3) prefer `session.withTransaction` when the deployment
  * supports multi-document transactions (replica set / Atlas); on standalone `mongod` the same steps retry
  * without a session (see `utils/mongoTransactionSupport`), (4) in `afterCreate`, insert four `transaction` rows,
- * (5) `OrderItem.insertMany`, (6) for each line with `warehouse_id`, `runInventoryMovementTxnBody` (movement `out`),
+ * (5) `OrderItem.insertMany`, (6) per line: resolve a warehouse with enough stock, then
+ *     `runInventoryMovementTxnBody` (movement `out` ledger). Failure aborts the txn (rolls back when supported).
  * (7) `syncHeaderTotalsFromLineItems`.
  *
  * On failure the transaction aborts; `req.body` is restored after `endSession`. Check server logs for `[order_save]` detail.
@@ -458,7 +793,7 @@ async function order_save(req, res) {
       status: 400,
       error: "Order lines required",
       details:
-        "Send at least one valid line with product_id[n], qty[n], and price[n] (e.g. product_id[0], qty[0], price[0]). Optional warehouse_id[n] per line records an inventory movement (out).",
+        "Send at least one valid line with product_id[n], qty[n], and price[n] (e.g. product_id[0], qty[0], price[0]). Optional warehouse_id[n] per line; when omitted, the company default warehouse is used for stock (out).",
       type: "validation",
     });
   }
@@ -598,18 +933,20 @@ async function order_save(req, res) {
     );
     insertedItemsPlain = inserted.map((d) => d.toObject({ flattenMaps: true }));
 
-    // Outbound inventory movement for each line that sent `warehouse_id[n]` (ledger via `runInventoryMovementTxnBody` only).
+    // Outbound inventory movement ledger (`inventory_movements` only).
     const companyIdForMovement =
       coalesceObjectId(response.data.company_id) ||
       coalesceObjectId(req.user?.company_id);
+    const companyIdForMovementOid =
+      (
+        companyIdForMovement &&
+        mongoose.Types.ObjectId.isValid(String(companyIdForMovement))
+      ) ?
+        new mongoose.Types.ObjectId(String(companyIdForMovement))
+      : null;
     const orderIdForMovement = response.data._id;
 
     for (const line of lines) {
-      const warehouseIdStr =
-        line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-      if (!warehouseIdStr || !mongoose.Types.ObjectId.isValid(warehouseIdStr)) {
-        continue;
-      }
       const unitCost = Number(line.price);
       const lineQtyNum = Number(line.qty);
       if (
@@ -619,9 +956,29 @@ async function order_save(req, res) {
         lineQtyNum <= 0
       ) {
         throw new Error(
-          "Each order line with a warehouse needs a finite unit price (price) and positive quantity for inventory movement",
+          "Each order line needs a finite unit price (price) and positive quantity for inventory movement",
         );
       }
+
+      let warehouseIdStr;
+      try {
+        warehouseIdStr = await resolveWarehouseForOutboundLine({
+          productId: line.product_id,
+          companyId: companyIdForMovementOid || companyIdForMovement,
+          qtyNeeded: lineQtyNum,
+          preferredWarehouseId:
+            resolveOrderLineWarehouseId(line, req) || undefined,
+        });
+      } catch (warehouseResolveErr) {
+        if (warehouseResolveErr.clientPayload) {
+          throwOrderCreateFromGenericFailure(
+            warehouseResolveErr.clientPayload,
+            "No warehouse with sufficient stock for order line",
+          );
+        }
+        throw warehouseResolveErr;
+      }
+
       const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
 
       const bodyBeforeInventoryMovement = req.body;
@@ -641,13 +998,38 @@ async function order_save(req, res) {
         reference_type: "order",
         reference_id: orderIdForMovement,
         reference_name: "Order",
-        company_id: companyIdForMovement,
+        company_id: companyIdForMovementOid || companyIdForMovement,
         status: "active",
       };
 
       try {
-        await runInventoryMovementTxnBody(req, mongoSession);
+        const movementResult = await runInventoryMovementTxnBody(
+          req,
+          mongoSession,
+        );
+        if (
+          !movementResult?.response?.success ||
+          !movementResult?.response?.data?._id
+        ) {
+          throwOrderCreateFromGenericFailure(
+            movementResult?.response || {
+              success: false,
+              status: 500,
+              error: "Inventory movement not persisted",
+              details:
+                "Outbound movement did not return a saved record; order rolled back",
+              type: "server",
+            },
+            "Inventory movement for order was not saved",
+          );
+        }
       } catch (inventoryMovementErr) {
+        if (inventoryMovementErr.clientErrorPayload) {
+          throwOrderCreateFromGenericFailure(
+            inventoryMovementErr.clientErrorPayload,
+            "Inventory movement for order failed",
+          );
+        }
         if (inventoryMovementErr.clientPayload) {
           throwOrderCreateFromGenericFailure(
             inventoryMovementErr.clientPayload,
@@ -1148,4 +1530,5 @@ module.exports = {
   order_save,
   order_update,
   getOrderByorderItem,
+  findProfitByOrderItem,
 };

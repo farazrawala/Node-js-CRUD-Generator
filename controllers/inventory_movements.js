@@ -17,6 +17,139 @@ function toFiniteNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** Normalize ids for raw aggregation `$match` (string vs ObjectId must match DB). */
+function toLedgerObjectId(value) {
+  const raw = coalesceObjectId(value);
+  if (raw == null || raw === "") return null;
+  const s = String(raw).trim();
+  if (!mongoose.Types.ObjectId.isValid(s)) return null;
+  return new mongoose.Types.ObjectId(s);
+}
+
+/**
+ * Active rows in `inventory_movements` (ledger). Matches PO `in` / order `out` documents
+ * with `status: "active"`, `deletedAt: null`, and a real `warehouse_id`.
+ */
+function buildActiveMovementLedgerMatch({
+  productId,
+  companyId,
+  warehouseId,
+} = {}) {
+  const match = {
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    warehouse_id: { $exists: true, $ne: null },
+  };
+  const pid = toLedgerObjectId(productId);
+  const cid = toLedgerObjectId(companyId);
+  const wid = toLedgerObjectId(warehouseId);
+  if (pid) match.product_id = pid;
+  if (cid) match.company_id = cid;
+  if (wid) match.warehouse_id = wid;
+  return match;
+}
+
+/**
+ * Per-warehouse on-hand from ledger only: sum(`in`.quantity) − sum(`out`.quantity).
+ * @returns {Promise<Array<{ warehouse_id: import('mongoose').Types.ObjectId, net_qty: number }>>}
+ */
+async function aggregateNetQtyByWarehouse(
+  productId,
+  companyId,
+  session = null,
+) {
+  const match = buildActiveMovementLedgerMatch({ productId, companyId });
+  const pipeline = [
+    { $match: match },
+    {
+      $group: {
+        _id: "$warehouse_id",
+        qty_in: {
+          $sum: {
+            $cond: [
+              {
+                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "in"],
+              },
+              { $ifNull: ["$quantity", 0] },
+              0,
+            ],
+          },
+        },
+        qty_out: {
+          $sum: {
+            $cond: [
+              {
+                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "out"],
+              },
+              { $ifNull: ["$quantity", 0] },
+              0,
+            ],
+          },
+        },
+      },
+    },
+    {
+      $project: {
+        warehouse_id: "$_id",
+        net_qty: { $subtract: ["$qty_in", "$qty_out"] },
+      },
+    },
+  ];
+  let agg = InventoryMovements.aggregate(pipeline);
+  if (session) agg = agg.session(session);
+  return agg;
+}
+
+/** Net qty for one product + company + warehouse from `inventory_movements` only. */
+async function getLedgerNetQtyForWarehouse(
+  productId,
+  companyId,
+  warehouseId,
+  session = null,
+) {
+  const match = buildActiveMovementLedgerMatch({
+    productId,
+    companyId,
+    warehouseId,
+  });
+  const pipeline = [
+    { $match: match },
+    {
+      $group: {
+        _id: null,
+        qty_in: {
+          $sum: {
+            $cond: [
+              {
+                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "in"],
+              },
+              { $ifNull: ["$quantity", 0] },
+              0,
+            ],
+          },
+        },
+        qty_out: {
+          $sum: {
+            $cond: [
+              {
+                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "out"],
+              },
+              { $ifNull: ["$quantity", 0] },
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ];
+  let agg = InventoryMovements.aggregate(pipeline);
+  if (session) agg = agg.session(session);
+  const rows = await agg;
+  const inQty = toFiniteNumber(rows[0]?.qty_in);
+  const outQty = toFiniteNumber(rows[0]?.qty_out);
+  return inQty - outQty;
+}
+
 /**
  * Net on-hand from **inventory_movements** (sum `in` qty − sum `out` qty) per `product_id`,
  * times each product’s `wholesale_price`. Same response shape as `product` COGS helper.
@@ -248,21 +381,11 @@ async function runInventoryMovementTxnBody(req, session) {
         rawProductId
       : new mongoose.Types.ObjectId(String(rawProductId).trim());
     const pidResolved = productIdResolved;
-    const companyId = coalesceObjectId(
-      req.body.company_id ?? req.user?.company_id,
-    );
-    const movementMatch = {
-      product_id: pidResolved,
-      status: "active",
-      $nor: [{ deletedAt: { $type: "date" } }],
-    };
-    if (
-      companyId != null &&
-      String(companyId).trim() !== "" &&
-      mongoose.Types.ObjectId.isValid(String(companyId))
-    ) {
-      movementMatch.company_id = companyId;
-    }
+    const movementMatch = buildActiveMovementLedgerMatch({
+      productId: pidResolved,
+      companyId: coalesceObjectId(req.body.company_id ?? req.user?.company_id),
+      warehouseId: req.body.warehouse_id,
+    });
     return {
       match: movementMatch,
       pid: pidResolved,
@@ -286,12 +409,13 @@ async function runInventoryMovementTxnBody(req, session) {
   }
   const movement_totals = await movementTotalsAggregation;
 
-  const in_qty = toFiniteNumber(
-    movement_totals.find((row) => row._id === "in")?.total_qty,
-  );
-  const out_qty = toFiniteNumber(
-    movement_totals.find((row) => row._id === "out")?.total_qty,
-  );
+  let in_qty = 0;
+  let out_qty = 0;
+  for (const row of movement_totals) {
+    const type = String(row._id ?? "").toLowerCase();
+    if (type === "in") in_qty = toFiniteNumber(row.total_qty);
+    if (type === "out") out_qty = toFiniteNumber(row.total_qty);
+  }
 
   const lineQty = toFiniteNumber(req.body.quantity);
   const lineCost = toFiniteNumber(req.body.total_cost);
@@ -312,7 +436,20 @@ async function runInventoryMovementTxnBody(req, session) {
 
   const wholesaleUnit = toFiniteNumber(productData.data.wholesale_price);
 
-  const qty_in_stock = in_qty - out_qty;
+  const companyIdForStock = toLedgerObjectId(
+    req.body.company_id ?? req.user?.company_id,
+  );
+  const warehouseIdForStock = toLedgerObjectId(req.body.warehouse_id);
+  // Read committed ledger for availability (txn session can hide existing `in` rows).
+  const qty_in_stock =
+    warehouseIdForStock && companyIdForStock ?
+      await getLedgerNetQtyForWarehouse(
+        pid,
+        companyIdForStock,
+        warehouseIdForStock,
+        null,
+      )
+    : in_qty - out_qty;
   const cost_in_stock = Math.abs(qty_in_stock) * wholesaleUnit;
   const total_qty = Math.abs(qty_in_stock) + lineQty;
   const total_cost = Math.abs(cost_in_stock) + lineCost;
@@ -329,6 +466,78 @@ async function runInventoryMovementTxnBody(req, session) {
   ];
 
   const request_type = req.body.movement_type === "in" ? "in" : "out";
+
+  if (request_type === "out" && lineQty > qty_in_stock) {
+    const warehouseIdStr =
+      req.body.warehouse_id ? String(req.body.warehouse_id) : null;
+    const productIdStr = String(pid);
+    const companyIdStr = String(
+      coalesceObjectId(req.body.company_id ?? req.user?.company_id) || "",
+    );
+
+    let warehouseStock = [];
+    if (
+      mongoose.Types.ObjectId.isValid(productIdStr) &&
+      mongoose.Types.ObjectId.isValid(companyIdStr)
+    ) {
+      const rows = await aggregateNetQtyByWarehouse(pid, companyIdStr, session);
+      warehouseStock = rows.map((row) => {
+        const wid = String(row.warehouse_id);
+        const available_qty = Math.max(0, Number(row.net_qty) || 0);
+        return {
+          warehouse_id: wid,
+          available_qty,
+          qty_needed: lineQty,
+          sufficient: available_qty >= lineQty,
+          short_by: Math.max(0, lineQty - available_qty),
+        };
+      });
+      if (
+        warehouseIdStr &&
+        mongoose.Types.ObjectId.isValid(warehouseIdStr) &&
+        !warehouseStock.some((w) => w.warehouse_id === warehouseIdStr)
+      ) {
+        warehouseStock.push({
+          warehouse_id: warehouseIdStr,
+          available_qty: 0,
+          qty_needed: lineQty,
+          sufficient: false,
+          short_by: lineQty,
+        });
+      }
+      warehouseStock.sort((a, b) => b.available_qty - a.available_qty);
+    }
+
+    const insufficientWarehouses = warehouseStock.filter((w) => !w.sufficient);
+    const warehouseHint =
+      warehouseIdStr ? ` in warehouse ${warehouseIdStr}` : "";
+    const ledgerSummary =
+      insufficientWarehouses.length === 0 ?
+        ""
+      : ` Other warehouses: ${insufficientWarehouses
+          .map(
+            (w) =>
+              `${w.warehouse_id} (available ${w.available_qty}, short by ${w.short_by})`,
+          )
+          .join("; ")}.`;
+    const insufficientMsg = `Insufficient stock${warehouseHint}: need ${lineQty}, available ${qty_in_stock}.${ledgerSummary}`;
+    const insufficientErr = new Error(insufficientMsg);
+    insufficientErr.clientPayload = {
+      success: false,
+      status: 400,
+      error: "Insufficient stock",
+      details: insufficientMsg,
+      type: "validation",
+      qty_needed: lineQty,
+      product_id: productIdStr,
+      company_id: companyIdStr,
+      warehouse_id: warehouseIdStr,
+      available_qty: qty_in_stock,
+      warehouses: warehouseStock,
+      insufficient_warehouses: insufficientWarehouses,
+    };
+    throw insufficientErr;
+  }
 
   const response = await handleGenericCreate(req, "inventory_movements", {
     session,
@@ -573,8 +782,198 @@ async function inventoryMovementsCreate(req, res) {
   });
 }
 
+/**
+ * GET stock for one product from `inventory_movements` ledger (in − out), per warehouse + totals.
+ * `product_id` / `id`: path param or query. Tenant from `req.user.company_id`.
+ */
+async function findStockByProductId(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const rawProductId =
+      req.params?.product_id ??
+      req.params?.id ??
+      req.query?.product_id ??
+      req.query?.id;
+    const productIdStr = String(rawProductId ?? "").trim();
+    if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid product id",
+        message: "Provide a valid product_id (path or query)",
+      });
+    }
+
+    const productObjectId = new mongoose.Types.ObjectId(productIdStr);
+
+    const product = await Product.findOne({
+      _id: productObjectId,
+      company_id: companyObjectId,
+      deletedAt: null,
+    })
+      .select("product_name product_code sku wholesale_price status")
+      .lean();
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Product not found",
+        message: "Product not found for this company",
+        product_id: productIdStr,
+      });
+    }
+
+    const match = buildActiveMovementLedgerMatch({
+      productId: productObjectId,
+      companyId: companyObjectId,
+    });
+
+    const warehouseRows = await InventoryMovements.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: "$warehouse_id",
+          qty_in: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: [
+                    { $toLower: { $ifNull: ["$movement_type", ""] } },
+                    "in",
+                  ],
+                },
+                { $ifNull: ["$quantity", 0] },
+                0,
+              ],
+            },
+          },
+          qty_out: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: [
+                    { $toLower: { $ifNull: ["$movement_type", ""] } },
+                    "out",
+                  ],
+                },
+                { $ifNull: ["$quantity", 0] },
+                0,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          warehouse_id: "$_id",
+          qty_in: 1,
+          qty_out: 1,
+          net_qty: { $subtract: ["$qty_in", "$qty_out"] },
+        },
+      },
+      { $sort: { net_qty: -1 } },
+    ]);
+
+    let Warehouse;
+    try {
+      Warehouse = mongoose.model("warehouse");
+    } catch {
+      Warehouse = null;
+    }
+
+    const warehouses = [];
+    let totalIn = 0;
+    let totalOut = 0;
+
+    for (const row of warehouseRows) {
+      const qty_in = toFiniteNumber(row.qty_in);
+      const qty_out = toFiniteNumber(row.qty_out);
+      const net_qty = toFiniteNumber(row.net_qty);
+      totalIn += qty_in;
+      totalOut += qty_out;
+
+      const entry = {
+        warehouse_id: String(row.warehouse_id),
+        qty_in,
+        qty_out,
+        net_qty,
+        available_qty: Math.max(0, net_qty),
+      };
+
+      if (Warehouse && row.warehouse_id) {
+        const wh = await Warehouse.findById(row.warehouse_id)
+          .select("name")
+          .lean();
+        if (wh?.name) entry.warehouse_name = String(wh.name).trim();
+      }
+
+      warehouses.push(entry);
+    }
+
+    const net_qty = totalIn - totalOut;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      product_id: productIdStr,
+      company_id: String(companyObjectId),
+      product: {
+        product_name: product.product_name,
+        product_code: product.product_code,
+        sku: product.sku,
+        wholesale_price: product.wholesale_price,
+        status: product.status,
+      },
+      qty_in: totalIn,
+      qty_out: totalOut,
+      net_qty,
+      available_qty: Math.max(0, net_qty),
+      warehouse_count: warehouses.length,
+      warehouses,
+    });
+  } catch (error) {
+    console.error("❌ findStockByProductId:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   cost_of_goods_available,
   inventoryMovementsCreate,
   runInventoryMovementTxnBody,
+  buildActiveMovementLedgerMatch,
+  aggregateNetQtyByWarehouse,
+  getLedgerNetQtyForWarehouse,
+  findStockByProductId,
 };
