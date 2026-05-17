@@ -697,6 +697,124 @@ async function findProfitByOrderItem(req, res) {
   }
 }
 
+/**
+ * GET sum of `total_amount` from `order` for the authenticated user's `company_id` only.
+ * Optional query: `order_status`, `from`, `to` (filters `createdAt`).
+ */
+async function findSales(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    };
+
+    const rawOrderStatus = req.query?.order_status;
+    if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
+      match.order_status = String(rawOrderStatus).trim();
+    }
+
+    if (req.query?.from || req.query?.to) {
+      match.createdAt = {};
+      if (req.query.from) {
+        const fromDate = new Date(String(req.query.from).trim());
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid from date",
+          });
+        }
+        match.createdAt.$gte = fromDate;
+      }
+      if (req.query.to) {
+        const toDate = new Date(String(req.query.to).trim());
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid to date",
+          });
+        }
+        match.createdAt.$lte = toDate;
+      }
+    }
+
+    const rows = await Order.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+          order_count: { $sum: 1 },
+          order_ids: { $push: "$_id" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          total_amount: { $round: ["$total_amount", 2] },
+          order_count: 1,
+          order_ids: {
+            $map: {
+              input: "$order_ids",
+              as: "id",
+              in: { $toString: "$$id" },
+            },
+          },
+        },
+      },
+    ]);
+
+    const total_amount = rows[0]?.total_amount ?? 0;
+    const order_count = rows[0]?.order_count ?? 0;
+    const order_ids = rows[0]?.order_ids ?? [];
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      total_amount,
+      order_count,
+      order_ids,
+    });
+  } catch (error) {
+    console.error("❌ findSales:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
 // async function orderCreate(req, res) {
 //   const response = await handleGenericCreate(req, "order", {
 //     afterCreate: async (record, req) => {
@@ -1531,4 +1649,5 @@ module.exports = {
   order_update,
   getOrderByorderItem,
   findProfitByOrderItem,
+  findSales,
 };

@@ -54,8 +54,10 @@ const {
   getOrderByorderItem,
   getOrderByOrderNo,
   findProfitByOrderItem,
+  findSales,
   invoiceUpdate,
 } = require("../controllers/order");
+const { costOfGoodsSoldByOrderItem } = require("../controllers/order_item");
 const {
   checkIntegrationActive,
   syncStoreCategory,
@@ -260,6 +262,11 @@ router.post("/order/order_save", order_save);
 router.patch("/order/order_update/:id", order_update);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/profit-by-order-item", findProfitByOrderItem);
+router.get(
+  "/order_item/cost-of-goods-sold-by-order-item",
+  costOfGoodsSoldByOrderItem,
+);
+router.get("/order/sales", findSales);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
 router.post("/payment_receipt/save", paymentReceiptCreate);

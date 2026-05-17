@@ -33,13 +33,9 @@ const modelSchema = new mongoose.Schema(
     },
     profit: {
       type: Number,
-      // required: true,
       min: 0,
     },
-    // image: {
-    //   type: String,
-    //   field_type: "image",
-    // },
+
     branch_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "branch",
