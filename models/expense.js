@@ -32,7 +32,7 @@ const modelSchema = new mongoose.Schema(
     },
     note: {
       type: String,
-      required: true,
+      //   required: true,
     },
     image: {
       type: String,
