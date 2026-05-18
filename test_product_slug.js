@@ -1,13 +1,12 @@
 // Test script to verify product slug generation works with empty slug
+require("dotenv").config();
 const mongoose = require("mongoose");
+const { getMongoUri } = require("./connection");
 
 // Connect to MongoDB
 const connectDB = async () => {
   try {
-    await mongoose.connect("mongodb://localhost:27017/test", {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    await mongoose.connect(getMongoUri());
     console.log("✅ Connected to MongoDB");
   } catch (error) {
     console.error("❌ MongoDB connection error:", error);

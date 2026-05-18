@@ -1,5 +1,7 @@
+require("dotenv").config();
+
 const express = require("express");
-const { connectMonogodb } = require("./connection");
+const { connectMonogodb, getMongoUri } = require("./connection");
 const path = require("path");
 const urlRouter = require("./routes/url");
 const userRoute = require("./routes/user");
@@ -217,7 +219,10 @@ app.use((req, res, next) => {
   next();
 });
 
-connectMonogodb("mongodb://localhost:27017/test");
+connectMonogodb(getMongoUri()).catch((err) => {
+  console.error("❌ Failed to connect to MongoDB:", err.message);
+  process.exit(1);
+});
 
 app.use(checkForAuthentication); // <--- This line must be enabled
 
