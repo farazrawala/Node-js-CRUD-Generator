@@ -44,6 +44,7 @@ const {
   cost_of_goods_available,
   inventoryMovementsCreate,
   findStockByProductId,
+  stockTransfer,
 } = require("../controllers/inventory_movements");
 
 const { expenseCreate, expenseUpdate } = require("../controllers/expense");
@@ -184,6 +185,7 @@ router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
 // Inventory movements routes
 router.post("/inventory_movements/save", inventoryMovementsCreate);
+router.post("/inventory_movements/stock-transfer", stockTransfer);
 
 // Product routes - Custom CRUD + warehouse inventory management
 router.post("/product/create", productCreate);

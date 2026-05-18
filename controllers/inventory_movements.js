@@ -11,6 +11,7 @@ const {
 } = require("../utils/mongoTransactionSupport");
 const InventoryMovements = require("../models/inventory_movements");
 const Product = require("../models/product");
+const Warehouse = require("../models/warehouse");
 
 function toFiniteNumber(value) {
   const parsed = Number(value);
@@ -968,6 +969,301 @@ async function findStockByProductId(req, res) {
   }
 }
 
+function resolveRequestCompanyId(req) {
+  const rawCompany = req.user?.company_id;
+  const companyId =
+    rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+      rawCompany._id
+    : rawCompany;
+  return coalesceObjectId(companyId);
+}
+
+/**
+ * POST stock transfer — two `inventory_movements` rows only (no `stock_transfer` table).
+ * Out: product_id + from_warehouse_id + qty. In: product_id + to_warehouse_id + qty.
+ * Body: product_id, from_warehouse_id, to_warehouse_id, qty (or quantity).
+ */
+async function stockTransfer(req, res) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const productIdRaw = body.product_id ?? body.productId;
+    const fromWarehouseIdRaw =
+      body.from_warehouse_id ?? body.from_warehouse ?? body.fromWarehouseId;
+    const toWarehouseIdRaw =
+      body.to_warehouse_id ?? body.to_warehouse ?? body.toWarehouseId;
+    const qtyRaw = body.qty ?? body.quantity;
+
+    const errors = [];
+    const productIdStr =
+      productIdRaw != null ? String(productIdRaw).trim() : "";
+    const fromWarehouseIdStr =
+      fromWarehouseIdRaw != null ? String(fromWarehouseIdRaw).trim() : "";
+    const toWarehouseIdStr =
+      toWarehouseIdRaw != null ? String(toWarehouseIdRaw).trim() : "";
+
+    if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
+      errors.push("valid product_id is required");
+    }
+    if (
+      !fromWarehouseIdStr ||
+      !mongoose.Types.ObjectId.isValid(fromWarehouseIdStr)
+    ) {
+      errors.push("valid from_warehouse_id is required");
+    }
+    if (
+      !toWarehouseIdStr ||
+      !mongoose.Types.ObjectId.isValid(toWarehouseIdStr)
+    ) {
+      errors.push("valid to_warehouse_id is required");
+    }
+
+    const transferQty = Number(qtyRaw);
+    if (!Number.isFinite(transferQty) || transferQty <= 0) {
+      errors.push("qty must be a number greater than zero");
+    }
+
+    if (
+      fromWarehouseIdStr &&
+      toWarehouseIdStr &&
+      fromWarehouseIdStr === toWarehouseIdStr
+    ) {
+      errors.push("from_warehouse_id and to_warehouse_id must be different");
+    }
+
+    const companyObjectId = resolveRequestCompanyId(req);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      errors.push("company_id is required (authenticate with a company user)");
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        errors,
+        message: errors.join("; "),
+      });
+    }
+
+    const companyId = new mongoose.Types.ObjectId(String(companyObjectId));
+    const productId = new mongoose.Types.ObjectId(productIdStr);
+    const fromWarehouseId = new mongoose.Types.ObjectId(fromWarehouseIdStr);
+    const toWarehouseId = new mongoose.Types.ObjectId(toWarehouseIdStr);
+
+    const companyFilter = {
+      company_id: companyId,
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+
+    const product = await Product.findOne({
+      _id: productId,
+      ...companyFilter,
+      status: "active",
+    })
+      .select("product_name product_code wholesale_price")
+      .lean();
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Product not found for this company",
+      });
+    }
+
+    const [fromWarehouse, toWarehouse] = await Promise.all([
+      Warehouse.findOne({
+        _id: fromWarehouseId,
+        ...companyFilter,
+        status: "active",
+      })
+        .select("name code")
+        .lean(),
+      Warehouse.findOne({
+        _id: toWarehouseId,
+        ...companyFilter,
+        status: "active",
+      })
+        .select("name code")
+        .lean(),
+    ]);
+
+    if (!fromWarehouse) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Source warehouse not found or inactive",
+      });
+    }
+    if (!toWarehouse) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Destination warehouse not found or inactive",
+      });
+    }
+
+    const availableQty = await getLedgerNetQtyForWarehouse(
+      productId,
+      companyId,
+      fromWarehouseId,
+      null,
+    );
+    if (transferQty > availableQty) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Insufficient stock",
+        message: `Insufficient stock in source warehouse: need ${transferQty}, available ${availableQty}`,
+        product_id: productIdStr,
+        from_warehouse_id: fromWarehouseIdStr,
+        available_qty: availableQty,
+        qty_needed: transferQty,
+      });
+    }
+
+    const unitCost = toFiniteNumber(product.wholesale_price);
+    const totalCost = Math.round(transferQty * unitCost * 100) / 100;
+
+    const runTransferTxn = async (session) => {
+      const transferReferenceId = new mongoose.Types.ObjectId();
+
+      const movementBase = {
+        product_id: productIdStr,
+        quantity: transferQty,
+        unit_cost: unitCost,
+        total_cost: totalCost,
+        reference_type: "stock_transfer",
+        reference_id: transferReferenceId,
+        reference_name: "Stock Transfer",
+        company_id: companyId,
+        status: "active",
+      };
+
+      const bodyBefore = req.body;
+      const paramsIdBefore = req.params?.id;
+
+      req.body = {
+        ...movementBase,
+        warehouse_id: fromWarehouseIdStr,
+        movement_type: "out",
+      };
+      const outResult = await runInventoryMovementTxnBody(req, session);
+
+      req.body = {
+        ...movementBase,
+        warehouse_id: toWarehouseIdStr,
+        movement_type: "in",
+      };
+      const inResult = await runInventoryMovementTxnBody(req, session);
+
+      req.body = bodyBefore;
+      if (paramsIdBefore !== undefined) req.params.id = paramsIdBefore;
+      else delete req.params.id;
+
+      return { transferReferenceId, outResult, inResult };
+    };
+
+    let txnResult = null;
+    let txnError = null;
+    let clientSession = null;
+
+    try {
+      clientSession = await mongoose.startSession();
+      await clientSession.withTransaction(async () => {
+        txnResult = await runTransferTxn(clientSession);
+      });
+    } catch (transactionStartError) {
+      if (isMongoTransactionUnsupportedError(transactionStartError)) {
+        if (clientSession) {
+          try {
+            clientSession.endSession();
+          } catch {
+            /* ignore */
+          }
+          clientSession = null;
+        }
+        console.warn(
+          "[inventory_movements] stock transfer: transactions unavailable; continuing without session:",
+          transactionStartError.message,
+        );
+        try {
+          txnResult = await runTransferTxn(null);
+        } catch (fallbackExecutionError) {
+          txnError = fallbackExecutionError;
+        }
+      } else {
+        txnError = transactionStartError;
+      }
+    } finally {
+      if (clientSession) {
+        try {
+          clientSession.endSession();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    if (txnError) {
+      const errorResponsePayload = txnError.clientPayload;
+      if (
+        errorResponsePayload &&
+        typeof errorResponsePayload.status === "number"
+      ) {
+        return res
+          .status(errorResponsePayload.status)
+          .json(errorResponsePayload);
+      }
+      return res.status(500).json({
+        success: false,
+        status: 500,
+        error: txnError.message || "Stock transfer failed",
+      });
+    }
+
+    const { transferReferenceId, outResult, inResult } = txnResult;
+    const fromLabel = fromWarehouse.name || fromWarehouseIdStr;
+    const toLabel = toWarehouse.name || toWarehouseIdStr;
+
+    await createApplicationLog(req, {
+      action: "Stock transfer completed",
+      url: req.originalUrl || "/api/inventory_movements/stock-transfer",
+      tags: ["stock_transfer", "inventory_movement"],
+      description: {
+        reference_id: transferReferenceId,
+        product_id: productIdStr,
+        from_warehouse_id: fromWarehouseIdStr,
+        to_warehouse_id: toWarehouseIdStr,
+        qty: transferQty,
+        out_movement_id: outResult?.response?.data?._id,
+        in_movement_id: inResult?.response?.data?._id,
+      },
+      company_id: companyId,
+    });
+
+    return res.status(201).json({
+      success: true,
+      status: 201,
+      message: `Transferred ${transferQty} unit(s) from ${fromLabel} to ${toLabel}`,
+      data: {
+        reference_id: String(transferReferenceId),
+        out: outResult?.response?.data ?? null,
+        in: inResult?.response?.data ?? null,
+      },
+    });
+  } catch (error) {
+    console.error("❌ stockTransfer:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   cost_of_goods_available,
   inventoryMovementsCreate,
@@ -976,4 +1272,5 @@ module.exports = {
   aggregateNetQtyByWarehouse,
   getLedgerNetQtyForWarehouse,
   findStockByProductId,
+  stockTransfer,
 };

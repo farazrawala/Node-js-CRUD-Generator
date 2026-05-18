@@ -132,6 +132,15 @@ modelSchema.index(
   },
 );
 
+/** findById scoped to the document's Mongo session (required inside multi-doc transactions). */
+async function findByIdInDocSession(Model, id, select, session) {
+  let q = Model.findById(id).select(select);
+  if (session) {
+    q = q.session(session);
+  }
+  return q.lean();
+}
+
 /**
  * Cross-tenant guards: GL account and branch must belong to transaction.company_id.
  * Polymorphic reference_id target is checked the same way.
@@ -140,11 +149,16 @@ modelSchema.pre("validate", async function () {
   const companyId = this.company_id;
   if (!companyId) return;
 
+  const session = this.$session();
+
   if (this.account_id) {
     const Account = mongoose.model("account");
-    const acc = await Account.findById(this.account_id)
-      .select("company_id")
-      .lean();
+    const acc = await findByIdInDocSession(
+      Account,
+      this.account_id,
+      "company_id",
+      session,
+    );
     if (!acc) {
       throw new Error("account_id: referenced account not found");
     }
@@ -157,9 +171,12 @@ modelSchema.pre("validate", async function () {
 
   if (this.branch_id) {
     const Branch = mongoose.model("branch");
-    const br = await Branch.findById(this.branch_id)
-      .select("company_id")
-      .lean();
+    const br = await findByIdInDocSession(
+      Branch,
+      this.branch_id,
+      "company_id",
+      session,
+    );
     if (!br) {
       throw new Error("branch_id: referenced branch not found");
     }
@@ -185,9 +202,12 @@ modelSchema.pre("validate", async function () {
     throw new Error(`reference_id.module: unknown model "${ref.module}"`);
   }
 
-  const target = await RefModel.findById(ref.ref_id)
-    .select("company_id")
-    .lean();
+  const target = await findByIdInDocSession(
+    RefModel,
+    ref.ref_id,
+    "company_id",
+    session,
+  );
   if (!target) {
     throw new Error("reference_id.ref_id: referenced document not found");
   }
