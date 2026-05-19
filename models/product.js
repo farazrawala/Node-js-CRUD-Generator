@@ -65,6 +65,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Dimension",
     },
+    price_before_tax: {
+      type: Number,
+      field_name: "Price Before Tax",
+      default: 0,
+    },
     tax_rate: {
       type: Number,
       field_name: "Tax Rate",
