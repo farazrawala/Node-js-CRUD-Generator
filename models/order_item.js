@@ -92,9 +92,15 @@ modelSchema.pre("validate", async function (next) {
 
     if (this.order_id) {
       const Order = mongoose.model("order");
-      const order = await Order.findById(this.order_id)
-        .select("company_id branch_id")
-        .lean();
+      const session =
+        typeof this.$session === "function" ? this.$session() : null;
+      let orderQuery = Order.findById(this.order_id).select(
+        "company_id branch_id",
+      );
+      if (session) {
+        orderQuery = orderQuery.session(session);
+      }
+      const order = await orderQuery.lean();
       if (!order) {
         this.invalidate("order_id", "Referenced order does not exist");
         return next();

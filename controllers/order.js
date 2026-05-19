@@ -435,7 +435,13 @@ function costPriceAtSaleFromProduct(product) {
 }
 
 async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
-  const companyId = orderSnapshot.company_id || req.user?.company_id;
+  const orderObjectId =
+    orderId instanceof mongoose.Types.ObjectId ?
+      orderId
+    : new mongoose.Types.ObjectId(String(orderId));
+  const companyId =
+    coalesceObjectId(orderSnapshot.company_id) ||
+    coalesceObjectId(req.user?.company_id);
   const createdBy = req.user?._id;
   if (!createdBy) {
     return {
@@ -486,7 +492,7 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
     const cost_price_at_sale = costPriceAtSaleFromProduct(product);
 
     docs.push({
-      order_id: orderId,
+      order_id: orderObjectId,
       product_id: pid,
       name,
       qty: String(line.qtyRaw ?? line.qty).trim(),
@@ -495,7 +501,7 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
       cost_price_at_sale,
       profit: Number(line.subtotal) - Number(cost_price_at_sale * line.qty),
       company_id: companyId,
-      branch_id: orderSnapshot.branch_id || undefined,
+      branch_id: coalesceObjectId(orderSnapshot.branch_id) || undefined,
       created_by: createdBy,
       status: "active",
       deletedAt: null,
@@ -900,7 +906,8 @@ async function getOrderByorderItem(req, res) {
  *     `runInventoryMovementTxnBody` (movement `out` ledger). Failure aborts the txn (rolls back when supported).
  * (7) `syncHeaderTotalsFromLineItems`.
  *
- * On failure the transaction aborts; `req.body` is restored after `endSession`. Check server logs for `[order_save]` detail.
+ * On failure the transaction aborts (when MongoDB supports it) and a row is written to `logs`
+ * (`ORDER CREATE ROLLBACK`) with the real error, stack, and request context. Check server logs for `[order_save]`.
  */
 async function order_save(req, res) {
   // Lines are parsed from the raw body; header create uses a stripped `req.body` (restored before the HTTP response).
@@ -935,10 +942,13 @@ async function order_save(req, res) {
   let response = null;
   let insertedItemsPlain = [];
   let txnError = null;
+  /** How `runOrderSaveBody` last ran; drives rollback/log diagnosis. */
+  let orderSaveExecutionMode = "pending";
 
   const runOrderSaveBody = async (mongoSession) => {
     insertedItemsPlain = [];
     const lineItemSessionOpts = mongoSession ? { session: mongoSession } : {};
+    orderSaveExecutionMode = mongoSession ? "mongodb_transaction" : "no_session";
 
     response = await handleGenericCreate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
@@ -1010,13 +1020,19 @@ async function order_save(req, res) {
           { stopOnError: true, session: sess },
         );
         if (failed.length) {
-          const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`;
+          const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(
+            failed,
+          )}`;
           console.error(
             "⚠️ Post-order transaction bulk insert failed:",
             failed,
           );
           await logControllerError(req, msg, ORDER_TRANSACTION_ERROR_LOG);
-          throw new Error(msg);
+          const glErr = new Error(msg);
+          glErr.statusCode = 400;
+          glErr.responseType = "transaction_bulk";
+          glErr.details = failed;
+          throw glErr;
         }
         if (created[0]?.data?._id) {
           console.log(
@@ -1173,6 +1189,7 @@ async function order_save(req, res) {
     await mongooseClientSession.withTransaction(async () => {
       await runOrderSaveBody(mongooseClientSession);
     });
+    orderSaveExecutionMode = "mongodb_transaction_committed";
   } catch (mongoTransactionError) {
     if (isMongoTransactionUnsupportedError(mongoTransactionError)) {
       if (mongooseClientSession) {
@@ -1189,6 +1206,7 @@ async function order_save(req, res) {
       try {
         response = null;
         insertedItemsPlain = [];
+        orderSaveExecutionMode = "standalone_no_transaction_retry";
         await runOrderSaveBody(null);
       } catch (nonSessionRetryError) {
         txnError = nonSessionRetryError;
@@ -1219,6 +1237,7 @@ async function order_save(req, res) {
       }
     } else {
       txnError = mongoTransactionError;
+      orderSaveExecutionMode = "mongodb_transaction_aborted";
       const errName = mongoTransactionError?.name || "Error";
       const errMsg =
         mongoTransactionError?.message != null ?
@@ -1258,10 +1277,48 @@ async function order_save(req, res) {
   req.body = originalBody;
 
   if (txnError) {
+    console.error(
+      "[order_save] failure (serializeErrorForLog):\n",
+      serializeErrorForLog(txnError),
+    );
+
+    const bodyForLog = originalBody && typeof originalBody === "object" ? originalBody : {};
+    const firstLine = lines[0] || {};
     await logRollbackFailure(req, txnError, {
       action: "ORDER CREATE ROLLBACK",
       tags: ["api", "order", "rollback", "create"],
       fallbackUrl: "/api/order/order_save",
+      context: {
+        execution_mode: orderSaveExecutionMode,
+        rollback_note:
+          orderSaveExecutionMode === "mongodb_transaction_aborted" ||
+          orderSaveExecutionMode === "mongodb_transaction"
+            ? "MongoDB multi-document transaction aborted; no partial commit from this attempt."
+            : orderSaveExecutionMode === "mongodb_transaction_committed"
+              ? "Transaction committed but a later step failed (unexpected)."
+              : "Standalone / no transaction: partial writes may exist if a step failed mid-flow; check order_item and transactions for orphans.",
+        transaction_number,
+        line_count: lines.length,
+        customer_id:
+          coalesceObjectId(bodyForLog.customer_id) ?? bodyForLog.customer_id,
+        amount_received: bodyForLog.amount_received,
+        posPayMethod:
+          coalesceObjectId(bodyForLog.posPayMethod) ??
+          bodyForLog.posPayMethod,
+        payment_method_id:
+          coalesceObjectId(bodyForLog.payment_method_id) ??
+          bodyForLog.payment_method_id,
+        company_id:
+          coalesceObjectId(req.user?.company_id) ?? req.user?.company_id,
+        first_line_product_id: firstLine.product_id,
+        first_line_qty: firstLine.qty,
+        partial_order_id: response?.data?._id
+          ? String(response.data._id)
+          : null,
+        api_client_error: txnError.clientErrorPayload ?? null,
+        gl_or_bulk_details: txnError.details ?? null,
+        error_message: String(txnError.message || ""),
+      },
     });
     if (
       txnError.clientErrorPayload &&
@@ -1283,11 +1340,14 @@ async function order_save(req, res) {
     const msg = String(txnError.message || "");
     // GL bulk path prefixes the message with `Post-order transaction bulk insert failed`.
     const isGl = msg.includes("Post-order");
-    return res.status(isGl ? 400 : 500).json({
+    const isBulk = txnError.responseType === "transaction_bulk";
+    return res.status(isGl || isBulk ? 400 : 500).json({
       success: false,
-      status: isGl ? 400 : 500,
-      error: isGl ? "Order creation rolled back" : "Failed to create order",
-      details: txnError.message,
+      status: isGl || isBulk ? 400 : 500,
+      error: isGl || isBulk ? "Order creation rolled back" : "Failed to create order",
+      message: txnError.message,
+      details: txnError.details ?? txnError.message,
+      type: txnError.responseType || (isGl ? "transaction_bulk" : "internal"),
     });
   }
 
@@ -1339,9 +1399,11 @@ async function order_update(req, res) {
   let mongooseClientSession = null;
   let response = null;
   let txnError = null;
+  let orderUpdateExecutionMode = "pending";
 
   const runOrderUpdateBody = async (mongoSession) => {
     const sessOpts = mongoSession ? { session: mongoSession } : {};
+    orderUpdateExecutionMode = mongoSession ? "mongodb_transaction" : "no_session";
 
     response = await handleGenericUpdate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
@@ -1366,10 +1428,10 @@ async function order_update(req, res) {
         );
 
         const { created, failed } = await transactionBulkCreate(
-          req,
+          orderReq,
           [
             {
-              account_id: req.user.company_id.default_sales_account,
+              account_id: orderReq.user.company_id.default_sales_account,
               type: "credit",
               amount: orderTotal,
               reference_user_id: record?.customer_id,
@@ -1382,7 +1444,7 @@ async function order_update(req, res) {
               createdAt: record.createdAt,
             },
             {
-              account_id: req.user.company_id.default_shipping_account,
+              account_id: orderReq.user.company_id.default_shipping_account,
               type: "credit",
               amount: record?.shipment,
               reference_user_id: record?.customer_id,
@@ -1395,7 +1457,7 @@ async function order_update(req, res) {
               createdAt: record.createdAt,
             },
             {
-              account_id: req.user.company_id.default_sales_discount_account,
+              account_id: orderReq.user.company_id.default_sales_discount_account,
               type: "debit",
               amount: record?.discount,
               reference_user_id: record?.customer_id,
@@ -1408,7 +1470,8 @@ async function order_update(req, res) {
               createdAt: record.createdAt,
             },
             {
-              account_id: req.body?.posPayMethod,
+              account_id:
+                orderReq.body?.posPayMethod ?? orderReq.body?.payment_method_accounts_id,
               type: "debit",
               amount: record?.amount_received,
               reference_user_id: record?.customer_id,
@@ -1426,13 +1489,19 @@ async function order_update(req, res) {
         postUpdateTransactions.created = created;
         postUpdateTransactions.failed = failed;
         if (failed.length) {
-          const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(failed)}`;
+          const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(
+            failed,
+          )}`;
           console.error(
             "⚠️ Post-order transaction bulk insert failed:",
             failed,
           );
           await logControllerError(req, msg, ORDER_TRANSACTION_ERROR_LOG);
-          throw new Error(msg);
+          const glErr = new Error(msg);
+          glErr.statusCode = 400;
+          glErr.responseType = "transaction_bulk";
+          glErr.details = failed;
+          throw glErr;
         }
         if (created[0]?.data?._id) {
           console.log(
@@ -1458,7 +1527,7 @@ async function order_update(req, res) {
         req,
       );
       if (built.error) {
-        throw new Error(JSON.stringify(built.error));
+        throwOrderCreateFromGenericFailure(built.error, "Order line build failed");
       }
       await OrderItem.deleteMany({ order_id: orderId }, sessOpts);
       await OrderItem.insertMany(built.docs, sessOpts);
@@ -1473,6 +1542,7 @@ async function order_update(req, res) {
     await mongooseClientSession.withTransaction(async () => {
       await runOrderUpdateBody(mongooseClientSession);
     });
+    orderUpdateExecutionMode = "mongodb_transaction_committed";
   } catch (mongoTransactionError) {
     if (isMongoTransactionUnsupportedError(mongoTransactionError)) {
       if (mongooseClientSession) {
@@ -1490,16 +1560,22 @@ async function order_update(req, res) {
         response = null;
         postUpdateTransactions.created = [];
         postUpdateTransactions.failed = [];
+        orderUpdateExecutionMode = "standalone_no_transaction_retry";
         await runOrderUpdateBody(null);
       } catch (nonSessionRetryError) {
         txnError = nonSessionRetryError;
         console.error(
-          "[order_update] non-session retry failed:",
+          "[order_update] non-session retry failed:\n",
           serializeErrorForLog(nonSessionRetryError),
         );
       }
     } else {
       txnError = mongoTransactionError;
+      orderUpdateExecutionMode = "mongodb_transaction_aborted";
+      console.error(
+        "[order_update] withTransaction failed:\n",
+        serializeErrorForLog(mongoTransactionError),
+      );
     }
   } finally {
     if (mongooseClientSession) {
@@ -1514,10 +1590,48 @@ async function order_update(req, res) {
   req.body = originalBody;
 
   if (txnError) {
+    console.error(
+      "[order_update] failure (serializeErrorForLog):\n",
+      serializeErrorForLog(txnError),
+    );
+
+    const bodyForLog =
+      originalBody && typeof originalBody === "object" ? originalBody : {};
+    const firstLine = lines[0] || {};
     await logRollbackFailure(req, txnError, {
       action: "ORDER UPDATE ROLLBACK",
       tags: ["api", "order", "rollback", "update"],
-      fallbackUrl: "/api/order/order_update",
+      fallbackUrl: `/api/order/order_update/${recordId}`,
+      context: {
+        execution_mode: orderUpdateExecutionMode,
+        rollback_note:
+          orderUpdateExecutionMode === "mongodb_transaction_aborted" ||
+          orderUpdateExecutionMode === "mongodb_transaction"
+            ? "MongoDB multi-document transaction aborted; no partial commit from this attempt."
+            : orderUpdateExecutionMode === "mongodb_transaction_committed"
+              ? "Transaction committed but a later step failed (unexpected)."
+              : "Standalone / no transaction: partial writes may exist if a step failed mid-flow; check order_item and transactions for orphans.",
+        order_id: recordId,
+        line_count: lines.length,
+        customer_id:
+          coalesceObjectId(bodyForLog.customer_id) ?? bodyForLog.customer_id,
+        amount_received: bodyForLog.amount_received,
+        posPayMethod:
+          coalesceObjectId(bodyForLog.posPayMethod) ?? bodyForLog.posPayMethod,
+        payment_method_id:
+          coalesceObjectId(bodyForLog.payment_method_id) ??
+          bodyForLog.payment_method_id,
+        company_id:
+          coalesceObjectId(req.user?.company_id) ?? req.user?.company_id,
+        first_line_product_id: firstLine.product_id,
+        first_line_qty: firstLine.qty,
+        partial_order_id: response?.data?._id
+          ? String(response.data._id)
+          : recordId || null,
+        api_client_error: txnError.clientErrorPayload ?? null,
+        gl_or_bulk_details: txnError.details ?? null,
+        error_message: String(txnError.message || ""),
+      },
     });
     if (
       txnError.clientErrorPayload &&
@@ -1537,11 +1651,14 @@ async function order_update(req, res) {
     }
     const msg = String(txnError.message || "");
     const isGl = msg.includes("Post-order");
-    return res.status(isGl ? 400 : 500).json({
+    const isBulk = txnError.responseType === "transaction_bulk";
+    return res.status(isGl || isBulk ? 400 : 500).json({
       success: false,
-      status: isGl ? 400 : 500,
+      status: isGl || isBulk ? 400 : 500,
       error: "Order update rolled back",
-      details: txnError.message,
+      message: txnError.message,
+      details: txnError.details ?? txnError.message,
+      type: txnError.responseType || (isGl ? "transaction_bulk" : "internal"),
     });
   }
 
