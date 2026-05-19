@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch index.js",
     "devs": "nodemon -L index.js",
-    "server": "node index.js"
+    "server": "node index.js",
+    "redis:inspect": "node scripts/redis-inspect.js"
   },
   "author": "",
   "license": "ISC",
@@ -30,6 +31,7 @@
     "mysql2": "^3.22.2",
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.10",
+    "redis": "^5.12.1",
     "shortid": "^2.2.17",
     "uuid": "^11.1.0"
   }

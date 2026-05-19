@@ -111,15 +111,14 @@ const {
 //   blogdelete,
 // } = require("../controllers/blog");
 
-// Note: Warehouse routes are now handled dynamically
-// const {
-//   warehouseCreate,
-//   warehouseUpdate,
-//   warehouseById,
-//   getAllwarehouse,
-//   getallwarehouseactive,
-//   warehousedelete,
-// } = require("../controllers/warehouse");
+const {
+  warehouseCreate,
+  warehouseUpdate,
+  warehouseById,
+  getAllwarehouse,
+  getallwarehouseactive,
+  warehousedelete,
+} = require("../controllers/warehouse");
 
 // Note: Company routes are now handled dynamically
 // const {
@@ -326,7 +325,19 @@ registerAllModelRoutes(router, {
     },
     warehouse: {
       enabled: true,
-      excludedRoutes: [],
+      excludedRoutes: ["getAllActive"],
+      customRoutes: [
+        {
+          method: "GET",
+          path: "/warehouse/get-all-active",
+          handler: getallwarehouseactive,
+        },
+        {
+          method: "GET",
+          path: "/warehouses/get-all-active",
+          handler: getallwarehouseactive,
+        },
+      ],
     },
     company: {
       enabled: true,
