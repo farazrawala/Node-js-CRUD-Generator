@@ -1,5 +1,6 @@
 const { getUserToken } = require("../service/auth");
-const { handleGenericCreate } = require("../utils/modelHelper");
+const { coalesceObjectId } = require("../utils/modelHelper");
+const { createApplicationLog } = require("../utils/applicationLogs");
 const {
   buildUserCompanyPopulate,
   COMPANY_DEFAULT_ACCOUNT_PATHS,
@@ -47,26 +48,19 @@ async function logApiRequest(req, user = null) {
       }
     }
 
-    // Create a mock request object with log data in req.body
-    const logReq = Object.create(Object.getPrototypeOf(req));
-    Object.assign(logReq, req, {
-      body: {
+    // Audit log only — never mutate req.body (would break POST /assets/create, etc.)
+    void createApplicationLog(
+      req,
+      {
         action: `${method} ${action}`,
         url: req.path,
         tags: ["api", method.toLowerCase(), user ? "authenticated" : "public"],
         description: `User ${userEmail} accessed ${req.path}`,
-        company_id: companyId,
+        company_id: coalesceObjectId(companyId) ?? companyId,
         created_by: userId,
       },
-    });
-
-    // Insert log asynchronously (don't block the request)
-    handleGenericCreate(logReq, "logs", {
-      afterCreate: async (record, req) => {
-        console.log("✅ Log created successfully:", record._id);
-      },
-    }).catch((error) => {
-      // Log error but don't block the request
+      { silent: true },
+    ).catch((error) => {
       console.error("❌ Failed to create log:", error);
     });
   } catch (error) {

@@ -186,6 +186,14 @@ function generateControllerFunctions(modelName) {
         : "NO USER",
       );
 
+      if (!req.body || typeof req.body !== "object") {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Request body is required",
+        });
+      }
+
       // Always add company_id to req.body if user has one
       const tenantCo = tenantCompanyIdFromUser(req.user);
       if (tenantCo) {
@@ -195,6 +203,11 @@ function generateControllerFunctions(modelName) {
         console.log(
           `⚠️  No company_id found in req.user for ${modelName} create`,
         );
+      }
+
+      // `assets` requires user_id — default to authenticated user
+      if (modelName === "assets" && req.user?._id && !req.body.user_id) {
+        req.body.user_id = req.user._id;
       }
 
       const userControllerPath = path.join(

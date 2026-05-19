@@ -21,6 +21,7 @@ const {
   handleUserSignupCompany,
 } = require("../controllers/user");
 
+const { assetsSave, assetsUpdate } = require("../controllers/assets");
 const {
   productCreate,
   productUpdate,
@@ -285,6 +286,10 @@ router.get(
   getTransactionsListWithDebitCreditSummary,
 );
 
+// Assets routes
+router.post("/assets/save", assetsSave);
+router.patch("/assets/update/:id", assetsUpdate);
+
 router.post("/test", (req, res) => {
   console.log("Test route hit");
   res.status(200).json({ message: "Test successful" });
@@ -367,6 +372,10 @@ registerAllModelRoutes(router, {
     product_relations: {
       enabled: true,
       excludedRoutes: [],
+    },
+    assets: {
+      enabled: true,
+      excludedRoutes: ["create", "update"],
     },
   },
 });
