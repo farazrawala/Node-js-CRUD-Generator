@@ -11,20 +11,21 @@ const {
 } = require("../utils/modelHelper");
 
 const {
-  WAREHOUSE_ACTIVE_CACHE_TTL_SEC,
-  buildWarehouseActiveListCacheKey,
-  normalizeWarehouseActiveListQuery,
-  resolveCompanyIdFromReq,
-  getCache,
-  setCache,
-  invalidateWarehouseActiveListForReq,
-  isRedisConnected,
+  runCachedListHandler,
+  invalidateListCacheForReq,
 } = require("../utils/redisCache");
+
+const WAREHOUSE_LIST_CACHE_MODULE = "warehouse";
+const WAREHOUSE_LIST_CACHE_ACTION = "get-all-active";
 
 async function warehouseCreate(req, res) {
   const response = await handleGenericCreate(req, "warehouse", {
     afterCreate: async (record, req) => {
-      await invalidateWarehouseActiveListForReq(req);
+      await invalidateListCacheForReq(
+        req,
+        WAREHOUSE_LIST_CACHE_MODULE,
+        WAREHOUSE_LIST_CACHE_ACTION,
+      );
 
       console.log("✅ Record created successfully:", record);
     },
@@ -58,7 +59,11 @@ async function warehouseUpdate(req, res) {
     },
 
     afterUpdate: async (record, req, existingUser) => {
-      await invalidateWarehouseActiveListForReq(req);
+      await invalidateListCacheForReq(
+        req,
+        WAREHOUSE_LIST_CACHE_MODULE,
+        WAREHOUSE_LIST_CACHE_ACTION,
+      );
 
       console.log("✅ Record updated successfully:", record);
     },
@@ -92,64 +97,24 @@ async function getAllwarehouse(req, res) {
 }
 
 /**
- * Active warehouses for the user's company.
- * Cache key: `{companyId}:warehouse:get-all-active` or `...:q:{hash}` per query params, TTL 300s.
+ * Active warehouses for the user's company (cached via generic list handler).
  */
 async function getallwarehouseactive(req, res) {
-  const companyId = resolveCompanyIdFromReq(req);
-  const cacheKey =
-    companyId ? buildWarehouseActiveListCacheKey(companyId, req) : null;
-  const cacheQuery = normalizeWarehouseActiveListQuery(req.query);
-
-  // 1. Check cache first (Redis, then in-memory if Redis is down)
-  if (cacheKey) {
-    const { data: cached, backend } = await getCache(cacheKey);
-    if (cached) {
-      return res.status(200).json({
-        ...cached,
-        fromCache: true,
-        cacheKey,
-        cacheBackend: backend,
-        ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
-      });
-    }
-  }
-
-  // 2. Cache miss → query database
-  const response = await handleGenericGetAll(req, "warehouse", {
-    filter: { status: "active", deletedAt: null },
-    excludeFields: [],
-    sort: { createdAt: -1 },
-    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
-    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
-  });
-
-  // 3. Store for next request
-  let cacheMeta = {};
-  if (cacheKey && response?.success) {
-    const { stored, backend } = await setCache(
-      cacheKey,
-      response,
-      WAREHOUSE_ACTIVE_CACHE_TTL_SEC,
-    );
-    const redisUp = await isRedisConnected();
-    cacheMeta = {
-      cacheKey,
-      fromCache: false,
-      cached: stored,
-      cacheBackend: backend,
-      redisConnected: redisUp,
-      ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
-      ...(!redisUp && {
-        cacheNote:
-          "Redis is not running on REDIS_URL; using in-memory cache for this process.",
+  return runCachedListHandler(req, res, {
+    module: WAREHOUSE_LIST_CACHE_MODULE,
+    action: WAREHOUSE_LIST_CACHE_ACTION,
+    fetch: () =>
+      handleGenericGetAll(req, "warehouse", {
+        filter: {
+          status: "active",
+          deletedAt: null,
+          companyId: req.user.companyId,
+        },
+        excludeFields: [],
+        sort: { createdAt: -1 },
+        limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+        skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
       }),
-    };
-  }
-
-  return res.status(response.status).json({
-    ...response,
-    ...cacheMeta,
   });
 }
 
@@ -166,7 +131,11 @@ async function warehousedelete(req, res) {
 
   const response = await handleGenericUpdate(req, "warehouse", {
     afterUpdate: async (record, req, existingRecord) => {
-      await invalidateWarehouseActiveListForReq(req);
+      await invalidateListCacheForReq(
+        req,
+        WAREHOUSE_LIST_CACHE_MODULE,
+        WAREHOUSE_LIST_CACHE_ACTION,
+      );
     },
   });
 

@@ -191,8 +191,7 @@ function buildAssetsGlItems(record, transaction_number, companyObj) {
     throw err;
   }
 
-  const purchaseAccountId = pickObjectId(companyObj?.default_purchase_account);
-  const salesAccountId = pickObjectId(companyObj?.default_sales_account);
+  const fixedAssetAccountId = pickObjectId(companyObj?.default_fixed_asset_account);
 
   const label = record?.name ? String(record.name).trim() : "Asset";
   const description = `Asset ${assetType} - ${label}`;
@@ -209,30 +208,24 @@ function buildAssetsGlItems(record, transaction_number, companyObj) {
     },
   };
 
-  if (isBuy) {
-    if (!purchaseAccountId) {
-      const err = new Error(
-        "Company default_purchase_account is required to post asset buy transactions",
-      );
-      err.statusCode = 400;
-      throw err;
-    }
-    return [
-      { ...base, account_id: purchaseAccountId, type: "debit" },
-      { ...base, account_id: cashAccountId, type: "credit" },
-    ];
-  }
-
-  if (!salesAccountId) {
+  if (!fixedAssetAccountId) {
     const err = new Error(
-      "Company default_sales_account is required to post asset sell transactions",
+      "Company default_fixed_asset_account is required to post asset transactions",
     );
     err.statusCode = 400;
     throw err;
   }
+
+  if (isBuy) {
+    return [
+      { ...base, account_id: fixedAssetAccountId, type: "debit" },
+      { ...base, account_id: cashAccountId, type: "credit" },
+    ];
+  }
+
   return [
     { ...base, account_id: cashAccountId, type: "debit" },
-    { ...base, account_id: salesAccountId, type: "credit" },
+    { ...base, account_id: fixedAssetAccountId, type: "credit" },
   ];
 }
 

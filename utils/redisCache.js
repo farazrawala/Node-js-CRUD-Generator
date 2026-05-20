@@ -1,12 +1,20 @@
 const crypto = require("crypto");
 const { coalesceObjectId } = require("./modelHelper");
 
-/** Suffix for active warehouse list cache keys: `{companyId}:warehouse:get-all-active` */
-const WAREHOUSE_ACTIVE_LIST_KEY_SUFFIX = "warehouse:get-all-active";
-
-const WAREHOUSE_ACTIVE_CACHE_TTL_SEC = Number(
-  process.env.REDIS_TTL_WAREHOUSE_ACTIVE || 300,
+const DEFAULT_LIST_CACHE_TTL_SEC = Number(
+  process.env.REDIS_TTL_LIST_CACHE ||
+    process.env.REDIS_TTL_WAREHOUSE_ACTIVE ||
+    300,
 );
+
+/** Ignored when building cache keys from full query (e.g. cache-busters). */
+const LIST_CACHE_QUERY_BLOCKLIST = new Set([
+  "_",
+  "t",
+  "cb",
+  "nocache",
+  "timestamp",
+]);
 
 let client = null;
 let connectPromise = null;
@@ -14,9 +22,7 @@ let redisUnavailable = false;
 let redisUnavailableAt = 0;
 let connectFailureLogged = false;
 
-/** In-process fallback when Redis is unreachable (per Node process). */
 const memoryCache = new Map();
-
 const REDIS_RETRY_AFTER_MS = Number(process.env.REDIS_RETRY_AFTER_MS || 5_000);
 
 function isMemoryFallbackEnabled() {
@@ -39,7 +45,7 @@ function memoryGet(key) {
 function memorySet(key, value, ttlSeconds) {
   const ttl = Number(ttlSeconds);
   const sec =
-    Number.isFinite(ttl) && ttl > 0 ? ttl : WAREHOUSE_ACTIVE_CACHE_TTL_SEC;
+    Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_LIST_CACHE_TTL_SEC;
   memoryCache.set(key, {
     value,
     expiresAt: Date.now() + Math.floor(sec) * 1000,
@@ -87,10 +93,6 @@ function markRedisUnavailable(err) {
   connectPromise = null;
 }
 
-/**
- * Reusable Redis client (singleton). Returns null if Redis is disabled or unreachable.
- * Never throws — safe to call from request handlers.
- */
 async function getRedisClient() {
   if (!isRedisConfigured()) return null;
   if (redisUnavailable && !shouldRetryRedisConnect()) return null;
@@ -129,10 +131,6 @@ async function getRedisClient() {
   return connectPromise;
 }
 
-/**
- * Read JSON from cache (Redis first, then in-memory fallback).
- * @returns {{ data: object|null, backend: 'redis'|'memory'|null }}
- */
 async function getCache(key) {
   try {
     const redis = await getRedisClient();
@@ -152,11 +150,7 @@ async function getCache(key) {
   return { data: null, backend: null };
 }
 
-/**
- * Write JSON to cache with TTL (seconds).
- * @returns {{ stored: boolean, backend: 'redis'|'memory'|null }}
- */
-async function setCache(key, value, ttlSeconds = WAREHOUSE_ACTIVE_CACHE_TTL_SEC) {
+async function setCache(key, value, ttlSeconds = DEFAULT_LIST_CACHE_TTL_SEC) {
   let backend = null;
   try {
     const redis = await getRedisClient();
@@ -165,7 +159,7 @@ async function setCache(key, value, ttlSeconds = WAREHOUSE_ACTIVE_CACHE_TTL_SEC)
       const ex =
         Number.isFinite(ttl) && ttl > 0 ?
           Math.floor(ttl)
-        : WAREHOUSE_ACTIVE_CACHE_TTL_SEC;
+        : DEFAULT_LIST_CACHE_TTL_SEC;
       await redis.set(key, JSON.stringify(value), { EX: ex });
       backend = "redis";
     }
@@ -179,7 +173,6 @@ async function setCache(key, value, ttlSeconds = WAREHOUSE_ACTIVE_CACHE_TTL_SEC)
   return { stored: backend === "redis", backend };
 }
 
-/** Delete a cache key (Redis + memory). */
 async function deleteCache(key) {
   memoryDel(key);
   try {
@@ -198,36 +191,40 @@ async function isRedisConnected() {
   return Boolean(redis?.isOpen);
 }
 
-/** Query params that change the get-all-active response shape (each combo gets its own cache entry). */
-const WAREHOUSE_ACTIVE_CACHE_QUERY_KEYS = [
-  "limit",
-  "skip",
-  "search",
-  "searchFields",
-  "sortBy",
-  "sortOrder",
-  "populate",
-];
-
-function normalizeWarehouseActiveListQuery(query = {}) {
+/**
+ * Stable query object for cache key fingerprint (pagination, search, filters, populate).
+ * @param {object} [query] req.query
+ * @param {{ keys?: string[] }} [options] optional allowlist; default = all keys except blocklist
+ */
+function normalizeListQuery(query = {}, options = {}) {
   const normalized = {};
-  for (const key of WAREHOUSE_ACTIVE_CACHE_QUERY_KEYS) {
+  const allowlist = options.keys;
+  const keys =
+    allowlist ?
+      [...allowlist].sort()
+    : Object.keys(query).sort();
+
+  for (const key of keys) {
+    if (LIST_CACHE_QUERY_BLOCKLIST.has(key)) continue;
     const raw = query[key];
     if (raw === undefined || raw === null || raw === "") continue;
-    normalized[key] = String(raw).trim();
+    normalized[key] =
+      Array.isArray(raw) ?
+        raw.map((v) => String(v).trim()).join(",")
+      : String(raw).trim();
   }
   return normalized;
 }
 
 /**
- * `{companyId}:warehouse:get-all-active` or `...:q:{hash}` when limit/skip/search/populate differ.
+ * `{companyId}:{module}:{action}` or `...:q:{hash}` when query params differ.
  */
-function buildWarehouseActiveListCacheKey(companyId, req) {
+function buildListCacheKey({ companyId, module, action = "get-all-active", query }) {
+  const mod = String(module || "resource").trim();
+  const act = String(action || "get-all-active").trim();
   const base =
-    companyId ?
-      `${String(companyId)}:${WAREHOUSE_ACTIVE_LIST_KEY_SUFFIX}`
-    : WAREHOUSE_ACTIVE_LIST_KEY_SUFFIX;
-  const queryPart = normalizeWarehouseActiveListQuery(req?.query);
+    companyId ? `${String(companyId)}:${mod}:${act}` : `${mod}:${act}`;
+  const queryPart = normalizeListQuery(query || {});
   if (Object.keys(queryPart).length === 0) {
     return base;
   }
@@ -239,28 +236,48 @@ function buildWarehouseActiveListCacheKey(companyId, req) {
   return `${base}:q:${fingerprint}`;
 }
 
+function buildListCachePrefix(companyId, module, action = "get-all-active") {
+  const mod = String(module || "resource").trim();
+  const act = String(action || "get-all-active").trim();
+  return companyId ? `${String(companyId)}:${mod}:${act}` : `${mod}:${act}`;
+}
+
 function resolveCompanyIdFromReq(req) {
   return coalesceObjectId(req.user?.company_id);
 }
 
-/** Prefix for all warehouse active-list keys for a company (used on invalidation). */
-function warehouseActiveListCachePrefix(companyId) {
-  if (!companyId) return WAREHOUSE_ACTIVE_LIST_KEY_SUFFIX;
-  return `${String(companyId)}:${WAREHOUSE_ACTIVE_LIST_KEY_SUFFIX}`;
+/**
+ * Cache key + normalized query for a list endpoint.
+ * @returns {{ cacheKey: string|null, cacheQuery: object, companyId: string|null }}
+ */
+function resolveListCacheFromReq(req, { module, action = "get-all-active" } = {}) {
+  const companyId = resolveCompanyIdFromReq(req);
+  const cacheQuery = normalizeListQuery(req?.query);
+  const cacheKey =
+    companyId ?
+      buildListCacheKey({
+        companyId,
+        module,
+        action,
+        query: req?.query,
+      })
+    : null;
+  return { cacheKey, cacheQuery, companyId };
 }
 
 async function deleteCacheByPattern(matchPattern) {
   const prefix = matchPattern.replace(/\*$/, "");
+  let deleted = 0;
   for (const key of [...memoryCache.keys()]) {
     if (key === prefix || key.startsWith(`${prefix}:`)) {
       memoryDel(key);
+      deleted += 1;
     }
   }
   try {
     const redis = await getRedisClient();
-    if (!redis) return 0;
+    if (!redis) return deleted;
     let cursor = 0;
-    let deleted = 0;
     do {
       const reply = await redis.scan(cursor, {
         MATCH: matchPattern,
@@ -274,39 +291,106 @@ async function deleteCacheByPattern(matchPattern) {
     return deleted;
   } catch (err) {
     markRedisUnavailable(err);
-    return 0;
+    return deleted;
   }
 }
 
-async function invalidateWarehouseActiveList(companyId) {
-  if (!companyId) return;
-  const pattern = `${warehouseActiveListCachePrefix(companyId)}*`;
+async function invalidateListCache(companyId, module, action = "get-all-active") {
+  if (!companyId) return 0;
+  const pattern = `${buildListCachePrefix(companyId, module, action)}*`;
   const deleted = await deleteCacheByPattern(pattern);
   if (deleted > 0) {
-    console.log("[redis] invalidated warehouse active-list cache:", pattern, deleted);
+    console.log("[redis] invalidated list cache:", pattern, deleted);
   }
+  return deleted;
 }
 
-async function invalidateWarehouseActiveListForReq(req) {
+async function invalidateListCacheForReq(
+  req,
+  module,
+  action = "get-all-active",
+) {
   const companyId = resolveCompanyIdFromReq(req);
   if (companyId) {
-    await invalidateWarehouseActiveList(companyId);
+    return invalidateListCache(companyId, module, action);
   }
+  return 0;
+}
+
+/**
+ * Generic read-through cache for GET list / get-all-active handlers.
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {{ module: string, action?: string, ttl?: number, fetch: () => Promise<object> }} options
+ */
+async function runCachedListHandler(req, res, options) {
+  const {
+    module,
+    action = "get-all-active",
+    ttl = DEFAULT_LIST_CACHE_TTL_SEC,
+    fetch,
+  } = options;
+
+  const { cacheKey, cacheQuery } = resolveListCacheFromReq(req, {
+    module,
+    action,
+  });
+
+  if (cacheKey) {
+    const { data: cached, backend } = await getCache(cacheKey);
+    if (cached) {
+      return res.status(200).json({
+        ...cached,
+        fromCache: true,
+        cacheKey,
+        cacheBackend: backend,
+        ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
+      });
+    }
+  }
+
+  const response = await fetch();
+
+  let cacheMeta = {};
+  if (cacheKey && response?.success) {
+    const { stored, backend } = await setCache(cacheKey, response, ttl);
+    const redisUp = await isRedisConnected();
+    cacheMeta = {
+      cacheKey,
+      fromCache: false,
+      cached: stored,
+      cacheBackend: backend,
+      redisConnected: redisUp,
+      ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
+      ...(!redisUp && {
+        cacheNote:
+          "Redis is not running on REDIS_URL; using in-memory cache for this process.",
+      }),
+    };
+  }
+
+  return res.status(response?.status || 200).json({
+    ...response,
+    ...cacheMeta,
+  });
 }
 
 module.exports = {
-  WAREHOUSE_ACTIVE_LIST_KEY_SUFFIX,
-  WAREHOUSE_ACTIVE_CACHE_TTL_SEC,
+  DEFAULT_LIST_CACHE_TTL_SEC,
+  WAREHOUSE_ACTIVE_CACHE_TTL_SEC: DEFAULT_LIST_CACHE_TTL_SEC,
   getRedisClient,
   getCache,
   setCache,
   deleteCache,
-  buildWarehouseActiveListCacheKey,
-  normalizeWarehouseActiveListQuery,
-  warehouseActiveListCachePrefix,
+  deleteCacheByPattern,
+  normalizeListQuery,
+  buildListCacheKey,
+  buildListCachePrefix,
+  resolveListCacheFromReq,
   resolveCompanyIdFromReq,
-  invalidateWarehouseActiveList,
-  invalidateWarehouseActiveListForReq,
+  invalidateListCache,
+  invalidateListCacheForReq,
+  runCachedListHandler,
   isRedisConfigured,
   isRedisConnected,
   isMemoryFallbackEnabled,

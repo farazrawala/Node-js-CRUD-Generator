@@ -20,6 +20,10 @@ const {
   applyIncludeExcludeIdQueryFilter,
   INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 } = require("./modelHelper");
+const {
+  runCachedListHandler,
+  invalidateListCacheForReq,
+} = require("./redisCache");
 
 const RESERVED_QUERY_KEYS = new Set([
   "limit",
@@ -257,6 +261,7 @@ function generateControllerFunctions(modelName) {
         }
 
         console.log(`✅ ${modelName} created successfully:`, record._id);
+        await invalidateListCacheForReq(req, modelName, "get-all-active");
       };
 
       try {
@@ -322,13 +327,14 @@ function generateControllerFunctions(modelName) {
         filter: filter,
       };
 
-      if (modelName === "user") {
-        updateOptions.afterUpdate = async (
-          updatedRecord,
-          req,
-          existingRecord,
-          session,
-        ) => {
+      const priorAfterUpdate = updateOptions.afterUpdate;
+      updateOptions.afterUpdate = async (
+        updatedRecord,
+        req,
+        existingRecord,
+        session,
+      ) => {
+        if (modelName === "user") {
           try {
             const { reconcileUserInitialBalanceOnUpdate } = require(
               userControllerPath,
@@ -343,8 +349,12 @@ function generateControllerFunctions(modelName) {
             console.error("⚠️ reconcileUserInitialBalanceOnUpdate:", e.message);
             throw e;
           }
-        };
-      }
+        }
+        if (priorAfterUpdate) {
+          await priorAfterUpdate(updatedRecord, req, existingRecord, session);
+        }
+        await invalidateListCacheForReq(req, modelName, "get-all-active");
+      };
 
       try {
         if (modelName === "user") {
@@ -441,41 +451,45 @@ function generateControllerFunctions(modelName) {
 
     // Get all active (if status field exists)
     getAllActive: async (req, res) => {
-      // `user`: "active" = not soft-deleted and not explicitly `inactive` (legacy docs may omit `status`).
-      // Pass `?include_inactive=true` to list every non-deleted user for the tenant (admin-style directory).
-      let filter = { deletedAt: null };
-      if (modelName === "user") {
-        const includeInactive =
-          req.query.include_inactive === "true" ||
-          req.query.include_inactive === "1";
-        if (!includeInactive) {
-          filter.status = { $ne: "inactive" };
-        }
-      } else {
-        filter.status = "active";
-      }
+      return runCachedListHandler(req, res, {
+        module: modelName,
+        action: "get-all-active",
+        fetch: async () => {
+          // `user`: "active" = not soft-deleted and not explicitly `inactive` (legacy docs may omit `status`).
+          // Pass `?include_inactive=true` to list every non-deleted user for the tenant (admin-style directory).
+          let filter = { deletedAt: null };
+          if (modelName === "user") {
+            const includeInactive =
+              req.query.include_inactive === "true" ||
+              req.query.include_inactive === "1";
+            if (!includeInactive) {
+              filter.status = { $ne: "inactive" };
+            }
+          } else {
+            filter.status = "active";
+          }
 
-      // Always filter by company_id if user has one
-      const tenantCo = tenantCompanyIdFromUser(req.user);
-      if (tenantCo) {
-        filter.company_id = tenantCo;
-        console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
-      }
-      filter = applyQueryFilters(filter, req.query, modelName);
-      filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
-      const sort = buildSortFromQuery(req.query, { createdAt: -1 });
+          const tenantCo = tenantCompanyIdFromUser(req.user);
+          if (tenantCo) {
+            filter.company_id = tenantCo;
+            console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
+          }
+          filter = applyQueryFilters(filter, req.query, modelName);
+          filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+          const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
-      const response = await handleGenericGetAll(req, modelName, {
-        filter: filter,
-        excludeFields: ["password"],
-        sort,
-        limit: req.query.limit ? parseInt(req.query.limit) : null,
-        skip: req.query.skip ? parseInt(req.query.skip) : 0,
-        search: req.query.search,
-        searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
-        populate: buildPopulateFromQuery(req.query, modelName),
+          return handleGenericGetAll(req, modelName, {
+            filter: filter,
+            excludeFields: ["password"],
+            sort,
+            limit: req.query.limit ? parseInt(req.query.limit) : null,
+            skip: req.query.skip ? parseInt(req.query.skip) : 0,
+            search: req.query.search,
+            searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+            populate: buildPopulateFromQuery(req.query, modelName),
+          });
+        },
       });
-      return res.status(response.status).json(response);
     },
 
     // Delete (soft delete)
@@ -501,6 +515,7 @@ function generateControllerFunctions(modelName) {
         filter,
         afterSoftDelete: async () => {
           console.log(`✅ ${modelName} soft deleted successfully.`);
+          await invalidateListCacheForReq(req, modelName, "get-all-active");
         },
       });
       return res.status(response.status).json(response);

@@ -149,6 +149,11 @@ const modelSchema = new mongoose.Schema(
       ref: "account",
       field_name: "Default Salary Account",
     },
+    default_fixed_asset_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Fixed Asset Account",
+    },
 
     default_equity_account_id: {
       type: mongoose.Schema.Types.ObjectId,

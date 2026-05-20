@@ -38,7 +38,7 @@ async function main() {
     if (used) console.log("Memory used:", used[1].trim());
     if (peak) console.log("Memory peak:", peak[1].trim());
 
-    const pattern = companyId ? `${companyId}:warehouse:*` : "*warehouse*";
+    const pattern = companyId ? `${companyId}:*` : "*";
     console.log("\nKeys matching", pattern, ":\n");
 
     let cursor = 0;
@@ -67,6 +67,7 @@ async function main() {
 
     if (companyId) {
       const exact = `${companyId}:warehouse:get-all-active`;
+      // Also try with query hash: KEYS `${companyId}:warehouse:get-all-active*`
       const exists = await client.exists(exact);
       if (exists) {
         const raw = await client.get(exact);

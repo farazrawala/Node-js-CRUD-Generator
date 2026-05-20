@@ -545,6 +545,7 @@ async function handleUserSignupCompany(req, res) {
       { name: "Equity", account_type: "equity" },
       { name: "Other Expense", account_type: "other_expense" },
       { name: "Utilities", account_type: "operating_expense" },
+      { name: "Fixed Asset", account_type: "fixed_asset" },
     ];
 
     // Create Equity first so opening-balance journals can resolve the contra account;
@@ -612,6 +613,7 @@ async function handleUserSignupCompany(req, res) {
           default_equity_account_id: createdAccountsData[10]._id,
           default_other_expense_account: createdAccountsData[11]._id,
           default_utilities_account: createdAccountsData[12]._id,
+          default_fixed_asset_account: createdAccountsData[13]._id,
         },
       }),
       "company",
