@@ -104,6 +104,11 @@ const {
   accountUpdate,
   fetchAccountsByType,
 } = require("../controllers/account");
+
+const {
+  amountTransferCreate,
+  amountTransferUpdate,
+} = require("../controllers/amount_transfer");
 const {
   adjustmentCreate,
   adjustmentUpdate,
@@ -191,6 +196,8 @@ router.get(
 // Expense routes
 router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
+
+// Amount transfer routes
 // Inventory movements routes
 router.post("/inventory_movements/save", inventoryMovementsCreate);
 router.post("/inventory_movements/stock-transfer", stockTransfer);
@@ -276,6 +283,10 @@ router.get("/account/fetch-account-by-type", fetchAccountsByType);
 // Adjustment routes
 router.post("/adjustment/save", adjustmentCreate);
 router.patch("/adjustment/update_record/:id", adjustmentUpdate);
+
+// Amount transfer routes
+router.post("/amount_transfer/save", amountTransferCreate);
+router.patch("/amount_transfer/update_record/:id", amountTransferUpdate);
 
 // Order routes
 router.post("/order/order_save", order_save);
