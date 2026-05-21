@@ -12,6 +12,10 @@ const {
 const InventoryMovements = require("../models/inventory_movements");
 const Product = require("../models/product");
 const Warehouse = require("../models/warehouse");
+const { invalidateListCacheForReq } = require("../utils/redisCache");
+
+const INVENTORY_MOVEMENTS_LIST_CACHE_MODULE = "inventory_movements";
+const INVENTORY_MOVEMENTS_LIST_CACHE_ACTION = "get-all-active";
 
 function toFiniteNumber(value) {
   const parsed = Number(value);
@@ -25,6 +29,14 @@ function toLedgerObjectId(value) {
   const s = String(raw).trim();
   if (!mongoose.Types.ObjectId.isValid(s)) return null;
   return new mongoose.Types.ObjectId(s);
+}
+
+/** Match ledger rows whether ids were saved as ObjectId or string (legacy / raw inserts). */
+function ledgerRefIdsMatch(value) {
+  const oid = toLedgerObjectId(value);
+  if (!oid) return null;
+  const str = String(oid);
+  return { $in: [oid, str] };
 }
 
 /**
@@ -41,9 +53,9 @@ function buildActiveMovementLedgerMatch({
     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     warehouse_id: { $exists: true, $ne: null },
   };
-  const pid = toLedgerObjectId(productId);
-  const cid = toLedgerObjectId(companyId);
-  const wid = toLedgerObjectId(warehouseId);
+  const pid = ledgerRefIdsMatch(productId);
+  const cid = ledgerRefIdsMatch(companyId);
+  const wid = ledgerRefIdsMatch(warehouseId);
   if (pid) match.product_id = pid;
   if (cid) match.company_id = cid;
   if (wid) match.warehouse_id = wid;
@@ -385,7 +397,8 @@ async function runInventoryMovementTxnBody(req, session) {
     const movementMatch = buildActiveMovementLedgerMatch({
       productId: pidResolved,
       companyId: coalesceObjectId(req.body.company_id ?? req.user?.company_id),
-      warehouseId: req.body.warehouse_id,
+      warehouseId:
+        toLedgerObjectId(req.body.warehouse_id) ?? req.body.warehouse_id,
     });
     return {
       match: movementMatch,
@@ -980,11 +993,18 @@ function resolveRequestCompanyId(req) {
 
 /**
  * POST stock transfer — two `inventory_movements` rows only (no `stock_transfer` table).
- * Out: product_id + from_warehouse_id + qty. In: product_id + to_warehouse_id + qty.
- * Body: product_id, from_warehouse_id, to_warehouse_id, qty (or quantity).
+ *
+ * Flow:
+ * 1. Validate body + tenant company
+ * 2. Ensure product and both warehouses belong to the company and are active
+ * 3. Check source warehouse has enough on-hand qty (ledger net)
+ * 4. Atomically post OUT (from) + IN (to) movements linked by `reference_id`
+ *
+ * Body (aliases accepted): product_id, from_warehouse_id, to_warehouse_id, qty | quantity
  */
 async function stockTransfer(req, res) {
   try {
+    // --- Parse body (camelCase aliases for clients) ---
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const productIdRaw = body.product_id ?? body.productId;
     const fromWarehouseIdRaw =
@@ -993,6 +1013,7 @@ async function stockTransfer(req, res) {
       body.to_warehouse_id ?? body.to_warehouse ?? body.toWarehouseId;
     const qtyRaw = body.qty ?? body.quantity;
 
+    // --- Request validation ---
     const errors = [];
     const productIdStr =
       productIdRaw != null ? String(productIdRaw).trim() : "";
@@ -1052,11 +1073,13 @@ async function stockTransfer(req, res) {
     const fromWarehouseId = new mongoose.Types.ObjectId(fromWarehouseIdStr);
     const toWarehouseId = new mongoose.Types.ObjectId(toWarehouseIdStr);
 
+    // Tenant scope: every lookup must match the authenticated user's company
     const companyFilter = {
       company_id: companyId,
       $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     };
 
+    // --- Product must exist, be active, and belong to this company ---
     const product = await Product.findOne({
       _id: productId,
       ...companyFilter,
@@ -1073,6 +1096,7 @@ async function stockTransfer(req, res) {
       });
     }
 
+    // --- Both warehouses must exist, be active, and belong to this company ---
     const [fromWarehouse, toWarehouse] = await Promise.all([
       Warehouse.findOne({
         _id: fromWarehouseId,
@@ -1105,6 +1129,7 @@ async function stockTransfer(req, res) {
       });
     }
 
+    // --- Stock check on source warehouse (sum of in/out ledger for this product) ---
     const availableQty = await getLedgerNetQtyForWarehouse(
       productId,
       companyId,
@@ -1112,21 +1137,43 @@ async function stockTransfer(req, res) {
       null,
     );
     if (transferQty > availableQty) {
+      const warehouseStock = await aggregateNetQtyByWarehouse(
+        productId,
+        companyId,
+        null,
+      );
+      const stockByWarehouse = warehouseStock.map((row) => ({
+        warehouse_id: String(row.warehouse_id),
+        net_qty: toFiniteNumber(row.net_qty),
+      }));
+
       return res.status(400).json({
         success: false,
         status: 400,
         error: "Insufficient stock",
-        message: `Insufficient stock in source warehouse: need ${transferQty}, available ${availableQty}`,
+        message:
+          availableQty === 0 ?
+            `No active ledger stock for this product in source warehouse ${fromWarehouseIdStr}. ` +
+            `Only movements with status "active" and deletedAt null count. ` +
+            `Stock by warehouse: ${stockByWarehouse.map((w) => `${w.warehouse_id}=${w.net_qty}`).join(", ") || "none"}`
+          : `Insufficient stock in source warehouse: need ${transferQty}, available ${availableQty}`,
         product_id: productIdStr,
+        company_id: String(companyId),
         from_warehouse_id: fromWarehouseIdStr,
         available_qty: availableQty,
         qty_needed: transferQty,
+        stock_by_warehouse: stockByWarehouse,
       });
     }
 
+    // Cost follows product wholesale price for both legs of the transfer
     const unitCost = toFiniteNumber(product.wholesale_price);
     const totalCost = Math.round(transferQty * unitCost * 100) / 100;
 
+    /**
+     * Creates paired OUT + IN movements inside one Mongo transaction (or sequential fallback).
+     * `reference_id` ties both rows to the same logical transfer for reporting/audit.
+     */
     const runTransferTxn = async (session) => {
       const transferReferenceId = new mongoose.Types.ObjectId();
 
@@ -1142,9 +1189,11 @@ async function stockTransfer(req, res) {
         status: "active",
       };
 
+      // Reuse generic movement handler by temporarily shaping req.body (restore after)
       const bodyBefore = req.body;
       const paramsIdBefore = req.params?.id;
 
+      // Leg 1: decrease stock at source warehouse
       req.body = {
         ...movementBase,
         warehouse_id: fromWarehouseIdStr,
@@ -1152,6 +1201,7 @@ async function stockTransfer(req, res) {
       };
       const outResult = await runInventoryMovementTxnBody(req, session);
 
+      // Leg 2: increase stock at destination warehouse
       req.body = {
         ...movementBase,
         warehouse_id: toWarehouseIdStr,
@@ -1166,6 +1216,7 @@ async function stockTransfer(req, res) {
       return { transferReferenceId, outResult, inResult };
     };
 
+    // --- Run OUT+IN atomically when the deployment supports multi-doc transactions ---
     let txnResult = null;
     let txnError = null;
     let clientSession = null;
@@ -1176,6 +1227,7 @@ async function stockTransfer(req, res) {
         txnResult = await runTransferTxn(clientSession);
       });
     } catch (transactionStartError) {
+      // Standalone Mongo / some hosts: retry without session so dev/single-node still works
       if (isMongoTransactionUnsupportedError(transactionStartError)) {
         if (clientSession) {
           try {
@@ -1207,6 +1259,7 @@ async function stockTransfer(req, res) {
       }
     }
 
+    // Surface validation/business errors from movement handler (e.g. insufficient stock race)
     if (txnError) {
       const errorResponsePayload = txnError.clientPayload;
       if (
@@ -1228,6 +1281,7 @@ async function stockTransfer(req, res) {
     const fromLabel = fromWarehouse.name || fromWarehouseIdStr;
     const toLabel = toWarehouse.name || toWarehouseIdStr;
 
+    // Audit trail links both movement ids under one transfer reference
     await createApplicationLog(req, {
       action: "Stock transfer completed",
       url: req.originalUrl || "/api/inventory_movements/stock-transfer",
@@ -1244,17 +1298,25 @@ async function stockTransfer(req, res) {
       company_id: companyId,
     });
 
+    // Clear cached list endpoints (e.g. GET /inventory_movements/get-all-active)
+    await invalidateListCacheForReq(
+      req,
+      INVENTORY_MOVEMENTS_LIST_CACHE_MODULE,
+      INVENTORY_MOVEMENTS_LIST_CACHE_ACTION,
+    );
+
     return res.status(201).json({
       success: true,
       status: 201,
       message: `Transferred ${transferQty} unit(s) from ${fromLabel} to ${toLabel}`,
       data: {
-        reference_id: String(transferReferenceId),
+        reference_id: String(transferReferenceId), // shared by OUT and IN rows
         out: outResult?.response?.data ?? null,
         in: inResult?.response?.data ?? null,
       },
     });
   } catch (error) {
+    // Unexpected errors outside movement txn (DB, logging, etc.)
     console.error("❌ stockTransfer:", error);
     return res.status(500).json({
       success: false,

@@ -199,10 +199,7 @@ async function isRedisConnected() {
 function normalizeListQuery(query = {}, options = {}) {
   const normalized = {};
   const allowlist = options.keys;
-  const keys =
-    allowlist ?
-      [...allowlist].sort()
-    : Object.keys(query).sort();
+  const keys = allowlist ? [...allowlist].sort() : Object.keys(query).sort();
 
   for (const key of keys) {
     if (LIST_CACHE_QUERY_BLOCKLIST.has(key)) continue;
@@ -219,7 +216,12 @@ function normalizeListQuery(query = {}, options = {}) {
 /**
  * `{companyId}:{module}:{action}` or `...:q:{hash}` when query params differ.
  */
-function buildListCacheKey({ companyId, module, action = "get-all-active", query }) {
+function buildListCacheKey({
+  companyId,
+  module,
+  action = "get-all-active",
+  query,
+}) {
   const mod = String(module || "resource").trim();
   const act = String(action || "get-all-active").trim();
   const base =
@@ -250,7 +252,10 @@ function resolveCompanyIdFromReq(req) {
  * Cache key + normalized query for a list endpoint.
  * @returns {{ cacheKey: string|null, cacheQuery: object, companyId: string|null }}
  */
-function resolveListCacheFromReq(req, { module, action = "get-all-active" } = {}) {
+function resolveListCacheFromReq(
+  req,
+  { module, action = "get-all-active" } = {},
+) {
   const companyId = resolveCompanyIdFromReq(req);
   const cacheQuery = normalizeListQuery(req?.query);
   const cacheKey =
@@ -295,7 +300,11 @@ async function deleteCacheByPattern(matchPattern) {
   }
 }
 
-async function invalidateListCache(companyId, module, action = "get-all-active") {
+async function invalidateListCache(
+  companyId,
+  module,
+  action = "get-all-active",
+) {
   if (!companyId) return 0;
   const pattern = `${buildListCachePrefix(companyId, module, action)}*`;
   const deleted = await deleteCacheByPattern(pattern);
