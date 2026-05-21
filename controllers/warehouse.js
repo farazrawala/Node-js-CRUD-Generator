@@ -1,4 +1,5 @@
 const {
+  coalesceObjectId,
   handleGenericCreate,
 
   handleGenericUpdate,
@@ -81,7 +82,14 @@ async function warehouseById(req, res) {
 }
 
 async function getAllwarehouse(req, res) {
+  const filter = { deletedAt: null };
+  const tenantCo = coalesceObjectId(req.user?.company_id);
+  if (tenantCo) {
+    filter.company_id = tenantCo;
+  }
+
   const response = await handleGenericGetAll(req, "warehouse", {
+    filter,
     excludeFields: [], // Don't exclude any fields
 
     // populate: ["user_id"],
@@ -100,16 +108,21 @@ async function getAllwarehouse(req, res) {
  * Active warehouses for the user's company (cached via generic list handler).
  */
 async function getallwarehouseactive(req, res) {
+  const filter = {
+    status: "active",
+    deletedAt: null,
+  };
+  const tenantCo = coalesceObjectId(req.user?.company_id);
+  if (tenantCo) {
+    filter.company_id = tenantCo;
+  }
+
   return runCachedListHandler(req, res, {
     module: WAREHOUSE_LIST_CACHE_MODULE,
     action: WAREHOUSE_LIST_CACHE_ACTION,
     fetch: () =>
       handleGenericGetAll(req, "warehouse", {
-        filter: {
-          status: "active",
-          deletedAt: null,
-          companyId: req.user.companyId,
-        },
+        filter,
         excludeFields: [],
         sort: { createdAt: -1 },
         limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
