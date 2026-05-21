@@ -73,9 +73,7 @@ async function verifyGlAccountIds(
       throw err;
     }
     if (String(acc.company_id) !== String(tenantId)) {
-      const err = new Error(
-        `${label} account does not belong to this company`,
-      );
+      const err = new Error(`${label} account does not belong to this company`);
       err.statusCode = 400;
       throw err;
     }
