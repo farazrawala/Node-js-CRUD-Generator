@@ -546,14 +546,17 @@ async function handleUserSignupCompany(req, res) {
       { name: "Other Expense", account_type: "other_expense" },
       { name: "Utilities", account_type: "operating_expense" },
       { name: "Fixed Asset", account_type: "fixed_asset" },
+      { name: "Adjustment", account_type: "equity" },
     ];
 
-    // Create Equity first so opening-balance journals can resolve the contra account;
-    // keep `createdAccountsData` in the original order for company default_* fields.
-    const equitySpec = accounts.find((a) => a.account_type === "equity");
+    // Create the named "Equity" account first (opening-balance journals). Do not filter
+    // all `account_type: "equity"` rows — "Adjustment" is also equity-typed and must be created.
+    const equitySpec = accounts.find(
+      (a) => a.name === "Equity" && a.account_type === "equity",
+    );
     const accountCreateOrder =
       equitySpec ?
-        [equitySpec, ...accounts.filter((a) => a.account_type !== "equity")]
+        [equitySpec, ...accounts.filter((a) => a.name !== "Equity")]
       : [...accounts];
 
     const createdByName = Object.create(null);
@@ -588,6 +591,16 @@ async function handleUserSignupCompany(req, res) {
     }
 
     const createdAccountsData = accounts.map((a) => createdByName[a.name]);
+    const missingCoa = accounts
+      .map((a, i) => (!createdAccountsData[i]?._id ? a.name : null))
+      .filter(Boolean);
+    if (missingCoa.length) {
+      return res.status(500).json({
+        success: false,
+        message: "Default chart of accounts incomplete after signup",
+        details: { missing_accounts: missingCoa },
+      });
+    }
 
     req.body = signupBodySnapshot;
 
@@ -614,6 +627,7 @@ async function handleUserSignupCompany(req, res) {
           default_other_expense_account: createdAccountsData[11]._id,
           default_utilities_account: createdAccountsData[12]._id,
           default_fixed_asset_account: createdAccountsData[13]._id,
+          default_adjustment_account: createdAccountsData[14]._id,
         },
       }),
       "company",

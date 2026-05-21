@@ -89,7 +89,11 @@ const {
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
-const { getMyBranches } = require("../controllers/company");
+const {
+  getMyBranches,
+  removeCache,
+  listAllCache,
+} = require("../controllers/company");
 const {
   transactionBulkCreate,
   getTransactionsListWithDebitCreditSummary,
@@ -100,6 +104,10 @@ const {
   accountUpdate,
   fetchAccountsByType,
 } = require("../controllers/account");
+const {
+  adjustmentCreate,
+  adjustmentUpdate,
+} = require("../controllers/adjustment");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
 // const {
@@ -220,6 +228,12 @@ router.get("/process/execute-process", execute_process);
 // Company routes
 router.get("/company/get-my-branches", getMyBranches);
 
+router.get("/company/list-cache", listAllCache);
+
+router.get("/company/remove-cache", removeCache);
+router.delete("/company/remove-cache", removeCache);
+router.post("/company/remove-cache", removeCache);
+
 // Product warehouse inventory management routes
 // router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
 // router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
@@ -258,6 +272,10 @@ router.patch("/product/:id/update-default-warehouse", updateWarehouseDefault);
 router.post("/account/custom-create", accountCreate);
 router.patch("/account/custom-update/:id", accountUpdate);
 router.get("/account/fetch-account-by-type", fetchAccountsByType);
+
+// Adjustment routes
+router.post("/adjustment/save", adjustmentCreate);
+router.patch("/adjustment/update_record/:id", adjustmentUpdate);
 
 // Order routes
 router.post("/order/order_save", order_save);

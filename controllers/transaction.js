@@ -3,6 +3,7 @@ const {
   handleGenericCreate,
   handleGenericGetAll,
   buildPopulateFromQuery,
+  coalesceObjectId,
 } = require("../utils/modelHelper");
 const Transaction = require("../models/transaction");
 
@@ -70,8 +71,10 @@ async function createTransactionsFromItems(req, items, options = {}) {
 
     const savedBody = req.body;
     req.body = { ...row };
-    if (req.user && req.user.company_id) {
-      req.body.company_id = req.user.company_id;
+    const rowCompanyId = coalesceObjectId(row.company_id);
+    const userCompanyId = coalesceObjectId(req.user?.company_id);
+    if (rowCompanyId || userCompanyId) {
+      req.body.company_id = rowCompanyId ?? userCompanyId;
     }
 
     let response;

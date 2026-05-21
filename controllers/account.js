@@ -4,6 +4,8 @@ const {
   handleGenericUpdate,
   handleGenericGetAll,
   parseSearchFieldsFromQuery,
+  applyIncludeExcludeIdQueryFilter,
+  coalesceObjectId,
 } = require("../utils/modelHelper");
 const Transaction = require("../models/transaction");
 const Company = require("../models/company");
@@ -135,7 +137,8 @@ async function resolveDefaultEquityAccountId(record, transcReq) {
  * Same behavior as HTTP `accountCreate` but returns the generic-create response
  * (for internal callers such as company signup that are not Express handlers).
  */
-async function performAccountCreate(req, comp_create = false) {
+async function performAccountCreate(req, comp_create = false, options = {}) {
+  const session = options.session || null;
   console.log("🔐 Processing account creation...", req.user);
   const transaction_number = generateTransactionNumber();
 
@@ -148,6 +151,7 @@ async function performAccountCreate(req, comp_create = false) {
   }
 
   return handleGenericCreate(req, "account", {
+    ...(session ? { session } : {}),
     beforeCreate: async (record, transcReq) => {
       console.log("🔍 Before Create_account", record);
       // return false;
@@ -427,8 +431,9 @@ async function fetchAccountsByType(req, res) {
     deletedAt: null,
   };
 
-  if (req.user?.company_id) {
-    filter.company_id = req.user.company_id;
+  const tenantCompanyId = coalesceObjectId(req.user?.company_id);
+  if (tenantCompanyId) {
+    filter.company_id = tenantCompanyId;
   }
 
   const excludeDefReceivable =
@@ -437,12 +442,15 @@ async function fetchAccountsByType(req, res) {
   if (excludeDefReceivable) {
     const arId = await resolveCompanyDefaultReceivableId(req.user);
     if (arId) {
-      filter._id = { $ne: arId };
+      const existing = String(req.query.exclude_id ?? "").trim();
+      req.query.exclude_id = existing ? `${existing},${arId}` : String(arId);
     }
   }
 
+  const scopedFilter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+
   const response = await handleGenericGetAll(req, "account", {
-    filter,
+    filter: scopedFilter,
     sort: { name: 1 },
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) || 0 : 0,

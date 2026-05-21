@@ -10,6 +10,7 @@ const TRANSACTION_REFERENCE_MODULES = [
   "payment_receipt",
   "expense",
   "assets",
+  "adjustment",
 ];
 
 const referenceEmbedSchema = new mongoose.Schema(

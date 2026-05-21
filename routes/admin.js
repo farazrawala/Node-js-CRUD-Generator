@@ -270,6 +270,7 @@ const companyAdminCRUD = adminCrudGenerator(
     "default_account_payable_account",
     "default_shipping_account",
     "default_equity_account_id",
+    "default_adjustment_account",
     "warehouse_id",
     "status",
   ], // Headings.
@@ -290,6 +291,7 @@ const companyAdminCRUD = adminCrudGenerator(
       "default_account_payable_account",
       "default_shipping_account",
       "default_equity_account_id",
+      "default_adjustment_account",
       "warehouse_id",
     ],
     searchableFields: ["company_name", "company_email", "company_phone"],
@@ -311,6 +313,7 @@ const companyAdminCRUD = adminCrudGenerator(
       default_account_payable_account: "select",
       default_shipping_account: "select",
       default_equity_account_id: "select",
+      default_adjustment_account: "select",
     },
     fieldLabels: {
       company_logo: "Logo Image",
@@ -328,6 +331,7 @@ const companyAdminCRUD = adminCrudGenerator(
       default_account_payable_account: "Default Account Payable Account",
       default_shipping_account: "Default Shipping Account",
       default_equity_account_id: "Default Equity Account",
+      default_adjustment_account: "Default Adjustment Account",
     },
     fieldOptions: {
       status: [

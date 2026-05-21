@@ -11,6 +11,7 @@ const COMPANY_DEFAULT_ACCOUNT_PATHS = [
   "default_expense_account",
   "default_salary_account",
   "default_equity_account_id",
+  "default_adjustment_account",
   "default_other_expense_account",
   "default_utilities_account",
 ];

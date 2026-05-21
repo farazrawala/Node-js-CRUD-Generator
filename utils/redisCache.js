@@ -224,8 +224,8 @@ function buildListCacheKey({
 }) {
   const mod = String(module || "resource").trim();
   const act = String(action || "get-all-active").trim();
-  const base =
-    companyId ? `${String(companyId)}:${mod}:${act}` : `${mod}:${act}`;
+  const tenant = normalizeCompanyIdForCache(companyId);
+  const base = tenant ? `${tenant}:${mod}:${act}` : `${mod}:${act}`;
   const queryPart = normalizeListQuery(query || {});
   if (Object.keys(queryPart).length === 0) {
     return base;
@@ -241,11 +241,32 @@ function buildListCacheKey({
 function buildListCachePrefix(companyId, module, action = "get-all-active") {
   const mod = String(module || "resource").trim();
   const act = String(action || "get-all-active").trim();
-  return companyId ? `${String(companyId)}:${mod}:${act}` : `${mod}:${act}`;
+  const tenant = normalizeCompanyIdForCache(companyId);
+  return tenant ? `${tenant}:${mod}:${act}` : `${mod}:${act}`;
+}
+
+/** Canonical 24-char hex tenant id for cache keys (handles populated `company_id`). */
+function normalizeCompanyIdForCache(value) {
+  const raw = coalesceObjectId(value);
+  if (raw == null || raw === "") return null;
+  const hex = String(raw).trim();
+  if (!/^[a-fA-F0-9]{24}$/.test(hex)) return null;
+  return hex.toLowerCase();
 }
 
 function resolveCompanyIdFromReq(req) {
-  return coalesceObjectId(req.user?.company_id);
+  return normalizeCompanyIdForCache(req.user?.company_id);
+}
+
+function keyBelongsToCompany(key, companyIdHex) {
+  if (!companyIdHex || !key) return false;
+  if (key === companyIdHex || key.startsWith(`${companyIdHex}:`)) return true;
+  const first = key.split(":")[0];
+  return (
+    first.length === 24 &&
+    /^[a-fA-F0-9]{24}$/.test(first) &&
+    first.toLowerCase() === companyIdHex
+  );
 }
 
 /**
@@ -270,29 +291,42 @@ function resolveListCacheFromReq(
   return { cacheKey, cacheQuery, companyId };
 }
 
+function patternToPrefix(matchPattern) {
+  return String(matchPattern || "")
+    .replace(/\*+$/, "")
+    .replace(/:+$/, "");
+}
+
 async function deleteCacheByPattern(matchPattern) {
-  const prefix = matchPattern.replace(/\*$/, "");
+  const prefix = patternToPrefix(matchPattern);
+  const companyPrefix = /^[a-fA-F0-9]{24}$/.test(prefix) ?
+    prefix.toLowerCase()
+  : null;
   let deleted = 0;
+
   for (const key of [...memoryCache.keys()]) {
-    if (key === prefix || key.startsWith(`${prefix}:`)) {
+    const matches =
+      companyPrefix ?
+        keyBelongsToCompany(key, companyPrefix)
+      : key === prefix || key.startsWith(`${prefix}:`);
+    if (matches) {
       memoryDel(key);
       deleted += 1;
     }
   }
+
   try {
     const redis = await getRedisClient();
     if (!redis) return deleted;
-    let cursor = 0;
-    do {
-      const reply = await redis.scan(cursor, {
-        MATCH: matchPattern,
-        COUNT: 100,
-      });
-      cursor = reply.cursor;
-      if (reply.keys.length > 0) {
-        deleted += await redis.del(reply.keys);
-      }
-    } while (cursor !== 0);
+
+    const iterator = redis.scanIterator({
+      MATCH: matchPattern,
+      COUNT: 100,
+    });
+    for await (const key of iterator) {
+      memoryDel(key);
+      deleted += await redis.del(key);
+    }
     return deleted;
   } catch (err) {
     markRedisUnavailable(err);
@@ -324,6 +358,176 @@ async function invalidateListCacheForReq(
     return invalidateListCache(companyId, module, action);
   }
   return 0;
+}
+
+/**
+ * Drop every list-cache key for a tenant: `{companyId}:*` (all modules/actions/query variants).
+ */
+async function invalidateAllListCacheForCompany(companyId) {
+  const tenant = normalizeCompanyIdForCache(companyId);
+  if (!tenant) return 0;
+  const pattern = `${tenant}:*`;
+  const deleted = await deleteCacheByPattern(pattern);
+  console.log(
+    "[redis] invalidated all list cache for company:",
+    pattern,
+    deleted,
+  );
+  return deleted;
+}
+
+/** @returns {Promise<number>} keys removed */
+async function invalidateAllListCacheForReq(req) {
+  const companyId = resolveCompanyIdFromReq(req);
+  if (!companyId) return 0;
+  return invalidateAllListCacheForCompany(companyId);
+}
+
+/** Parse `{companyId}:{module}:{action}[:q:{hash}]` list-cache keys. */
+function parseListCacheKey(key, companyId) {
+  const prefix = `${String(companyId)}:`;
+  if (!key.startsWith(prefix)) return { module: null, action: null, query_fingerprint: null };
+  const rest = key.slice(prefix.length);
+  const parts = rest.split(":");
+  const module = parts[0] || null;
+  const action = parts[1] || null;
+  const query_fingerprint = parts[2] === "q" ? parts[3] || null : null;
+  return { module, action, query_fingerprint };
+}
+
+function summarizeCacheValue(value) {
+  if (value == null) return null;
+  if (typeof value !== "object") return { type: typeof value };
+  return {
+    success: value.success,
+    status: value.status,
+    count: value.count,
+    data_count: Array.isArray(value.data) ? value.data.length : undefined,
+    fromCache: value.fromCache,
+  };
+}
+
+/**
+ * List all list-cache keys for a tenant (`{companyId}:*`) from memory and Redis.
+ * @param {string|import('mongoose').Types.ObjectId} companyId
+ * @param {{ includeValues?: boolean }} [options]
+ */
+async function listAllListCacheForCompany(companyId, options = {}) {
+  const companyIdStr = normalizeCompanyIdForCache(companyId);
+  if (!companyIdStr) {
+    return {
+      company_id: null,
+      pattern: null,
+      count: 0,
+      memory_count: 0,
+      redis_count: 0,
+      redis_enabled: isRedisConfigured(),
+      redis_connected: false,
+      entries: [],
+    };
+  }
+
+  const pattern = `${companyIdStr}:*`;
+  const includeValues = options.includeValues === true;
+  const now = Date.now();
+  const entries = [];
+
+  for (const [key, entry] of memoryCache.entries()) {
+    if (!keyBelongsToCompany(key, companyIdStr)) continue;
+    const expired = now > entry.expiresAt;
+    const row = {
+      key,
+      backend: "memory",
+      expired,
+      expires_at: new Date(entry.expiresAt).toISOString(),
+      ttl_seconds_remaining: expired ?
+        0
+      : Math.max(0, Math.floor((entry.expiresAt - now) / 1000)),
+      ...parseListCacheKey(key, companyIdStr),
+    };
+    if (includeValues) row.value_summary = summarizeCacheValue(entry.value);
+    entries.push(row);
+  }
+
+  let redisConnected = false;
+  try {
+    const redis = await getRedisClient();
+    redisConnected = Boolean(redis?.isOpen);
+    if (redis) {
+      const iterator = redis.scanIterator({
+        MATCH: pattern,
+        COUNT: 100,
+      });
+      for await (const key of iterator) {
+        if (entries.some((e) => e.key === key && e.backend === "memory")) {
+          continue;
+        }
+        let ttl = -2;
+        try {
+          ttl = await redis.ttl(key);
+        } catch {
+          /* ignore */
+        }
+        const row = {
+          key,
+          backend: "redis",
+          expired: ttl === -2,
+          ttl_seconds_remaining: ttl >= 0 ? ttl : null,
+          ...parseListCacheKey(key, companyIdStr),
+        };
+        if (includeValues) {
+          try {
+            const raw = await redis.get(key);
+            row.value_summary = summarizeCacheValue(
+              raw ? JSON.parse(raw) : null,
+            );
+          } catch {
+            row.value_summary = null;
+          }
+        }
+        entries.push(row);
+      }
+    }
+  } catch (err) {
+    markRedisUnavailable(err);
+  }
+
+  entries.sort((a, b) => a.key.localeCompare(b.key));
+
+  const memory_count = entries.filter((e) => e.backend === "memory").length;
+  const redis_count = entries.filter((e) => e.backend === "redis").length;
+
+  return {
+    company_id: companyIdStr,
+    pattern,
+    count: entries.length,
+    memory_count,
+    redis_count,
+    redis_enabled: isRedisConfigured(),
+    redis_connected: redisConnected,
+    entries,
+  };
+}
+
+async function listAllListCacheForReq(req, options = {}) {
+  const companyId = resolveCompanyIdFromReq(req);
+  if (!companyId) {
+    return {
+      company_id: null,
+      pattern: null,
+      count: 0,
+      memory_count: 0,
+      redis_count: 0,
+      redis_enabled: isRedisConfigured(),
+      redis_connected: false,
+      entries: [],
+    };
+  }
+  const includeValues =
+    options.includeValues === true ||
+    req.query?.include_values === "true" ||
+    req.query?.include_values === "1";
+  return listAllListCacheForCompany(companyId, { includeValues });
 }
 
 /**
@@ -396,9 +600,14 @@ module.exports = {
   buildListCacheKey,
   buildListCachePrefix,
   resolveListCacheFromReq,
+  normalizeCompanyIdForCache,
   resolveCompanyIdFromReq,
   invalidateListCache,
   invalidateListCacheForReq,
+  invalidateAllListCacheForCompany,
+  invalidateAllListCacheForReq,
+  listAllListCacheForCompany,
+  listAllListCacheForReq,
   runCachedListHandler,
   isRedisConfigured,
   isRedisConnected,
