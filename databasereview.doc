@@ -1,0 +1,569 @@
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta charset="utf-8">
+<title>MongoDB Database Review - Node-js-CRUD-Generator</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.4; margin: 1in; }
+  h1 { font-size: 18pt; color: #1a365d; border-bottom: 2px solid #2b6cb0; padding-bottom: 6px; }
+  h2 { font-size: 14pt; color: #2c5282; margin-top: 18px; }
+  h3 { font-size: 12pt; color: #2d3748; margin-top: 14px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #cbd5e0; padding: 8px; text-align: left; vertical-align: top; }
+  th { background: #edf2f7; font-weight: bold; }
+  .score { font-size: 14pt; font-weight: bold; }
+  .warn { color: #c53030; }
+  .ok { color: #276749; }
+  code, pre { font-family: Consolas, monospace; font-size: 9.5pt; background: #f7fafc; }
+  pre { border: 1px solid #e2e8f0; padding: 10px; overflow-x: auto; }
+  ul { margin: 6px 0; }
+  li { margin: 4px 0; }
+  .meta { color: #718096; font-size: 10pt; }
+  .diagram { background: #f8fafc; border: 1px solid #bee3f8; padding: 14px; font-family: Consolas, monospace; font-size: 9pt; line-height: 1.35; white-space: pre; overflow-x: auto; }
+  .tip { background: #ebf8ff; border-left: 4px solid #3182ce; padding: 10px 14px; margin: 12px 0; }
+  .module { display: inline-block; background: #e6fffa; border: 1px solid #81e6d9; padding: 4px 10px; margin: 2px; border-radius: 4px; font-size: 10pt; }
+</style>
+</head>
+<body>
+
+<h1>MongoDB Database &amp; Scalability Review</h1>
+<p class="meta"><strong>Project:</strong> Node-js-CRUD-Generator (Multi-company POS + Accounts)<br>
+<strong>Stack:</strong> Node.js, Express, Mongoose, MongoDB (single database)<br>
+<strong>Review date:</strong> May 22, 2026<br>
+<strong>Scope:</strong> Schema design, architecture, indexing, sharding readiness, production POS load assumptions</p>
+
+<h3>Contents</h3>
+<ol style="font-size: 10pt;">
+  <li>Executive Summary</li>
+  <li><strong>Database Architecture — Easy Guide</strong> (start here for non-technical readers)</li>
+  <li>Collection Mapping</li>
+  <li>Scores</li>
+  <li>Sharding Analysis</li>
+  <li>Collection-by-Collection Review (Technical)</li>
+  <li>Single Database Policy</li>
+  <li>Query &amp; Report Optimization</li>
+  <li>Bottlenecks, Technology, Roadmap</li>
+</ol>
+
+<h2>1. Executive Summary</h2>
+<p>This system uses a <strong>single MongoDB database</strong> with <strong>company_id</strong> on tenant-scoped collections. That is the correct foundation for multi-tenant SaaS.</p>
+<p><strong>Verdict:</strong> Good tenant isolation and several strong indexes, but <strong>not shard-ready</strong> and <strong>not yet optimized for millions of invoice-heavy records</strong> without further work.</p>
+<p>Primary blockers at scale:</p>
+<ul>
+  <li>Stock quantity derived by aggregating <strong>inventory_movements</strong> (no reliable live snapshot; warehouse_inventory model disabled)</li>
+  <li><strong>Two parallel inventory ledgers</strong> (inventory_movements vs stock_movements)</li>
+  <li>GL balances computed by scanning <strong>transactions</strong> on read</li>
+  <li>Per-tenant order/PO counter hotspots and order number max-scan</li>
+  <li>Offset pagination (skip/limit) on list endpoints</li>
+  <li>Missing indexes on payment_receipt and user role-based listings</li>
+</ul>
+
+<h2>2. Database Architecture — Easy Guide for Anyone</h2>
+<p>This section explains <strong>how data is organized</strong> in plain language. No MongoDB expertise required.</p>
+
+<h3>2.1 The big picture (30-second version)</h3>
+<div class="tip">
+  <strong>One database</strong> stores data for <strong>many companies</strong> (shops/businesses).<br>
+  Almost every record is tagged with <strong>company_id</strong> so Company A never sees Company B’s data.<br>
+  The app is a <strong>POS (Point of Sale) + Accounts</strong> system: sales, purchases, stock, and general ledger (money ledger).
+</div>
+
+<pre class="diagram">                         YOUR APPLICATION
+                    (Node.js + Express + API)
+                              |
+                              v
+              +-----------------------------------+
+              |   ONE MongoDB DATABASE            |
+              |   (all companies live here)       |
+              +-----------------------------------+
+                              |
+     +------------+-----------+-----------+------------+
+     |            |           |           |            |
+     v            v           v           v            v
+  TENANT       SALES      PURCHASE    INVENTORY    ACCOUNTS
+  (who)        (POS)        (PO)        (stock)      (GL)
+     |            |           |           |            |
+ companies    orders      purchase_    inventory_   transactions
+ users        order_items   orders       movements   accounts
+ branches                 purchase_    stock_       payment_
+ accounts                  order_items  movements    receipts
+ products
+ warehouses</pre>
+
+<h3>2.2 Multi-company (tenant) model — how isolation works</h3>
+<p>Think of <strong>company_id</strong> as a label on every document: “this row belongs to Shop X.”</p>
+<table>
+  <tr><th>Concept</th><th>Simple explanation</th><th>Where it lives</th></tr>
+  <tr><td><strong>Root company (tenant)</strong></td><td>The main business account. Other tables point to its <em>_id</em> as company_id.</td><td>companies row with <strong>no</strong> parent company_id</td></tr>
+  <tr><td><strong>Branch / child company</strong></td><td>A site under a parent (franchise, branch). Has company_id = parent’s _id.</td><td>companies collection (self-reference)</td></tr>
+  <tr><td><strong>Logged-in user</strong></td><td>Staff, customer, or vendor. user.company_id = which tenant they belong to.</td><td>users collection</td></tr>
+  <tr><td><strong>Business data</strong></td><td>Orders, products, stock, GL lines — all carry the same company_id.</td><td>Most collections</td></tr>
+</table>
+
+<pre class="diagram">  PARENT COMPANY (Tenant)                    BRANCH (optional)
+  companies._id = AAA                        companies._id = BBB
+  companies.company_id = null                companies.company_id = AAA
+           |                                          |
+           +------------------+------------------------+
+                              |
+              All tenant data uses company_id = AAA
+              (orders, products, transactions, ...)
+                              |
+              branch_id (optional) on orders, transactions, etc.</pre>
+
+<p><strong>Rule for developers:</strong> Every API query for tenant users should filter by <code>company_id</code> from the logged-in user. The helper in <code>utils/modelHelper.js</code> sets this automatically on create/update.</p>
+
+<h3>2.3 Five modules (what each part of the system does)</h3>
+<p>
+  <span class="module">1. Tenant &amp; setup</span>
+  <span class="module">2. Sales (POS)</span>
+  <span class="module">3. Purchase</span>
+  <span class="module">4. Inventory</span>
+  <span class="module">5. Accounts (GL)</span>
+</p>
+<table>
+  <tr><th>Module</th><th>Business purpose</th><th>Main collections</th></tr>
+  <tr>
+    <td><strong>1. Tenant &amp; master data</strong></td>
+    <td>Companies, users, branches, products, categories, warehouses, chart of accounts</td>
+    <td>companies, branches, users, products, categories, brands, warehouses, accounts, attributes</td>
+  </tr>
+  <tr>
+    <td><strong>2. Sales (POS)</strong></td>
+    <td>Invoices / orders, line items, customer link, totals, payment on counter</td>
+    <td>orders, order_items</td>
+  </tr>
+  <tr>
+    <td><strong>3. Purchase</strong></td>
+    <td>Buying from suppliers, PO lines, goods inward</td>
+    <td>purchase_orders, purchase_order_items</td>
+  </tr>
+  <tr>
+    <td><strong>4. Inventory</strong></td>
+    <td>Stock in/out per warehouse; quantity history</td>
+    <td>inventory_movements (main POS path), stock_movements (separate API)</td>
+  </tr>
+  <tr>
+    <td><strong>5. Accounts (GL)</strong></td>
+    <td>Double-entry bookkeeping: debits &amp; credits, payments, expenses, adjustments</td>
+    <td>transactions, payment_receipts, expenses, adjustments, amount_transfers, assets</td>
+  </tr>
+  <tr>
+    <td><strong>Support</strong></td>
+    <td>Audit trail, auto numbering, alerts, integrations</td>
+    <td>logs, counters, alerts, integration, process, blog</td>
+  </tr>
+</table>
+
+<h3>2.4 Entity relationships (who links to whom)</h3>
+<p>MongoDB does not use SQL foreign keys; the app uses <strong>ObjectId references</strong> (same idea as FK).</p>
+<pre class="diagram">  companies ─────┬──── default GL accounts (cash, sales, AR, AP, ...)
+                   │
+                   ├── branches (company_id → company)
+                   │
+                   ├── users (company_id, roles: USER | CUSTOMER | VENDOR | ADMIN)
+                   │
+                   ├── products ─── categories, brands
+                   │       │
+                   │       └── warehouse (via inventory_movements)
+                   │
+       SALES       ├── orders (invoice header) ─── order_items (lines)
+                   │       │                           │
+                   │       ├── customer_id → users       ├── product_id → products
+                   │       ├── branch_id → branches      └── order_id → orders
+                   │       └── payment_method → accounts
+                   │
+       PURCHASE     ├── purchase_orders ─── purchase_order_items
+                   │       └── vendor_id → users (VENDOR)
+                   │
+       STOCK        ├── inventory_movements (in/out qty, cost)
+                   │       ├── product_id, warehouse_id, company_id
+                   │       └── reference → order / PO line / adjustment
+                   │
+       GL           ├── transactions (many rows per journal)
+                   │       ├── account_id → accounts
+                   │       ├── transaction_number (batch id, shared by lines)
+                   │       └── reference_id → order | purchase_order | payment_receipt | ...
+                   │
+                   └── payment_receipts (Send/Receive money)
+                           ├── user_id → users
+                           └── payment_mode → accounts</pre>
+
+<h3>2.5 What happens when you save a sale? (data flow)</h3>
+<p>This is the <strong>most important flow</strong> for understanding the architecture.</p>
+<ol>
+  <li><strong>Create order</strong> (header) in <code>orders</code> — order_no from <code>counters</code>, totals on header.</li>
+  <li><strong>Create order_items</strong> — one document per product line; subtotal computed.</li>
+  <li><strong>Stock out</strong> — rows in <code>inventory_movements</code> (movement_type: out) per warehouse/product.</li>
+  <li><strong>General ledger</strong> — multiple rows in <code>transactions</code> (debit + credit) sharing one <code>transaction_number</code>.</li>
+  <li><strong>Audit</strong> — optional row in <code>logs</code> (auto-deleted after 180 days).</li>
+</ol>
+<p>Steps 1–4 run inside a <strong>MongoDB transaction</strong> (<code>withTransaction</code>) so either everything saves or nothing does.</p>
+
+<pre class="diagram">  [ POS Save Invoice ]
+         |
+         v
+    +---------+     +-------------+     +----------------------+
+    | orders  |---->| order_items |---->| inventory_movements  |
+    | (header)|     | (lines)     |     | (stock out per WH)   |
+    +---------+     +-------------+     +----------------------+
+         |                                        |
+         +------------------+---------------------+
+                            v
+                    +---------------+
+                    | transactions  |  (2+ GL lines per journal)
+                    +---------------+
+                            |
+                            v
+                      [ logs ] (optional audit)</pre>
+
+<h3>2.6 Customers &amp; suppliers (same table)</h3>
+<p>There is <strong>no separate</strong> customers or suppliers collection. Both are <strong>users</strong> with different roles:</p>
+<table>
+  <tr><th>Role in app</th><th>role field</th><th>Used as</th></tr>
+  <tr><td>Staff / cashier</td><td>USER</td><td>Login, permissions</td></tr>
+  <tr><td>Customer</td><td>CUSTOMER</td><td>orders.customer_id</td></tr>
+  <tr><td>Supplier / vendor</td><td>VENDOR</td><td>purchase_orders.vendor_id</td></tr>
+  <tr><td>Platform admin</td><td>ADMIN</td><td>May omit company_id</td></tr>
+</table>
+
+<h3>2.7 General ledger (double-entry) in simple terms</h3>
+<p>Each money event creates <strong>several rows</strong> in <code>transactions</code>, not one row:</p>
+<ul>
+  <li>Same <strong>transaction_number</strong> = one journal entry (batch).</li>
+  <li>Each row is either <strong>debit</strong> or <strong>credit</strong> on one <strong>account_id</strong>.</li>
+  <li>Debits and credits for a batch should balance (enforced in application logic).</li>
+</ul>
+<p>Account list lives in <code>accounts</code> (Cash, Sales, AR, Inventory, etc.). Company row stores <strong>default account IDs</strong> for automated posting.</p>
+
+<h3>2.8 Inventory: two ledgers (important)</h3>
+<table>
+  <tr><th>Collection</th><th>Used by</th><th>Status</th></tr>
+  <tr><td><strong>inventory_movements</strong></td><td>POS order save, stock reports, COGS</td><td class="ok">Primary path — use this for architecture understanding</td></tr>
+  <tr><td><strong>stock_movements</strong></td><td>Separate REST API (/api/stock_movement)</td><td class="warn">Parallel system — risk of duplicate/conflicting stock logic</td></tr>
+  <tr><td><strong>warehouse_inventory</strong></td><td>Was meant to hold current qty per warehouse</td><td class="warn">Model disabled (commented out) — qty computed by aggregating movements</td></tr>
+</table>
+<p><strong>Current stock formula:</strong> Sum(in movements) − Sum(out movements) per company + product + warehouse.</p>
+
+<h3>2.9 All MongoDB collections (complete list)</h3>
+<table>
+  <tr><th>Collection</th><th>Category</th><th>Has company_id?</th><th>Grows fast?</th></tr>
+  <tr><td>orders</td><td>Sales</td><td>Yes</td><td>Yes</td></tr>
+  <tr><td>order_items</td><td>Sales</td><td>Yes</td><td>Yes (lines per order)</td></tr>
+  <tr><td>purchase_orders</td><td>Purchase</td><td>Yes</td><td>Medium</td></tr>
+  <tr><td>purchase_order_items</td><td>Purchase</td><td>Yes</td><td>Medium</td></tr>
+  <tr><td>inventory_movements</td><td>Inventory</td><td>Yes</td><td class="warn">Very fast</td></tr>
+  <tr><td>stock_movements</td><td>Inventory</td><td>Yes</td><td>Fast (if API used)</td></tr>
+  <tr><td>transactions</td><td>GL</td><td>Yes</td><td class="warn">Very fast (2+ per event)</td></tr>
+  <tr><td>payment_receipts</td><td>GL</td><td>Yes</td><td>Yes</td></tr>
+  <tr><td>expenses</td><td>GL</td><td>Yes</td><td>Medium</td></tr>
+  <tr><td>adjustments</td><td>Inventory/GL</td><td>Yes</td><td>Low–medium</td></tr>
+  <tr><td>amount_transfers</td><td>GL</td><td>Yes</td><td>Medium</td></tr>
+  <tr><td>assets</td><td>GL</td><td>Yes</td><td>Low</td></tr>
+  <tr><td>accounts</td><td>Master</td><td>Yes</td><td>Slow (chart of accounts)</td></tr>
+  <tr><td>products</td><td>Master</td><td>Yes</td><td>Medium</td></tr>
+  <tr><td>users</td><td>Master</td><td>Usually</td><td>Medium</td></tr>
+  <tr><td>companies</td><td>Tenant</td><td>Sometimes (branches)</td><td>Slow</td></tr>
+  <tr><td>branches</td><td>Tenant</td><td>Yes</td><td>Slow</td></tr>
+  <tr><td>warehouses</td><td>Master</td><td>Yes</td><td>Slow</td></tr>
+  <tr><td>categories, brands, attributes</td><td>Master</td><td>Yes</td><td>Slow</td></tr>
+  <tr><td>logs</td><td>Audit</td><td>Yes</td><td>Fast (TTL 180 days)</td></tr>
+  <tr><td>counters</td><td>System</td><td>No (key = order_no_&lt;companyId&gt;)</td><td>Tiny (one doc per tenant counter)</td></tr>
+  <tr><td>alerts, blog, integration, process, complain, url</td><td>Other</td><td>Mostly yes</td><td>Low</td></tr>
+</table>
+
+<h3>2.10 Standard fields on most business documents</h3>
+<table>
+  <tr><th>Field</th><th>Purpose</th></tr>
+  <tr><td>company_id</td><td>Which tenant owns this row</td></tr>
+  <tr><td>branch_id</td><td>Optional branch (orders, transactions)</td></tr>
+  <tr><td>created_by / updated_by</td><td>Which user created or last changed the row</td></tr>
+  <tr><td>status</td><td>active / inactive (soft business status)</td></tr>
+  <tr><td>deletedAt</td><td>Soft delete (null = active); partial indexes ignore deleted rows</td></tr>
+  <tr><td>createdAt / updatedAt</td><td>Automatic timestamps (Mongoose)</td></tr>
+</table>
+
+<h3>2.11 Target architecture (recommended future — for scale)</h3>
+<p>Today the system is <strong>event-based</strong> (every sale appends movements and GL lines). For large scale, add <strong>snapshot</strong> collections (updated in the same transaction):</p>
+<pre class="diagram">  TODAY (calculate on read)              FUTURE (recommended)
+  -------------------------              ----------------------
+  inventory_movements  ──aggregate──>    warehouse_stock_snapshot
+       (many rows)                            (1 row per product+WH)
+
+  transactions  ──aggregate──>         gl_period_balances
+       (many rows)                            (1 row per account+month)
+
+  transactions  ──aggregate──>         customer_balances
+       (many rows)                            (1 row per customer)</pre>
+<p>Sales and purchase <strong>header + lines</strong> design stays the same; only reporting/stock reads become faster.</p>
+
+<h3>2.12 Technology stack (how pieces connect)</h3>
+<table>
+  <tr><th>Layer</th><th>Technology</th><th>Role</th></tr>
+  <tr><td>API</td><td>Express (routes/api.js, routes/admin.js)</td><td>HTTP endpoints</td></tr>
+  <tr><td>Logic</td><td>controllers/*.js</td><td>Business rules, transactions, aggregations</td></tr>
+  <tr><td>Data shape</td><td>models/*.js (Mongoose)</td><td>Schema, indexes, validation hooks</td></tr>
+  <tr><td>Database</td><td>MongoDB (single database)</td><td>Persistent storage</td></tr>
+  <tr><td>Shared helpers</td><td>utils/modelHelper.js</td><td>CRUD, pagination, company_id injection, search</td></tr>
+</table>
+
+<h2>3. Collection Mapping (Requested vs Actual)</h2>
+<table>
+  <tr><th>Business term</th><th>Model file</th><th>MongoDB collection</th></tr>
+  <tr><td>Invoices</td><td>models/order.js</td><td>orders</td></tr>
+  <tr><td>Invoice items</td><td>models/order_item.js</td><td>order_items</td></tr>
+  <tr><td>Customers</td><td>models/user.js (role: CUSTOMER)</td><td>users</td></tr>
+  <tr><td>Suppliers</td><td>models/user.js (role: VENDOR)</td><td>users</td></tr>
+  <tr><td>Stock movements</td><td>inventory_movements + stock_movement</td><td>inventory_movements, stock_movements</td></tr>
+  <tr><td>Ledger entries</td><td>models/transaction.js</td><td>transactions</td></tr>
+  <tr><td>Payments</td><td>models/payment_receipt.js</td><td>payment_receipts</td></tr>
+  <tr><td>Audit logs</td><td>models/logs.js</td><td>logs</td></tr>
+  <tr><td>Chart of accounts</td><td>models/account.js</td><td>accounts</td></tr>
+  <tr><td>Purchase orders</td><td>models/purchase_order.js</td><td>purchase_orders</td></tr>
+  <tr><td>Tenants / branches</td><td>models/company.js, branch.js</td><td>companies, branches</td></tr>
+</table>
+
+<h2>4. Scores (0–100)</h2>
+<table>
+  <tr><th>Dimension</th><th>Score</th><th>Interpretation</th></tr>
+  <tr><td>Scalability</td><td class="score">58</td><td>Tenant field + header denormalization; ledger/stock paths dominate at volume</td></tr>
+  <tr><td>Sharding readiness</td><td class="score">52</td><td>company_id everywhere; shard key and counter design need work</td></tr>
+  <tr><td>Indexing</td><td class="score">62</td><td>Strong on orders/transactions/stock_movement; gaps on payments and users</td></tr>
+  <tr><td>Future risk</td><td class="score warn">72</td><td>Higher = more risk (dual inventory, disabled warehouse_inventory, scan-based GL)</td></tr>
+</table>
+
+<h2>5. Sharding Analysis</h2>
+
+<h3>5.1 Is the design shard-ready?</h3>
+<p><strong>Partially.</strong> Queries typically include company_id. That is necessary but not sufficient for production sharding.</p>
+
+<h3>5.2 Bad shard key choices</h3>
+<table>
+  <tr><th>Shard key</th><th>Problem</th></tr>
+  <tr><td>{ company_id: 1 } only</td><td>Mega-tenant → one hot chunk; all writes for large retailer on one shard</td></tr>
+  <tr><td>{ createdAt: 1 }</td><td>Global insert hotspot; cross-tenant queries scatter-gather</td></tr>
+  <tr><td>{ order_no: 1 }</td><td>Not globally unique; poor distribution</td></tr>
+  <tr><td>{ _id: 1 } only</td><td>Even writes but tenant queries need company_id → inefficient</td></tr>
+  <tr><td>{ company_id: "hashed" }</td><td>OK for equal tenants; still hot for one huge tenant</td></tr>
+</table>
+
+<h3>5.3 Recommended shard key (most collections)</h3>
+<pre>{ company_id: 1, _id: 1 }</pre>
+<p>Reason: Application always filters by company_id; _id spreads writes within a busy tenant across chunks.</p>
+<p><strong>Optional (branch-heavy POS):</strong> { company_id: 1, branch_id: 1, _id: 1 } — only if branch_id is always set on high-volume writes.</p>
+
+<h3>5.4 Special case: counters collection</h3>
+<p>Order and PO numbers use a shared counters collection (_id: order_no_&lt;companyId&gt;, $inc seq).</p>
+<ul>
+  <li>Shard key { _id: 1 } is fine</li>
+  <li class="warn">Hotspot: every new invoice for one company updates the same counter document</li>
+  <li class="warn">getMaxOrderSeqForCompany() scans all ORD-* orders — does not scale; remove in production</li>
+</ul>
+
+<h3>5.5 Cross-shard risks in application code</h3>
+<table>
+  <tr><th>Pattern</th><th>Risk</th></tr>
+  <tr><td>withTransaction (order + items + inventory + GL)</td><td>OK if all docs share company_id in shard key; fails if tenant field missing/wrong</td></tr>
+  <tr><td>$lookup order_items → inventory_movements</td><td>Cross-shard join if collections shard differently — use same shard key</td></tr>
+  <tr><td>Admin cross-tenant queries</td><td>Scatter-gather — avoid on hot paths</td></tr>
+  <tr><td>skip/limit pagination</td><td>Slow on all shards at deep offsets</td></tr>
+</table>
+
+<h2>6. Collection-by-Collection Review (Technical)</h2>
+
+<h3>6.1 orders (Invoices)</h3>
+<p><span class="ok">Strengths:</span> Header/line split; lines_subtotal, total_amount denormalized; partial unique { company_id, order_no }; list index { company_id, order_status, createdAt }.</p>
+<p><span class="warn">Risks:</span> Per-tenant counter hotspot; getMaxOrderSeqForCompany full scan; skip pagination; optional branch_id not indexed for lists.</p>
+<p><strong>Recommended indexes:</strong></p>
+<pre>{ company_id: 1, createdAt: -1, order_status: 1 }
+{ company_id: 1, branch_id: 1, createdAt: -1 }
+{ company_id: 1, customer_id: 1, createdAt: -1 }</pre>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 }</p>
+
+<h3>6.2 order_items (Invoice lines)</h3>
+<p><span class="ok">Strengths:</span> { company_id, order_id } index; validates company_id matches parent order.</p>
+<p><span class="warn">Gaps:</span> Profit/P&amp;L uses $lookup to inventory_movements; no product/time report indexes.</p>
+<p><strong>Add:</strong> { company_id: 1, product_id: 1, createdAt: -1 }, { company_id: 1, createdAt: -1 }</p>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 }</p>
+
+<h3>6.3 users (Customers &amp; Suppliers)</h3>
+<p>Customers = role CUSTOMER; Suppliers = role VENDOR (same collection).</p>
+<p><span class="ok">Strengths:</span> Unique partial { company_id, email }.</p>
+<p><span class="warn">Gaps:</span> No index on role; initial_balance without maintained running balance; balance views may scan transactions.</p>
+<p><strong>Add:</strong> { company_id: 1, role: 1, status: 1, createdAt: -1 }</p>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 }</p>
+
+<h3>6.4 inventory_movements &amp; stock_movements</h3>
+<p class="warn"><strong>Critical:</strong> Two parallel inventory systems.</p>
+<table>
+  <tr><th>Collection</th><th>Used by</th></tr>
+  <tr><td>inventory_movements</td><td>Order save, COGS, stock checks, profit reports (controllers/order.js, inventory_movements.js)</td></tr>
+  <tr><td>stock_movements</td><td>Separate /api/stock_movement with idempotency and line linkage</td></tr>
+</table>
+<p>Stock on hand = aggregate(in) - aggregate(out) over all movement rows. warehouse_inventory model is fully commented out but product controller still references it.</p>
+<p><span class="ok">inventory_movements indexes:</span> { company_id, product_id, warehouse_id, createdAt }; { company_id, warehouse_id }</p>
+<p><span class="ok">stock_movements indexes:</span> Idempotency, order_item uniqueness, product/warehouse/time — well designed</p>
+<p><strong>Recommendation:</strong> Unify to one ledger; add idempotency to inventory_movements; maintain warehouse_stock_snapshot updated in same transaction as movement insert.</p>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 } | <strong>Archive:</strong> movements older than fiscal policy to inventory_movements_archive</p>
+
+<h3>6.5 transactions (Ledger / GL)</h3>
+<p>Multiple rows per journal (transaction_number shared) — correct double-entry pattern.</p>
+<p><span class="ok">Indexes:</span> { company_id, createdAt }, { company_id, account_id }, { company_id, transaction_number, createdAt } (partial)</p>
+<p><span class="warn">Risks:</span> 2+ rows per invoice; trial balance aggregates all lines; list-with-summary scans all matches then paginates; pre(validate) does 2-3 extra findById per insert; duplicate transaction_number field in schema (lines 43 and 79).</p>
+<p><strong>Add indexes:</strong></p>
+<pre>{ company_id: 1, account_id: 1, createdAt: -1 }
+{ company_id: 1, reference_user_id: 1, createdAt: -1 }
+{ company_id: 1, branch_id: 1, createdAt: -1 }
+{ company_id: 1, "reference_id.module": 1, "reference_id.ref_id": 1 }</pre>
+<p><strong>Pre-calculated balances (high ROI):</strong> account_balances, customer_balances, gl_period_balances collections updated on post.</p>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 }</p>
+
+<h3>6.6 payment_receipts (Payments)</h3>
+<p class="warn"><strong>Critical gap:</strong> No custom indexes — only default _id.</p>
+<p><strong>Add:</strong></p>
+<pre>{ company_id: 1, createdAt: -1 }
+{ company_id: 1, user_id: 1, createdAt: -1 }
+{ company_id: 1, transaction_number: 1 }
+{ company_id: 1, payment_type: 1, date: -1 }</pre>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 }</p>
+
+<h3>6.7 logs (Audit)</h3>
+<p><span class="ok">Strengths:</span> Field size caps; TTL 180 days on createdAt; { company_id, createdAt } index; sanitization of secrets.</p>
+<p><span class="warn">Risks:</span> High write volume if every API call logged.</p>
+<p><strong>Shard key:</strong> { company_id: 1, _id: 1 } or ship to OpenSearch/S3 for search-heavy audit.</p>
+
+<h3>6.8 accounts, products, purchase_orders</h3>
+<p><strong>accounts:</strong> Unique partial { company_id, name }, { company_id, account_number } — good.</p>
+<p><strong>products:</strong> Unique partial { company_id, sku }, { company_id, barcode } — good.</p>
+<p><strong>purchase_orders:</strong> Same counter/numbering pattern as orders; { company_id, purchase_order_no } unique partial — good.</p>
+
+<h2>7. Single Database for All Companies (Scale Policy)</h2>
+<p><strong>Safe for most SaaS POS deployments</strong> when:</p>
+<ul>
+  <li>Every query includes company_id (enforced via req.user in modelHelper)</li>
+  <li>Shard key includes company_id</li>
+  <li>Mega-tenants (&gt;30-40% of data) get special handling</li>
+  <li>Compliance does not require per-country physical isolation yet</li>
+</ul>
+<table>
+  <tr><th>Approach</th><th>When to use</th></tr>
+  <tr><td>Single DB (current)</td><td>Default; simplest ops; good to 100M+ docs with indexes/sharding</td></tr>
+  <tr><td>DB per company</td><td>Rare; painful ops; only strict contractual isolation</td></tr>
+  <tr><td>Hybrid (recommended at scale)</td><td>One cluster + archive DB for closed years + read replicas + Redis for dashboards</td></tr>
+</table>
+
+<h2>8. Query &amp; Report Optimization</h2>
+<table>
+  <tr><th>Report</th><th>Current behavior</th><th>Recommendation</th></tr>
+  <tr><td>Invoice listing</td><td>handleGenericGetAll + skip/limit</td><td>Keyset pagination (createdAt + _id cursor); index { company_id, createdAt, _id }</td></tr>
+  <tr><td>Dashboard sales/profit</td><td>$match + $group on orders/order_items</td><td>OK with company_id + date in $match; avoid $push all order_ids at scale</td></tr>
+  <tr><td>Stock reports</td><td>Aggregate inventory_movements in−out</td><td>warehouse_stock_snapshot updated on each movement</td></tr>
+  <tr><td>Customer balances</td><td>initial_balance + transaction aggregates</td><td>customer_balances snapshot + index on reference_user_id</td></tr>
+  <tr><td>Trial balance / P&amp;L</td><td>aggregateTransactionSumsByAccountIds per account</td><td>gl_period_balances(company_id, account_id, period) nightly + on post</td></tr>
+  <tr><td>Transaction list + summary</td><td>Full aggregate then find().skip().limit()</td><td>Facet or pre-aggregated period totals; date-bound all GL reads</td></tr>
+</table>
+
+<h2>9. Bottleneck Order (Busy Invoice-Heavy Tenant)</h2>
+<ol>
+  <li><strong>inventory_movements</strong> — writes + aggregate-on-read for stock</li>
+  <li><strong>transactions</strong> — multi-line GL + full aggregations</li>
+  <li><strong>order_items</strong> — volume ≈ lines × invoices</li>
+  <li><strong>orders</strong> — counter hotspot + listing pagination</li>
+  <li><strong>logs</strong> — write IOPS (TTL helps storage only)</li>
+  <li><strong>users</strong> — later unless huge CRM search without indexes</li>
+</ol>
+
+<h2>10. Technology Recommendations</h2>
+<table>
+  <tr><th>Technique</th><th>Verdict</th></tr>
+  <tr><td>Denormalize</td><td>Extend to running stock qty and account/customer balances</td></tr>
+  <tr><td>Pre-calculate balances</td><td><strong>Yes</strong> — highest ROI for GL and AR/AP</td></tr>
+  <tr><td>Redis</td><td><strong>Yes</strong> for dashboard KPIs, sessions; not GL source of truth</td></tr>
+  <tr><td>Read replicas</td><td><strong>Yes</strong> for reporting/analytics routes</td></tr>
+  <tr><td>Archive collections</td><td><strong>Yes</strong> for transactions, inventory_movements after fiscal close</td></tr>
+  <tr><td>TTL</td><td>logs only (180d exists); never TTL-delete financial data</td></tr>
+</table>
+
+<h2>11. Hotspot &amp; Chunk Risks</h2>
+<table>
+  <tr><th>Risk</th><th>Severity</th><th>Detail</th></tr>
+  <tr><td>Per-tenant counter $inc</td><td>High</td><td>Serializes invoice numbering per company at extreme TPS</td></tr>
+  <tr><td>Mega-tenant on company_id shard</td><td>High</td><td>One chunk owns most of one retailer</td></tr>
+  <tr><td>Jumbo chunks</td><td>Low</td><td>No large embedded arrays in orders; logs capped</td></tr>
+  <tr><td>Write amplification</td><td>Medium</td><td>transaction pre-validate extra reads; dual inventory writes if both APIs used</td></tr>
+  <tr><td>Cross-shard queries</td><td>Medium</td><td>Lookups and admin without company_id</td></tr>
+</table>
+
+<h2>12. Example Schema Additions</h2>
+
+<h3>12.1 warehouse_stock_snapshot (new)</h3>
+<pre>{
+  company_id: ObjectId,   // required
+  product_id: ObjectId,
+  warehouse_id: ObjectId,
+  quantity: Number,       // min 0
+  updatedAt: Date
+}
+// Unique: { company_id, product_id, warehouse_id }
+// Shard: { company_id, product_id, warehouse_id }
+// Update in same withTransaction as inventory_movements insert</pre>
+
+<h3>12.2 gl_period_balance (new)</h3>
+<pre>{
+  company_id: ObjectId,
+  account_id: ObjectId,
+  period: String,         // e.g. '2026-05'
+  debit_total: Number,
+  credit_total: Number,
+  line_count: Number
+}
+// Unique: { company_id, period, account_id }</pre>
+
+<h3>12.3 payment_receipt indexes</h3>
+<pre>paymentReceiptSchema.index({ company_id: 1, createdAt: -1 });
+paymentReceiptSchema.index({ company_id: 1, user_id: 1, createdAt: -1 });
+paymentReceiptSchema.index(
+  { company_id: 1, transaction_number: 1 },
+  { partialFilterExpression: { deletedAt: null } }
+);</pre>
+
+<h2>13. Implementation Roadmap (Priority)</h2>
+<ol>
+  <li>Unify inventory — one ledger; deprecate duplicate API</li>
+  <li>Fix or remove warehouse_inventory — align product controller with snapshot strategy</li>
+  <li>Add missing indexes — payment_receipt, user.role, transaction period indexes</li>
+  <li>Remove order max-scan — counter + unique index retry only</li>
+  <li>Introduce stock and GL balance snapshots</li>
+  <li>Replace deep skip with keyset pagination</li>
+  <li>Enable sharding when hot collections exceed ~50GB — use { company_id: 1, _id: 1 }</li>
+  <li>Read replica + Redis for reporting dashboards</li>
+</ol>
+
+<h2>14. Multi-Document Transactions</h2>
+<p>Application uses mongoose.startSession() and withTransaction in:</p>
+<ul>
+  <li>controllers/order.js (order save/update)</li>
+  <li>controllers/payment_receipt.js</li>
+  <li>controllers/inventory_movements.js</li>
+  <li>controllers/adjustment.js, amount_transfer.js, assets.js, purchase_order.js, stock_movement.js</li>
+</ul>
+<p><strong>Requirements:</strong> Replica set or Atlas; keep transactions short; all documents should share company_id for sharded deployments.</p>
+
+<h2>15. Files Reviewed (Codebase)</h2>
+<ul>
+  <li>models/order.js, order_item.js, transaction.js, stock_movement.js, inventory_movements.js</li>
+  <li>models/payment_receipt.js, logs.js, user.js, account.js, company.js, product.js</li>
+  <li>models/purchase_order.js, warehouse_inventory.js (commented out)</li>
+  <li>controllers/order.js, inventory_movements.js, account.js, transaction.js, product.js</li>
+  <li>utils/modelHelper.js (pagination, company_id injection)</li>
+</ul>
+
+<h2>16. Bottom Line</h2>
+<p>The project has a <strong>solid multi-tenant shape</strong> (company_id, header/line split, partial unique indexes, bounded audit logs with TTL). It is <strong>not production-ready for millions of invoice-heavy rows</strong> until stock and GL stop relying on full ledger scans, dual inventory is resolved, and numbering/pagination are fixed.</p>
+<p><strong>Do not shard on company_id alone.</strong> Use <strong>{ company_id: 1, _id: 1 }</strong>. A single database remains appropriate until mega-tenant or compliance requirements dictate otherwise — then prefer <strong>hybrid archive + read replicas</strong> over database-per-company.</p>
+
+<p class="meta" style="margin-top: 24px;">Generated for Node-js-CRUD-Generator — MongoDB Atlas scaling review perspective.</p>
+
+</body>
+</html>

@@ -43,6 +43,7 @@ const modelSchema = new mongoose.Schema(
     transaction_number: {
       type: String,
       required: true,
+      field_name: "Transaction Number",
     },
     // Populated via GET ?populate=account_id or together with ?populate=ref_id (account_id is auto-added when ref_id is used)
     account_id: {
@@ -76,10 +77,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       //   required: true,
     },
-    transaction_number: {
-      type: String,
-      field_name: "Transaction Number",
-    },
+    // transaction_number: {
+    //   type: String,
+    //   field_name: "Transaction Number",
+    // },
 
     // default fields
     user_id: {
