@@ -130,3 +130,18 @@ create one default walkin customer.
 
 // to check load on terminal
 & "E:\xampp\apache\bin\ab.exe" -n 1000 -c 10 http://localhost:8000/api/blog/get-all-active?name=apple
+
+
+
+
+
+The 3 Things That Will Slow Down First
+1. Stock Quantity — Aggregate on Every Read (Biggest Risk)
+Right now, to find how many units are in stock, the system runs SUM(in) - SUM(out) across all inventory_movements rows for that product. At billions of records, this becomes extremely slow.
+Fix: Add a warehouse_stock_snapshot collection — 1 row per product+warehouse holding the current qty. Update it inside the same transaction as the movement insert. Your doc already shows this exact schema in Section 12.1.
+2. GL / Accounting — Trial Balance Scans Everything
+Every trial balance, P&L, and customer balance report aggregates raw transactions rows. At scale, this is like running SELECT SUM(...) over a billion rows every time someone opens the accounts screen.
+Fix: Add gl_period_balances (1 row per account per month) and customer_balances. Update them on each transaction post. Section 12.2 in your doc covers this.
+3. Pagination — skip/limit Breaks at Deep Pages
+When a user goes to page 500 of invoices, MongoDB has to scan and discard 499 pages of data. On billions of rows this is very slow.
+Fix: Switch to keyset pagination using createdAt + _id as a cursor instead of skip.
