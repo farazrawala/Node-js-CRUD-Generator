@@ -122,7 +122,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true },
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 modelSchema.index({ company_id: 1, createdAt: -1 });

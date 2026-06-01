@@ -21,8 +21,12 @@ const modelSchema = new mongoose.Schema(
       field_name: "Attachments",
       field_type: "image",
     },
+    company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+    },
   },
-  { timestamps: true }
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 const MODEL = mongoose.model("complain", modelSchema);

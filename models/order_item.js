@@ -70,7 +70,7 @@ const modelSchema = new mongoose.Schema(
       default: null,
     },
   },
-  { timestamps: true },
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 /** Monetary line total: 2 decimal places, single source of truth from price × qty */

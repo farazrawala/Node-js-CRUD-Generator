@@ -78,7 +78,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true },
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 /** Line total: 2 decimal places from price × qty (same as order_item). */

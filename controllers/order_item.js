@@ -61,10 +61,14 @@ async function getAllorder_item(req, res) {
   return res.status(response.status).json(response);
 }
 
+/** Default reporting window when GET …/cost-of-goods-sold-by-order-item omits `from` and `to`. */
+const FIND_COGS_DEFAULT_RANGE_DAYS = 365;
+
 /**
  * GET cost of goods sold: `SUM(cost_price_at_sale * qty)` from `order_item` for the user's company.
  * Only lines with a matching `inventory_movements` row (`movement_type: "out"`).
- * Optional query: `order_id`, `product_id`, `from`, `to`.
+ * Query: `order_id`, `product_id`, optional `from` / `to` on line `createdAt`.
+ * If both dates are omitted, only the last {@link FIND_COGS_DEFAULT_RANGE_DAYS} days are included.
  */
 async function costOfGoodsSoldByOrderItem(req, res) {
   try {
@@ -128,9 +132,18 @@ async function costOfGoodsSoldByOrderItem(req, res) {
       match.product_id = new mongoose.Types.ObjectId(productIdStr);
     }
 
-    if (req.query?.from || req.query?.to) {
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+
+    if (!hasFrom && !hasTo) {
+      const toDate = new Date();
+      const fromDate = new Date(toDate);
+      fromDate.setDate(fromDate.getDate() - FIND_COGS_DEFAULT_RANGE_DAYS);
+      match.createdAt = { $gte: fromDate, $lte: toDate };
+    } else {
       match.createdAt = {};
-      if (req.query.from) {
+      if (hasFrom) {
         const fromDate = new Date(String(req.query.from).trim());
         if (Number.isNaN(fromDate.getTime())) {
           return res.status(400).json({
@@ -141,7 +154,7 @@ async function costOfGoodsSoldByOrderItem(req, res) {
         }
         match.createdAt.$gte = fromDate;
       }
-      if (req.query.to) {
+      if (hasTo) {
         const toDate = new Date(String(req.query.to).trim());
         if (Number.isNaN(toDate.getTime())) {
           return res.status(400).json({
@@ -168,6 +181,11 @@ async function costOfGoodsSoldByOrderItem(req, res) {
       ],
     };
 
+    /*
+     * Correlated $lookup per order line — stock-out proof; O(lines) subqueries at scale.
+     * Prefer denormalized line fields (cost_price_at_sale) when business rules allow.
+     * Subpipeline is tenant-scoped via $$companyId in $expr.
+     */
     const rows = await OrderItem.aggregate([
       { $match: match },
       {
@@ -209,12 +227,16 @@ async function costOfGoodsSoldByOrderItem(req, res) {
         },
       },
       { $match: { "out_movements.0": { $exists: true } } },
+      /*
+       * Scalar $group only — do not $push line _id values (MongoDB 16MB aggregation output
+       * cap; multi-tenant line volume can exceed BSON limits). Default createdAt window
+       * above limits scan when from/to are omitted. Use paginated OrderItem.find for id lists.
+       */
       {
         $group: {
           _id: null,
           cost_of_goods_sold: { $sum: lineCostExpr },
           line_count: { $sum: 1 },
-          order_item_ids: { $push: "$_id" },
         },
       },
       {
@@ -222,20 +244,12 @@ async function costOfGoodsSoldByOrderItem(req, res) {
           _id: 0,
           cost_of_goods_sold: { $round: ["$cost_of_goods_sold", 2] },
           line_count: 1,
-          order_item_ids: {
-            $map: {
-              input: "$order_item_ids",
-              as: "id",
-              in: { $toString: "$$id" },
-            },
-          },
         },
       },
     ]);
 
     const cost_of_goods_sold = rows[0]?.cost_of_goods_sold ?? 0;
     const line_count = rows[0]?.line_count ?? 0;
-    const order_item_ids = rows[0]?.order_item_ids ?? [];
 
     return res.status(200).json({
       success: true,
@@ -243,7 +257,6 @@ async function costOfGoodsSoldByOrderItem(req, res) {
       company_id: String(cid),
       cost_of_goods_sold,
       line_count,
-      order_item_ids,
     });
   } catch (error) {
     console.error("❌ costOfGoodsSoldByOrderItem:", error);

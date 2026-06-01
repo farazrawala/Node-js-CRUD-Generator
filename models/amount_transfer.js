@@ -75,7 +75,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true },
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 const MODEL = mongoose.model("amount_transfer", modelSchema);

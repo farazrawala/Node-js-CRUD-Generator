@@ -523,10 +523,14 @@ function shapeOrderWithItems(orderPlain, items) {
   };
 }
 
+/** Default reporting window when GET /order/profit-by-order-item omits `from` and `to`. */
+const FIND_PROFIT_DEFAULT_RANGE_DAYS = 90;
+
 /**
  * GET `SUM(profit)` from `order_item` for the authenticated user's `company_id` only.
  * Includes lines that have a matching `inventory_movements` row with `movement_type: "out"`.
- * Optional query: `order_id`, `product_id`, `from`, `to` (filters order line `createdAt`).
+ * Query: `order_id`, `product_id`, optional `from` / `to` on line `createdAt`.
+ * If both dates are omitted, only the last {@link FIND_PROFIT_DEFAULT_RANGE_DAYS} days are included.
  */
 async function findProfitByOrderItem(req, res) {
   try {
@@ -590,9 +594,18 @@ async function findProfitByOrderItem(req, res) {
       match.product_id = new mongoose.Types.ObjectId(productIdStr);
     }
 
-    if (req.query?.from || req.query?.to) {
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+
+    if (!hasFrom && !hasTo) {
+      const toDate = new Date();
+      const fromDate = new Date(toDate);
+      fromDate.setDate(fromDate.getDate() - FIND_PROFIT_DEFAULT_RANGE_DAYS);
+      match.createdAt = { $gte: fromDate, $lte: toDate };
+    } else {
       match.createdAt = {};
-      if (req.query.from) {
+      if (hasFrom) {
         const fromDate = new Date(String(req.query.from).trim());
         if (Number.isNaN(fromDate.getTime())) {
           return res.status(400).json({
@@ -603,7 +616,7 @@ async function findProfitByOrderItem(req, res) {
         }
         match.createdAt.$gte = fromDate;
       }
-      if (req.query.to) {
+      if (hasTo) {
         const toDate = new Date(String(req.query.to).trim());
         if (Number.isNaN(toDate.getTime())) {
           return res.status(400).json({
@@ -616,6 +629,11 @@ async function findProfitByOrderItem(req, res) {
       }
     }
 
+    /*
+     * Correlated $lookup per order line — correct for stock-out proof but O(lines) subqueries
+     * at scale; prefer denormalized line fields (e.g. cost_price_at_sale, profit) when
+     * business rules allow. Subpipeline is tenant-scoped via $$companyId in $expr.
+     */
     const rows = await OrderItem.aggregate([
       { $match: match },
       {
@@ -657,12 +675,16 @@ async function findProfitByOrderItem(req, res) {
         },
       },
       { $match: { "out_movements.0": { $exists: true } } },
+      /*
+       * Scalar $group only — do not $push line _id values (MongoDB 16MB aggregation output
+       * cap; multi-tenant line volume can exceed BSON limits). Use paginated OrderItem.find
+       * if clients need id lists.
+       */
       {
         $group: {
           _id: null,
           profit: { $sum: { $ifNull: ["$profit", 0] } },
           line_count: { $sum: 1 },
-          order_item_ids: { $push: "$_id" },
         },
       },
       {
@@ -670,20 +692,12 @@ async function findProfitByOrderItem(req, res) {
           _id: 0,
           profit: { $round: ["$profit", 2] },
           line_count: 1,
-          order_item_ids: {
-            $map: {
-              input: "$order_item_ids",
-              as: "id",
-              in: { $toString: "$$id" },
-            },
-          },
         },
       },
     ]);
 
     const profit = rows[0]?.profit ?? 0;
     const line_count = rows[0]?.line_count ?? 0;
-    const order_item_ids = rows[0]?.order_item_ids ?? [];
 
     return res.status(200).json({
       success: true,
@@ -691,7 +705,6 @@ async function findProfitByOrderItem(req, res) {
       company_id: String(cid),
       profit,
       line_count,
-      order_item_ids,
     });
   } catch (error) {
     console.error("❌ findProfitByOrderItem:", error);
@@ -703,9 +716,13 @@ async function findProfitByOrderItem(req, res) {
   }
 }
 
+/** Default reporting window when GET /order/sales omits `from` and `to` (multi-tenant safety). */
+const FIND_SALES_DEFAULT_RANGE_DAYS = 365;
+
 /**
  * GET sum of `total_amount` from `order` for the authenticated user's `company_id` only.
- * Optional query: `order_status`, `from`, `to` (filters `createdAt`).
+ * Query: `order_status`, optional `from` / `to` on `createdAt`.
+ * If both dates are omitted, only the last {@link FIND_SALES_DEFAULT_RANGE_DAYS} days are included.
  */
 async function findSales(req, res) {
   try {
@@ -748,9 +765,18 @@ async function findSales(req, res) {
       match.order_status = String(rawOrderStatus).trim();
     }
 
-    if (req.query?.from || req.query?.to) {
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+
+    if (!hasFrom && !hasTo) {
+      const toDate = new Date();
+      const fromDate = new Date(toDate);
+      fromDate.setDate(fromDate.getDate() - FIND_SALES_DEFAULT_RANGE_DAYS);
+      match.createdAt = { $gte: fromDate, $lte: toDate };
+    } else {
       match.createdAt = {};
-      if (req.query.from) {
+      if (hasFrom) {
         const fromDate = new Date(String(req.query.from).trim());
         if (Number.isNaN(fromDate.getTime())) {
           return res.status(400).json({
@@ -761,7 +787,7 @@ async function findSales(req, res) {
         }
         match.createdAt.$gte = fromDate;
       }
-      if (req.query.to) {
+      if (hasTo) {
         const toDate = new Date(String(req.query.to).trim());
         if (Number.isNaN(toDate.getTime())) {
           return res.status(400).json({
@@ -774,6 +800,12 @@ async function findSales(req, res) {
       }
     }
 
+    /*
+     * Summary-only $group (scalars). Do not $push order _id values: MongoDB caps each
+     * aggregation result document at 16MB BSON; large tenants would fail or OOM when
+     * every matching _id is accumulated in one array. Use paginated Order.find() if
+     * clients need id lists.
+     */
     const rows = await Order.aggregate([
       { $match: match },
       {
@@ -781,7 +813,6 @@ async function findSales(req, res) {
           _id: null,
           total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
           order_count: { $sum: 1 },
-          order_ids: { $push: "$_id" },
         },
       },
       {
@@ -789,20 +820,12 @@ async function findSales(req, res) {
           _id: 0,
           total_amount: { $round: ["$total_amount", 2] },
           order_count: 1,
-          order_ids: {
-            $map: {
-              input: "$order_ids",
-              as: "id",
-              in: { $toString: "$$id" },
-            },
-          },
         },
       },
     ]);
 
     const total_amount = rows[0]?.total_amount ?? 0;
     const order_count = rows[0]?.order_count ?? 0;
-    const order_ids = rows[0]?.order_ids ?? [];
 
     return res.status(200).json({
       success: true,
@@ -810,7 +833,6 @@ async function findSales(req, res) {
       company_id: String(cid),
       total_amount,
       order_count,
-      order_ids,
     });
   } catch (error) {
     console.error("❌ findSales:", error);
@@ -948,7 +970,8 @@ async function order_save(req, res) {
   const runOrderSaveBody = async (mongoSession) => {
     insertedItemsPlain = [];
     const lineItemSessionOpts = mongoSession ? { session: mongoSession } : {};
-    orderSaveExecutionMode = mongoSession ? "mongodb_transaction" : "no_session";
+    orderSaveExecutionMode =
+      mongoSession ? "mongodb_transaction" : "no_session";
 
     response = await handleGenericCreate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
@@ -1282,7 +1305,8 @@ async function order_save(req, res) {
       serializeErrorForLog(txnError),
     );
 
-    const bodyForLog = originalBody && typeof originalBody === "object" ? originalBody : {};
+    const bodyForLog =
+      originalBody && typeof originalBody === "object" ? originalBody : {};
     const firstLine = lines[0] || {};
     await logRollbackFailure(req, txnError, {
       action: "ORDER CREATE ROLLBACK",
@@ -1291,20 +1315,21 @@ async function order_save(req, res) {
       context: {
         execution_mode: orderSaveExecutionMode,
         rollback_note:
-          orderSaveExecutionMode === "mongodb_transaction_aborted" ||
-          orderSaveExecutionMode === "mongodb_transaction"
-            ? "MongoDB multi-document transaction aborted; no partial commit from this attempt."
-            : orderSaveExecutionMode === "mongodb_transaction_committed"
-              ? "Transaction committed but a later step failed (unexpected)."
-              : "Standalone / no transaction: partial writes may exist if a step failed mid-flow; check order_item and transactions for orphans.",
+          (
+            orderSaveExecutionMode === "mongodb_transaction_aborted" ||
+            orderSaveExecutionMode === "mongodb_transaction"
+          ) ?
+            "MongoDB multi-document transaction aborted; no partial commit from this attempt."
+          : orderSaveExecutionMode === "mongodb_transaction_committed" ?
+            "Transaction committed but a later step failed (unexpected)."
+          : "Standalone / no transaction: partial writes may exist if a step failed mid-flow; check order_item and transactions for orphans.",
         transaction_number,
         line_count: lines.length,
         customer_id:
           coalesceObjectId(bodyForLog.customer_id) ?? bodyForLog.customer_id,
         amount_received: bodyForLog.amount_received,
         posPayMethod:
-          coalesceObjectId(bodyForLog.posPayMethod) ??
-          bodyForLog.posPayMethod,
+          coalesceObjectId(bodyForLog.posPayMethod) ?? bodyForLog.posPayMethod,
         payment_method_id:
           coalesceObjectId(bodyForLog.payment_method_id) ??
           bodyForLog.payment_method_id,
@@ -1312,9 +1337,8 @@ async function order_save(req, res) {
           coalesceObjectId(req.user?.company_id) ?? req.user?.company_id,
         first_line_product_id: firstLine.product_id,
         first_line_qty: firstLine.qty,
-        partial_order_id: response?.data?._id
-          ? String(response.data._id)
-          : null,
+        partial_order_id:
+          response?.data?._id ? String(response.data._id) : null,
         api_client_error: txnError.clientErrorPayload ?? null,
         gl_or_bulk_details: txnError.details ?? null,
         error_message: String(txnError.message || ""),
@@ -1344,7 +1368,10 @@ async function order_save(req, res) {
     return res.status(isGl || isBulk ? 400 : 500).json({
       success: false,
       status: isGl || isBulk ? 400 : 500,
-      error: isGl || isBulk ? "Order creation rolled back" : "Failed to create order",
+      error:
+        isGl || isBulk ?
+          "Order creation rolled back"
+        : "Failed to create order",
       message: txnError.message,
       details: txnError.details ?? txnError.message,
       type: txnError.responseType || (isGl ? "transaction_bulk" : "internal"),
@@ -1403,7 +1430,8 @@ async function order_update(req, res) {
 
   const runOrderUpdateBody = async (mongoSession) => {
     const sessOpts = mongoSession ? { session: mongoSession } : {};
-    orderUpdateExecutionMode = mongoSession ? "mongodb_transaction" : "no_session";
+    orderUpdateExecutionMode =
+      mongoSession ? "mongodb_transaction" : "no_session";
 
     response = await handleGenericUpdate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
@@ -1457,7 +1485,8 @@ async function order_update(req, res) {
               createdAt: record.createdAt,
             },
             {
-              account_id: orderReq.user.company_id.default_sales_discount_account,
+              account_id:
+                orderReq.user.company_id.default_sales_discount_account,
               type: "debit",
               amount: record?.discount,
               reference_user_id: record?.customer_id,
@@ -1471,7 +1500,8 @@ async function order_update(req, res) {
             },
             {
               account_id:
-                orderReq.body?.posPayMethod ?? orderReq.body?.payment_method_accounts_id,
+                orderReq.body?.posPayMethod ??
+                orderReq.body?.payment_method_accounts_id,
               type: "debit",
               amount: record?.amount_received,
               reference_user_id: record?.customer_id,
@@ -1527,7 +1557,10 @@ async function order_update(req, res) {
         req,
       );
       if (built.error) {
-        throwOrderCreateFromGenericFailure(built.error, "Order line build failed");
+        throwOrderCreateFromGenericFailure(
+          built.error,
+          "Order line build failed",
+        );
       }
       await OrderItem.deleteMany({ order_id: orderId }, sessOpts);
       await OrderItem.insertMany(built.docs, sessOpts);
@@ -1605,12 +1638,14 @@ async function order_update(req, res) {
       context: {
         execution_mode: orderUpdateExecutionMode,
         rollback_note:
-          orderUpdateExecutionMode === "mongodb_transaction_aborted" ||
-          orderUpdateExecutionMode === "mongodb_transaction"
-            ? "MongoDB multi-document transaction aborted; no partial commit from this attempt."
-            : orderUpdateExecutionMode === "mongodb_transaction_committed"
-              ? "Transaction committed but a later step failed (unexpected)."
-              : "Standalone / no transaction: partial writes may exist if a step failed mid-flow; check order_item and transactions for orphans.",
+          (
+            orderUpdateExecutionMode === "mongodb_transaction_aborted" ||
+            orderUpdateExecutionMode === "mongodb_transaction"
+          ) ?
+            "MongoDB multi-document transaction aborted; no partial commit from this attempt."
+          : orderUpdateExecutionMode === "mongodb_transaction_committed" ?
+            "Transaction committed but a later step failed (unexpected)."
+          : "Standalone / no transaction: partial writes may exist if a step failed mid-flow; check order_item and transactions for orphans.",
         order_id: recordId,
         line_count: lines.length,
         customer_id:
@@ -1625,9 +1660,8 @@ async function order_update(req, res) {
           coalesceObjectId(req.user?.company_id) ?? req.user?.company_id,
         first_line_product_id: firstLine.product_id,
         first_line_qty: firstLine.qty,
-        partial_order_id: response?.data?._id
-          ? String(response.data._id)
-          : recordId || null,
+        partial_order_id:
+          response?.data?._id ? String(response.data._id) : recordId || null,
         api_client_error: txnError.clientErrorPayload ?? null,
         gl_or_bulk_details: txnError.details ?? null,
         error_message: String(txnError.message || ""),

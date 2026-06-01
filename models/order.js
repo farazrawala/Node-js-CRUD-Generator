@@ -71,17 +71,8 @@ const counterSchema = new mongoose.Schema({
   seq: { type: Number, default: 0 },
 });
 
-const Counter =
-  mongoose.models.counter || mongoose.model("counter", counterSchema);
-
-// Function to get next sequence number
-async function getNextSequence(name) {
-  const counter = await Counter.findByIdAndUpdate(
-    name,
-    { $inc: { seq: 1 } },
-    { new: true, upsert: true },
-  );
-  return counter.seq;
+if (!mongoose.models.counter) {
+  mongoose.model("counter", counterSchema);
 }
 
 /** Numeric suffix from standard tenant format `ORD-####` (ignores legacy formats like ORD-BRA-####). */
@@ -92,45 +83,37 @@ function parseOrdNumericSuffix(orderNo) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-/** Highest `ORD-####` suffix for this company (active, non-deleted rows only). */
-async function getMaxOrderSeqForCompany(companyId) {
-  if (!companyId) return 0;
-  const cid =
-    companyId instanceof mongoose.Types.ObjectId ?
+function formatOrderNo(seq) {
+  return `ORD-${String(seq).padStart(4, "0")}`;
+}
+
+function toCompanyObjectId(companyId) {
+  if (!companyId) return null;
+  return companyId instanceof mongoose.Types.ObjectId ?
       companyId
     : new mongoose.Types.ObjectId(String(companyId));
-  const Order = mongoose.model("order");
-  const rows = await Order.find({
-    company_id: cid,
-    deletedAt: null,
-    order_no: /^ORD-\d+$/i,
-  })
-    .select("order_no")
-    .lean();
-  let max = 0;
-  for (const row of rows) {
-    max = Math.max(max, parseOrdNumericSuffix(row.order_no));
-  }
-  return max;
 }
 
 /**
- * Allocate next `ORD-####` for one tenant. Syncs the counter to the DB max first so failed
- * saves (duplicate index, rollback) do not burn sequence numbers.
+ * Next `ORD-####` for one tenant: load the latest standard order, then suffix + 1.
+ * Uses one `findOne` sorted by `_id` (aligns with shard key `{ company_id, _id }`).
  */
 async function allocateOrderNoForCompany(companyId) {
-  const counterKey =
-    companyId ?
-      `order_no_${companyId.toString()}`
-    : "order_no__no_company";
-  const maxFromDb = await getMaxOrderSeqForCompany(companyId);
-  await Counter.findOneAndUpdate(
-    { _id: counterKey },
-    { $set: { seq: maxFromDb } },
-    { upsert: true },
-  );
-  const seq = await getNextSequence(counterKey);
-  return `ORD-${String(seq).padStart(4, "0")}`;
+  const Order = mongoose.model("order");
+  const filter = {
+    deletedAt: null,
+    order_no: /^ORD-\d+$/i,
+  };
+  const cid = toCompanyObjectId(companyId);
+  if (cid) filter.company_id = cid;
+
+  const last = await Order.findOne(filter)
+    .sort({ _id: -1 })
+    .select("order_no")
+    .lean();
+
+  const nextSeq = parseOrdNumericSuffix(last?.order_no) + 1;
+  return formatOrderNo(nextSeq);
 }
 
 /** Cross-tenant guard: optional POS `customer_id` must reference a user with the same `company_id`. */
@@ -273,7 +256,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true },
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 modelSchema.statics.classifyOrderStatus = function (status) {

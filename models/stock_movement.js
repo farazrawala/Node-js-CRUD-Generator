@@ -110,7 +110,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true },
+  { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
 /** Legacy rows: only reference_id set → treat as PO line for reporting / populate. */
