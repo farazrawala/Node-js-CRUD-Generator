@@ -544,6 +544,13 @@ async function runCachedListHandler(req, res, options) {
     fetch,
   } = options;
 
+  // User lists change on every create/update; caching empty results before commit
+  // produced stale tenant directories (fromCache: true, data: []).
+  if (module === "user") {
+    const response = await fetch();
+    return res.status(response?.status || 200).json(response);
+  }
+
   const { cacheKey, cacheQuery } = resolveListCacheFromReq(req, {
     module,
     action,

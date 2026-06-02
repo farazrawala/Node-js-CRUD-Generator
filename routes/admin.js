@@ -36,6 +36,7 @@ const userAdminCRUD = adminCrudGenerator(
   [
     "name",
     "email",
+    "phone",
     "password",
     "role",
     "permissions",
@@ -48,14 +49,15 @@ const userAdminCRUD = adminCrudGenerator(
     includedFields: [
       "name",
       "email",
+      "phone",
       "role",
       "profile_image",
       "company_id",
       "createdAt",
     ],
-    searchableFields: ["name", "email"],
+    searchableFields: ["name", "email", "phone"],
     filterableFields: ["role"],
-    sortableFields: ["name", "email", "createdAt"],
+    sortableFields: ["name", "email", "phone", "createdAt"],
     // Base URL for assets
     softDelete: true, // Enable soft delete functionality
     baseUrl: BASE_URL,

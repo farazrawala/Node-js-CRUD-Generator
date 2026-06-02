@@ -6,6 +6,7 @@ const {
   handleGenericGetAll,
   handleGenericFindOne,
   parseSearchFieldsFromQuery,
+  coalesceObjectId,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
@@ -1351,15 +1352,38 @@ async function productCostUpdate(req, res) {
 }
 
 async function getAllActiveProductsPOS(req, res) {
+  const tenantCo = coalesceObjectId(req.user?.company_id);
   const filter = {
     status: "active",
     deletedAt: null,
     product_parent_id: null,
-    company_id: req.user.company_id,
+    ...(tenantCo ? { company_id: tenantCo } : {}),
   };
+
+  const rawCategory = req.query.category_id ?? req.query.categoryId;
+  if (rawCategory != null && String(rawCategory).trim() !== "") {
+    const categoryOid = coalesceObjectId(rawCategory);
+    if (
+      !categoryOid ||
+      !mongoose.Types.ObjectId.isValid(String(categoryOid))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid category_id",
+        message: "category_id must be a valid 24-character ObjectId",
+      });
+    }
+    // `category_id` on product is an array; equality matches docs that include this id.
+    filter.category_id = categoryOid;
+  }
+
   const response = await handleGenericGetAll(req, "product", {
     filter,
-    excludeFields: [], // Don't exclude any fields
+    excludeFields: [],
+    sort: { createdAt: -1 },
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
     search: req.query.search,
     searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
     populate: [

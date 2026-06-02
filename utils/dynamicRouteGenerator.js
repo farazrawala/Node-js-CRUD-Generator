@@ -261,7 +261,6 @@ function generateControllerFunctions(modelName) {
         }
 
         console.log(`✅ ${modelName} created successfully:`, record._id);
-        await invalidateListCacheForReq(req, modelName, "get-all-active");
       };
 
       try {
@@ -285,12 +284,18 @@ function generateControllerFunctions(modelName) {
             }
             return out;
           });
+          if (response?.success) {
+            await invalidateListCacheForReq(req, modelName, "get-all-active");
+          }
           return res.status(response.status).json(response);
         }
 
         const response = await handleGenericCreate(req, modelName, {
           afterCreate,
         });
+        if (response?.success) {
+          await invalidateListCacheForReq(req, modelName, "get-all-active");
+        }
         return res.status(response.status).json(response);
       } catch (err) {
         console.error(`❌ ${modelName} create error:`, err.message);
@@ -353,7 +358,6 @@ function generateControllerFunctions(modelName) {
         if (priorAfterUpdate) {
           await priorAfterUpdate(updatedRecord, req, existingRecord, session);
         }
-        await invalidateListCacheForReq(req, modelName, "get-all-active");
       };
 
       try {
@@ -377,6 +381,9 @@ function generateControllerFunctions(modelName) {
             }
             return out;
           });
+          if (response?.success) {
+            await invalidateListCacheForReq(req, modelName, "get-all-active");
+          }
           return res.status(response.status).json(response);
         }
 
@@ -385,6 +392,9 @@ function generateControllerFunctions(modelName) {
           modelName,
           updateOptions,
         );
+        if (response?.success) {
+          await invalidateListCacheForReq(req, modelName, "get-all-active");
+        }
         return res.status(response.status).json(response);
       } catch (err) {
         console.error(`❌ ${modelName} update error:`, err.message);

@@ -359,8 +359,16 @@ function coalesceObjectId(value) {
   if (value == null || value === "") {
     return value;
   }
+  const mongoose = require("mongoose");
+  if (value instanceof mongoose.Types.ObjectId) {
+    return value;
+  }
   if (typeof value === "object" && value._id != null) {
-    return value._id;
+    return coalesceObjectId(value._id);
+  }
+  const str = String(value).trim();
+  if (mongoose.Types.ObjectId.isValid(str) && str.length === 24) {
+    return new mongoose.Types.ObjectId(str);
   }
   return value;
 }
@@ -2428,44 +2436,76 @@ function escapeRegexForSearch(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const SEARCH_SKIP_FIELD_NAMES = new Set([
+  "_id",
+  "__v",
+  "password",
+  "deletedAt",
+  "createdAt",
+  "updatedAt",
+  "created_by",
+  "updated_by",
+  /** Balances/amounts are numeric but not typical list search targets (use ?searchFields=). */
+  "initial_balance",
+]);
+
+const SEARCHABLE_NUMBER_INSTANCES = new Set(["Number", "Decimal128"]);
+
 /**
- * Top-level string fields on a Mongoose schema (for generic text search).
+ * Top-level string and number fields on a Mongoose schema (for generic text search).
  */
 function getDefaultSearchFieldsFromModel(Model) {
-  const skip = new Set([
-    "_id",
-    "__v",
-    "password",
-    "deletedAt",
-    "createdAt",
-    "updatedAt",
-    "created_by",
-    "updated_by",
-  ]);
   const paths = Model.schema?.paths || {};
   return Object.keys(paths).filter((key) => {
-    if (skip.has(key)) return false;
-    return paths[key]?.instance === "String";
+    if (SEARCH_SKIP_FIELD_NAMES.has(key)) return false;
+    const inst = paths[key]?.instance;
+    return inst === "String" || SEARCHABLE_NUMBER_INSTANCES.has(inst);
   });
 }
 
 /**
- * AND-combines an existing filter with a case-insensitive $or regex across fields.
+ * Build one $or branch for a schema field (regex on strings; digit substring on numbers).
  */
-function mergeSearchIntoFilter(filter, searchTerm, searchFields) {
+function buildSearchOrClause(field, searchTerm, escaped, schemaPath) {
+  const inst = schemaPath?.instance;
+  if (SEARCHABLE_NUMBER_INSTANCES.has(inst)) {
+    const clauses = [
+      {
+        $expr: {
+          $regexMatch: {
+            input: { $ifNull: [{ $toString: `$${field}` }, ""] },
+            regex: escaped,
+          },
+        },
+      },
+    ];
+    const num = Number(searchTerm);
+    if (searchTerm !== "" && Number.isFinite(num)) {
+      clauses.push({ [field]: num });
+    }
+    return clauses;
+  }
+  return [{ [field]: { $regex: escaped, $options: "i" } }];
+}
+
+/**
+ * AND-combines an existing filter with a case-insensitive $or across string/number fields.
+ */
+function mergeSearchIntoFilter(filter, searchTerm, searchFields, Model = null) {
   if (!searchTerm || !searchFields.length) {
     return { ...filter };
   }
   const escaped = escapeRegexForSearch(searchTerm);
+  const paths = Model?.schema?.paths || {};
+  const orClauses = [];
+  for (const field of searchFields) {
+    orClauses.push(...buildSearchOrClause(field, searchTerm, escaped, paths[field]));
+  }
+  if (orClauses.length === 0) {
+    return { ...filter };
+  }
   return {
-    $and: [
-      filter,
-      {
-        $or: searchFields.map((field) => ({
-          [field]: { $regex: escaped, $options: "i" },
-        })),
-      },
-    ],
+    $and: [filter, { $or: orClauses }],
   };
 }
 
@@ -2799,7 +2839,7 @@ const handleGenericGetAll = async (
 
     const mongoFilter =
       searchTerm && searchFields.length > 0 ?
-        mergeSearchIntoFilter(filter, searchTerm, searchFields)
+        mergeSearchIntoFilter(filter, searchTerm, searchFields, Model)
       : { ...filter };
 
     console.log(

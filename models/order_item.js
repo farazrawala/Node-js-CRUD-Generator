@@ -33,7 +33,6 @@ const modelSchema = new mongoose.Schema(
     },
     profit: {
       type: Number,
-      min: 0,
     },
 
     branch_id: {

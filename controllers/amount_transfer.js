@@ -227,8 +227,8 @@ async function buildAmountTransferGlItems(
   };
 
   return [
-    { ...base, account_id: fromAccountId, type: "debit" },
-    { ...base, account_id: toAccountId, type: "credit" },
+    { ...base, account_id: fromAccountId, type: "credit" },
+    { ...base, account_id: toAccountId, type: "debit" },
   ];
 }
 
