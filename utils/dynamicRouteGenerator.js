@@ -37,6 +37,7 @@ const RESERVED_QUERY_KEYS = new Set([
   "page",
   "deleted",
   "include_inactive",
+  "role",
   ...INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 ]);
 
@@ -112,6 +113,57 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
     filter[key] = parsed;
   });
   return filter;
+}
+
+/**
+ * `?role=CUSTOMER` or `?role=customer` on user list routes.
+ * `role` is stored as a string array; equality matches docs that include the role.
+ */
+function applyUserRoleQueryFilter(filter, query, modelName) {
+  if (modelName !== "user") {
+    return { filter, error: null };
+  }
+  const raw = query?.role;
+  if (raw == null || String(raw).trim() === "") {
+    return { filter, error: null };
+  }
+
+  let allowed = ["USER", "ADMIN", "VENDOR", "CUSTOMER"];
+  try {
+    const User = getModelFromController("user");
+    if (Array.isArray(User.USER_ROLE_VALUES) && User.USER_ROLE_VALUES.length) {
+      allowed = User.USER_ROLE_VALUES;
+    }
+  } catch (_) {
+    /* keep default */
+  }
+
+  const roles = (
+    Array.isArray(raw) ? raw : String(raw).split(",")
+  )
+    .map((s) => String(s).trim().toUpperCase())
+    .filter(Boolean);
+  const valid = roles.filter((r) => allowed.includes(r));
+  if (valid.length === 0) {
+    return {
+      filter,
+      error: {
+        success: false,
+        status: 400,
+        error: "Invalid role",
+        message: `role must be one of: ${allowed.join(", ")}`,
+        allowed,
+      },
+    };
+  }
+
+  return {
+    filter: {
+      ...filter,
+      role: valid.length === 1 ? valid[0] : { $in: valid },
+    },
+    error: null,
+  };
 }
 
 function buildSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
@@ -434,6 +486,11 @@ function generateControllerFunctions(modelName) {
         console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
       }
       filter = applyQueryFilters(filter, req.query, modelName);
+      const roleFilter = applyUserRoleQueryFilter(filter, req.query, modelName);
+      if (roleFilter.error) {
+        return res.status(roleFilter.error.status).json(roleFilter.error);
+      }
+      filter = roleFilter.filter;
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       // console.log("filter", filter);
@@ -485,6 +542,15 @@ function generateControllerFunctions(modelName) {
             console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
           }
           filter = applyQueryFilters(filter, req.query, modelName);
+          const roleFilter = applyUserRoleQueryFilter(
+            filter,
+            req.query,
+            modelName,
+          );
+          if (roleFilter.error) {
+            return roleFilter.error;
+          }
+          filter = roleFilter.filter;
           filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
           const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 

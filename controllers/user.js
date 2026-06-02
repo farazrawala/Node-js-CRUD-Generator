@@ -510,7 +510,7 @@ async function handleUserSignupCompany(req, res) {
           data.name = "Default User";
           data.password = defaultUserEmail;
           data.company_id = companyId;
-          data.role = ["USER"];
+          data.role = ["USER", "CUSTOMER", "VENDOR"];
         },
       },
     );
