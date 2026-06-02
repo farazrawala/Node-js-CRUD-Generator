@@ -1394,6 +1394,50 @@ const handleGenericUpdate = async (req, controllerName, options = {}) => {
       });
     }
 
+    // Process map fields (e.g., permissions[integration][view]) — same as handleGenericCreate
+    Object.keys(req.body).forEach((key) => {
+      const mapMatch = key.match(/^(.+)\[([^\]]+)\]\[([^\]]+)\]$/);
+      if (!mapMatch) {
+        return;
+      }
+
+      const mapFieldName = mapMatch[1];
+      const mapKey = mapMatch[2];
+      const mapSubField = mapMatch[3];
+
+      const schemaPath = Model.schema.paths[mapFieldName];
+      const isMapField =
+        schemaPath &&
+        typeof schemaPath.instance === "string" &&
+        schemaPath.instance.toLowerCase().startsWith("map");
+
+      if (!isMapField) {
+        return;
+      }
+
+      if (!updateData[mapFieldName]) {
+        updateData[mapFieldName] = {};
+      }
+
+      if (!updateData[mapFieldName][mapKey]) {
+        updateData[mapFieldName][mapKey] = {};
+      }
+
+      const rawValue = req.body[key];
+      let value = rawValue;
+
+      if (typeof rawValue === "string") {
+        const lower = rawValue.toLowerCase();
+        if (lower === "true") {
+          value = true;
+        } else if (lower === "false") {
+          value = false;
+        }
+      }
+
+      updateData[mapFieldName][mapKey][mapSubField] = value;
+    });
+
     // Handle multiselect fields (fields with field_type: "multiselect" that come as fieldName[] from forms)
     Object.keys(modelSchema).forEach((fieldName) => {
       const fieldConfig = modelSchema[fieldName];

@@ -35,19 +35,26 @@ function permissionsInputToPlain(input) {
   return {};
 }
 
+/** Plain object from a permission row (plain JSON or Mongoose subdocument). */
+function permissionRowToPlain(row) {
+  if (row == null || typeof row !== "object") return {};
+  if (typeof row.toObject === "function") return row.toObject();
+  return { ...row };
+}
+
 /** Drop unknown module / action keys so clients cannot inject privilege buckets. */
 function sanitizeUserPermissions(plain) {
   const src = plain && typeof plain === "object" ? plain : {};
   const out = {};
   for (const mod of PERMISSION_MODULE_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(src, mod)) continue;
-    const row = src[mod];
+    const row = permissionRowToPlain(src[mod]);
     if (!row || typeof row !== "object") continue;
     const clean = {};
     for (const act of PERMISSION_ACTION_KEYS) {
-      if (Object.prototype.hasOwnProperty.call(row, act)) {
-        clean[act] = Boolean(row[act]);
-      }
+      // Subdocuments use schema paths on the prototype — `hasOwnProperty` is always false.
+      if (!(act in row)) continue;
+      clean[act] = Boolean(row[act]);
     }
     out[mod] = clean;
   }
