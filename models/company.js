@@ -174,6 +174,11 @@ const modelSchema = new mongoose.Schema(
       ref: "account",
       field_name: "Default Utilities Account",
     },
+    default_withdraw_account: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "account",
+      field_name: "Default Withdraw Account",
+    },
 
     warehouse_id: {
       type: mongoose.Schema.Types.ObjectId,

@@ -547,6 +547,7 @@ async function handleUserSignupCompany(req, res) {
       { name: "Utilities", account_type: "operating_expense" },
       { name: "Fixed Asset", account_type: "fixed_asset" },
       { name: "Adjustment", account_type: "equity" },
+      { name: "Withdraw", account_type: "other_expense" },
     ];
 
     // Create the named "Equity" account first (opening-balance journals). Do not filter
@@ -628,6 +629,7 @@ async function handleUserSignupCompany(req, res) {
           default_utilities_account: createdAccountsData[12]._id,
           default_fixed_asset_account: createdAccountsData[13]._id,
           default_adjustment_account: createdAccountsData[14]._id,
+          default_withdraw_account: createdAccountsData[15]._id,
         },
       }),
       "company",
