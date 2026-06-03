@@ -1,6 +1,9 @@
 const crypto = require("crypto");
 const { coalesceObjectId } = require("./modelHelper");
-const { logListAccess } = require("./applicationLogs");
+const {
+  logListAccess,
+  isListAccessAuditExcluded,
+} = require("./applicationLogs");
 
 const DEFAULT_LIST_CACHE_TTL_SEC = Number(
   process.env.REDIS_TTL_LIST_CACHE ||
@@ -552,10 +555,12 @@ async function runCachedListHandler(req, res, options) {
     fetch,
   } = options;
 
-  // `user`: stale empty lists after create; `logs`: audit trail must always hit the DB.
+  // `user`: stale empty lists after create; `logs`: always hit DB, no list-access audit row.
   if (isListCacheBypassed(module)) {
     const response = await fetch();
-    void logListAccess(req, { source: "api", module, action });
+    if (!isListAccessAuditExcluded(module)) {
+      void logListAccess(req, { source: "api", module, action });
+    }
     return res.status(response?.status || 200).json(response);
   }
 

@@ -90,6 +90,7 @@ const {
   getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
 const {
+  companyCreate,
   getMyBranches,
   removeCache,
   listAllCache,
@@ -370,7 +371,11 @@ registerAllModelRoutes(router, {
     },
     company: {
       enabled: true,
-      excludedRoutes: [],
+      excludedRoutes: ["create"],
+      customRoutes: [
+        { method: "POST", path: "/company/create", handler: companyCreate },
+        { method: "POST", path: "/companies/create", handler: companyCreate },
+      ],
     },
     complain: {
       enabled: true,

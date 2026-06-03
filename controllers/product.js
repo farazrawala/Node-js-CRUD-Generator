@@ -156,9 +156,21 @@ function getIncomingInventoryForMerge(updateData, reqBody) {
   return normalizeWarehouseInventoryInput(reqBody);
 }
 
-async function createWarehouseStockLogs(changes, req, productName) {
-  if (!Array.isArray(changes) || changes.length === 0) return;
+/**
+ * @param {{ session?: import("mongoose").ClientSession | null, strict?: boolean }} [options]
+ * @returns {Promise<{ insertedIds: import("mongoose").Types.ObjectId[] }>}
+ */
+async function createWarehouseStockLogs(
+  changes,
+  req,
+  productName,
+  options = {},
+) {
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return { insertedIds: [] };
+  }
 
+  const { session = null, strict = false } = options;
   const warehouseIds = [
     ...new Set(changes.map((change) => change.warehouse_id).filter(Boolean)),
   ];
@@ -166,9 +178,11 @@ async function createWarehouseStockLogs(changes, req, productName) {
 
   if (warehouseIds.length > 0) {
     try {
-      const warehouses = await Warehouse.find({ _id: { $in: warehouseIds } })
+      let whQ = Warehouse.find({ _id: { $in: warehouseIds } })
         .select("_id warehouse_name name")
         .lean();
+      if (session) whQ = whQ.session(session);
+      const warehouses = await whQ;
       warehouseNameMap = new Map(
         warehouses.map((warehouse) => [
           warehouse._id.toString(),
@@ -177,6 +191,7 @@ async function createWarehouseStockLogs(changes, req, productName) {
       );
     } catch (error) {
       console.error("❌ Failed to fetch warehouse names for logs:", error);
+      if (strict) throw error;
     }
   }
 
@@ -192,12 +207,53 @@ async function createWarehouseStockLogs(changes, req, productName) {
   }));
 
   try {
-    await Logs.insertMany(
-      logsToCreate.map((row) => Logs.sanitizeLogPlainObject(row)),
-    );
+    const docs = logsToCreate.map((row) => Logs.sanitizeLogPlainObject(row));
+    const inserted =
+      session ?
+        await Logs.insertMany(docs, { session })
+      : await Logs.insertMany(docs);
+    return {
+      insertedIds: inserted.map((doc) => doc._id).filter(Boolean),
+    };
   } catch (error) {
     console.error("❌ Failed to create warehouse stock logs:", error);
+    if (strict) throw error;
+    return { insertedIds: [] };
   }
+}
+
+function productUpdateLogContext(req, extra = {}) {
+  return {
+    product_id: req.params?.id ?? null,
+    product_name: req.body?.product_name,
+    company_id: req.user?.company_id,
+    user_id: req.user?._id,
+    ...extra,
+  };
+}
+
+async function rollbackProductUpdate(tracker, req, session = null) {
+  const opts = session ? { session } : {};
+
+  if (tracker.stockLogIds?.length) {
+    await Logs.updateMany(
+      { _id: { $in: tracker.stockLogIds }, deletedAt: null },
+      { $set: { deletedAt: new Date(), status: "inactive" } },
+      opts,
+    );
+  }
+
+  if (tracker.productBefore && tracker.productId) {
+    await restoreProductFromSnapshot(
+      tracker.productId,
+      tracker.productBefore,
+      session,
+    );
+  }
+
+  console.warn(
+    `⚠️ product update compensating rollback: product=${tracker.productId}`,
+  );
 }
 
 async function updateWarehouseDefault(req, res) {
@@ -1023,42 +1079,132 @@ async function productCreate(req, res) {
   return res.status(response.status).json(response);
 }
 
-async function productUpdate(req, res) {
-  const response = await handleGenericUpdate(req, "product", {
+async function performProductUpdate(req, options = {}) {
+  const session = options.session || null;
+  const strictSideEffects = Boolean(session || options.strictSideEffects);
+
+  return handleGenericUpdate(req, "product", {
+    ...(session ? { session } : {}),
     beforeUpdate: async (updateData, req, existingRecord) => {
       console.log("🔧 Product update - beforeUpdate hook called");
-      console.log(
-        "🔧 Original updateData.warehouse_inventory:",
-        updateData.warehouse_inventory,
-      );
-
-      const incomingInventory = getIncomingInventoryForMerge(
+      mergeParentWarehouseInventoryBeforeUpdate(
         updateData,
-        req.body,
+        req,
+        existingRecord,
       );
-      if (incomingInventory !== null) {
-        const { mergedInventory, changes } = mergeWarehouseInventory(
-          existingRecord?.warehouse_inventory || [],
-          incomingInventory,
-        );
-        updateData.warehouse_inventory = mergedInventory;
-        req._warehouseStockChanges = changes;
-        console.log(
-          "✅ Merged warehouse inventory in controller:",
-          mergedInventory,
-        );
-      }
     },
-    afterUpdate: async (record, req, existingUser) => {
+    afterUpdate: async (record, req, existingRecord, sess) => {
       console.log("✅ Record updated successfully:", record);
-      await createWarehouseStockLogs(
+      const bulkSession = sess || session;
+      const { insertedIds } = await createWarehouseStockLogs(
         req._warehouseStockChanges || [],
         req,
         record.product_name || "Product",
+        { session: bulkSession, strict: strictSideEffects },
       );
+      if (options.tracker && insertedIds.length) {
+        if (!options.tracker.stockLogIds) options.tracker.stockLogIds = [];
+        options.tracker.stockLogIds.push(...insertedIds);
+      }
     },
   });
-  return res.status(response.status).json(response);
+}
+
+async function runProductUpdateBody(req, session, tracker) {
+  const productId = req.params?.id;
+  if (!productId) {
+    const err = new Error("Product ID is required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  tracker.productId = coalesceObjectId(productId);
+  tracker.update_step = "snapshot";
+  tracker.productBefore = await fetchProductLeanSnapshot(
+    productId,
+    req.user?.company_id,
+    session,
+  );
+  if (!tracker.productBefore) {
+    const err = new Error("Product not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  tracker.update_step = "product";
+  const response = await performProductUpdate(req, {
+    session,
+    strictSideEffects: true,
+    tracker,
+  });
+
+  if (!response?.success) {
+    throwWithGenericFailure(response, "Product update failed");
+  }
+
+  tracker.update_step = "complete";
+  return response;
+}
+
+async function productUpdate(req, res) {
+  const tracker = {
+    update_step: "init",
+    productId: null,
+    productBefore: null,
+    stockLogIds: [],
+  };
+  let response = null;
+
+  const txnError = await runProductVariationWithOptionalTransaction(
+    async (session) => {
+      try {
+        response = await runProductUpdateBody(req, session, tracker);
+      } catch (stepError) {
+        if (!session && (tracker.productBefore || tracker.stockLogIds?.length)) {
+          await rollbackProductUpdate(tracker, req, null);
+        }
+        throw stepError;
+      }
+    },
+  );
+
+  if (txnError) {
+    console.error(
+      "❌ productUpdate failed:\n",
+      serializeErrorForLog(txnError),
+    );
+    await logRollbackFailure(req, txnError, {
+      action: "PRODUCT UPDATE ROLLBACK",
+      tags: ["product", "update", "error"],
+      fallbackUrl: req.originalUrl || `/api/product/update/${req.params?.id || ""}`,
+      context: productUpdateLogContext(req, {
+        update_step: tracker.update_step,
+        product_id: tracker.productId,
+        stock_log_ids: tracker.stockLogIds,
+        warehouse_change_count:
+          req._warehouseStockChanges?.length ?? 0,
+        execution_mode:
+          isMongoTransactionUnsupportedError(txnError) ?
+            "no_mongodb_transaction_compensating_rollback"
+          : "mongodb_transaction_aborted",
+        api_client_error: txnError.clientErrorPayload ?? null,
+      }),
+      fallbackCompanyId: req.user?.company_id,
+    });
+
+    if (txnError.clientErrorPayload) {
+      const status = txnError.clientErrorPayload.status || 400;
+      return res.status(status).json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
+      success: false,
+      message: txnError.message || "Product update failed",
+      details: txnError.details ?? undefined,
+      type: txnError.responseType || "internal",
+    });
+  }
+
+  return res.status(response?.status || 200).json(response);
 }
 
 async function productById(req, res) {

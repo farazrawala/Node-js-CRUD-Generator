@@ -33,6 +33,17 @@ function defaultRequestUrl(req, overrideUrl) {
   return u != null && String(u).trim() !== "" ? String(u).trim() : "/api";
 }
 
+/** Listing the logs module must not write another row into `logs` (infinite audit noise). */
+const LIST_ACCESS_AUDIT_EXCLUDE_MODULES = new Set(["logs"]);
+
+function isListAccessAuditExcluded(module) {
+  return LIST_ACCESS_AUDIT_EXCLUDE_MODULES.has(
+    String(module || "")
+      .trim()
+      .toLowerCase(),
+  );
+}
+
 /** Paths that log access in `runCachedListHandler` or company cache routes (not auth middleware). */
 function shouldDeferListAccessLogToHandler(req) {
   const path = String(req?.originalUrl || req?.path || req?.url || "")
@@ -61,6 +72,10 @@ async function logListAccess(req, options = {}) {
     cacheKey,
     cacheBackend,
   } = options;
+
+  if (isListAccessAuditExcluded(module)) {
+    return { ok: false, skipped: "list_access_audit_excluded" };
+  }
 
   const sourceTag = source === "cache" ? "Cache" : "API";
   const method = (req?.method || "GET").toUpperCase();
@@ -232,6 +247,7 @@ module.exports = {
   createApplicationLog,
   logEntityFieldChange,
   logListAccess,
+  isListAccessAuditExcluded,
   shouldDeferListAccessLogToHandler,
   normalizeTags,
 };

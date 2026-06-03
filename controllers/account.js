@@ -10,7 +10,12 @@ const {
 const Transaction = require("../models/transaction");
 const Company = require("../models/company");
 const AccountModel = require("../models/account");
-const { logControllerError } = require("../utils/logControllerError");
+const {
+  logControllerError,
+  logRollbackFailure,
+  serializeErrorForLog,
+} = require("../utils/logControllerError");
+const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   createTransactionsFromItems: transactionBulkCreate,
@@ -29,6 +34,367 @@ const ACCOUNT_TRANSACTION_ERROR_LOG = {
   ],
   fallbackUrl: "/api/account",
 };
+
+function throwWithGenericFailure(response, fallbackMessage) {
+  const err = new Error(
+    response?.error || response?.message || fallbackMessage || "Request failed",
+  );
+  err.statusCode = response?.status || 400;
+  err.responseType = response?.type || "validation";
+  err.details = response?.details ?? response?.missing ?? response;
+  err.clientErrorPayload = response;
+  throw err;
+}
+
+function throwAccountGlBulkFailed(failed) {
+  const err = new Error(
+    `Post-account opening balance GL failed: ${JSON.stringify(failed)}`,
+  );
+  err.statusCode = 400;
+  err.details = failed;
+  err.responseType = "transaction_bulk";
+  throw err;
+}
+
+function accountCustomCreateLogContext(req, extra = {}) {
+  return {
+    account_name: req.body?.name,
+    account_type: req.body?.account_type,
+    initial_balance: req.body?.initial_balance,
+    company_id: coalesceObjectId(req.user?.company_id) ?? req.body?.company_id,
+    user_id: toObjectId(req.user?._id),
+    ...extra,
+  };
+}
+
+function accountCustomUpdateLogContext(req, extra = {}) {
+  return {
+    account_id: req.params?.id ?? null,
+    account_name: req.body?.name,
+    account_type: req.body?.account_type,
+    initial_balance: req.body?.initial_balance,
+    company_id: coalesceObjectId(req.user?.company_id) ?? req.body?.company_id,
+    user_id: toObjectId(req.user?._id),
+    ...extra,
+  };
+}
+
+function glSoftDeleteSet(req) {
+  const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
+  const uid = toObjectId(req.user?._id);
+  if (uid) softDeleteSet.updated_by = uid;
+  return softDeleteSet;
+}
+
+/** Opening-balance journal lines for asset / liability accounts (empty if not applicable or zero balance). */
+function buildOpeningBalanceGlItems(record, transcReq, transaction_number) {
+  const openingRaw = Number(record?.initial_balance ?? 0);
+  if (Number.isNaN(openingRaw) || openingRaw === 0) {
+    return [];
+  }
+
+  const amount = makeNumberPositive(openingRaw);
+  const posting = {
+    company_id: record.company_id,
+    user_id: transcReq.user._id,
+    description: "Account Initial Balance",
+    amount,
+    transaction_number,
+  };
+
+  const items = [];
+  if (
+    record?.account_type == "current_asset" ||
+    record?.account_type == "fixed_asset"
+  ) {
+    items.push({
+      ...posting,
+      account_id: record._id,
+      type: record?.initial_balance >= 0 ? "debit" : "credit",
+    });
+    return { items, equityRequired: true, openingRaw };
+  }
+  if (
+    record?.account_type === "current_liability" ||
+    record?.account_type === "long_term_liability" ||
+    record?.account_type === "short_term_liability"
+  ) {
+    items.push({
+      ...posting,
+      account_id: record._id,
+      type: record?.initial_balance >= 0 ? "credit" : "debit",
+    });
+    return { items, equityRequired: true, openingRaw };
+  }
+  return { items: [], equityRequired: false, openingRaw };
+}
+
+async function postOpeningBalanceGl(
+  record,
+  transcReq,
+  transaction_number,
+  bulkSession,
+  strictGl,
+) {
+  const built = buildOpeningBalanceGlItems(record, transcReq, transaction_number);
+  if (!built.items.length) {
+    return;
+  }
+
+  const equityAccountId = await resolveDefaultEquityAccountId(
+    record,
+    transcReq,
+    bulkSession,
+  );
+
+  if (!equityAccountId) {
+    const msg =
+      "Opening balance journal requires a default equity account for this company";
+    if (strictGl) {
+      const err = new Error(msg);
+      err.statusCode = 400;
+      err.responseType = "equity_account_missing";
+      throw err;
+    }
+    console.warn(`⚠️ Skipping opening balance journal: ${msg}`);
+    return;
+  }
+  if (String(equityAccountId) === String(record._id)) {
+    return;
+  }
+
+  if (!transcReq.user?._id) {
+    const msg = "Opening balance journal requires an authenticated user (user_id)";
+    if (strictGl) {
+      const err = new Error(msg);
+      err.statusCode = 400;
+      err.responseType = "user_missing";
+      throw err;
+    }
+    console.warn(`⚠️ Skipping opening balance journal: ${msg}`);
+    return;
+  }
+
+  const openingRaw = built.openingRaw;
+  const amount = makeNumberPositive(openingRaw);
+  const posting = {
+    company_id: record.company_id,
+    user_id: transcReq.user._id,
+    description: "Account Initial Balance",
+    amount,
+    transaction_number,
+  };
+
+  built.items.push({
+    ...posting,
+    account_id: equityAccountId,
+    type:
+      record?.account_type == "current_asset" ||
+      record?.account_type == "fixed_asset" ?
+        openingRaw >= 0 ?
+          "credit"
+        : "debit"
+      : openingRaw >= 0 ?
+        "debit"
+      : "credit",
+  });
+
+  const { created, failed } = await transactionBulkCreate(
+    transcReq,
+    built.items,
+    {
+      stopOnError: true,
+      ...(bulkSession ? { session: bulkSession } : {}),
+    },
+  );
+
+  if (failed.length) {
+    console.error("⚠️ Post-account transaction bulk insert failed:", failed);
+    if (strictGl) {
+      throwAccountGlBulkFailed(failed);
+    }
+    await logControllerError(
+      transcReq,
+      `Post-account transaction bulk insert failed: ${JSON.stringify(failed)}`,
+      ACCOUNT_TRANSACTION_ERROR_LOG,
+    );
+    return;
+  }
+
+  if (created[0]?.data?._id) {
+    console.log(
+      "✅ Transaction(s) created:",
+      created.map((c) => c.data._id),
+    );
+  }
+}
+
+async function softDeleteGlByTransactionNumber(
+  transaction_number,
+  companyId,
+  req,
+  session = null,
+) {
+  const txnNum = String(transaction_number || "").trim();
+  if (!txnNum) return;
+
+  const opts = session ? { session } : {};
+  const filter = { transaction_number: txnNum, deletedAt: null };
+  const coId = coalesceObjectId(companyId);
+  if (coId) filter.company_id = coId;
+
+  await Transaction.updateMany(filter, { $set: glSoftDeleteSet(req) }, opts);
+}
+
+async function rollbackAccountCustomCreate(
+  accountId,
+  transactionNumber,
+  req,
+  session = null,
+) {
+  const opts = session ? { session } : {};
+  const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
+  const uid = toObjectId(req.user?._id);
+  if (uid) softDeleteSet.updated_by = uid;
+  const companyId = coalesceObjectId(req.user?.company_id);
+
+  if (transactionNumber) {
+    const txnFilter = {
+      transaction_number: String(transactionNumber).trim(),
+      deletedAt: null,
+    };
+    if (companyId) txnFilter.company_id = companyId;
+    await Transaction.updateMany(txnFilter, { $set: softDeleteSet }, opts);
+  }
+
+  const accountOid = toObjectId(accountId);
+  if (accountOid) {
+    const acctFilter = { _id: accountOid, deletedAt: null };
+    if (companyId) acctFilter.company_id = companyId;
+    await AccountModel.updateOne(acctFilter, { $set: softDeleteSet }, opts);
+  }
+
+  console.warn(
+    `⚠️ account custom-create compensating rollback: account=${accountId}, txn=${transactionNumber}`,
+  );
+}
+
+async function captureAccountUpdateSnapshots(req, session, tracker) {
+  const accountId = req.params?.id;
+  const accountOid = toObjectId(accountId);
+  if (!accountOid) {
+    const err = new Error("Invalid account id");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  tracker.accountId = accountOid;
+  let acctQ = AccountModel.findOne({ _id: accountOid, deletedAt: null }).lean();
+  if (session) acctQ = acctQ.session(session);
+  tracker.accountBefore = await acctQ;
+  if (!tracker.accountBefore) {
+    const err = new Error("Account not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  tracker.transaction_number = tracker.accountBefore.transaction_number;
+  if (tracker.transaction_number) {
+    const txnFilter = {
+      transaction_number: String(tracker.transaction_number).trim(),
+      deletedAt: null,
+    };
+    const companyId = coalesceObjectId(
+      tracker.accountBefore.company_id || req.user?.company_id,
+    );
+    if (companyId) txnFilter.company_id = companyId;
+
+    let txnQ = Transaction.find(txnFilter).lean();
+    if (session) txnQ = txnQ.session(session);
+    tracker.transactionsBefore = await txnQ;
+  } else {
+    tracker.transactionsBefore = [];
+  }
+}
+
+async function rollbackAccountCustomUpdate(tracker, req, session = null) {
+  const opts = session ? { session } : {};
+  const companyId = coalesceObjectId(
+    tracker.accountBefore?.company_id || req.user?.company_id,
+  );
+
+  const txnNum = tracker.transaction_number;
+  if (txnNum) {
+    await softDeleteGlByTransactionNumber(
+      txnNum,
+      companyId,
+      req,
+      session,
+    );
+
+    for (const row of tracker.transactionsBefore || []) {
+      if (!row?._id) continue;
+      const restoreDoc = {
+        ...row,
+        deletedAt: null,
+        status: row.status || "active",
+      };
+      await Transaction.replaceOne({ _id: row._id }, restoreDoc, {
+        upsert: true,
+        ...opts,
+      });
+    }
+  }
+
+  if (tracker.accountBefore && tracker.accountId) {
+    const { _id, __v, createdAt, updatedAt, ...rest } = tracker.accountBefore;
+    const acctFilter = { _id: tracker.accountId };
+    if (companyId) acctFilter.company_id = companyId;
+    await AccountModel.updateOne(acctFilter, { $set: rest }, opts);
+  }
+
+  console.warn(
+    `⚠️ account custom-update compensating rollback: account=${tracker.accountId}, txn=${txnNum}`,
+  );
+}
+
+async function runAccountWithOptionalTransaction(runFlow) {
+  let session = null;
+  let txnError = null;
+  try {
+    session = await mongoose.startSession();
+    await session.withTransaction(async () => {
+      await runFlow(session);
+    });
+  } catch (error) {
+    if (isMongoTransactionUnsupportedError(error)) {
+      if (session) {
+        try {
+          session.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+        session = null;
+      }
+      try {
+        await runFlow(null);
+      } catch (retryError) {
+        txnError = retryError;
+      }
+    } else {
+      txnError = error;
+    }
+  } finally {
+    if (session) {
+      try {
+        session.endSession();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  return txnError;
+}
 
 /** Must match `models/account.js` account_type enum */
 const ACCOUNT_TYPES = new Set([
@@ -109,20 +475,22 @@ async function aggregateTransactionSumsByAccountIds(accountIds, companyId) {
 /**
  * Equity leg for opening-balance journals: populated company, DB default, or first equity GL.
  */
-async function resolveDefaultEquityAccountId(record, transcReq) {
+async function resolveDefaultEquityAccountId(record, transcReq, session = null) {
   const populatedCompany = transcReq.user?.company_id;
   if (populatedCompany && typeof populatedCompany === "object") {
     const id = populatedCompany.default_equity_account_id;
     if (id) return id;
   }
   if (record.company_id) {
-    const comp = await Company.findById(record.company_id)
+    let compQ = Company.findById(record.company_id)
       .select("default_equity_account_id")
       .lean();
+    if (session) compQ = compQ.session(session);
+    const comp = await compQ;
     if (comp?.default_equity_account_id) return comp.default_equity_account_id;
   }
   if (!record.company_id) return null;
-  const eq = await AccountModel.findOne({
+  let eqQ = AccountModel.findOne({
     company_id: record.company_id,
     account_type: "equity",
     status: "active",
@@ -130,6 +498,8 @@ async function resolveDefaultEquityAccountId(record, transcReq) {
   })
     .sort({ createdAt: 1 })
     .lean();
+  if (session) eqQ = eqQ.session(session);
+  const eq = await eqQ;
   return eq?._id ?? null;
 }
 
@@ -139,6 +509,7 @@ async function resolveDefaultEquityAccountId(record, transcReq) {
  */
 async function performAccountCreate(req, comp_create = false, options = {}) {
   const session = options.session || null;
+  const strictGl = Boolean(session || options.strictGl);
   console.log("🔐 Processing account creation...", req.user);
   const transaction_number = generateTransactionNumber();
 
@@ -152,229 +523,264 @@ async function performAccountCreate(req, comp_create = false, options = {}) {
 
   return handleGenericCreate(req, "account", {
     ...(session ? { session } : {}),
+    skipFailureLog: options.skipFailureLog,
     beforeCreate: async (record, transcReq) => {
       console.log("🔍 Before Create_account", record);
-      // return false;
     },
-    // Always persist server-generated number (covers /account/create vs body-only edge cases)
     afterCreate: async (record, transcReq, sess) => {
       console.log("✅ Record created successfully:", record);
-
-      const openingRaw = Number(record?.initial_balance ?? 0);
-      if (Number.isNaN(openingRaw)) {
-        return;
+      if (options.tracker) {
+        options.tracker.accountId = record._id;
+        options.tracker.transaction_number = transaction_number;
       }
 
-      const amount = makeNumberPositive(openingRaw);
-      const equityAccountId = await resolveDefaultEquityAccountId(
+      await postOpeningBalanceGl(
         record,
         transcReq,
+        transaction_number,
+        sess || session,
+        strictGl,
       );
-
-      if (!equityAccountId) {
-        console.warn(
-          "⚠️ Skipping opening balance journal: no equity account resolved yet",
-        );
-        return;
-      }
-      if (String(equityAccountId) === String(record._id)) {
-        return;
-      }
-
-      if (!transcReq.user?._id) {
-        console.warn(
-          "⚠️ Skipping opening balance journal: req.user._id missing (transactions require user_id)",
-        );
-        return;
-      }
-
-      try {
-        const posting = {
-          company_id: record.company_id,
-          user_id: transcReq.user._id,
-          description: "Account Initial Balance",
-          amount,
-          transaction_number,
-        };
-
-        let transactionData = [];
-        if (
-          record?.account_type == "current_asset" ||
-          record?.account_type == "fixed_asset"
-        ) {
-          transactionData.push({
-            ...posting,
-            account_id: record._id,
-            type: record?.initial_balance >= 0 ? "debit" : "credit",
-          });
-          transactionData.push({
-            ...posting,
-            account_id: equityAccountId,
-            type: record?.initial_balance >= 0 ? "credit" : "debit",
-          });
-        } else if (
-          record?.account_type === "current_liability" ||
-          record?.account_type === "long_term_liability" ||
-          record?.account_type === "short_term_liability"
-        ) {
-          transactionData.push({
-            ...posting,
-            account_id: record._id,
-            type: record?.initial_balance >= 0 ? "credit" : "debit",
-          });
-          transactionData.push({
-            ...posting,
-            account_id: equityAccountId,
-            type: record?.initial_balance >= 0 ? "debit" : "credit",
-          });
-        }
-
-        console.log("🔍 Transaction Data:", transactionData);
-
-        const bulkSession = sess || session;
-        const { created, failed } = await transactionBulkCreate(
-          transcReq,
-          transactionData,
-          {
-            stopOnError: true,
-            ...(bulkSession ? { session: bulkSession } : {}),
-          },
-        );
-
-        if (failed.length) {
-          console.error(
-            "⚠️ Post-order transaction bulk insert failed:",
-            failed,
-          );
-          if (bulkSession) {
-            const err = new Error(
-              `Post-account transaction bulk insert failed: ${JSON.stringify(failed)}`,
-            );
-            err.statusCode = 400;
-            err.details = failed;
-            err.responseType = "transaction_bulk";
-            throw err;
-          }
-          await logControllerError(
-            req,
-            `Post-account transaction bulk insert failed: ${JSON.stringify(failed)}`,
-            ACCOUNT_TRANSACTION_ERROR_LOG,
-          );
-        } else if (created[0]?.data?._id) {
-          console.log(
-            "✅ Transaction(s) created:",
-            created.map((c) => c.data._id),
-          );
-        }
-      } catch (e) {
-        console.error("⚠️ Post-order transaction error:", e.message);
-        await logControllerError(
-          req,
-          `Post-account transaction error: ${e.message}`,
-          ACCOUNT_TRANSACTION_ERROR_LOG,
-        );
-      }
     },
   });
+}
+
+/**
+ * HTTP `POST /api/account/custom-create` — account + opening GL in one atomic unit.
+ */
+async function runAccountCustomCreateBody(req, session, tracker) {
+  const txnOpts = {
+    strictGl: true,
+    tracker,
+    ...(session ? { session } : {}),
+  };
+  tracker.create_step = "account";
+
+  const response = await performAccountCreate(req, false, txnOpts);
+
+  if (!response?.success || !response?.data?._id) {
+    throwWithGenericFailure(response, "Account create failed");
+  }
+
+  tracker.accountId = response.data._id;
+  tracker.transaction_number =
+    response.data.transaction_number || req.body.transaction_number;
+  tracker.create_step = "complete";
+  return response;
 }
 
 async function accountCreate(req, res, comp_create = false) {
-  const response = await performAccountCreate(req, comp_create);
-  return res.status(response.status).json(response);
+  if (comp_create) {
+    const response = await performAccountCreate(req, true);
+    return res.status(response.status).json(response);
+  }
+
+  const tracker = {
+    create_step: "init",
+    accountId: null,
+    transaction_number: req.body?.transaction_number ?? null,
+  };
+  let response = null;
+
+  const txnError = await runAccountWithOptionalTransaction(async (session) => {
+      try {
+        response = await runAccountCustomCreateBody(req, session, tracker);
+      } catch (stepError) {
+        if (
+          !session &&
+          (tracker.accountId || tracker.transaction_number)
+        ) {
+          await rollbackAccountCustomCreate(
+            tracker.accountId,
+            tracker.transaction_number,
+            req,
+            null,
+          );
+        }
+        throw stepError;
+      }
+    },
+  );
+
+  if (txnError) {
+    console.error(
+      "❌ accountCreate failed:\n",
+      serializeErrorForLog(txnError),
+    );
+    await logRollbackFailure(req, txnError, {
+      action: "ACCOUNT CUSTOM CREATE ROLLBACK",
+      tags: ["account", "custom-create", "error"],
+      fallbackUrl: req.originalUrl || "/api/account/custom-create",
+      context: accountCustomCreateLogContext(req, {
+        create_step: tracker.create_step,
+        account_id: tracker.accountId,
+        transaction_number: tracker.transaction_number,
+        execution_mode:
+          isMongoTransactionUnsupportedError(txnError) ?
+            "no_mongodb_transaction_compensating_rollback"
+          : "mongodb_transaction_aborted",
+        api_client_error: txnError.clientErrorPayload ?? null,
+        gl_failed: txnError.details ?? null,
+      }),
+      fallbackCompanyId: req.user?.company_id,
+    });
+
+    if (txnError.clientErrorPayload) {
+      return res
+        .status(txnError.clientErrorPayload.status || txnError.statusCode || 400)
+        .json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
+      success: false,
+      message: txnError.message || "Account create failed",
+      details: txnError.details ?? undefined,
+      type: txnError.responseType || "internal",
+    });
+  }
+
+  return res.status(response?.status || 201).json(response);
 }
 
-async function accountUpdate(req, res) {
-  const response = await handleGenericUpdate(req, "account", {
-    excludeFields: ["password"], // Don't return password in response
-    // allowedFields: [] - Empty array means allow all fields except password (dynamic)
-    beforeUpdate: async (updateData, req, existingUser) => {
-      console.log("🔧 Processing user update...", {
-        userId: existingUser._id,
-        currentName: existingUser.name,
-        newName: updateData.name,
-        currentEmail: existingUser.email,
-        newEmail: updateData.email,
-        hasProfileImage: !!req.files?.profile_image,
+/**
+ * Account update + replace opening-balance GL (shared by HTTP custom-update).
+ */
+async function performAccountUpdate(req, options = {}) {
+  const session = options.session || null;
+  const strictGl = Boolean(session || options.strictGl);
+
+  return handleGenericUpdate(req, "account", {
+    ...(session ? { session } : {}),
+    excludeFields: ["password"],
+    beforeUpdate: async (updateData, transcReq, existingRecord) => {
+      console.log("🔧 Processing account update...", {
+        accountId: existingRecord._id,
         updateFields: Object.keys(updateData),
       });
     },
-    afterUpdate: async (record, transcReq, existingUser) => {
+    afterUpdate: async (record, transcReq, existingRecord, sess) => {
       console.log("✅ Record updated successfully:", record);
+      const bulkSession = sess || session;
 
-      try {
-        const transaction_number = record?.transaction_number;
-        const deleteTransc =
-          transaction_number ?
-            await Transaction.deleteMany({ transaction_number })
-          : { deletedCount: 0 };
-        if (deleteTransc.deletedCount > 0) {
-          console.log("✅ Transaction deleted:", deleteTransc.deletedCount);
-        }
-        const amount = makeNumberPositive(Number(record?.initial_balance ?? 0));
-        const equityAccountId = await resolveDefaultEquityAccountId(
-          record,
-          transcReq,
-        );
-        if (
-          equityAccountId &&
-          String(equityAccountId) !== String(record._id) &&
-          transcReq.user?._id
-        ) {
-          const posting = {
-            company_id: record.company_id,
-            user_id: transcReq.user._id,
-          };
-          const { created, failed } = await transactionBulkCreate(
-            transcReq,
-            [
-              {
-                ...posting,
-                account_id: record._id,
-                type: record?.initial_balance > 0 ? "debit" : "credit",
-                amount,
-                transaction_number,
-                description: "Account Initial Balance",
-              },
-              {
-                ...posting,
-                account_id: equityAccountId,
-                type: record?.initial_balance > 0 ? "credit" : "debit",
-                amount,
-                transaction_number,
-                description: "Account Initial Balance",
-              },
-            ],
-            { stopOnError: true },
-          );
-          if (failed.length) {
-            console.error(
-              "⚠️ Post-order transaction bulk insert failed:",
-              failed,
-            );
-            await logControllerError(
-              req,
-              `Post-account transaction bulk insert failed: ${JSON.stringify(failed)}`,
-              ACCOUNT_TRANSACTION_ERROR_LOG,
-            );
-          } else if (created[0]?.data?._id) {
-            console.log(
-              "✅ Transaction(s) created:",
-              created.map((c) => c.data._id),
-            );
-          }
-        }
-      } catch (e) {
-        console.error("⚠️ Post-order transaction error:", e.message);
-        await logControllerError(
-          req,
-          `Post-account transaction error: ${e.message}`,
-          ACCOUNT_TRANSACTION_ERROR_LOG,
-        );
+      if (options.tracker) {
+        options.tracker.accountId = record._id;
+        options.tracker.transaction_number = record?.transaction_number;
       }
+
+      const transaction_number = record?.transaction_number;
+      if (!transaction_number) {
+        const openingRaw = Number(record?.initial_balance ?? 0);
+        if (strictGl && openingRaw !== 0) {
+          const err = new Error(
+            "Account update with non-zero initial_balance requires transaction_number for GL",
+          );
+          err.statusCode = 400;
+          err.responseType = "transaction_number_missing";
+          throw err;
+        }
+        return;
+      }
+
+      await softDeleteGlByTransactionNumber(
+        transaction_number,
+        record.company_id,
+        transcReq,
+        bulkSession,
+      );
+
+      await postOpeningBalanceGl(
+        record,
+        transcReq,
+        transaction_number,
+        bulkSession,
+        strictGl,
+      );
     },
   });
+}
 
-  return res.status(response.status).json(response);
+async function runAccountCustomUpdateBody(req, session, tracker) {
+  tracker.update_step = "snapshot";
+  await captureAccountUpdateSnapshots(req, session, tracker);
+
+  tracker.update_step = "account_and_gl";
+  const txnOpts = {
+    strictGl: true,
+    tracker,
+    ...(session ? { session } : {}),
+  };
+
+  const response = await performAccountUpdate(req, txnOpts);
+
+  if (!response?.success) {
+    throwWithGenericFailure(response, "Account update failed");
+  }
+
+  tracker.update_step = "complete";
+  return response;
+}
+
+async function accountUpdate(req, res) {
+  const tracker = {
+    update_step: "init",
+    accountId: null,
+    accountBefore: null,
+    transactionsBefore: [],
+    transaction_number: null,
+  };
+  let response = null;
+
+  const txnError = await runAccountWithOptionalTransaction(async (session) => {
+    try {
+      response = await runAccountCustomUpdateBody(req, session, tracker);
+    } catch (stepError) {
+      if (
+        !session &&
+        (tracker.accountBefore || tracker.transactionsBefore?.length)
+      ) {
+        await rollbackAccountCustomUpdate(tracker, req, null);
+      }
+      throw stepError;
+    }
+  });
+
+  if (txnError) {
+    console.error(
+      "❌ accountUpdate failed:\n",
+      serializeErrorForLog(txnError),
+    );
+    await logRollbackFailure(req, txnError, {
+      action: "ACCOUNT CUSTOM UPDATE ROLLBACK",
+      tags: ["account", "custom-update", "error"],
+      fallbackUrl: req.originalUrl || "/api/account/custom-update",
+      context: accountCustomUpdateLogContext(req, {
+        update_step: tracker.update_step,
+        account_id: tracker.accountId,
+        transaction_number: tracker.transaction_number,
+        prior_gl_line_count: tracker.transactionsBefore?.length ?? 0,
+        execution_mode:
+          isMongoTransactionUnsupportedError(txnError) ?
+            "no_mongodb_transaction_compensating_rollback"
+          : "mongodb_transaction_aborted",
+        api_client_error: txnError.clientErrorPayload ?? null,
+        gl_failed: txnError.details ?? null,
+      }),
+      fallbackCompanyId: req.user?.company_id,
+    });
+
+    if (txnError.clientErrorPayload) {
+      return res
+        .status(txnError.clientErrorPayload.status || txnError.statusCode || 400)
+        .json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
+      success: false,
+      message: txnError.message || "Account update failed",
+      details: txnError.details ?? undefined,
+      type: txnError.responseType || "internal",
+    });
+  }
+
+  return res.status(response?.status || 200).json(response);
 }
 
 function truthyQuery(v) {
