@@ -80,7 +80,10 @@ async function logControllerError(req, description, options = {}) {
     });
     const logReq = Object.create(Object.getPrototypeOf(req));
     Object.assign(logReq, req, { body });
-    const createResult = await handleGenericCreate(logReq, "logs", {});
+    logReq._skipGenericCrudFailureLog = true;
+    const createResult = await handleGenericCreate(logReq, "logs", {
+      skipFailureLog: true,
+    });
     if (!createResult?.success) {
       console.error(
         "[logControllerError] handleGenericCreate(logs) returned failure:",
@@ -173,6 +176,157 @@ function serializeErrorForLog(err) {
  * @param {unknown} err
  * @param {{ action?: string, tags?: string[], fallbackUrl?: string, context?: Record<string, unknown>, fallbackCompanyId?: import("mongoose").Types.ObjectId|string }} [options]
  */
+const GENERIC_CRUD_REDACT_KEYS = new Set([
+  "password",
+  "confirm_password",
+  "current_password",
+  "new_password",
+  "token",
+  "access_token",
+  "refresh_token",
+]);
+
+function redactBodyForGenericCrudLog(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return body;
+  }
+  const copy = { ...body };
+  for (const key of Object.keys(copy)) {
+    if (GENERIC_CRUD_REDACT_KEYS.has(key)) {
+      copy[key] = "[REDACTED]";
+    }
+  }
+  return copy;
+}
+
+function buildGenericCrudFailureDescription(
+  modelName,
+  operation,
+  failureResult,
+  context = {},
+) {
+  const lines = [];
+  lines.push(`model: ${modelName}`);
+  lines.push(`operation: ${operation}`);
+  if (context.recordId != null && String(context.recordId).trim() !== "") {
+    lines.push(`record_id: ${context.recordId}`);
+  }
+  lines.push(`http_status: ${failureResult?.status ?? "n/a"}`);
+  if (failureResult?.type) lines.push(`failure_type: ${failureResult.type}`);
+  if (failureResult?.error) lines.push(`error: ${failureResult.error}`);
+  if (failureResult?.message) lines.push(`message: ${failureResult.message}`);
+  if (failureResult?.details != null) {
+    lines.push(`details: ${safeJsonForLog(failureResult.details, 4500)}`);
+  }
+  if (failureResult?.missing != null) {
+    lines.push(`missing: ${safeJsonForLog(failureResult.missing, 2000)}`);
+  }
+  if (failureResult?.required != null) {
+    lines.push(`required: ${safeJsonForLog(failureResult.required, 2000)}`);
+  }
+  if (failureResult?.received != null) {
+    lines.push(`received_fields: ${safeJsonForLog(failureResult.received, 1500)}`);
+  }
+  if (failureResult?.contentType) {
+    lines.push(`content_type: ${failureResult.contentType}`);
+  }
+  if (context.bodyKeys?.length) {
+    lines.push(`body_keys: ${context.bodyKeys.join(", ")}`);
+  }
+  if (context.bodySample != null) {
+    lines.push(`body_sample: ${safeJsonForLog(context.bodySample, 3500)}`);
+  }
+  if (context.inTransaction) {
+    lines.push("in_transaction: true");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Persist handleGenericCreate / handleGenericUpdate failures to `logs` (direct insert; avoids circular import).
+ * @param {import("express").Request} req
+ * @param {string} modelName
+ * @param {"create"|"update"} operation
+ * @param {{ success?: boolean, status?: number, error?: string, message?: string, details?: unknown, type?: string, missing?: unknown, required?: unknown, received?: unknown, contentType?: string }} failureResult
+ * @param {{ recordId?: string, fallbackUrl?: string, fallbackCompanyId?: import("mongoose").Types.ObjectId|string, inTransaction?: boolean }} [extraContext]
+ */
+async function logGenericCrudFailure(
+  req,
+  modelName,
+  operation,
+  failureResult,
+  extraContext = {},
+) {
+  if (!failureResult || failureResult.success !== false) return;
+
+  const resolvedModel = String(modelName || "unknown").trim() || "unknown";
+  if (resolvedModel === "logs") return;
+
+  const companyId =
+    normalizeObjectIdMaybe(extraContext.fallbackCompanyId) ||
+    normalizeObjectIdMaybe(req.user?.company_id?._id) ||
+    normalizeObjectIdMaybe(req.user?.company_id);
+
+  if (!companyId) {
+    console.error(
+      "[logGenericCrudFailure] logs row not inserted: missing company_id",
+      {
+        model: resolvedModel,
+        operation,
+        error: failureResult.error,
+        message: failureResult.message,
+      },
+    );
+    return;
+  }
+
+  const bodyKeys =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ?
+      Object.keys(req.body)
+    : [];
+
+  const description = buildGenericCrudFailureDescription(
+    resolvedModel,
+    operation,
+    failureResult,
+    {
+      recordId: extraContext.recordId,
+      bodyKeys,
+      bodySample: redactBodyForGenericCrudLog(req.body),
+      inTransaction: extraContext.inTransaction === true,
+    },
+  );
+
+  const action =
+    operation === "update" ? "GENERIC UPDATE FAILED" : "GENERIC CREATE FAILED";
+  const opTag = operation === "update" ? "generic_update" : "generic_create";
+
+  const logRow = Logs.sanitizeLogPlainObject({
+    action,
+    url:
+      req.originalUrl ||
+      req.path ||
+      extraContext.fallbackUrl ||
+      "/api",
+    tags: ["api", "error", opTag, resolvedModel],
+    description,
+    company_id: companyId,
+    created_by: normalizeObjectIdMaybe(req.user?._id),
+    status: "active",
+  });
+
+  try {
+    await Logs.create(logRow);
+  } catch (logErr) {
+    console.error(
+      "[logGenericCrudFailure] Logs.create failed:",
+      logErr.message,
+      "\n",
+      truncateForLog(description, 800),
+    );
+  }
+}
+
 async function logRollbackFailure(req, err, options = {}) {
   const {
     action = "TRANSACTION ROLLBACK",
@@ -202,5 +356,6 @@ async function logRollbackFailure(req, err, options = {}) {
 module.exports = {
   logControllerError,
   logRollbackFailure,
+  logGenericCrudFailure,
   serializeErrorForLog,
 };

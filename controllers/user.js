@@ -12,9 +12,16 @@ const {
 } = require("../utils/modelHelper");
 const { performAccountCreate } = require("./account");
 const Company = require("../models/company");
+const Warehouse = require("../models/warehouse");
+const Account = require("../models/account");
 const Transaction = require("../models/transaction");
 const { createTransactionsFromItems } = require("./transaction");
 const { buildUserCompanyPopulate } = require("../utils/userCompanyPopulate");
+const {
+  logRollbackFailure,
+  serializeErrorForLog,
+} = require("../utils/logControllerError");
+const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
 
 /**
  * Build & post the 2-line user opening journal. Does not touch `user.transaction_number`.
@@ -354,25 +361,395 @@ function requestWithOverrides(req, overrides) {
   );
 }
 
+function throwWithSignupFailure(response, fallbackMessage) {
+  const err = new Error(
+    response?.error ||
+      response?.message ||
+      fallbackMessage ||
+      "Company signup step failed",
+  );
+  err.statusCode = response?.status || 400;
+  err.responseType = response?.type || "validation";
+  err.details = response?.details ?? response?.missing ?? response;
+  err.clientErrorPayload = response;
+  throw err;
+}
+
+function userCompanySignupLogContext(req, extra = {}) {
+  const emailRaw = req.body?.email;
+  const email =
+    typeof emailRaw === "string" ? emailRaw.trim().toLowerCase() : "";
+  return {
+    email,
+    company_name: req.body?.company_name,
+    ...extra,
+  };
+}
+
+function trackId(tracker, field, id) {
+  if (id == null) return;
+  const oid =
+    id instanceof mongoose.Types.ObjectId ?
+      id
+    : new mongoose.Types.ObjectId(String(id));
+  if (field === "companyId") {
+    tracker.companyId = oid;
+    return;
+  }
+  if (field === "warehouseId") {
+    tracker.warehouseId = oid;
+    return;
+  }
+  if (!tracker[field]) tracker[field] = [];
+  tracker[field].push(oid);
+}
+
+/** Compensating soft-delete when Mongo multi-doc transactions are unavailable. */
+async function rollbackUserCompanySignup(tracker, req, session = null) {
+  if (!tracker?.companyId) return;
+
+  const opts = session ? { session } : {};
+  const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
+  const companyId = tracker.companyId;
+
+  if (tracker.accountIds?.length) {
+    await Transaction.updateMany(
+      {
+        company_id: companyId,
+        account_id: { $in: tracker.accountIds },
+        deletedAt: null,
+      },
+      { $set: softDeleteSet },
+      opts,
+    );
+    await Account.updateMany(
+      { _id: { $in: tracker.accountIds }, company_id: companyId },
+      { $set: softDeleteSet },
+      opts,
+    );
+  }
+
+  if (tracker.userIds?.length) {
+    await User.updateMany(
+      { _id: { $in: tracker.userIds }, company_id: companyId },
+      { $set: softDeleteSet },
+      opts,
+    );
+  }
+
+  if (tracker.warehouseId) {
+    await Warehouse.updateOne(
+      { _id: tracker.warehouseId, company_id: companyId },
+      { $set: softDeleteSet },
+      opts,
+    );
+  }
+
+  await Company.updateOne(
+    { _id: companyId },
+    { $set: softDeleteSet },
+    opts,
+  );
+
+  console.warn(
+    `⚠️ user_company signup compensating rollback: company ${companyId}`,
+  );
+}
+
+async function runUserCompanySignupWithOptionalTransaction(runFlow) {
+  let session = null;
+  let txnError = null;
+  try {
+    session = await mongoose.startSession();
+    await session.withTransaction(async () => {
+      await runFlow(session);
+    });
+  } catch (error) {
+    if (isMongoTransactionUnsupportedError(error)) {
+      if (session) {
+        try {
+          session.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+        session = null;
+      }
+      try {
+        await runFlow(null);
+      } catch (retryError) {
+        txnError = retryError;
+      }
+    } else {
+      txnError = error;
+    }
+  } finally {
+    if (session) {
+      try {
+        session.endSession();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  return txnError;
+}
+
+/**
+ * Tenant bootstrap inside a transaction when the deployment supports it.
+ * @returns {Promise<object>} Success payload for JSON response (`data` key).
+ */
+async function runUserCompanySignupBody(req, session, tracker) {
+  const emailRaw = req.body && req.body.email;
+  const email =
+    typeof emailRaw === "string" ? emailRaw.trim().toLowerCase() : "";
+  const txnOpts = session ? { session } : {};
+
+  tracker.signup_step = "company";
+  const create_company = await handleGenericCreate(req, "company", {
+    ...txnOpts,
+    beforeCreate: async (data) => {
+      const cn = String(req.body.company_name || "").trim();
+      const em = String(req.body.email || "").trim();
+      data.company_name = cn ? `${cn} (${em})` : `Company (${em})`;
+      data.company_email = req.body.company_email || req.body.email;
+      data.company_phone = req.body.company_phone || "N/A";
+      data.company_address =
+        req.body.company_address || req.body.address || "Default Address";
+      data.status = "active";
+    },
+  });
+  if (!create_company.success) {
+    throwWithSignupFailure(create_company, "Company creation failed");
+  }
+  const companyIdRaw = create_company.data?._id;
+  if (!companyIdRaw) {
+    const err = new Error("Company created but response had no _id");
+    err.statusCode = 500;
+    err.details = create_company;
+    throw err;
+  }
+  const companyId =
+    companyIdRaw instanceof mongoose.Types.ObjectId ?
+      companyIdRaw
+    : new mongoose.Types.ObjectId(String(companyIdRaw));
+  trackId(tracker, "companyId", companyId);
+
+  const signupBodySnapshot = { ...req.body };
+  tracker.signup_step = "warehouse";
+  const warehouseName = "Head Office " + (req.body.company_name || "");
+  const warehousePayload = {
+    name: warehouseName,
+    company_id: companyId,
+    status: "active",
+  };
+  const create_warehouse = await handleGenericCreate(
+    requestWithOverrides(req, { body: warehousePayload }),
+    "warehouse",
+    txnOpts,
+  );
+  if (!create_warehouse.success) {
+    throwWithSignupFailure(create_warehouse, "Warehouse creation failed");
+  }
+  trackId(tracker, "warehouseId", create_warehouse.data?._id);
+
+  tracker.signup_step = "admin_user";
+  const user_created = await handleGenericCreate(req, "user", {
+    ...txnOpts,
+    excludeFields: ["password"],
+    beforeCreate: async (data) => {
+      data.email = email;
+      data.name = (req.body.name && String(req.body.name).trim()) || "User";
+      data.password = req.body.password;
+      data.company_id = companyId;
+      data.role = ["USER", "ADMIN"];
+    },
+  });
+  if (!user_created.success) {
+    throwWithSignupFailure(user_created, "User creation failed");
+  }
+  trackId(tracker, "userIds", user_created.data?._id);
+
+  tracker.signup_step = "default_user";
+  const defaultUserEmail = `default.${crypto.randomBytes(8).toString("hex")}@gmail.com`;
+  const user_default_created = await handleGenericCreate(
+    requestWithOverrides(req, {
+      body: { status: "active", company_id: companyId },
+    }),
+    "user",
+    {
+      ...txnOpts,
+      excludeFields: ["password"],
+      beforeCreate: async (data) => {
+        data.email = defaultUserEmail;
+        data.name = "Default User";
+        data.password = defaultUserEmail;
+        data.company_id = companyId;
+        data.role = ["USER", "CUSTOMER", "VENDOR"];
+      },
+    },
+  );
+  if (!user_default_created.success) {
+    throwWithSignupFailure(
+      user_default_created,
+      "Default user creation failed",
+    );
+  }
+  trackId(tracker, "userIds", user_default_created.data?._id);
+
+  const postingUser = {
+    _id: user_created.data._id,
+    company_id: companyId,
+  };
+
+  const accounts = [
+    { name: "Cash", account_type: "current_asset" },
+    { name: "Accounts Receivable", account_type: "current_asset" },
+    { name: "Sales", account_type: "revenue" },
+    { name: "Purchase", account_type: "cost_of_goods_sold_account" },
+    { name: "Purchase Discount", account_type: "other" },
+    { name: "Accounts Payable", account_type: "current_liability" },
+    { name: "Sales Discount", account_type: "other" },
+    { name: "Shipping", account_type: "operating_expense" },
+    { name: "Expense", account_type: "operating_expense" },
+    { name: "Salary", account_type: "operating_expense" },
+    { name: "Equity", account_type: "equity" },
+    { name: "Other Expense", account_type: "other_expense" },
+    { name: "Utilities", account_type: "operating_expense" },
+    { name: "Fixed Asset", account_type: "fixed_asset" },
+    { name: "Adjustment", account_type: "equity" },
+    { name: "Withdraw", account_type: "other_expense" },
+  ];
+
+  const equitySpec = accounts.find(
+    (a) => a.name === "Equity" && a.account_type === "equity",
+  );
+  const accountCreateOrder =
+    equitySpec ?
+      [equitySpec, ...accounts.filter((a) => a.name !== "Equity")]
+    : [...accounts];
+
+  const createdByName = Object.create(null);
+  tracker.signup_step = "chart_of_accounts";
+  for (const account of accountCreateOrder) {
+    tracker.signup_step = `account:${account.name}`;
+    const accountResult = await performAccountCreate(
+      requestWithOverrides(req, {
+        body: {
+          name: account.name,
+          account_type: account.account_type,
+          company_id: companyId,
+          status: "active",
+        },
+        user: postingUser,
+      }),
+      true,
+      txnOpts,
+    );
+    if (!accountResult.success) {
+      const err = new Error(
+        `Default chart of accounts creation failed: ${account.name}`,
+      );
+      err.statusCode = accountResult.status || 500;
+      err.details = { account: account.name, result: accountResult };
+      err.clientErrorPayload = {
+        success: false,
+        message: "Default chart of accounts creation failed",
+        details: { account: account.name, result: accountResult },
+      };
+      throw err;
+    }
+    trackId(tracker, "accountIds", accountResult.data?._id);
+    createdByName[account.name] = accountResult.data;
+  }
+
+  const createdAccountsData = accounts.map((a) => createdByName[a.name]);
+  const missingCoa = accounts
+    .map((a, i) => (!createdAccountsData[i]?._id ? a.name : null))
+    .filter(Boolean);
+  if (missingCoa.length) {
+    const err = new Error("Default chart of accounts incomplete after signup");
+    err.statusCode = 500;
+    err.details = { missing_accounts: missingCoa };
+    throw err;
+  }
+
+  req.body = signupBodySnapshot;
+  const originalBody = { ...req.body };
+  const originalParams = { ...req.params };
+
+  tracker.signup_step = "company_defaults_patch";
+  const updateCompany = await handleGenericUpdate(
+    requestWithOverrides(req, {
+      params: { ...originalParams, id: companyId },
+      body: {
+        warehouse_id: create_warehouse.data._id,
+        default_cash_account: createdAccountsData[0]._id,
+        default_account_receivable_account: createdAccountsData[1]._id,
+        default_sales_account: createdAccountsData[2]._id,
+        default_purchase_account: createdAccountsData[3]._id,
+        default_purchase_discount_account: createdAccountsData[4]._id,
+        default_account_payable_account: createdAccountsData[5]._id,
+        default_sales_discount_account: createdAccountsData[6]._id,
+        default_shipping_account: createdAccountsData[7]._id,
+        default_expense_account: createdAccountsData[8]._id,
+        default_salary_account: createdAccountsData[9]._id,
+        default_equity_account_id: createdAccountsData[10]._id,
+        default_other_expense_account: createdAccountsData[11]._id,
+        default_utilities_account: createdAccountsData[12]._id,
+        default_fixed_asset_account: createdAccountsData[13]._id,
+        default_adjustment_account: createdAccountsData[14]._id,
+        default_withdraw_account: createdAccountsData[15]._id,
+      },
+    }),
+    "company",
+    txnOpts,
+  );
+
+  req.body = originalBody;
+  req.params = originalParams;
+
+  if (!updateCompany.success) {
+    const err = new Error("Failed to update company with warehouse_id");
+    err.statusCode = 200;
+    err.clientErrorPayload = {
+      success: false,
+      message: "Failed to update company with warehouse_id",
+      details: updateCompany,
+    };
+    err.details = updateCompany;
+    throw err;
+  }
+
+  tracker.signup_step = "completed";
+  return {
+    company: create_company.data,
+    warehouse: create_warehouse.data,
+    user: user_created.data,
+    default_user: user_default_created.data,
+    accounts: createdAccountsData,
+  };
+}
+
 /**
  * POST /api/user/user_company — bootstrap a new tenant: company, default warehouse, first admin user,
  * default chart of accounts, then wire `company` default GL / warehouse refs.
  *
- * Order of operations: validate input → ensure email unused → create `company` → create `warehouse` →
- * create tenant admin `user` + synthetic "Default User" (`USER` only) → create each `account` via `performAccountCreate` (Equity first in
- * DB order for opening-balance logic; response array `createdAccountsData` stays in the fixed list order
- * so `default_*` indices match `models/company` expectations) → PATCH company with `warehouse_id` and
- * all `default_*_account` fields.
- *
- * Not wrapped in a Mongo multi-document transaction; a mid-flight failure may leave partial rows (cleanup
- * or idempotent retry is a separate concern).
+ * Uses `session.withTransaction` when supported; on standalone Mongo, retries without a session
+ * and runs compensating soft-delete on failure. Failures are written to `logs` via `logRollbackFailure`.
  */
 async function handleUserSignupCompany(req, res) {
+  const tracker = {
+    signup_step: "validation",
+    companyId: null,
+    warehouseId: null,
+    userIds: [],
+    accountIds: [],
+  };
+
   try {
-    console.log("🚀 Starting handleUserSignupCompany function...");
+    console.log("🚀 Starting handleUserSignupCompany...");
     console.log("📧 Request body:", safeBodyPreview(req.body));
 
-    // --- Required fields (signup form) ---
     const emailRaw = req.body && req.body.email;
     const email =
       typeof emailRaw === "string" ? emailRaw.trim().toLowerCase() : "";
@@ -389,13 +766,10 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
-    // --- Email uniqueness (404 from find-one = OK to proceed) ---
     const find_email = await handleGenericFindOne(req, "user", {
       searchCriteria: { email },
     });
-
     if (find_email.success && find_email.data) {
-      console.log("❌ Email already exists:", email);
       return res.status(400).json({
         success: false,
         message: "Email already exists",
@@ -409,277 +783,74 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
-    // --- 1) Company row (tenant root). `beforeCreate` maps signup fields into company schema. ---
-    const create_company = await handleGenericCreate(req, "company", {
-      beforeCreate: async (data, req) => {
-        console.log("🏢 Company beforeCreate hook called");
-        const cn = String(req.body.company_name || "").trim();
-        const em = String(req.body.email || "").trim();
-        data.company_name = cn ? `${cn} (${em})` : `Company (${em})`;
-        data.company_email = req.body.company_email || req.body.email;
-        data.company_phone = req.body.company_phone || "N/A";
-        data.company_address =
-          req.body.company_address || req.body.address || "Default Address";
-        data.status = "active";
-        console.log(
-          "🏢 Company data after setting:",
-          JSON.stringify(data, null, 2),
-        );
-      },
-    });
-
-    if (!create_company.success) {
-      console.log("❌ Company creation failed:", create_company);
-      return res.status(create_company.status || 500).json({
-        success: false,
-        message: "Company creation failed",
-        details: create_company,
-      });
-    }
-
-    const companyIdRaw = create_company.data && create_company.data._id;
-    if (!companyIdRaw) {
-      return res.status(500).json({
-        success: false,
-        message: "Company created but response had no _id",
-        details: create_company,
-      });
-    }
-    const companyId =
-      companyIdRaw instanceof mongoose.Types.ObjectId ?
-        companyIdRaw
-      : new mongoose.Types.ObjectId(String(companyIdRaw));
-
-    // --- 2) Default warehouse ("Head Office …") for this company only ---
-    const signupBodySnapshot = { ...req.body };
-    const warehouseName = "Head Office " + (req.body.company_name || "");
-    // Only warehouse schema fields — avoids form permissions / extra keys breaking generic create
-    const warehousePayload = {
-      name: warehouseName,
-      company_id: companyId,
-      status: "active",
-    };
-    console.log("🏪 Warehouse create payload:", warehousePayload);
-
-    const create_warehouse = await handleGenericCreate(
-      requestWithOverrides(req, { body: warehousePayload }),
-      "warehouse",
-      {},
-    );
-
-    if (!create_warehouse.success) {
-      console.log("❌ Warehouse creation failed:", create_warehouse);
-      return res.status(create_warehouse.status || 500).json({
-        success: false,
-        message: "Warehouse creation failed",
-        details: create_warehouse,
-      });
-    }
-
-    // --- 3a) First user for the tenant (roles include ADMIN). Password handled in beforeCreate. ---
-    const user_created = await handleGenericCreate(req, "user", {
-      excludeFields: ["password"],
-      beforeCreate: async (data, req) => {
-        console.log("👤 User beforeCreate hook called");
-        data.email = email;
-        data.name = (req.body.name && String(req.body.name).trim()) || "User";
-        data.password = req.body.password;
-        data.company_id = companyId;
-        data.role = ["USER", "ADMIN"];
-        console.log("👤 User data:", JSON.stringify(data, null, 2));
-      },
-    });
-
-    if (!user_created.success) {
-      console.log("❌ User creation failed:", user_created);
-      return res.status(user_created.status || 500).json({
-        success: false,
-        message: "User creation failed",
-        details: user_created,
-      });
-    }
-
-    // --- 3b) Extra tenant user: "Default User" (USER only); password equals random `@gmail.com` email. ---
-    const defaultUserEmail = `default.${crypto.randomBytes(8).toString("hex")}@gmail.com`;
-    const user_default_created = await handleGenericCreate(
-      requestWithOverrides(req, {
-        body: {
-          status: "active",
-          company_id: companyId,
-        },
-      }),
-      "user",
-      {
-        excludeFields: ["password"],
-        beforeCreate: async (data) => {
-          data.email = defaultUserEmail;
-          data.name = "Default User";
-          data.password = defaultUserEmail;
-          data.company_id = companyId;
-          data.role = ["USER", "CUSTOMER", "VENDOR"];
-        },
+    let signupData = null;
+    const txnError = await runUserCompanySignupWithOptionalTransaction(
+      async (session) => {
+        try {
+          signupData = await runUserCompanySignupBody(req, session, tracker);
+        } catch (stepError) {
+          if (!session && tracker.companyId) {
+            await rollbackUserCompanySignup(tracker, req, null);
+          }
+          throw stepError;
+        }
       },
     );
 
-    if (!user_default_created.success) {
-      console.log("❌ Default user creation failed:", user_default_created);
-      return res.status(user_default_created.status || 500).json({
-        success: false,
-        message: "Default user creation failed",
-        details: user_default_created,
-      });
-    }
-
-    // Minimal `req.user` for `performAccountCreate` (created_by / GL side effects).
-    const postingUser = {
-      _id: user_created.data._id,
-      company_id: companyId,
-    };
-
-    // Default COA for POS / orders / PO flows. Names and `account_type` must match `models/account.js` enum.
-    const accounts = [
-      { name: "Cash", account_type: "current_asset" },
-      { name: "Accounts Receivable", account_type: "current_asset" },
-      { name: "Sales", account_type: "revenue" },
-      { name: "Purchase", account_type: "cost_of_goods_sold_account" },
-      { name: "Purchase Discount", account_type: "other" },
-      { name: "Accounts Payable", account_type: "current_liability" },
-      { name: "Sales Discount", account_type: "other" },
-      { name: "Shipping", account_type: "operating_expense" },
-      { name: "Expense", account_type: "operating_expense" },
-      { name: "Salary", account_type: "operating_expense" },
-      { name: "Equity", account_type: "equity" },
-      { name: "Other Expense", account_type: "other_expense" },
-      { name: "Utilities", account_type: "operating_expense" },
-      { name: "Fixed Asset", account_type: "fixed_asset" },
-      { name: "Adjustment", account_type: "equity" },
-      { name: "Withdraw", account_type: "other_expense" },
-    ];
-
-    // Create the named "Equity" account first (opening-balance journals). Do not filter
-    // all `account_type: "equity"` rows — "Adjustment" is also equity-typed and must be created.
-    const equitySpec = accounts.find(
-      (a) => a.name === "Equity" && a.account_type === "equity",
-    );
-    const accountCreateOrder =
-      equitySpec ?
-        [equitySpec, ...accounts.filter((a) => a.name !== "Equity")]
-      : [...accounts];
-
-    const createdByName = Object.create(null);
-    // Insert order: Equity first (see `accountCreateOrder`); `createdAccountsData` order stays tied to `accounts[]` indices.
-    for (const account of accountCreateOrder) {
-      const accountPayload = {
-        name: account.name,
-        account_type: account.account_type,
-        company_id: companyId,
-        status: "active",
-      };
-      const accountResult = await performAccountCreate(
-        requestWithOverrides(req, {
-          body: accountPayload,
-          user: postingUser,
-        }),
-        true,
+    if (txnError) {
+      console.error(
+        "❌ handleUserSignupCompany failed:\n",
+        serializeErrorForLog(txnError),
       );
-      if (!accountResult.success) {
-        console.log(
-          "❌ Default account creation failed:",
-          account.name,
-          accountResult,
-        );
-        return res.status(accountResult.status || 500).json({
-          success: false,
-          message: "Default chart of accounts creation failed",
-          details: { account: account.name, result: accountResult },
-        });
+      await logRollbackFailure(req, txnError, {
+        action: "USER COMPANY SIGNUP ROLLBACK",
+        tags: ["user", "user_company", "signup", "error"],
+        fallbackUrl: "/api/user/user_company",
+        context: userCompanySignupLogContext(req, {
+          signup_step: tracker.signup_step,
+          company_id: tracker.companyId,
+          warehouse_id: tracker.warehouseId,
+          user_ids: tracker.userIds,
+          account_ids: tracker.accountIds,
+          execution_mode:
+            isMongoTransactionUnsupportedError(txnError) ?
+              "no_mongodb_transaction_compensating_rollback"
+            : "mongodb_transaction_aborted",
+          api_client_error: txnError.clientErrorPayload ?? null,
+        }),
+        fallbackCompanyId: tracker.companyId,
+      });
+
+      if (txnError.clientErrorPayload) {
+        const status = txnError.clientErrorPayload.status || 400;
+        return res.status(status).json(txnError.clientErrorPayload);
       }
-      createdByName[account.name] = accountResult.data;
-    }
-
-    const createdAccountsData = accounts.map((a) => createdByName[a.name]);
-    const missingCoa = accounts
-      .map((a, i) => (!createdAccountsData[i]?._id ? a.name : null))
-      .filter(Boolean);
-    if (missingCoa.length) {
-      return res.status(500).json({
+      return res.status(txnError.statusCode || 500).json({
         success: false,
-        message: "Default chart of accounts incomplete after signup",
-        details: { missing_accounts: missingCoa },
+        status: txnError.statusCode || 500,
+        message: txnError.message || "Company signup failed",
+        details: txnError.details ?? undefined,
+        type: txnError.responseType || "internal",
       });
     }
 
-    req.body = signupBodySnapshot;
-
-    // --- 4) Patch company: `warehouse_id` + every `default_*` account ref (indices align with `accounts` array above). ---
-    const originalBody = { ...req.body };
-    const originalParams = { ...req.params };
-
-    const updateCompany = await handleGenericUpdate(
-      requestWithOverrides(req, {
-        params: { ...originalParams, id: companyId },
-        body: {
-          warehouse_id: create_warehouse.data._id,
-          default_cash_account: createdAccountsData[0]._id,
-          default_account_receivable_account: createdAccountsData[1]._id,
-          default_sales_account: createdAccountsData[2]._id,
-          default_purchase_account: createdAccountsData[3]._id,
-          default_purchase_discount_account: createdAccountsData[4]._id,
-          default_account_payable_account: createdAccountsData[5]._id,
-          default_sales_discount_account: createdAccountsData[6]._id,
-          default_shipping_account: createdAccountsData[7]._id,
-          default_expense_account: createdAccountsData[8]._id,
-          default_salary_account: createdAccountsData[9]._id,
-          default_equity_account_id: createdAccountsData[10]._id,
-          default_other_expense_account: createdAccountsData[11]._id,
-          default_utilities_account: createdAccountsData[12]._id,
-          default_fixed_asset_account: createdAccountsData[13]._id,
-          default_adjustment_account: createdAccountsData[14]._id,
-          default_withdraw_account: createdAccountsData[15]._id,
-        },
-      }),
-      "company",
-      {},
-    );
-
-    // Restore `req` for anything after this handler (middleware / logging).
-    req.body = originalBody;
-    req.params = originalParams;
-
-    if (!updateCompany.success) {
-      console.log("❌ Company warehouse_id update failed:", updateCompany);
-      // Status 200 preserves legacy clients; failure is indicated by `success: false` + `details`.
-      return res.status(200).json({
-        success: false,
-        message: "Failed to update company with warehouse_id",
-        details: updateCompany,
-      });
-    }
-
-    console.log(
-      "✅ Company updated with warehouse_id:",
-      create_warehouse.data._id,
-    );
-
-    console.log("✅ Warehouse created:", create_warehouse.data._id);
-    console.log("✅ User created:", user_created.data._id);
-    console.log("✅ Default user created:", user_default_created.data._id);
-
-    // 200: resource creation is split across several writes; caller inspects `data` for ids.
     return res.status(200).json({
       success: true,
       message: "Company signup completed successfully",
-      data: {
-        company: create_company.data,
-        warehouse: create_warehouse.data,
-        user: user_created.data,
-        default_user: user_default_created.data,
-        accounts: createdAccountsData,
-      },
+      data: signupData,
     });
   } catch (error) {
-    // Unexpected throw (e.g. network); structured failures above return JSON without hitting this.
     console.error("❌ Company user signup error:", error);
+    await logRollbackFailure(req, error, {
+      action: "USER COMPANY SIGNUP ROLLBACK",
+      tags: ["user", "user_company", "signup", "error", "outer"],
+      fallbackUrl: "/api/user/user_company",
+      context: userCompanySignupLogContext(req, {
+        signup_step: tracker.signup_step,
+        company_id: tracker.companyId,
+      }),
+      fallbackCompanyId: tracker.companyId,
+    });
     return res.status(500).json({
       success: false,
       message: error.message || "Internal server error during company signup",

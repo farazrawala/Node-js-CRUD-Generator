@@ -157,7 +157,7 @@ async function performAccountCreate(req, comp_create = false, options = {}) {
       // return false;
     },
     // Always persist server-generated number (covers /account/create vs body-only edge cases)
-    afterCreate: async (record, transcReq) => {
+    afterCreate: async (record, transcReq, sess) => {
       console.log("✅ Record created successfully:", record);
 
       const openingRaw = Number(record?.initial_balance ?? 0);
@@ -231,10 +231,14 @@ async function performAccountCreate(req, comp_create = false, options = {}) {
 
         console.log("🔍 Transaction Data:", transactionData);
 
+        const bulkSession = sess || session;
         const { created, failed } = await transactionBulkCreate(
           transcReq,
           transactionData,
-          { stopOnError: true },
+          {
+            stopOnError: true,
+            ...(bulkSession ? { session: bulkSession } : {}),
+          },
         );
 
         if (failed.length) {
@@ -242,6 +246,15 @@ async function performAccountCreate(req, comp_create = false, options = {}) {
             "⚠️ Post-order transaction bulk insert failed:",
             failed,
           );
+          if (bulkSession) {
+            const err = new Error(
+              `Post-account transaction bulk insert failed: ${JSON.stringify(failed)}`,
+            );
+            err.statusCode = 400;
+            err.details = failed;
+            err.responseType = "transaction_bulk";
+            throw err;
+          }
           await logControllerError(
             req,
             `Post-account transaction bulk insert failed: ${JSON.stringify(failed)}`,

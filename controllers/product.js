@@ -13,6 +13,11 @@ const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
+const {
+  logRollbackFailure,
+  serializeErrorForLog,
+} = require("../utils/logControllerError");
+const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
 
 function normalizeWarehouseInventoryInput(reqBody) {
   if (reqBody.warehouse_inventory) {
@@ -264,131 +269,400 @@ async function updateWarehouseDefault(req, res) {
     });
   }
 }
-async function productCreateVariation(req, res) {
+function requestWithOverrides(req, overrides) {
+  return Object.assign(
+    Object.create(Object.getPrototypeOf(req)),
+    req,
+    overrides,
+  );
+}
+
+function throwWithGenericFailure(response, fallbackMessage) {
+  const err = new Error(
+    response?.error || response?.message || fallbackMessage || "Request failed",
+  );
+  err.statusCode = response?.status || 400;
+  err.responseType = response?.type || "validation";
+  err.details = response?.details ?? response?.missing ?? response;
+  err.clientErrorPayload = response;
+  throw err;
+}
+
+function parseProductVariationsFromBody(body) {
+  const variations = [];
+  if (!body || typeof body !== "object") return variations;
+
+  for (const key of Object.keys(body)) {
+    const match = key.match(/^variations\[(\d+)\]\[(.+)\]$/);
+    if (!match) continue;
+    const index = parseInt(match[1], 10);
+    const field = match[2];
+    if (!variations[index]) variations[index] = {};
+    variations[index][field] = body[key];
+  }
+  return variations;
+}
+
+/** JSON array or form-encoded `variations[n][field]`. */
+function parseProductVariationsFromRequest(body) {
+  if (Array.isArray(body?.variations)) return body.variations;
+  return parseProductVariationsFromBody(body);
+}
+
+function productVariationLogContext(req, extra = {}) {
+  return {
+    company_id: req.user?.company_id,
+    user_id: req.user?._id,
+    parent_product_id: req.params?.id ?? null,
+    product_name: req.body?.product_name,
+    variation_count: parseProductVariationsFromRequest(req.body).length,
+    ...extra,
+  };
+}
+
+function trackProductVariationId(tracker, field, id) {
+  if (id == null) return;
+  const oid =
+    id instanceof mongoose.Types.ObjectId ?
+      id
+    : new mongoose.Types.ObjectId(String(id));
+  if (field === "parentProductId") {
+    tracker.parentProductId = oid;
+    return;
+  }
+  if (!tracker.variationProductIds) tracker.variationProductIds = [];
+  tracker.variationProductIds.push(oid);
+}
+
+/** Compensating soft-delete when Mongo multi-doc transactions are unavailable. */
+async function rollbackProductCreateVariation(tracker, req, session = null) {
+  const ids = [];
+  if (tracker.variationProductIds?.length) {
+    ids.push(...tracker.variationProductIds);
+  }
+  if (tracker.parentProductId) {
+    ids.push(tracker.parentProductId);
+  }
+  if (!ids.length) return;
+
+  const opts = session ? { session } : {};
+  const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
+  const companyId = coalesceObjectId(
+    tracker.companyId || req.user?.company_id,
+  );
+  const filter = { _id: { $in: ids }, deletedAt: null };
+  if (companyId) filter.company_id = companyId;
+
+  await Product.updateMany(filter, { $set: softDeleteSet }, opts);
+  console.warn(
+    `⚠️ create-product-variation compensating rollback: products ${ids.map(String).join(", ")}`,
+  );
+}
+
+async function fetchProductLeanSnapshot(productId, companyId, session = null) {
+  const oid = coalesceObjectId(productId);
+  if (!oid) return null;
+  const filter = { _id: oid, deletedAt: null };
+  const companyOid = coalesceObjectId(companyId);
+  if (companyOid) filter.company_id = companyOid;
+
+  let q = Product.findOne(filter).lean();
+  if (session) q = q.session(session);
+  return q;
+}
+
+async function restoreProductFromSnapshot(productId, snapshot, session = null) {
+  if (!snapshot || productId == null) return;
+  const oid = coalesceObjectId(productId);
+  if (!oid) return;
+
+  const { _id, __v, createdAt, updatedAt, ...rest } = snapshot;
+  const opts = session ? { session } : {};
+  await Product.updateOne({ _id: oid }, { $set: rest }, opts);
+}
+
+/** Restore parent + updated variations; soft-delete newly created variations. */
+async function rollbackProductUpdateVariation(tracker, req, session = null) {
+  const opts = session ? { session } : {};
+  const companyId = coalesceObjectId(
+    tracker.companyId || req.user?.company_id,
+  );
+  const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
+
+  if (tracker.createdVariationIds?.length) {
+    const filter = {
+      _id: { $in: tracker.createdVariationIds },
+      deletedAt: null,
+    };
+    if (companyId) filter.company_id = companyId;
+    await Product.updateMany(filter, { $set: softDeleteSet }, opts);
+  }
+
+  if (tracker.variationUpdatesBefore?.length) {
+    for (const row of tracker.variationUpdatesBefore) {
+      await restoreProductFromSnapshot(row.id, row.before, session);
+    }
+  }
+
+  if (tracker.parentBefore && tracker.parentProductId) {
+    await restoreProductFromSnapshot(
+      tracker.parentProductId,
+      tracker.parentBefore,
+      session,
+    );
+  }
+
+  console.warn(
+    `⚠️ update-product-variation compensating rollback: parent ${tracker.parentProductId}`,
+  );
+}
+
+function mergeParentWarehouseInventoryBeforeUpdate(
+  updateData,
+  req,
+  existingRecord,
+) {
+  const incomingInventory = getIncomingInventoryForMerge(updateData, req.body);
+  if (incomingInventory === null) return;
+  const { mergedInventory, changes } = mergeWarehouseInventory(
+    existingRecord?.warehouse_inventory || [],
+    incomingInventory,
+  );
+  updateData.warehouse_inventory = mergedInventory;
+  req._warehouseStockChanges = changes;
+}
+
+async function runProductVariationWithOptionalTransaction(runFlow) {
+  let session = null;
+  let txnError = null;
   try {
-    // console.log("🔧 Product create variation - req.body keys:", Object.keys(req.body));
-    // cconsole.log("🔧 Product create variation - req.user.company_id:", req.user.company_id);
-    const company = await handleGenericFindOne(req, "company", {
-      searchCriteria: {
-        _id: req.user.company_id,
-        deletedAt: null,
-      },
-      excludeFields: [],
+    session = await mongoose.startSession();
+    await session.withTransaction(async () => {
+      await runFlow(session);
     });
-
-    if (!company.success || !company.data) {
-      return res.status(404).json({
-        success: false,
-        message: "Company not found",
-      });
+  } catch (error) {
+    if (isMongoTransactionUnsupportedError(error)) {
+      if (session) {
+        try {
+          session.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+        session = null;
+      }
+      try {
+        await runFlow(null);
+      } catch (retryError) {
+        txnError = retryError;
+      }
+    } else {
+      txnError = error;
     }
-
-    // Backward compatibility: if no warehouse inventory is provided,
-    // seed one default company warehouse entry.
-    if (!normalizeWarehouseInventoryInput(req.body)) {
-      req.body.warehouse_inventory = [
-        {
-          warehouse_id: company.data.warehouse_id,
-          quantity: req.body.quantity || 0,
-          quantity_action: "add",
-          last_updated: new Date(),
-        },
-      ];
-    }
-
-    // Set company_id if not already set
-    if (!req.body.company_id && company.data._id) {
-      req.body.company_id = company.data._id.toString();
-    }
-
-    console.log("🔧 Product create variation - req.body:", req.body);
-    const variations = [];
-
-    for (const key in req.body) {
-      const match = key.match(/^variations\[(\d+)\]\[(.+)\]$/);
-      if (match) {
-        const index = parseInt(match[1]);
-        const field = match[2];
-
-        // ensure object exists at that index
-        if (!variations[index]) variations[index] = {};
-
-        variations[index][field] = req.body[key];
+  } finally {
+    if (session) {
+      try {
+        session.endSession();
+      } catch (_) {
+        /* ignore */
       }
     }
+  }
+  return txnError;
+}
 
-    const parentProductResponse = await handleGenericCreate(req, "product", {
-      afterCreate: async (record, req) => {
-        console.log("✅ Parent product created successfully:", record);
+/**
+ * Parent product + N variation creates inside a transaction when supported.
+ * @returns {Promise<object>} handleGenericCreate-style success payload for parent
+ */
+async function runProductCreateVariationBody(req, session, tracker) {
+  const txnOpts = session ? { session } : {};
+
+  tracker.variation_step = "company";
+  const company = await handleGenericFindOne(req, "company", {
+    searchCriteria: {
+      _id: req.user.company_id,
+      deletedAt: null,
+    },
+    excludeFields: [],
+    ...txnOpts,
+  });
+
+  if (!company.success || !company.data) {
+    const err = new Error("Company not found");
+    err.statusCode = 404;
+    err.responseType = "not_found";
+    throw err;
+  }
+
+  tracker.companyId = coalesceObjectId(company.data._id);
+
+  if (!normalizeWarehouseInventoryInput(req.body)) {
+    req.body.warehouse_inventory = [
+      {
+        warehouse_id: company.data.warehouse_id,
+        quantity: req.body.quantity || 0,
+        quantity_action: "add",
+        last_updated: new Date(),
       },
-    });
+    ];
+  }
 
-    // Check if parent product was created successfully
-    if (
-      !parentProductResponse.success ||
-      !parentProductResponse.data ||
-      !parentProductResponse.data._id
-    ) {
-      console.error(
-        "❌ Failed to create parent product:",
-        parentProductResponse,
-      );
-      return res.status(parentProductResponse.status || 500).json({
-        success: false,
-        message: "Failed to create parent product",
-        error: parentProductResponse.error,
-        details: parentProductResponse.details,
-        missing: parentProductResponse.missing,
-        type: parentProductResponse.type,
-      });
-    }
+  if (!req.body.company_id && company.data._id) {
+    req.body.company_id = company.data._id.toString();
+  }
 
-    console.log(
-      "✅ Parent product created with ID:",
-      parentProductResponse.data._id,
+  const variations = parseProductVariationsFromRequest(req.body);
+
+  tracker.variation_step = "parent_product";
+  const parentProductResponse = await handleGenericCreate(req, "product", {
+    ...txnOpts,
+    afterCreate: async (record) => {
+      console.log("✅ Parent product created successfully:", record?._id);
+    },
+  });
+
+  if (
+    !parentProductResponse.success ||
+    !parentProductResponse.data ||
+    !parentProductResponse.data._id
+  ) {
+    throwWithGenericFailure(
+      parentProductResponse,
+      "Failed to create parent product",
     );
+  }
 
-    if (variations.length > 0) {
-      for (const variation of variations) {
-        const variant = {};
-        variant.body = { ...variation };
-        variant.body.company_id = company.data._id.toString();
-        variant.body.warehouse_inventory = [
+  trackProductVariationId(
+    tracker,
+    "parentProductId",
+    parentProductResponse.data._id,
+  );
+
+  const parentId = parentProductResponse.data._id.toString();
+
+  if (variations.length > 0) {
+    tracker.variation_step = "variation_products";
+    let variationIndex = 0;
+    for (const variation of variations) {
+      if (!variation || typeof variation !== "object") continue;
+
+      const variantBody = {
+        ...variation,
+        company_id: company.data._id.toString(),
+        warehouse_inventory: [
           {
             warehouse_id: company.data.warehouse_id,
             quantity: variation.quantity || 0,
             quantity_action: variation.quantity_action || "add",
             last_updated: new Date(),
           },
-        ];
-        variant.body.product_name = variation.product_name;
-        variant.body.parent_product_id =
-          parentProductResponse.data._id.toString();
-        variant.body.product_price = variation.product_price;
-        variant.body.product_description = variation.product_description;
-        const variationResponse = await handleGenericCreate(
-          variant,
-          "product",
-          {
-            afterCreate: async (record, req) => {
-              console.log("✅ Product variation created successfully:", record);
-            },
+        ],
+        product_name: variation.product_name,
+        parent_product_id: parentId,
+        product_price: variation.product_price,
+        product_description: variation.product_description,
+      };
+
+      const variationReq = requestWithOverrides(req, { body: variantBody });
+      const variationResponse = await handleGenericCreate(
+        variationReq,
+        "product",
+        {
+          ...txnOpts,
+          afterCreate: async (record) => {
+            console.log(
+              "✅ Product variation created successfully:",
+              record?._id,
+            );
           },
+        },
+      );
+
+      if (
+        !variationResponse.success ||
+        !variationResponse.data ||
+        !variationResponse.data._id
+      ) {
+        const failure = { ...variationResponse };
+        failure.error =
+          failure.error ||
+          `Failed to create variation at index ${variationIndex}`;
+        throwWithGenericFailure(
+          failure,
+          `Failed to create product variation at index ${variationIndex}`,
         );
-        console.log(
-          "🔧 Product create variation - response:",
-          variationResponse,
-        );
-        // return res.status(variationResponse.status).json(variationResponse);
       }
+
+      trackProductVariationId(
+        tracker,
+        "variationProductIds",
+        variationResponse.data._id,
+      );
+      variationIndex += 1;
     }
-    return res
-      .status(parentProductResponse.status || 200)
-      .json(parentProductResponse);
-  } catch (error) {
-    console.error("❌ Product create variation error:", error);
-    return res.status(500).json({ error: "Internal server error" });
   }
+
+  return parentProductResponse;
+}
+
+async function productCreateVariation(req, res) {
+  const tracker = {
+    variation_step: "init",
+    parentProductId: null,
+    variationProductIds: [],
+    companyId: null,
+  };
+  let result = null;
+
+  const txnError = await runProductVariationWithOptionalTransaction(
+    async (session) => {
+      try {
+        result = await runProductCreateVariationBody(req, session, tracker);
+      } catch (stepError) {
+        if (!session && (tracker.parentProductId || tracker.variationProductIds?.length)) {
+          await rollbackProductCreateVariation(tracker, req, null);
+        }
+        throw stepError;
+      }
+    },
+  );
+
+  if (txnError) {
+    console.error(
+      "❌ productCreateVariation failed:\n",
+      serializeErrorForLog(txnError),
+    );
+    await logRollbackFailure(req, txnError, {
+      action: "PRODUCT CREATE VARIATION ROLLBACK",
+      tags: ["product", "create-product-variation", "error"],
+      fallbackUrl: "/api/product/create-product-variation",
+      context: productVariationLogContext(req, {
+        variation_step: tracker.variation_step,
+        parent_product_id: tracker.parentProductId,
+        variation_product_ids: tracker.variationProductIds,
+        company_id: tracker.companyId,
+        execution_mode:
+          isMongoTransactionUnsupportedError(txnError) ?
+            "no_mongodb_transaction_compensating_rollback"
+          : "mongodb_transaction_aborted",
+        api_client_error: txnError.clientErrorPayload ?? null,
+      }),
+      fallbackCompanyId: tracker.companyId,
+    });
+
+    if (txnError.clientErrorPayload) {
+      const status = txnError.clientErrorPayload.status || 400;
+      return res.status(status).json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
+      success: false,
+      message: txnError.message || "Failed to create product variation",
+      details: txnError.details ?? undefined,
+      type: txnError.responseType || "internal",
+    });
+  }
+
+  return res.status(result?.status || 201).json(result);
 }
 
 async function getProductVariationById(req, res) {
@@ -429,348 +703,302 @@ async function getProductVariationById(req, res) {
 }
 
 /**
- * Update product variation
- *
- * This function handles updating a parent product and its variations.
- * It supports two operations:
- * 1. Update existing variations (if variation has an 'id' field)
- * 2. Create new variations (if variation doesn't have an 'id' field)
- *
- * @param {Object} req - Express request object
- * @param {Object} req.params.id - Parent product ID from URL
- * @param {Object} req.body - Request body containing product data and variations
- * @param {Object} req.body.variations - Array of variations (can be form-encoded or direct array)
- * @param {Object} res - Express response object
- * @returns {Promise<Object>} JSON response with parent product and variations update results
+ * Parent update + per-variation create/update inside a transaction when supported.
+ * @returns {Promise<{ status: number, payload: object }>}
  */
-async function productUpdateVariation(req, res) {
-  try {
-    // Extract parent product ID from URL parameters
-    const { id } = req.params;
+async function runProductUpdateVariationBody(req, session, tracker) {
+  const txnOpts = session ? { session } : {};
+  const parentId = req.params?.id;
 
-    console.log("🔧 Product update variation - req.body:", req.body);
-    console.log("🔧 Product update variation - product ID:", id);
+  if (!parentId) {
+    const err = new Error("Parent product ID is required");
+    err.statusCode = 400;
+    throw err;
+  }
+  tracker.parentProductId = coalesceObjectId(parentId);
 
-    /**
-     * Step 1: Get company information
-     * Company data is needed to set company_id and warehouse_id for variations
-     */
-    const company = await handleGenericFindOne(req, "company", {
-      searchCriteria: {
-        _id: req.user.company_id,
-        deletedAt: null,
+  tracker.variation_step = "company";
+  const company = await handleGenericFindOne(req, "company", {
+    searchCriteria: {
+      _id: req.user.company_id,
+      deletedAt: null,
+    },
+    excludeFields: [],
+    ...txnOpts,
+  });
+
+  if (!company.success || !company.data) {
+    const err = new Error("Company not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  tracker.companyId = coalesceObjectId(company.data._id);
+
+  const variations = parseProductVariationsFromRequest(req.body);
+
+  if (!normalizeWarehouseInventoryInput(req.body)) {
+    req.body.warehouse_inventory = [
+      {
+        warehouse_id: company.data.warehouse_id,
+        quantity: req.body.quantity || 0,
+        quantity_action: "add",
+        last_updated: new Date(),
       },
-      excludeFields: [],
-    });
+    ];
+  }
 
-    // Validate company exists
-    if (!company.success || !company.data) {
-      return res.status(404).json({
-        success: false,
-        message: "Company not found",
-      });
-    }
+  if (!req.body.company_id && company.data._id) {
+    req.body.company_id = company.data._id.toString();
+  }
 
-    /**
-     * Step 2: Parse variations from req.body
-     *
-     * Supports two input formats:
-     * 1. Direct array format (JSON): req.body.variations = [{...}, {...}]
-     * 2. Form-encoded format: variations[0][field_name] = value
-     *    Example: variations[0][product_name] = "Variant 1"
-     */
-    let variations = [];
+  tracker.variation_step = "parent_snapshot";
+  tracker.parentBefore = await fetchProductLeanSnapshot(
+    parentId,
+    tracker.companyId,
+    session,
+  );
+  if (!tracker.parentBefore) {
+    const err = new Error("Parent product not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
-    if (Array.isArray(req.body.variations)) {
-      // Direct array format (JSON) - use as is
-      variations = req.body.variations;
-    } else {
-      // Form-encoded format: variations[0][field_name]
-      // Parse each key matching the pattern variations[index][field]
-      for (const key in req.body) {
-        const match = key.match(/^variations\[(\d+)\]\[(.+)\]$/);
-        if (match) {
-          const index = parseInt(match[1]); // Extract array index
-          const field = match[2]; // Extract field name
-
-          // Initialize variation object at this index if it doesn't exist
-          if (!variations[index]) variations[index] = {};
-
-          // Set the field value
-          variations[index][field] = req.body[key];
-        }
-      }
-    }
-
-    /**
-     * Step 3: Process warehouse inventory for parent product
-     *
-     * Initialize and set up warehouse_inventory array structure
-     * This ensures the parent product has proper inventory tracking
-     */
-    // Backward compatibility: only seed default warehouse if no
-    // warehouse inventory payload is provided in request.
-    if (!normalizeWarehouseInventoryInput(req.body)) {
-      req.body.warehouse_inventory = [
-        {
-          warehouse_id: company.data.warehouse_id,
-          quantity: req.body.quantity || 0,
-          quantity_action: "add",
-          last_updated: new Date(),
-        },
-      ];
-    }
-
-    // Set company_id if not already set in request body
-    if (!req.body.company_id && company.data._id) {
-      req.body.company_id = company.data._id.toString();
-    }
-
-    /**
-     * Step 4: Update the parent product first
-     *
-     * The parent product must be updated successfully before processing variations
-     * because variations need the parent_product_id reference
-     */
-    const parentProductResponse = await handleGenericUpdate(req, "product", {
-      /**
-       * beforeUpdate hook: Process warehouse inventory data
-       *
-       * This hook processes warehouse_inventory data before saving.
-       * It handles both object and array formats and ensures proper structure.
-       */
-      beforeUpdate: async (updateData, req, existingRecord) => {
-        console.log("🔧 Product update variation - beforeUpdate hook called");
-        console.log(
-          "🔧 Original updateData.warehouse_inventory:",
-          updateData.warehouse_inventory,
-        );
-
-        const incomingInventory = getIncomingInventoryForMerge(
-          updateData,
-          req.body,
-        );
-        if (incomingInventory !== null) {
-          const { mergedInventory, changes } = mergeWarehouseInventory(
-            existingRecord?.warehouse_inventory || [],
-            incomingInventory,
-          );
-          updateData.warehouse_inventory = mergedInventory;
-          req._warehouseStockChanges = changes;
-          console.log(
-            "✅ Merged warehouse inventory in controller:",
-            mergedInventory,
-          );
-        }
-      },
-      /**
-       * afterUpdate hook: Log successful update
-       */
-      afterUpdate: async (record, req, existingRecord) => {
-        console.log("✅ Parent product updated successfully:", record);
-        await createWarehouseStockLogs(
-          req._warehouseStockChanges || [],
-          req,
-          record.product_name || "Product",
-        );
-      },
-    });
-
-    /**
-     * Step 5: Validate parent product update was successful
-     *
-     * If parent product update fails, we cannot proceed with variations
-     * because they need the parent_product_id reference
-     */
-    if (
-      !parentProductResponse.success ||
-      !parentProductResponse.data ||
-      !parentProductResponse.data._id
-    ) {
-      console.error(
-        "❌ Failed to update parent product:",
-        parentProductResponse,
+  tracker.variation_step = "parent_product";
+  const parentProductResponse = await handleGenericUpdate(req, "product", {
+    ...txnOpts,
+    beforeUpdate: async (updateData, req, existingRecord) => {
+      mergeParentWarehouseInventoryBeforeUpdate(
+        updateData,
+        req,
+        existingRecord,
       );
-      return res.status(parentProductResponse.status || 500).json({
-        success: false,
-        message: "Failed to update parent product",
-        error: parentProductResponse.error || parentProductResponse,
-      });
-    }
+    },
+    afterUpdate: async (record) => {
+      console.log("✅ Parent product updated successfully:", record?._id);
+    },
+  });
 
-    // Extract parent product ID for use in variations
-    const parentProductId = parentProductResponse.data._id.toString();
-    console.log("✅ Parent product updated with ID:", parentProductId);
+  if (
+    !parentProductResponse.success ||
+    !parentProductResponse.data ||
+    !parentProductResponse.data._id
+  ) {
+    throwWithGenericFailure(
+      parentProductResponse,
+      "Failed to update parent product",
+    );
+  }
 
-    /**
-     * Step 6: Process variations
-     *
-     * For each variation in the array:
-     * - If variation has an 'id': Update existing variation
-     * - If variation doesn't have an 'id': Create new variation with parent_product_id
-     */
-    const variationResults = [];
+  const parentProductId = parentProductResponse.data._id.toString();
+  const variationResults = [];
 
-    if (variations.length > 0) {
-      // Process each variation sequentially
-      for (const variation of variations) {
-        if (variation.id) {
-          /**
-           * Update existing variation
-           *
-           * Variation has an ID, so we update the existing record
-           */
-          console.log("🔄 Updating variation with ID:", variation.id);
+  if (variations.length > 0) {
+    tracker.variation_step = "variation_products";
+    let variationIndex = 0;
 
-          /**
-           * Create a mock request object for updating the variation
-           *
-           * handleGenericUpdate expects req.params.id to contain the record ID
-           * and req.body to contain the update data
-           *
-           * Create object that inherits from req to preserve Express methods (like req.get)
-           */
-          const variationReq = Object.create(Object.getPrototypeOf(req));
-          Object.assign(variationReq, req, {
-            params: { ...req.params, id: variation.id }, // Set variation ID in params
-            body: { ...variation }, // Use variation data as body
-          });
+    for (const variation of variations) {
+      if (!variation || typeof variation !== "object") continue;
 
-          // Remove id from body since it's now in params
-          delete variationReq.body.id;
-
-          /**
-           * Set required fields for the variation:
-           * - company_id: Link to company
-           * - warehouse_inventory: Set up inventory tracking
-           * - parent_product_id: Link to parent product
-           */
-          variationReq.body.company_id = company.data._id.toString();
-          variationReq.body.warehouse_inventory = [
-            {
-              warehouse_id: company.data.warehouse_id,
-              quantity: variation.quantity || 0,
-              quantity_action: variation.quantity_action || "add",
-              last_updated: new Date(),
-            },
-          ];
-          variationReq.body.parent_product_id = parentProductId;
-
-          // Update the variation using handleGenericUpdate
-          const variationResponse = await handleGenericUpdate(
-            variationReq,
-            "product",
-            {
-              beforeUpdate: async (updateData, req, existingRecord) => {
-                console.log(
-                  "🔧 Variation update - beforeUpdate hook called for:",
-                  variation.id,
-                );
-              },
-              afterUpdate: async (record, req, existingRecord) => {
-                console.log(
-                  "✅ Product variation updated successfully:",
-                  record._id,
-                );
-              },
-            },
-          );
-
-          // Store result for response
-          variationResults.push({
-            id: variation.id,
-            action: "updated",
-            response: variationResponse,
-          });
-        } else {
-          /**
-           * Create new variation
-           *
-           * Variation doesn't have an ID, so we create a new record
-           * and link it to the parent product via parent_product_id
-           */
-          console.log("➕ Creating new variation");
-
-          /**
-           * Create a mock request object for creating the variation
-           *
-           * handleGenericCreate expects req.body to contain the data
-           *
-           * Create object that inherits from req to preserve Express methods (like req.get)
-           */
-          const variantReq = Object.create(Object.getPrototypeOf(req));
-          Object.assign(variantReq, req, {
-            body: { ...variation }, // Use variation data as body
-          });
-
-          /**
-           * Set required fields for the new variation:
-           * - company_id: Link to company
-           * - warehouse_inventory: Set up inventory tracking
-           * - parent_product_id: Link to parent product (required for variations)
-           */
-          variantReq.body.company_id = company.data._id.toString();
-          variantReq.body.warehouse_inventory = [
-            {
-              warehouse_id: company.data.warehouse_id,
-              quantity: variation.quantity || 0,
-              quantity_action: variation.quantity_action || "add",
-              last_updated: new Date(),
-            },
-          ];
-          variantReq.body.parent_product_id = parentProductId;
-
-          // Create the variation using handleGenericCreate
-          const variationResponse = await handleGenericCreate(
-            variantReq,
-            "product",
-            {
-              afterCreate: async (record, req) => {
-                console.log(
-                  "✅ Product variation created successfully:",
-                  record._id,
-                );
-              },
-            },
-          );
-
-          // Store result for response
-          variationResults.push({
-            action: "created",
-            response: variationResponse,
-          });
+      if (variation.id) {
+        const variationId = String(variation.id);
+        const before = await fetchProductLeanSnapshot(
+          variationId,
+          tracker.companyId,
+          session,
+        );
+        if (!before) {
+          const err = new Error(`Variation product not found: ${variationId}`);
+          err.statusCode = 404;
+          throw err;
         }
-      }
-    }
 
-    /**
-     * Step 7: Return success response
-     *
-     * Response includes:
-     * - parent_product: Updated parent product data
-     * - variations: Array of variation update/create results
-     */
-    return res.status(parentProductResponse.status || 200).json({
+        if (!tracker.variationUpdatesBefore) {
+          tracker.variationUpdatesBefore = [];
+        }
+        tracker.variationUpdatesBefore.push({ id: variationId, before });
+
+        const variationBody = { ...variation };
+        delete variationBody.id;
+        variationBody.company_id = company.data._id.toString();
+        variationBody.warehouse_inventory = [
+          {
+            warehouse_id: company.data.warehouse_id,
+            quantity: variation.quantity || 0,
+            quantity_action: variation.quantity_action || "add",
+            last_updated: new Date(),
+          },
+        ];
+        variationBody.parent_product_id = parentProductId;
+
+        const variationReq = requestWithOverrides(req, {
+          params: { ...req.params, id: variationId },
+          body: variationBody,
+        });
+
+        const variationResponse = await handleGenericUpdate(
+          variationReq,
+          "product",
+          txnOpts,
+        );
+
+        if (!variationResponse.success) {
+          const failure = { ...variationResponse };
+          failure.error =
+            failure.error ||
+            `Failed to update variation at index ${variationIndex}`;
+          throwWithGenericFailure(
+            failure,
+            `Failed to update product variation at index ${variationIndex}`,
+          );
+        }
+
+        variationResults.push({
+          id: variationId,
+          action: "updated",
+          response: variationResponse,
+        });
+      } else {
+        const variantBody = {
+          ...variation,
+          company_id: company.data._id.toString(),
+          warehouse_inventory: [
+            {
+              warehouse_id: company.data.warehouse_id,
+              quantity: variation.quantity || 0,
+              quantity_action: variation.quantity_action || "add",
+              last_updated: new Date(),
+            },
+          ],
+          parent_product_id: parentProductId,
+        };
+
+        const variantReq = requestWithOverrides(req, { body: variantBody });
+        const variationResponse = await handleGenericCreate(
+          variantReq,
+          "product",
+          txnOpts,
+        );
+
+        if (
+          !variationResponse.success ||
+          !variationResponse.data ||
+          !variationResponse.data._id
+        ) {
+          const failure = { ...variationResponse };
+          failure.error =
+            failure.error ||
+            `Failed to create variation at index ${variationIndex}`;
+          throwWithGenericFailure(
+            failure,
+            `Failed to create product variation at index ${variationIndex}`,
+          );
+        }
+
+        const newId = variationResponse.data._id;
+        if (!tracker.createdVariationIds) tracker.createdVariationIds = [];
+        tracker.createdVariationIds.push(
+          newId instanceof mongoose.Types.ObjectId ?
+            newId
+          : new mongoose.Types.ObjectId(String(newId)),
+        );
+
+        variationResults.push({
+          action: "created",
+          response: variationResponse,
+        });
+      }
+
+      variationIndex += 1;
+    }
+  }
+
+  await createWarehouseStockLogs(
+    req._warehouseStockChanges || [],
+    req,
+    parentProductResponse.data.product_name || "Product",
+  );
+
+  return {
+    status: parentProductResponse.status || 200,
+    payload: {
       success: true,
       message: "Product variation updated successfully",
       data: {
         parent_product: parentProductResponse.data,
         variations: variationResults,
       },
+    },
+  };
+}
+
+async function productUpdateVariation(req, res) {
+  const tracker = {
+    variation_step: "init",
+    parentProductId: null,
+    companyId: null,
+    parentBefore: null,
+    variationUpdatesBefore: [],
+    createdVariationIds: [],
+  };
+  let result = null;
+
+  const txnError = await runProductVariationWithOptionalTransaction(
+    async (session) => {
+      try {
+        result = await runProductUpdateVariationBody(req, session, tracker);
+      } catch (stepError) {
+        const needsRollback =
+          !session &&
+          (tracker.parentBefore ||
+            tracker.createdVariationIds?.length ||
+            tracker.variationUpdatesBefore?.length);
+        if (needsRollback) {
+          await rollbackProductUpdateVariation(tracker, req, null);
+        }
+        throw stepError;
+      }
+    },
+  );
+
+  if (txnError) {
+    console.error(
+      "❌ productUpdateVariation failed:\n",
+      serializeErrorForLog(txnError),
+    );
+    await logRollbackFailure(req, txnError, {
+      action: "PRODUCT UPDATE VARIATION ROLLBACK",
+      tags: ["product", "update-product-variation", "error"],
+      fallbackUrl: `/api/product/update-product-variation/${req.params?.id || ""}`,
+      context: productVariationLogContext(req, {
+        variation_step: tracker.variation_step,
+        parent_product_id: tracker.parentProductId,
+        created_variation_ids: tracker.createdVariationIds,
+        updated_variation_ids: tracker.variationUpdatesBefore?.map(
+          (row) => row.id,
+        ),
+        company_id: tracker.companyId,
+        execution_mode:
+          isMongoTransactionUnsupportedError(txnError) ?
+            "no_mongodb_transaction_compensating_rollback"
+          : "mongodb_transaction_aborted",
+        api_client_error: txnError.clientErrorPayload ?? null,
+      }),
+      fallbackCompanyId: tracker.companyId,
     });
-  } catch (error) {
-    /**
-     * Error handling
-     *
-     * Catch any unexpected errors and return appropriate error response
-     */
-    console.error("❌ Product update variation error:", error);
-    return res.status(500).json({
+
+    if (txnError.clientErrorPayload) {
+      const status = txnError.clientErrorPayload.status || 400;
+      return res.status(status).json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
       success: false,
-      message: "Internal server error",
-      error: error.message,
+      message: txnError.message || "Failed to update product variation",
+      details: txnError.details ?? undefined,
+      type: txnError.responseType || "internal",
     });
   }
+
+  return res.status(result?.status || 200).json(result.payload);
 }
 
 async function productCreate(req, res) {

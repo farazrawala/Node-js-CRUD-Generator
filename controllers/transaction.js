@@ -6,6 +6,11 @@ const {
   coalesceObjectId,
 } = require("../utils/modelHelper");
 const Transaction = require("../models/transaction");
+const {
+  logRollbackFailure,
+  serializeErrorForLog,
+} = require("../utils/logControllerError");
+const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
 
 const MAX_BULK_ITEMS = 500;
 
@@ -114,6 +119,153 @@ async function createTransactionsFromItems(req, items, options = {}) {
   };
 }
 
+function parseAtomicBulkFlag(req) {
+  const v = req.body?.atomic ?? req.query?.atomic;
+  if (v === false || v === "false" || v === "0") return false;
+  if (v === true || v === "true" || v === "1") return true;
+  return true;
+}
+
+function parseStopOnErrorFlag(req) {
+  return (
+    req.body.stopOnError === true ||
+    req.body.stopOnError === "true" ||
+    req.query.stopOnError === "true"
+  );
+}
+
+function transactionBulkLogContext(req, extra = {}) {
+  const raw = req.body?.items ?? req.body?.transactions;
+  return {
+    company_id: req.user?.company_id,
+    user_id: req.user?._id,
+    item_count: Array.isArray(raw) ? raw.length : 0,
+    atomic: parseAtomicBulkFlag(req),
+    ...extra,
+  };
+}
+
+function throwOnBulkTransactionFailures(result) {
+  if (!result?.failed?.length) return;
+  const first = result.failed[0];
+  const err = new Error(
+    first.message || first.error || "Bulk transaction create failed",
+  );
+  err.statusCode = first.status || 400;
+  err.responseType = "validation";
+  err.details = first.details ?? first.missing ?? result.failed;
+  err.clientErrorPayload = {
+    success: false,
+    summary: result.summary,
+    inserted: result.created,
+    errors: result.failed,
+  };
+  throw err;
+}
+
+/** Soft-delete rows inserted during a failed non-transactional atomic bulk. */
+async function rollbackBulkTransactions(created, req, session = null) {
+  const ids = [];
+  for (const row of created || []) {
+    const id = row?.data?._id ?? row?.data?.id;
+    const oid = coalesceObjectId(id);
+    if (oid) ids.push(oid);
+  }
+  if (!ids.length) return;
+
+  const opts = session ? { session } : {};
+  const filter = { _id: { $in: ids }, deletedAt: null };
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (companyId) filter.company_id = companyId;
+
+  const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
+  const uid = coalesceObjectId(req.user?._id);
+  if (uid) softDeleteSet.updated_by = uid;
+
+  await Transaction.updateMany(filter, { $set: softDeleteSet }, opts);
+  console.warn(
+    `⚠️ transaction bulk-create compensating rollback: ${ids.length} row(s)`,
+  );
+}
+
+async function runTransactionBulkWithOptionalTransaction(runFlow) {
+  let session = null;
+  let txnError = null;
+  try {
+    session = await mongoose.startSession();
+    await session.withTransaction(async () => {
+      await runFlow(session);
+    });
+  } catch (error) {
+    if (isMongoTransactionUnsupportedError(error)) {
+      if (session) {
+        try {
+          session.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+        session = null;
+      }
+      try {
+        await runFlow(null);
+      } catch (retryError) {
+        txnError = retryError;
+      }
+    } else {
+      txnError = error;
+    }
+  } finally {
+    if (session) {
+      try {
+        session.endSession();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  return txnError;
+}
+
+/**
+ * All items succeed or none persist (Mongo txn when supported; else compensating rollback).
+ */
+async function runAtomicTransactionBulkCreateBody(req, session) {
+  const raw = req.body.items ?? req.body.transactions;
+  let result = await createTransactionsFromItems(req, raw, {
+    session,
+    stopOnError: true,
+  });
+
+  if (result.failed.length > 0) {
+    if (!session) {
+      await rollbackBulkTransactions(result.created, req, null);
+    }
+    throwOnBulkTransactionFailures(result);
+  }
+
+  return result;
+}
+
+function buildBulkCreateHttpPayload(created, failed, summary) {
+  return {
+    success: failed.length === 0,
+    summary,
+    inserted: created,
+    errors: failed,
+  };
+}
+
+function sendLegacyBulkCreateResponse(res, created, failed, summary) {
+  const payload = buildBulkCreateHttpPayload(created, failed, summary);
+  if (failed.length === 0) {
+    return res.status(201).json(payload);
+  }
+  if (created.length === 0) {
+    return res.status(400).json(payload);
+  }
+  return res.status(207).json(payload);
+}
+
 async function getMyLedgerTransactions(req, res) {
   const referenceUserId =
     req.query?.reference_user_id && String(req.query.reference_user_id).trim()
@@ -153,8 +305,11 @@ async function getMyLedgerTransactions(req, res) {
 }
 
 /**
- * POST /api/transaction/bulk-create
+ * POST /api/transaction/bulk-create  (alias: POST /api/transactions/bulk-create)
  * Body: { "items": [ { ...transaction fields }, ... ] }  (alias: `transactions`)
+ *
+ * Default (`atomic` true): all rows commit together (Mongo txn when supported) or none persist.
+ * Legacy partial mode: `atomic: false` — may return 207 with per-row `errors` (no session).
  */
 async function transactionBulkCreate(req, res) {
   const raw = req.body.items ?? req.body.transactions;
@@ -165,34 +320,72 @@ async function transactionBulkCreate(req, res) {
     });
   }
 
-  const stopOnError =
-    req.body.stopOnError === true ||
-    req.body.stopOnError === "true" ||
-    req.query.stopOnError === "true";
+  const atomic = parseAtomicBulkFlag(req);
 
-  const { created, failed, summary } = await createTransactionsFromItems(
-    req,
-    raw,
-    { stopOnError },
+  if (!atomic) {
+    const { created, failed, summary } = await createTransactionsFromItems(
+      req,
+      raw,
+      { stopOnError: parseStopOnErrorFlag(req) },
+    );
+    return sendLegacyBulkCreateResponse(res, created, failed, summary);
+  }
+
+  const tracker = { bulk_step: "items", inserted_count: 0 };
+  let result = null;
+
+  const txnError = await runTransactionBulkWithOptionalTransaction(
+    async (session) => {
+      try {
+        tracker.bulk_step = "create_rows";
+        result = await runAtomicTransactionBulkCreateBody(req, session);
+        tracker.inserted_count = result.created.length;
+      } catch (stepError) {
+        if (!session && result?.created?.length) {
+          await rollbackBulkTransactions(result.created, req, null);
+        }
+        throw stepError;
+      }
+    },
   );
 
-  const allOk = failed.length === 0;
-  const noneOk = created.length === 0;
+  if (txnError) {
+    console.error(
+      "❌ transactionBulkCreate failed:\n",
+      serializeErrorForLog(txnError),
+    );
+    await logRollbackFailure(req, txnError, {
+      action: "TRANSACTION BULK CREATE ROLLBACK",
+      tags: ["transaction", "bulk-create", "error"],
+      fallbackUrl:
+        req.originalUrl || req.path || "/api/transaction/bulk-create",
+      context: transactionBulkLogContext(req, {
+        bulk_step: tracker.bulk_step,
+        inserted_count: tracker.inserted_count,
+        execution_mode:
+          isMongoTransactionUnsupportedError(txnError) ?
+            "no_mongodb_transaction_compensating_rollback"
+          : "mongodb_transaction_aborted",
+        api_client_error: txnError.clientErrorPayload ?? null,
+      }),
+      fallbackCompanyId: req.user?.company_id,
+    });
 
-  const payload = {
-    success: allOk,
-    summary,
-    inserted: created,
-    errors: failed,
-  };
+    if (txnError.clientErrorPayload) {
+      const status = txnError.statusCode || 400;
+      return res.status(status).json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
+      success: false,
+      message: txnError.message || "Bulk transaction create failed",
+      details: txnError.details ?? undefined,
+      type: txnError.responseType || "internal",
+    });
+  }
 
-  if (allOk) {
-    return res.status(201).json(payload);
-  }
-  if (noneOk) {
-    return res.status(400).json(payload);
-  }
-  return res.status(207).json(payload);
+  return res
+    .status(201)
+    .json(buildBulkCreateHttpPayload(result.created, [], result.summary));
 }
 
 /**

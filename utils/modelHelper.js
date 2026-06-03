@@ -374,14 +374,55 @@ function coalesceObjectId(value) {
 }
 
 /**
+ * Best-effort `logs` row when handleGenericCreate/Update returns `success: false`.
+ * Lazy-requires logControllerError to avoid circular import at module load.
+ */
+async function maybeLogGenericCrudFailure(
+  req,
+  controllerName,
+  operation,
+  result,
+  options = {},
+) {
+  if (!result || result.success !== false) return;
+  if (options.skipFailureLog === true || req._skipGenericCrudFailureLog) return;
+
+  const modelName =
+    controllerName && String(controllerName).trim() !== "" ?
+      String(controllerName).trim()
+    : getControllerName();
+  if (modelName === "logs") return;
+
+  try {
+    const { logGenericCrudFailure } = require("./logControllerError");
+    const idParam = options.idParam || "id";
+    await logGenericCrudFailure(req, modelName, operation, result, {
+      recordId:
+        operation === "update" ?
+          req.params?.[idParam] ?? req.params?.id
+        : undefined,
+      fallbackUrl: req.originalUrl || req.path,
+      fallbackCompanyId: req.user?.company_id,
+      inTransaction: Boolean(options.session),
+    });
+  } catch (logErr) {
+    console.error(
+      "[maybeLogGenericCrudFailure]",
+      logErr.message,
+      { model: modelName, operation },
+    );
+  }
+}
+
+/**
  * Generic create function that works for any model
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  * @param {string} controllerName - The name of the controller/model (optional, auto-detected if not provided)
- * @param {Object} options - Additional options
+ * @param {Object} options - Additional options (`skipFailureLog` suppresses automatic logs row)
  * @returns {Promise} Express response
  */
-const handleGenericCreate = async (
+const handleGenericCreateCore = async (
   req,
   controllerName = null,
   options = {},
@@ -1252,7 +1293,7 @@ const handleGenericCreate = async (
  * @param {Object} options - Additional options
  * @returns {Promise} Express response
  */
-const handleGenericUpdate = async (req, controllerName, options = {}) => {
+const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
   // Auto-detect controller name if not provided or empty
   const modelName =
     controllerName && controllerName.trim() !== "" ?
@@ -3551,6 +3592,18 @@ const handleGenericFindOne = async (
         };
     }
   }
+};
+
+const handleGenericCreate = async (req, controllerName = null, options = {}) => {
+  const result = await handleGenericCreateCore(req, controllerName, options);
+  await maybeLogGenericCrudFailure(req, controllerName, "create", result, options);
+  return result;
+};
+
+const handleGenericUpdate = async (req, controllerName = null, options = {}) => {
+  const result = await handleGenericUpdateCore(req, controllerName, options);
+  await maybeLogGenericCrudFailure(req, controllerName, "update", result, options);
+  return result;
 };
 
 module.exports = {
