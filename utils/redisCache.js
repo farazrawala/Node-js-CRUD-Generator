@@ -5,11 +5,33 @@ const {
   isListAccessAuditExcluded,
 } = require("./applicationLogs");
 
+/** 3 days — default list-cache TTL (memory + Redis EX). Override via env. */
+const THREE_DAYS_SEC = 3 * 24 * 60 * 60;
+
 const DEFAULT_LIST_CACHE_TTL_SEC = Number(
   process.env.REDIS_TTL_LIST_CACHE ||
     process.env.REDIS_TTL_WAREHOUSE_ACTIVE ||
-    300,
+    THREE_DAYS_SEC,
 );
+
+/** Single TTL (seconds) for Redis EX and in-memory expiresAt. */
+function resolveListCacheTtlSeconds(ttlSeconds) {
+  const ttl = Number(ttlSeconds);
+  return Number.isFinite(ttl) && ttl > 0 ?
+      Math.floor(ttl)
+    : DEFAULT_LIST_CACHE_TTL_SEC;
+}
+
+function memoryTtlSecondsRemaining(key) {
+  const entry = memoryCache.get(key);
+  if (!entry) return null;
+  const remaining = Math.floor((entry.expiresAt - Date.now()) / 1000);
+  if (remaining <= 0) {
+    memoryCache.delete(key);
+    return null;
+  }
+  return remaining;
+}
 
 /** Ignored when building cache keys from full query (e.g. cache-busters). */
 const LIST_CACHE_QUERY_BLOCKLIST = new Set([
@@ -54,12 +76,10 @@ function memoryGet(key) {
 }
 
 function memorySet(key, value, ttlSeconds) {
-  const ttl = Number(ttlSeconds);
-  const sec =
-    Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_LIST_CACHE_TTL_SEC;
+  const sec = resolveListCacheTtlSeconds(ttlSeconds);
   memoryCache.set(key, {
     value,
-    expiresAt: Date.now() + Math.floor(sec) * 1000,
+    expiresAt: Date.now() + sec * 1000,
   });
 }
 
@@ -143,34 +163,59 @@ async function getRedisClient() {
 }
 
 async function getCache(key) {
+  let ttlSecondsRemaining = null;
+
   try {
     const redis = await getRedisClient();
     if (redis) {
       const raw = await redis.get(key);
       if (raw) {
-        return { data: JSON.parse(raw), backend: "redis" };
+        const data = JSON.parse(raw);
+        try {
+          const ttl = await redis.ttl(key);
+          if (ttl > 0) {
+            ttlSecondsRemaining = ttl;
+            if (isMemoryFallbackEnabled()) {
+              memorySet(key, data, ttl);
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        return { data, backend: "redis", ttlSecondsRemaining };
       }
     }
   } catch (err) {
     markRedisUnavailable(err);
   }
+
   if (isMemoryFallbackEnabled()) {
     const hit = memoryGet(key);
-    if (hit) return { data: hit, backend: "memory" };
+    if (hit) {
+      ttlSecondsRemaining = memoryTtlSecondsRemaining(key);
+      try {
+        const redis = await getRedisClient();
+        if (redis && ttlSecondsRemaining > 0) {
+          await redis.set(key, JSON.stringify(hit), {
+            EX: ttlSecondsRemaining,
+          });
+        }
+      } catch (err) {
+        markRedisUnavailable(err);
+      }
+      return { data: hit, backend: "memory", ttlSecondsRemaining };
+    }
   }
-  return { data: null, backend: null };
+
+  return { data: null, backend: null, ttlSecondsRemaining: null };
 }
 
 async function setCache(key, value, ttlSeconds = DEFAULT_LIST_CACHE_TTL_SEC) {
+  const ex = resolveListCacheTtlSeconds(ttlSeconds);
   let backend = null;
   try {
     const redis = await getRedisClient();
     if (redis) {
-      const ttl = Number(ttlSeconds);
-      const ex =
-        Number.isFinite(ttl) && ttl > 0 ?
-          Math.floor(ttl)
-        : DEFAULT_LIST_CACHE_TTL_SEC;
       await redis.set(key, JSON.stringify(value), { EX: ex });
       backend = "redis";
     }
@@ -178,10 +223,10 @@ async function setCache(key, value, ttlSeconds = DEFAULT_LIST_CACHE_TTL_SEC) {
     markRedisUnavailable(err);
   }
   if (isMemoryFallbackEnabled()) {
-    memorySet(key, value, ttlSeconds);
-    return { stored: true, backend: backend || "memory" };
+    memorySet(key, value, ex);
+    return { stored: true, backend: backend || "memory", ttlSeconds: ex };
   }
-  return { stored: backend === "redis", backend };
+  return { stored: backend === "redis", backend, ttlSeconds: ex };
 }
 
 async function deleteCache(key) {
@@ -220,6 +265,11 @@ function normalizeListQuery(query = {}, options = {}) {
       Array.isArray(raw) ?
         raw.map((v) => String(v).trim()).join(",")
       : String(raw).trim();
+  }
+  // Common typo: `lim` → `limit` so cache keys match get-all-active requests.
+  if (normalized.lim != null && normalized.limit == null) {
+    normalized.limit = normalized.lim;
+    delete normalized.lim;
   }
   return normalized;
 }
@@ -443,23 +493,23 @@ async function listAllListCacheForCompany(companyId, options = {}) {
   const now = Date.now();
   const entries = [];
 
+  const memoryByKey = new Map();
+
   for (const [key, entry] of memoryCache.entries()) {
     if (!keyBelongsToCompany(key, companyIdStr)) continue;
     const expired = now > entry.expiresAt;
-    const row = {
-      key,
-      backend: "memory",
+    const memoryTtl =
+      expired ? 0 : Math.max(0, Math.floor((entry.expiresAt - now) / 1000));
+    memoryByKey.set(key, {
+      entry,
       expired,
+      memoryTtl,
       expires_at: new Date(entry.expiresAt).toISOString(),
-      ttl_seconds_remaining:
-        expired ? 0 : Math.max(0, Math.floor((entry.expiresAt - now) / 1000)),
-      ...parseListCacheKey(key, companyIdStr),
-    };
-    if (includeValues) row.value_summary = summarizeCacheValue(entry.value);
-    entries.push(row);
+    });
   }
 
   let redisConnected = false;
+  const redisTtlByKey = new Map();
   try {
     const redis = await getRedisClient();
     redisConnected = Boolean(redis?.isOpen);
@@ -469,43 +519,77 @@ async function listAllListCacheForCompany(companyId, options = {}) {
         COUNT: 100,
       });
       for await (const key of iterator) {
-        if (entries.some((e) => e.key === key && e.backend === "memory")) {
-          continue;
-        }
         let ttl = -2;
         try {
           ttl = await redis.ttl(key);
         } catch {
           /* ignore */
         }
-        const row = {
-          key,
-          backend: "redis",
-          expired: ttl === -2,
-          ttl_seconds_remaining: ttl >= 0 ? ttl : null,
-          ...parseListCacheKey(key, companyIdStr),
-        };
-        if (includeValues) {
-          try {
-            const raw = await redis.get(key);
-            row.value_summary = summarizeCacheValue(
-              raw ? JSON.parse(raw) : null,
-            );
-          } catch {
-            row.value_summary = null;
-          }
-        }
-        entries.push(row);
+        redisTtlByKey.set(key, ttl);
       }
     }
   } catch (err) {
     markRedisUnavailable(err);
   }
 
+  const allKeys = new Set([...memoryByKey.keys(), ...redisTtlByKey.keys()]);
+  for (const key of allKeys) {
+    const mem = memoryByKey.get(key);
+    const redisTtl = redisTtlByKey.has(key) ? redisTtlByKey.get(key) : null;
+    const memoryTtl = mem?.memoryTtl ?? null;
+    const redisLive = redisTtl != null && redisTtl >= 0;
+    const memoryLive = memoryTtl != null && memoryTtl > 0 && !mem?.expired;
+
+    let effectiveTtl = null;
+    if (redisLive && memoryLive) {
+      effectiveTtl = Math.min(redisTtl, memoryTtl);
+    } else if (redisLive) {
+      effectiveTtl = redisTtl;
+    } else if (memoryLive) {
+      effectiveTtl = memoryTtl;
+    }
+
+    const backends = [];
+    if (memoryLive) backends.push("memory");
+    if (redisLive) backends.push("redis");
+
+    const row = {
+      key,
+      backend: backends.length === 1 ? backends[0] : backends.join("+"),
+      backends,
+      expired: effectiveTtl == null || effectiveTtl <= 0,
+      expires_at: mem?.expires_at ?? null,
+      ttl_seconds_remaining: effectiveTtl,
+      memory_ttl_seconds_remaining: memoryLive ? memoryTtl : null,
+      redis_ttl_seconds_remaining: redisLive ? redisTtl : null,
+      ttl_mismatch:
+        memoryLive &&
+        redisLive &&
+        Math.abs(memoryTtl - redisTtl) > 2,
+      ...parseListCacheKey(key, companyIdStr),
+    };
+    if (includeValues && mem?.entry) {
+      row.value_summary = summarizeCacheValue(mem.entry.value);
+    } else if (includeValues && redisLive) {
+      try {
+        const redis = await getRedisClient();
+        const raw = redis ? await redis.get(key) : null;
+        row.value_summary = summarizeCacheValue(
+          raw ? JSON.parse(raw) : null,
+        );
+      } catch {
+        row.value_summary = null;
+      }
+    }
+    entries.push(row);
+  }
+
   entries.sort((a, b) => a.key.localeCompare(b.key));
 
-  const memory_count = entries.filter((e) => e.backend === "memory").length;
-  const redis_count = entries.filter((e) => e.backend === "redis").length;
+  const memory_count = entries.filter((e) =>
+    e.backends?.includes("memory"),
+  ).length;
+  const redis_count = entries.filter((e) => e.backends?.includes("redis")).length;
 
   return {
     company_id: companyIdStr,
@@ -569,7 +653,8 @@ async function runCachedListHandler(req, res, options) {
   });
 
   if (cacheKey) {
-    const { data: cached, backend } = await getCache(cacheKey);
+    const { data: cached, backend, ttlSecondsRemaining } =
+      await getCache(cacheKey);
     if (cached) {
       void logListAccess(req, {
         source: "cache",
@@ -583,6 +668,9 @@ async function runCachedListHandler(req, res, options) {
         fromCache: true,
         cacheKey,
         cacheBackend: backend,
+        ...(ttlSecondsRemaining != null ?
+          { cacheTtlSecondsRemaining: ttlSecondsRemaining }
+        : {}),
         ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
       });
     }
@@ -593,13 +681,18 @@ async function runCachedListHandler(req, res, options) {
 
   let cacheMeta = {};
   if (cacheKey && response?.success) {
-    const { stored, backend } = await setCache(cacheKey, response, ttl);
+    const { stored, backend, ttlSeconds } = await setCache(
+      cacheKey,
+      response,
+      ttl,
+    );
     const redisUp = await isRedisConnected();
     cacheMeta = {
       cacheKey,
       fromCache: false,
       cached: stored,
       cacheBackend: backend,
+      cacheTtlSeconds: ttlSeconds,
       redisConnected: redisUp,
       ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
       ...(!redisUp && {
@@ -615,8 +708,24 @@ async function runCachedListHandler(req, res, options) {
   });
 }
 
+if (!Number.isFinite(DEFAULT_LIST_CACHE_TTL_SEC) || DEFAULT_LIST_CACHE_TTL_SEC <= 0) {
+  console.warn(
+    `[redis] Invalid REDIS_TTL_LIST_CACHE / REDIS_TTL_WAREHOUSE_ACTIVE — using ${THREE_DAYS_SEC}s (3 days)`,
+  );
+}
+if (isMemoryFallbackEnabled() && !isRedisConfigured()) {
+  console.warn(
+    `[redis] REDIS_ENABLED=false — list cache is in-process memory only (TTL ${resolveListCacheTtlSeconds()}s). Cache is cleared on server restart and when create/update/delete invalidates the module.`,
+  );
+} else {
+  console.log(
+    `[redis] List cache TTL: ${resolveListCacheTtlSeconds()}s (REDIS_ENABLED=${String(process.env.REDIS_ENABLED ?? "true")})`,
+  );
+}
+
 module.exports = {
   DEFAULT_LIST_CACHE_TTL_SEC,
+  resolveListCacheTtlSeconds,
   WAREHOUSE_ACTIVE_CACHE_TTL_SEC: DEFAULT_LIST_CACHE_TTL_SEC,
   getRedisClient,
   getCache,
