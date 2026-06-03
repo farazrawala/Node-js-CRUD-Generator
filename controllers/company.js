@@ -19,7 +19,9 @@ const {
   logRollbackFailure,
   serializeErrorForLog,
 } = require("../utils/logControllerError");
-const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
+const {
+  isMongoTransactionUnsupportedError,
+} = require("../utils/mongoTransactionSupport");
 
 function tenantCompanyIdFromUser(user) {
   if (!user?.company_id) return null;
@@ -188,10 +190,7 @@ async function companyCreate(req, res) {
       try {
         response = await runCompanyCreateBody(req, session, tracker);
       } catch (stepError) {
-        if (
-          !session &&
-          (tracker.companyId || tracker.userLinked)
-        ) {
+        if (!session && (tracker.companyId || tracker.userLinked)) {
           await rollbackCompanyCreate(tracker, req, null);
         }
         throw stepError;
@@ -200,10 +199,7 @@ async function companyCreate(req, res) {
   );
 
   if (txnError) {
-    console.error(
-      "❌ companyCreate failed:\n",
-      serializeErrorForLog(txnError),
-    );
+    console.error("❌ companyCreate failed:\n", serializeErrorForLog(txnError));
     await logRollbackFailure(req, txnError, {
       action: "COMPANY CREATE ROLLBACK",
       tags: ["company", "create", "error"],
@@ -225,7 +221,9 @@ async function companyCreate(req, res) {
 
     if (txnError.clientErrorPayload) {
       return res
-        .status(txnError.clientErrorPayload.status || txnError.statusCode || 400)
+        .status(
+          txnError.clientErrorPayload.status || txnError.statusCode || 400,
+        )
         .json(txnError.clientErrorPayload);
     }
     return res.status(txnError.statusCode || 500).json({
@@ -350,7 +348,6 @@ async function getMyBranches(req, res) {
   });
   return res.status(response.status).json(response);
 }
-
 
 /**
  * DELETE/POST — clear all list-cache entries for the authenticated user's company.

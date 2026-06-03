@@ -310,9 +310,8 @@ function patternToPrefix(matchPattern) {
 
 async function deleteCacheByPattern(matchPattern) {
   const prefix = patternToPrefix(matchPattern);
-  const companyPrefix = /^[a-fA-F0-9]{24}$/.test(prefix) ?
-    prefix.toLowerCase()
-  : null;
+  const companyPrefix =
+    /^[a-fA-F0-9]{24}$/.test(prefix) ? prefix.toLowerCase() : null;
   let deleted = 0;
 
   for (const key of [...memoryCache.keys()]) {
@@ -397,7 +396,8 @@ async function invalidateAllListCacheForReq(req) {
 /** Parse `{companyId}:{module}:{action}[:q:{hash}]` list-cache keys. */
 function parseListCacheKey(key, companyId) {
   const prefix = `${String(companyId)}:`;
-  if (!key.startsWith(prefix)) return { module: null, action: null, query_fingerprint: null };
+  if (!key.startsWith(prefix))
+    return { module: null, action: null, query_fingerprint: null };
   const rest = key.slice(prefix.length);
   const parts = rest.split(":");
   const module = parts[0] || null;
@@ -451,9 +451,8 @@ async function listAllListCacheForCompany(companyId, options = {}) {
       backend: "memory",
       expired,
       expires_at: new Date(entry.expiresAt).toISOString(),
-      ttl_seconds_remaining: expired ?
-        0
-      : Math.max(0, Math.floor((entry.expiresAt - now) / 1000)),
+      ttl_seconds_remaining:
+        expired ? 0 : Math.max(0, Math.floor((entry.expiresAt - now) / 1000)),
       ...parseListCacheKey(key, companyIdStr),
     };
     if (includeValues) row.value_summary = summarizeCacheValue(entry.value);
