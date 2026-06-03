@@ -62,9 +62,32 @@ function buildActiveMovementLedgerMatch({
   return match;
 }
 
+/** Shared $group for ledger in/out totals (`movement_type` is enum in, out). */
+const LEDGER_QTY_BY_WAREHOUSE_GROUP = {
+  _id: "$warehouse_id",
+  qty_in: {
+    $sum: {
+      $cond: [
+        { $eq: ["$movement_type", "in"] },
+        { $ifNull: ["$quantity", 0] },
+        0,
+      ],
+    },
+  },
+  qty_out: {
+    $sum: {
+      $cond: [
+        { $eq: ["$movement_type", "out"] },
+        { $ifNull: ["$quantity", 0] },
+        0,
+      ],
+    },
+  },
+};
+
 /**
  * Per-warehouse on-hand from ledger only: sum(`in`.quantity) − sum(`out`.quantity).
- * @returns {Promise<Array<{ warehouse_id: import('mongoose').Types.ObjectId, net_qty: number }>>}
+ * @returns {Promise<Array<{ warehouse_id: import('mongoose').Types.ObjectId, qty_in: number, qty_out: number, net_qty: number }>>}
  */
 async function aggregateNetQtyByWarehouse(
   productId,
@@ -74,43 +97,40 @@ async function aggregateNetQtyByWarehouse(
   const match = buildActiveMovementLedgerMatch({ productId, companyId });
   const pipeline = [
     { $match: match },
-    {
-      $group: {
-        _id: "$warehouse_id",
-        qty_in: {
-          $sum: {
-            $cond: [
-              {
-                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "in"],
-              },
-              { $ifNull: ["$quantity", 0] },
-              0,
-            ],
-          },
-        },
-        qty_out: {
-          $sum: {
-            $cond: [
-              {
-                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "out"],
-              },
-              { $ifNull: ["$quantity", 0] },
-              0,
-            ],
-          },
-        },
-      },
-    },
+    { $group: LEDGER_QTY_BY_WAREHOUSE_GROUP },
     {
       $project: {
         warehouse_id: "$_id",
+        qty_in: 1,
+        qty_out: 1,
         net_qty: { $subtract: ["$qty_in", "$qty_out"] },
       },
     },
+    { $sort: { net_qty: -1 } },
   ];
   let agg = InventoryMovements.aggregate(pipeline);
   if (session) agg = agg.session(session);
   return agg;
+}
+
+/** One query for warehouse display names (avoids N× findById in stock APIs). */
+async function loadWarehouseNamesById(warehouseIds) {
+  const ids = [
+    ...new Set(
+      (warehouseIds || [])
+        .filter((id) => id != null && mongoose.Types.ObjectId.isValid(String(id)))
+        .map((id) => new mongoose.Types.ObjectId(String(id))),
+    ),
+  ];
+  if (!ids.length) return new Map();
+
+  const rows = await Warehouse.find({ _id: { $in: ids } }).select("name").lean();
+  const map = new Map();
+  for (const row of rows) {
+    const name = row?.name != null ? String(row.name).trim() : "";
+    if (name) map.set(String(row._id), name);
+  }
+  return map;
 }
 
 /** Net qty for one product + company + warehouse from `inventory_movements` only. */
@@ -130,28 +150,8 @@ async function getLedgerNetQtyForWarehouse(
     {
       $group: {
         _id: null,
-        qty_in: {
-          $sum: {
-            $cond: [
-              {
-                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "in"],
-              },
-              { $ifNull: ["$quantity", 0] },
-              0,
-            ],
-          },
-        },
-        qty_out: {
-          $sum: {
-            $cond: [
-              {
-                $eq: [{ $toLower: { $ifNull: ["$movement_type", ""] } }, "out"],
-              },
-              { $ifNull: ["$quantity", 0] },
-              0,
-            ],
-          },
-        },
+        qty_in: LEDGER_QTY_BY_WAREHOUSE_GROUP.qty_in,
+        qty_out: LEDGER_QTY_BY_WAREHOUSE_GROUP.qty_out,
       },
     },
   ];
@@ -797,26 +797,189 @@ async function inventoryMovementsCreate(req, res) {
 }
 
 /**
+ * Reconcile `product.stock` with ledger net qty (in − out) for one product.
+ * Same logic as GET `/api/inventory_movements/stock-by-product/:productId` (no HTTP self-call).
+ *
+ * @param {string|import("mongoose").Types.ObjectId} productId
+ * @param {string|import("mongoose").Types.ObjectId} companyObjectId
+ * @param {{ req?: object, mongoSession?: import("mongoose").ClientSession | null, logUrl?: string }} [options]
+ * @returns {Promise<object>} success payload or `{ success: false, status, error, ... }`
+ */
+async function syncProductStockFromMovementLedger(
+  productId,
+  companyObjectId,
+  { req = null, mongoSession = null, logUrl = null } = {},
+) {
+  const productIdStr = String(productId ?? "").trim();
+  if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
+    return {
+      success: false,
+      status: 400,
+      error: "Invalid product id",
+      message: "Provide a valid product_id",
+    };
+  }
+
+  const companyIdCoalesced = coalesceObjectId(companyObjectId);
+  if (
+    !companyIdCoalesced ||
+    !mongoose.Types.ObjectId.isValid(String(companyIdCoalesced))
+  ) {
+    return {
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      message: "Company context is required",
+    };
+  }
+
+  const productObjectId = new mongoose.Types.ObjectId(productIdStr);
+  const companyObj = new mongoose.Types.ObjectId(String(companyIdCoalesced));
+
+  let productQuery = Product.findOne({
+    _id: productObjectId,
+    company_id: companyObj,
+    deletedAt: null,
+  }).select(
+    "product_name product_code sku wholesale_price status stock",
+  );
+  if (mongoSession) productQuery = productQuery.session(mongoSession);
+
+  const [product, warehouseRows] = await Promise.all([
+    productQuery.lean(),
+    aggregateNetQtyByWarehouse(productObjectId, companyObj),
+  ]);
+
+  if (!product) {
+    return {
+      success: false,
+      status: 404,
+      error: "Product not found",
+      message: "Product not found for this company",
+      product_id: productIdStr,
+    };
+  }
+
+  const warehouseNameById = await loadWarehouseNamesById(
+    warehouseRows.map((row) => row.warehouse_id),
+  );
+
+  const warehouses = [];
+  let totalIn = 0;
+  let totalOut = 0;
+
+  for (const row of warehouseRows) {
+    const qty_in = toFiniteNumber(row.qty_in);
+    const qty_out = toFiniteNumber(row.qty_out);
+    const net_qty = toFiniteNumber(row.net_qty);
+    totalIn += qty_in;
+    totalOut += qty_out;
+
+    const warehouseIdStr = String(row.warehouse_id);
+    const entry = {
+      warehouse_id: warehouseIdStr,
+      qty_in,
+      qty_out,
+      net_qty,
+      available_qty: Math.max(0, net_qty),
+    };
+    const whName = warehouseNameById.get(warehouseIdStr);
+    if (whName) entry.warehouse_name = whName;
+
+    warehouses.push(entry);
+  }
+
+  const net_qty = totalIn - totalOut;
+  const available_qty = Math.max(0, net_qty);
+  const stockFromLedger = Math.round(available_qty * 100) / 100;
+  const previousStock = Number(product.stock) || 0;
+  let productStock = previousStock;
+
+  if (previousStock !== stockFromLedger) {
+    const updateOpts = { new: true };
+    if (mongoSession) updateOpts.session = mongoSession;
+
+    const updatedProduct = await Product.findOneAndUpdate(
+      {
+        _id: productObjectId,
+        company_id: companyObj,
+        deletedAt: null,
+      },
+      { $set: { stock: stockFromLedger } },
+      updateOpts,
+    )
+      .select("stock")
+      .lean();
+    productStock =
+      updatedProduct != null ?
+        Number(updatedProduct.stock) || 0
+      : stockFromLedger;
+
+    if (req) {
+      const productName =
+        product.product_name != null ?
+          String(product.product_name).trim()
+        : "";
+      const nameLabel = productName || `id ${productIdStr}`;
+      const description =
+        `Product "${nameLabel}" stock synced from ledger (in ${totalIn}, out ${totalOut}): ` +
+        `updated from ${previousStock} to ${productStock}.`;
+
+      await createApplicationLog(req, {
+        action: "Product stock synced from ledger",
+        url:
+          logUrl ||
+          req.originalUrl ||
+          req.path ||
+          "/api/inventory_movements/stock-by-product",
+        tags: ["product", "stock", "inventory_movement", "sync"],
+        description: {
+          product_id: productIdStr,
+          product_name: productName || null,
+          qty_in: totalIn,
+          qty_out: totalOut,
+          net_qty,
+          previous_stock: previousStock,
+          stock: productStock,
+          message: description,
+        },
+        company_id: companyObj,
+      });
+    }
+  }
+
+  return {
+    success: true,
+    status: 200,
+    product_id: productIdStr,
+    company_id: String(companyObj),
+    product: {
+      product_name: product.product_name,
+      product_code: product.product_code,
+      sku: product.sku,
+      wholesale_price: product.wholesale_price,
+      status: product.status,
+      stock: productStock,
+      previous_stock: previousStock,
+    },
+    qty_in: totalIn,
+    qty_out: totalOut,
+    net_qty,
+    available_qty,
+    stock_synced: previousStock !== stockFromLedger,
+    warehouse_count: warehouses.length,
+    warehouses,
+  };
+}
+
+/**
  * GET stock for one product from `inventory_movements` ledger (in − out), per warehouse + totals.
+ * Sets `product.stock` on the same product to ledger `available_qty` (max(0, net_qty)) when it differs.
  * `product_id` / `id`: path param or query. Tenant from `req.user.company_id`.
  */
 async function findStockByProductId(req, res) {
   try {
-    const rawCompany = req.user?.company_id;
-    const companyId =
-      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
-        rawCompany._id
-      : rawCompany;
-    if (!companyId) {
-      return res.status(400).json({
-        success: false,
-        status: 400,
-        error: "company_id is required",
-        message: "Authentication with company context is required",
-      });
-    }
-
-    const companyObjectId = coalesceObjectId(companyId);
+    const companyObjectId = coalesceObjectId(req.user?.company_id);
     if (
       !companyObjectId ||
       !mongoose.Types.ObjectId.isValid(String(companyObjectId))
@@ -825,7 +988,7 @@ async function findStockByProductId(req, res) {
         success: false,
         status: 400,
         error: "company_id is required",
-        message: "Invalid company context",
+        message: "Authentication with company context is required",
       });
     }
 
@@ -834,144 +997,18 @@ async function findStockByProductId(req, res) {
       req.params?.id ??
       req.query?.product_id ??
       req.query?.id;
-    const productIdStr = String(rawProductId ?? "").trim();
-    if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
-      return res.status(400).json({
-        success: false,
-        status: 400,
-        error: "Invalid product id",
-        message: "Provide a valid product_id (path or query)",
-      });
+
+    const result = await syncProductStockFromMovementLedger(
+      rawProductId,
+      companyObjectId,
+      { req },
+    );
+
+    if (!result.success) {
+      return res.status(result.status || 400).json(result);
     }
 
-    const productObjectId = new mongoose.Types.ObjectId(productIdStr);
-
-    const product = await Product.findOne({
-      _id: productObjectId,
-      company_id: companyObjectId,
-      deletedAt: null,
-    })
-      .select("product_name product_code sku wholesale_price status")
-      .lean();
-
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        status: 404,
-        error: "Product not found",
-        message: "Product not found for this company",
-        product_id: productIdStr,
-      });
-    }
-
-    const match = buildActiveMovementLedgerMatch({
-      productId: productObjectId,
-      companyId: companyObjectId,
-    });
-
-    const warehouseRows = await InventoryMovements.aggregate([
-      { $match: match },
-      {
-        $group: {
-          _id: "$warehouse_id",
-          qty_in: {
-            $sum: {
-              $cond: [
-                {
-                  $eq: [
-                    { $toLower: { $ifNull: ["$movement_type", ""] } },
-                    "in",
-                  ],
-                },
-                { $ifNull: ["$quantity", 0] },
-                0,
-              ],
-            },
-          },
-          qty_out: {
-            $sum: {
-              $cond: [
-                {
-                  $eq: [
-                    { $toLower: { $ifNull: ["$movement_type", ""] } },
-                    "out",
-                  ],
-                },
-                { $ifNull: ["$quantity", 0] },
-                0,
-              ],
-            },
-          },
-        },
-      },
-      {
-        $project: {
-          warehouse_id: "$_id",
-          qty_in: 1,
-          qty_out: 1,
-          net_qty: { $subtract: ["$qty_in", "$qty_out"] },
-        },
-      },
-      { $sort: { net_qty: -1 } },
-    ]);
-
-    let Warehouse;
-    try {
-      Warehouse = mongoose.model("warehouse");
-    } catch {
-      Warehouse = null;
-    }
-
-    const warehouses = [];
-    let totalIn = 0;
-    let totalOut = 0;
-
-    for (const row of warehouseRows) {
-      const qty_in = toFiniteNumber(row.qty_in);
-      const qty_out = toFiniteNumber(row.qty_out);
-      const net_qty = toFiniteNumber(row.net_qty);
-      totalIn += qty_in;
-      totalOut += qty_out;
-
-      const entry = {
-        warehouse_id: String(row.warehouse_id),
-        qty_in,
-        qty_out,
-        net_qty,
-        available_qty: Math.max(0, net_qty),
-      };
-
-      if (Warehouse && row.warehouse_id) {
-        const wh = await Warehouse.findById(row.warehouse_id)
-          .select("name")
-          .lean();
-        if (wh?.name) entry.warehouse_name = String(wh.name).trim();
-      }
-
-      warehouses.push(entry);
-    }
-
-    const net_qty = totalIn - totalOut;
-
-    return res.status(200).json({
-      success: true,
-      status: 200,
-      product_id: productIdStr,
-      company_id: String(companyObjectId),
-      product: {
-        product_name: product.product_name,
-        product_code: product.product_code,
-        sku: product.sku,
-        wholesale_price: product.wholesale_price,
-        status: product.status,
-      },
-      qty_in: totalIn,
-      qty_out: totalOut,
-      net_qty,
-      available_qty: Math.max(0, net_qty),
-      warehouse_count: warehouses.length,
-      warehouses,
-    });
+    return res.status(200).json(result);
   } catch (error) {
     console.error("❌ findStockByProductId:", error);
     return res.status(500).json({
@@ -1333,6 +1370,7 @@ module.exports = {
   buildActiveMovementLedgerMatch,
   aggregateNetQtyByWarehouse,
   getLedgerNetQtyForWarehouse,
+  syncProductStockFromMovementLedger,
   findStockByProductId,
   stockTransfer,
 };

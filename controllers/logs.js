@@ -1,12 +1,18 @@
-const { handleGenericGetAll } = require("../utils/modelHelper");
+const {
+  handleGenericGetAll,
+  coalesceObjectId,
+} = require("../utils/modelHelper");
+const { applyLogsTagQueryFilter } = require("../utils/logsListFilter");
 
 async function getAllLogsByUser(req, res) {
-  const filter = { status: "active", deletedAt: null };
-  const tag =
-    req.query?.tag != null ? String(req.query.tag).trim() : "";
-  if (tag) {
-    filter.tags = tag;
+  let filter = { status: "active", deletedAt: null };
+
+  const tenantCo = coalesceObjectId(req.user?.company_id);
+  if (tenantCo) {
+    filter.company_id = tenantCo;
   }
+
+  filter = applyLogsTagQueryFilter(filter, req.query);
 
   const response = await handleGenericGetAll(req, "logs", {
     filter,

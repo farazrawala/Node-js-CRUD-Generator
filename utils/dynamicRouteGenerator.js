@@ -25,6 +25,7 @@ const {
   runCachedListHandler,
   invalidateListCacheForReq,
 } = require("./redisCache");
+const { applyLogsTagQueryFilter } = require("./logsListFilter");
 
 const RESERVED_QUERY_KEYS = new Set([
   "limit",
@@ -39,6 +40,7 @@ const RESERVED_QUERY_KEYS = new Set([
   "deleted",
   "include_inactive",
   "role",
+  "tag",
   ...INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 ]);
 
@@ -509,6 +511,10 @@ function generateControllerFunctions(modelName) {
         return res.status(roleFilter.error.status).json(roleFilter.error);
       }
       filter = roleFilter.filter;
+      filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+      if (modelName === "logs") {
+        filter = applyLogsTagQueryFilter(filter, req.query);
+      }
       const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
       // console.log("filter", filter);
@@ -570,6 +576,9 @@ function generateControllerFunctions(modelName) {
           }
           filter = roleFilter.filter;
           filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+          if (modelName === "logs") {
+            filter = applyLogsTagQueryFilter(filter, req.query);
+          }
           const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
           return handleGenericGetAll(req, modelName, {

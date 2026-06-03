@@ -88,6 +88,11 @@ const modelSchema = new mongoose.Schema(
       enum: ["Single", "Variable"],
       default: "Single",
     },
+    stock: {
+      type: Number,
+      default: 0,
+      field_name: "Stock",
+    },
     category_id: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "category",

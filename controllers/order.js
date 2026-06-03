@@ -14,6 +14,7 @@ const {
   logRollbackFailure,
   serializeErrorForLog,
 } = require("../utils/logControllerError");
+const { createApplicationLog } = require("../utils/applicationLogs");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   createTransactionsFromItems: transactionBulkCreate,
@@ -24,6 +25,7 @@ const {
 const {
   runInventoryMovementTxnBody,
   aggregateNetQtyByWarehouse,
+  syncProductStockFromMovementLedger,
 } = require("./inventory_movements");
 
 const ORDER_TRANSACTION_ERROR_LOG = {
@@ -523,6 +525,132 @@ function shapeOrderWithItems(orderPlain, items) {
   };
 }
 
+/** Unique product ObjectId strings from order line rows or `built.docs`. */
+function collectUniqueProductIdsFromLineRows(rows) {
+  const seen = new Set();
+  const ids = [];
+  for (const row of rows || []) {
+    const id = coalesceObjectId(row?.product_id);
+    const str = id != null ? String(id) : "";
+    if (str && mongoose.Types.ObjectId.isValid(str) && !seen.has(str)) {
+      seen.add(str);
+      ids.push(str);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Read `product.stock`, subtract sold qty, persist on `product` (before outbound movement).
+ * @param {{ productId: unknown, lineQty: unknown, companyId: unknown, req?: import("express").Request, mongoSession?: object | null }} params
+ */
+async function decrementProductStockForOrderLine({
+  productId,
+  lineQty,
+  companyId,
+  req = null,
+  mongoSession = null,
+}) {
+  const pid = coalesceObjectId(productId);
+  const cid = coalesceObjectId(companyId);
+  if (!pid || !mongoose.Types.ObjectId.isValid(String(pid))) {
+    throw new Error("Valid product_id is required to update product stock");
+  }
+  if (!cid || !mongoose.Types.ObjectId.isValid(String(cid))) {
+    throw new Error("company_id is required to update product stock");
+  }
+
+  const qtyToRemove = Number(lineQty);
+  if (!Number.isFinite(qtyToRemove) || qtyToRemove <= 0) {
+    throw new Error(
+      "Each order line needs a positive quantity to update product stock",
+    );
+  }
+
+  let productQuery = Product.findOne({
+    _id: pid,
+    company_id: cid,
+    status: "active",
+    deletedAt: null,
+  }).select("stock product_name");
+  if (mongoSession) {
+    productQuery = productQuery.session(mongoSession);
+  }
+  const productDoc = await productQuery.lean();
+  if (!productDoc) {
+    throw new Error(`Product not found for stock update (id ${String(pid)})`);
+  }
+
+  const previousStock = Number(productDoc.stock) || 0;
+  if (previousStock < qtyToRemove) {
+    const msg = `Insufficient product stock: need ${qtyToRemove}, available ${previousStock}`;
+    const err = new Error(msg);
+    err.statusCode = 400;
+    err.clientErrorPayload = {
+      success: false,
+      status: 400,
+      error: "Insufficient product stock",
+      message: msg,
+      details: msg,
+      type: "validation",
+      product_id: String(pid),
+      previous_stock: previousStock,
+      qty_needed: qtyToRemove,
+    };
+    throw err;
+  }
+
+  const nextStock = Math.round((previousStock - qtyToRemove) * 100) / 100;
+  const updateOpts = mongoSession ? { session: mongoSession } : {};
+  const updated = await Product.findOneAndUpdate(
+    { _id: pid, company_id: cid, status: "active", deletedAt: null },
+    { $set: { stock: nextStock } },
+    { new: true, ...updateOpts },
+  ).lean();
+
+  if (!updated) {
+    throw new Error(`Failed to update product stock (id ${String(pid)})`);
+  }
+
+  const productName =
+    productDoc.product_name != null ?
+      String(productDoc.product_name).trim()
+    : "";
+  const nameLabel = productName || `id ${String(pid)}`;
+  const description =
+    `Product "${nameLabel}" stock updated from ${previousStock} to ${nextStock} ` +
+    `(${qtyToRemove} qty sold on order).`;
+
+  if (req) {
+    await createApplicationLog(
+      req,
+      {
+        action: "Product stock updated (order)",
+        url: req.originalUrl || req.path || "/api/order/order_save",
+        tags: ["product", "stock", "order", "sale"],
+        description: {
+          product_id: String(pid),
+          product_name: productName || null,
+          qty_sold: qtyToRemove,
+          previous_stock: previousStock,
+          stock: nextStock,
+          message: description,
+        },
+        company_id: cid,
+      },
+      { session: mongoSession, silent: true },
+    );
+  }
+
+  return {
+    product_id: pid,
+    product_name: productDoc.product_name,
+    previous_stock: previousStock,
+    stock: nextStock,
+    qty_removed: qtyToRemove,
+  };
+}
+
 /** Default reporting window when GET /order/profit-by-order-item omits `from` and `to`. */
 const FIND_PROFIT_DEFAULT_RANGE_DAYS = 90;
 
@@ -932,7 +1060,7 @@ async function getOrderByorderItem(req, res) {
  * (`ORDER CREATE ROLLBACK`) with the real error, stack, and request context. Check server logs for `[order_save]`.
  */
 async function order_save(req, res) {
-  // Lines are parsed from the raw body; header create uses a stripped `req.body` (restored before the HTTP response).
+  // ─── Parse & validate cart lines (indexed keys, arrays, or legacy shapes) ───
   const lines = parseOrderLineItems(req.body);
   if (lines.length === 0) {
     return res.status(400).json({
@@ -945,7 +1073,7 @@ async function order_save(req, res) {
     });
   }
 
-  // `handleGenericCreate` only reads header fields from `req.body`; stash the client payload and restore after the session block.
+  // ─── Build order header payload (line keys stripped; restored to `originalBody` before response) ───
   const originalBody = req.body;
   req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
   delete req.body._id;
@@ -960,22 +1088,32 @@ async function order_save(req, res) {
   req.body.payment_method_accounts_id = req.body?.posPayMethod;
   req.body.transaction_number = transaction_number;
 
+  // Outer state survives txn attempt / standalone retry (see `orderSaveExecutionMode` in rollback logs).
   let mongooseClientSession = null;
   let response = null;
   let insertedItemsPlain = [];
+  /** Per-line `product.stock` decrements + audit rows in `logs`. */
+  let productStockUpdates = [];
   let txnError = null;
   /** How `runOrderSaveBody` last ran; drives rollback/log diagnosis. */
   let orderSaveExecutionMode = "pending";
 
+  /**
+   * Single logical create: order header → GL → order_item rows → product.stock → inventory `out` → header sync.
+   * @param {import("mongoose").ClientSession | null} mongoSession
+   */
   const runOrderSaveBody = async (mongoSession) => {
     insertedItemsPlain = [];
+    productStockUpdates = [];
     const lineItemSessionOpts = mongoSession ? { session: mongoSession } : {};
     orderSaveExecutionMode =
       mongoSession ? "mongodb_transaction" : "no_session";
 
+    // Step 1 — persist `order` document (order_no assigned in model pre-save when missing).
     response = await handleGenericCreate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterCreate: async (record, orderReq, sess) => {
+        // Step 2 — four GL postings (sales, shipping, discount, payment); shared transaction_number.
         const orderTotal = Number(
           lines
             .reduce(
@@ -1072,6 +1210,8 @@ async function order_save(req, res) {
     }
 
     const orderId = response.data._id;
+
+    // Step 3 — `order_item` documents (one row per cart line).
     const built = await buildOrderItemDocuments(
       orderId,
       response.data,
@@ -1090,7 +1230,7 @@ async function order_save(req, res) {
     );
     insertedItemsPlain = inserted.map((d) => d.toObject({ flattenMaps: true }));
 
-    // Outbound inventory movement ledger (`inventory_movements` only).
+    // Step 4 — per line: decrement `product.stock`, pick warehouse, post `inventory_movements` `out`.
     const companyIdForMovement =
       coalesceObjectId(response.data.company_id) ||
       coalesceObjectId(req.user?.company_id);
@@ -1117,6 +1257,32 @@ async function order_save(req, res) {
         );
       }
 
+      const productIdStr = String(line.product_id).trim();
+      if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
+        throw new Error("Each order line needs a valid product_id");
+      }
+
+      // 4a — `product.stock` on product document (logs row when stock changes).
+      try {
+        const stockUpdate = await decrementProductStockForOrderLine({
+          productId: productIdStr,
+          lineQty: lineQtyNum,
+          companyId: companyIdForMovementOid || companyIdForMovement,
+          req,
+          mongoSession,
+        });
+        productStockUpdates.push(stockUpdate);
+      } catch (stockErr) {
+        if (stockErr.clientErrorPayload) {
+          throwOrderCreateFromGenericFailure(
+            stockErr.clientErrorPayload,
+            "Insufficient product stock for order line",
+          );
+        }
+        throw stockErr;
+      }
+
+      // 4b — warehouse with enough ledger qty (line warehouse_id or company default).
       let warehouseIdStr;
       try {
         warehouseIdStr = await resolveWarehouseForOutboundLine({
@@ -1138,6 +1304,7 @@ async function order_save(req, res) {
 
       const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
 
+      // 4c — `runInventoryMovementTxnBody` mutates `req.body` / `req.params.id`; restore after each line.
       const bodyBeforeInventoryMovement = req.body;
       const hadRouteParamId = Object.prototype.hasOwnProperty.call(
         req.params,
@@ -1204,9 +1371,11 @@ async function order_save(req, res) {
       }
     }
 
+    // Step 5 — recompute header totals from line items (items_total, etc.).
     await Order.syncHeaderTotalsFromLineItems(orderId, lineItemSessionOpts);
   };
 
+  // Prefer multi-document transaction (replica set / Atlas); fallback on standalone mongod.
   try {
     mongooseClientSession = await mongoose.startSession();
     await mongooseClientSession.withTransaction(async () => {
@@ -1229,6 +1398,7 @@ async function order_save(req, res) {
       try {
         response = null;
         insertedItemsPlain = [];
+        productStockUpdates = [];
         orderSaveExecutionMode = "standalone_no_transaction_retry";
         await runOrderSaveBody(null);
       } catch (nonSessionRetryError) {
@@ -1299,6 +1469,7 @@ async function order_save(req, res) {
   // Caller / downstream middleware may still need the original multipart or indexed keys.
   req.body = originalBody;
 
+  // Failure path — map to client JSON + `logs` rollback row (`ORDER CREATE ROLLBACK`).
   if (txnError) {
     console.error(
       "[order_save] failure (serializeErrorForLog):\n",
@@ -1385,7 +1556,7 @@ async function order_save(req, res) {
       .json(response);
   }
 
-  // Reload from DB so header fields updated by `syncHeaderTotalsFromLineItems` are included in the response.
+  // Success — reload header after sync; attach line items + stock audit from this request.
   const orderId = response.data._id;
   const orderFresh = await Order.findById(orderId).lean();
   const data = shapeOrderWithItems(
@@ -1396,9 +1567,14 @@ async function order_save(req, res) {
     success: true,
     status: 201,
     data,
+    product_stock_updates: productStockUpdates,
   });
 }
 
+/**
+ * PATCH order header + optional line replace. Rebuilds GL for `transaction_number` when lines sent.
+ * Does not replay inventory movements or `product.stock` (unlike `order_save`); lines replace `order_item` only.
+ */
 async function order_update(req, res) {
   const lines = parseOrderLineItems(req.body);
   const originalBody = req.body;
@@ -1421,13 +1597,17 @@ async function order_update(req, res) {
     );
   }
 
+  /** GL bulk result from `afterUpdate` (exposed on success response). */
   const postUpdateTransactions = { created: [], failed: [] };
 
   let mongooseClientSession = null;
   let response = null;
   let txnError = null;
   let orderUpdateExecutionMode = "pending";
+  /** Set when lines are replaced: product ids on old rows vs incoming `built.docs`. */
+  let orderLineReplaceSnapshot = null;
 
+  /** @param {import("mongoose").ClientSession | null} mongoSession */
   const runOrderUpdateBody = async (mongoSession) => {
     const sessOpts = mongoSession ? { session: mongoSession } : {};
     orderUpdateExecutionMode =
@@ -1436,6 +1616,7 @@ async function order_update(req, res) {
     response = await handleGenericUpdate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterUpdate: async (record, orderReq, _existing, sess) => {
+        // Replace GL set: delete prior rows for this order's transaction_number, then insert four new lines.
         const transaction_number = record?.transaction_number;
         if (transaction_number) {
           const deleteTransc = await Transaction.deleteMany(
@@ -1549,6 +1730,7 @@ async function order_update(req, res) {
 
     const orderId = response.data._id;
 
+    // When body includes lines: replace all `order_item` rows for this order, then sync header.
     if (lines.length > 0) {
       const built = await buildOrderItemDocuments(
         orderId,
@@ -1562,9 +1744,66 @@ async function order_update(req, res) {
           "Order line build failed",
         );
       }
+
+      // Snapshot existing lines before replace (for stock/inventory follow-up and API metadata).
+      let existingItemsQuery = OrderItem.find({
+        order_id: orderId,
+        status: "active",
+        deletedAt: null,
+      }).select("product_id qty price subtotal");
+      if (mongoSession) {
+        existingItemsQuery = existingItemsQuery.session(mongoSession);
+      }
+      const existingOrderItems = await existingItemsQuery.lean();
+
+      const previous_product_ids =
+        collectUniqueProductIdsFromLineRows(existingOrderItems);
+      const new_product_ids = collectUniqueProductIdsFromLineRows(built.docs);
+
       await OrderItem.deleteMany({ order_id: orderId }, sessOpts);
       await OrderItem.insertMany(built.docs, sessOpts);
       await Order.syncHeaderTotalsFromLineItems(orderId, sessOpts);
+
+      // Reconcile product.stock from movement ledger for every product touched by the replace.
+      const companyIdForStock =
+        coalesceObjectId(response?.data?.company_id) ||
+        coalesceObjectId(req.user?.company_id);
+      const productIdsToSync = [
+        ...new Set([...previous_product_ids, ...new_product_ids]),
+      ];
+      const stockSyncResults = [];
+      for (const pid of productIdsToSync) {
+        const syncResult = await syncProductStockFromMovementLedger(
+          pid,
+          companyIdForStock,
+          {
+            req,
+            mongoSession,
+            logUrl: req.originalUrl || "/api/order/order_update",
+          },
+        );
+        if (!syncResult.success) {
+          throwOrderCreateFromGenericFailure(
+            syncResult,
+            `Stock sync failed for product ${pid}`,
+          );
+        }
+        stockSyncResults.push({
+          product_id: syncResult.product_id,
+          stock_synced: syncResult.stock_synced,
+          previous_stock: syncResult.product?.previous_stock,
+          stock: syncResult.product?.stock,
+          net_qty: syncResult.net_qty,
+          qty_in: syncResult.qty_in,
+          qty_out: syncResult.qty_out,
+        });
+      }
+
+      orderLineReplaceSnapshot = {
+        previous_product_ids,
+        new_product_ids,
+        stock_sync: stockSyncResults,
+      };
     } else {
       await Order.syncHeaderTotalsFromLineItems(orderId, sessOpts);
     }
@@ -1577,6 +1816,7 @@ async function order_update(req, res) {
     });
     orderUpdateExecutionMode = "mongodb_transaction_committed";
   } catch (mongoTransactionError) {
+    // Same standalone retry pattern as `order_save`.
     if (isMongoTransactionUnsupportedError(mongoTransactionError)) {
       if (mongooseClientSession) {
         try {
@@ -1631,6 +1871,7 @@ async function order_update(req, res) {
     const bodyForLog =
       originalBody && typeof originalBody === "object" ? originalBody : {};
     const firstLine = lines[0] || {};
+    // `logs` rollback row — see `execution_mode` / `rollback_note` in context.
     await logRollbackFailure(req, txnError, {
       action: "ORDER UPDATE ROLLBACK",
       tags: ["api", "order", "rollback", "update"],
@@ -1704,6 +1945,7 @@ async function order_update(req, res) {
 
   const orderId = response.data._id;
 
+  // Success — return order + populated line items and GL bulk metadata.
   const items = await OrderItem.find({
     order_id: orderId,
     status: "active",
@@ -1722,6 +1964,9 @@ async function order_update(req, res) {
     data,
     created: postUpdateTransactions.created,
     failed: postUpdateTransactions.failed,
+    ...(orderLineReplaceSnapshot ?
+      { line_replace: orderLineReplaceSnapshot }
+    : {}),
   });
 }
 

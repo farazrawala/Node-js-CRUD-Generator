@@ -90,7 +90,7 @@ function glSoftDeleteSet(req) {
 function buildOpeningBalanceGlItems(record, transcReq, transaction_number) {
   const openingRaw = Number(record?.initial_balance ?? 0);
   if (Number.isNaN(openingRaw) || openingRaw === 0) {
-    return [];
+    return { items: [], equityRequired: false, openingRaw: 0 };
   }
 
   const amount = makeNumberPositive(openingRaw);
