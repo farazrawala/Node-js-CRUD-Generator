@@ -33,6 +33,63 @@ function defaultRequestUrl(req, overrideUrl) {
   return u != null && String(u).trim() !== "" ? String(u).trim() : "/api";
 }
 
+/** Paths that log access in `runCachedListHandler` or company cache routes (not auth middleware). */
+function shouldDeferListAccessLogToHandler(req) {
+  const path = String(req?.originalUrl || req?.path || req?.url || "")
+    .split("?")[0]
+    .toLowerCase();
+  if (
+    path.includes("/company/list-cache") ||
+    path.includes("/company/remove-cache")
+  ) {
+    return true;
+  }
+  return /\/(get-all-active|get-all)$/.test(path);
+}
+
+/**
+ * Audit log for tenant list reads: **API** (database) vs **Cache** (Redis/memory).
+ * @param {import("express").Request | null} req
+ * @param {{ source?: "api" | "cache", module?: string, action?: string, description?: string | Record<string, unknown>, cacheKey?: string, cacheBackend?: string }} options
+ */
+async function logListAccess(req, options = {}) {
+  const {
+    source = "api",
+    module = "list",
+    action = "get-all-active",
+    description,
+    cacheKey,
+    cacheBackend,
+  } = options;
+
+  const sourceTag = source === "cache" ? "Cache" : "API";
+  const method = (req?.method || "GET").toUpperCase();
+  const mod = String(module || "list").trim();
+  const act = String(action || "get-all-active").trim();
+
+  const desc =
+    description != null ?
+      description
+    : {
+        source: sourceTag,
+        module: mod,
+        action: act,
+        ...(cacheKey ? { cacheKey } : {}),
+        ...(cacheBackend ? { cacheBackend } : {}),
+      };
+
+  return createApplicationLog(
+    req,
+    {
+      action: `${method} ${mod}/${act}`,
+      url: defaultRequestUrl(req),
+      tags: [sourceTag, method.toLowerCase(), mod, act],
+      description: desc,
+    },
+    { silent: true },
+  );
+}
+
 /**
  * Insert one row into `logs` (operational / audit trail).
  * Failures are swallowed by default so business flows are not blocked.
@@ -174,5 +231,7 @@ async function logEntityFieldChange(req, params, options = {}) {
 module.exports = {
   createApplicationLog,
   logEntityFieldChange,
+  logListAccess,
+  shouldDeferListAccessLogToHandler,
   normalizeTags,
 };

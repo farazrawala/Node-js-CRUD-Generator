@@ -9,6 +9,7 @@ const {
   listAllListCacheForReq,
   resolveCompanyIdFromReq,
 } = require("../utils/redisCache");
+const { logListAccess } = require("../utils/applicationLogs");
 
 // async function companyCreate(req, res) {
 //   const response = await handleGenericCreate(req, "company", {
@@ -141,6 +142,17 @@ async function removeCache(req, res) {
     const keysDeleted = await invalidateAllListCacheForReq(req);
     const after = await listAllListCacheForReq(req);
 
+    void logListAccess(req, {
+      source: "cache",
+      module: "company",
+      action: "remove-cache",
+      description: {
+        keys_before: before.count,
+        keys_deleted: keysDeleted,
+        keys_remaining: after.count,
+      },
+    });
+
     return res.status(200).json({
       success: true,
       status: 200,
@@ -184,6 +196,13 @@ async function listAllCache(req, res) {
     }
 
     const data = await listAllListCacheForReq(req);
+
+    void logListAccess(req, {
+      source: "cache",
+      module: "company",
+      action: "list-cache",
+      description: { entry_count: data.count },
+    });
 
     return res.status(200).json({
       success: true,

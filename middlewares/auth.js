@@ -1,6 +1,9 @@
 const { getUserToken } = require("../service/auth");
 const { coalesceObjectId } = require("../utils/modelHelper");
-const { createApplicationLog } = require("../utils/applicationLogs");
+const {
+  createApplicationLog,
+  shouldDeferListAccessLogToHandler,
+} = require("../utils/applicationLogs");
 const {
   buildUserCompanyPopulate,
   COMPANY_DEFAULT_ACCOUNT_PATHS,
@@ -54,7 +57,7 @@ async function logApiRequest(req, user = null) {
       {
         action: `${method} ${action}`,
         url: req.path,
-        tags: ["api", method.toLowerCase(), user ? "authenticated" : "public"],
+        tags: ["API", method.toLowerCase(), user ? "authenticated" : "public"],
         description: `User ${userEmail} accessed ${req.path}`,
         company_id: coalesceObjectId(companyId) ?? companyId,
         created_by: userId,
@@ -201,8 +204,10 @@ async function checkHeaderAuthentication(req, res, next) {
 
   req.user = user;
 
-  // Log authenticated route access
-  logApiRequest(req, user);
+  // List/cache routes log API vs Cache in runCachedListHandler or company cache handlers.
+  if (!shouldDeferListAccessLogToHandler(req)) {
+    logApiRequest(req, user);
+  }
 
   return next();
 }

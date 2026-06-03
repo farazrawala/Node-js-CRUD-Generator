@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { coalesceObjectId } = require("./modelHelper");
+const { logListAccess } = require("./applicationLogs");
 
 const DEFAULT_LIST_CACHE_TTL_SEC = Number(
   process.env.REDIS_TTL_LIST_CACHE ||
@@ -15,6 +16,13 @@ const LIST_CACHE_QUERY_BLOCKLIST = new Set([
   "nocache",
   "timestamp",
 ]);
+
+/** Never read/write list cache for these modules (`get-all-active` / `get-all`). */
+const LIST_CACHE_BYPASS_MODULES = new Set(["user", "logs"]);
+
+function isListCacheBypassed(module) {
+  return LIST_CACHE_BYPASS_MODULES.has(String(module || "").trim());
+}
 
 let client = null;
 let connectPromise = null;
@@ -544,10 +552,10 @@ async function runCachedListHandler(req, res, options) {
     fetch,
   } = options;
 
-  // User lists change on every create/update; caching empty results before commit
-  // produced stale tenant directories (fromCache: true, data: []).
-  if (module === "user") {
+  // `user`: stale empty lists after create; `logs`: audit trail must always hit the DB.
+  if (isListCacheBypassed(module)) {
     const response = await fetch();
+    void logListAccess(req, { source: "api", module, action });
     return res.status(response?.status || 200).json(response);
   }
 
@@ -559,6 +567,13 @@ async function runCachedListHandler(req, res, options) {
   if (cacheKey) {
     const { data: cached, backend } = await getCache(cacheKey);
     if (cached) {
+      void logListAccess(req, {
+        source: "cache",
+        module,
+        action,
+        cacheKey,
+        cacheBackend: backend,
+      });
       return res.status(200).json({
         ...cached,
         fromCache: true,
@@ -570,6 +585,7 @@ async function runCachedListHandler(req, res, options) {
   }
 
   const response = await fetch();
+  void logListAccess(req, { source: "api", module, action, cacheKey });
 
   let cacheMeta = {};
   if (cacheKey && response?.success) {
@@ -616,6 +632,8 @@ module.exports = {
   listAllListCacheForCompany,
   listAllListCacheForReq,
   runCachedListHandler,
+  isListCacheBypassed,
+  LIST_CACHE_BYPASS_MODULES,
   isRedisConfigured,
   isRedisConnected,
   isMemoryFallbackEnabled,
