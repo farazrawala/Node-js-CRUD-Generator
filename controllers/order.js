@@ -27,6 +27,7 @@ const {
   aggregateNetQtyByWarehouse,
   syncProductStockFromMovementLedger,
 } = require("./inventory_movements");
+const { evaluateProductStockAlert } = require("./alerts");
 
 const ORDER_TRANSACTION_ERROR_LOG = {
   action: "POST ORDER TRANSACTION ERROR",
@@ -1263,8 +1264,9 @@ async function order_save(req, res) {
       }
 
       // 4a — `product.stock` on product document (logs row when stock changes).
+      let stockUpdate;
       try {
-        const stockUpdate = await decrementProductStockForOrderLine({
+        stockUpdate = await decrementProductStockForOrderLine({
           productId: productIdStr,
           lineQty: lineQtyNum,
           companyId: companyIdForMovementOid || companyIdForMovement,
@@ -1368,6 +1370,23 @@ async function order_save(req, res) {
         } else {
           delete req.params.id;
         }
+      }
+
+      const alertResult = await evaluateProductStockAlert({
+        req,
+        productId: productIdStr,
+        companyId: companyIdForMovementOid || companyIdForMovement,
+        onHand: stockUpdate.stock,
+        pathQty: stockUpdate.stock,
+        session: mongoSession,
+        logUrl: req.originalUrl || req.path || "/api/order/order_save",
+      });
+      if (!alertResult.success) {
+        throw new Error(
+          alertResult.message ||
+            alertResult.error ||
+            "Product stock alert check failed",
+        );
       }
     }
 
@@ -1573,7 +1592,8 @@ async function order_save(req, res) {
 
 /**
  * PATCH order header + optional line replace. Rebuilds GL for `transaction_number` when lines sent.
- * Does not replay inventory movements or `product.stock` (unlike `order_save`); lines replace `order_item` only.
+ * Does not replay inventory `out` movements (unlike `order_save`); replaces `order_item` only, then
+ * `syncProductStockFromMovementLedger` for affected product ids (ledger → `product.stock`, same session when txn supported).
  */
 async function order_update(req, res) {
   const lines = parseOrderLineItems(req.body);
@@ -1764,7 +1784,7 @@ async function order_update(req, res) {
       await OrderItem.insertMany(built.docs, sessOpts);
       await Order.syncHeaderTotalsFromLineItems(orderId, sessOpts);
 
-      // Reconcile product.stock from movement ledger for every product touched by the replace.
+      // Ledger → product.stock (mongoSession: aggregate + product update + audit log roll back with txn).
       const companyIdForStock =
         coalesceObjectId(response?.data?.company_id) ||
         coalesceObjectId(req.user?.company_id);
@@ -1797,6 +1817,24 @@ async function order_update(req, res) {
           qty_in: syncResult.qty_in,
           qty_out: syncResult.qty_out,
         });
+
+        const onHandAfterSync = Number(syncResult.product?.stock);
+        const alertResult = await evaluateProductStockAlert({
+          req,
+          productId: String(pid),
+          companyId: companyIdForStock,
+          onHand: onHandAfterSync,
+          pathQty: onHandAfterSync,
+          session: mongoSession,
+          logUrl: req.originalUrl || req.path || "/api/order/order_update",
+        });
+        if (!alertResult.success) {
+          throw new Error(
+            alertResult.message ||
+              alertResult.error ||
+              "Product stock alert check failed",
+          );
+        }
       }
 
       orderLineReplaceSnapshot = {

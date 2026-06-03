@@ -7,6 +7,7 @@ const {
   paymentReceiptCreate,
   paymentReceiptUpdate,
 } = require("../controllers/payment_receipt");
+const { checkProductAlert } = require("../controllers/alerts");
 const {
   // handleUserSignup,
 
@@ -175,6 +176,8 @@ router.post("/user/login", handleUserLogin);
 // router.get("/user/get-all", getAllUser);
 // router.get("/user/get/:id", userById);
 // router.post("/user/get-one", findUserByEmail);
+
+router.get("/alerts/check-product-alert/:product_id/:qty", checkProductAlert);
 
 router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
 router.patch(

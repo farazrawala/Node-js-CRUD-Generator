@@ -22,6 +22,7 @@ const {
   runInventoryMovementTxnBody,
   syncProductStockFromMovementLedger,
 } = require("./inventory_movements");
+const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
@@ -1144,6 +1145,32 @@ async function purchaseOrderCreate(req, res) {
         persistedLineItems.push(lineItemCreateResult.data);
       }
 
+      const stockByProductId = new Map();
+      for (const update of productStockUpdates) {
+        stockByProductId.set(String(update.product_id), Number(update.stock));
+      }
+      for (const [productIdStr, onHand] of stockByProductId) {
+        const alertResult = await evaluateProductStockAlert({
+          req,
+          productId: productIdStr,
+          companyId,
+          onHand,
+          pathQty: onHand,
+          session: mongoSession,
+          logUrl:
+            req.originalUrl ||
+            req.path ||
+            "/api/purchase_order/purchase_order_create",
+        });
+        if (!alertResult.success) {
+          throw new Error(
+            alertResult.message ||
+              alertResult.error ||
+              "Product stock alert check failed",
+          );
+        }
+      }
+
       await PurchaseOrder.syncHeaderTotalsFromLineItems(newPurchaseOrderId, {
         session: mongoSession,
       });
@@ -1296,6 +1323,31 @@ async function purchaseOrderCreate(req, res) {
  * in the post-update block (GL + movement soft-delete in `afterUpdate` still runs on every successful header save).
  *
  * Standalone `mongod`: retries `runPurchaseOrderUpdateBody` without a session (partial writes possible on failure).
+ *
+ * Collections (Mongo) — op = insert | update | delete | read; scope = one | many
+ *
+ * | When | Collection | Op | Scope | Notes |
+ * |------|------------|-----|-------|-------|
+ * | Pre-txn (no lines in body) | purchase_order_item | read | many | Sum subtotals → `lines_subtotal` on header |
+ * | In txn — always | purchase_order | update | one | `handleGenericUpdate` (header fields) |
+ * | In txn — always (`afterUpdate`) | transaction | update | many | Soft-delete active rows for `transaction_number` |
+ * | In txn — always (`afterUpdate`) | transaction | insert | many (5) | `transactionBulkCreate` — new GL set |
+ * | In txn — always (`afterUpdate`) | inventory_movements | update | many | Soft-delete rows for this PO `reference_id` |
+ * | In txn — lines in body | purchase_order_item | read | many | Snapshot before replace (`product_id`) |
+ * | In txn — lines in body | purchase_order_item | delete | many | `deleteMany` by `purchase_order_id` |
+ * | In txn — lines in body | purchase_order_item | insert | many | `insertMany` from `built.docs` |
+ * | In txn — lines in body (per line w/ warehouse) | inventory_movements | insert | one × N | `runInventoryMovementTxnBody` → `in` movement |
+ * | In txn — lines in body (per line w/ warehouse) | product | update | one × N | Optional `wholesale_price` on `in` (weighted avg) |
+ * | In txn — lines in body (per line w/ warehouse) | logs | insert | one × N | Movement + optional wholesale audit rows |
+ * | In txn — lines in body | product | read / update | one × P | `syncProductStockFromMovementLedger` (session: ledger + stock + log) |
+ * | In txn — lines in body | logs | insert | one × P | Stock-sync audit when stock changed (same session) |
+ * | In txn — always | purchase_order | update | one | `syncHeaderTotalsFromLineItems` (`lines_subtotal`, `total_amount`) |
+ * | Post-txn success | purchase_order_item | read | many | Populate for response `data` |
+ * | Post-txn success | purchase_order | read | one | Reload header for response |
+ * | On failure | logs | insert | one | `logRollbackFailure` (`PURCHASE ORDER UPDATE ROLLBACK`) |
+ *
+ * P = distinct product ids on old ∪ new lines. N = lines with valid `warehouse_id`. Does not call
+ * `incrementProductStockForPoLine` (create-only direct `product.stock` bump).
  */
 async function purchase_order_update(req, res) {
   const lines = collectLineItems(req.body);
@@ -1616,6 +1668,24 @@ async function purchase_order_update(req, res) {
           qty_in: syncResult.qty_in,
           qty_out: syncResult.qty_out,
         });
+
+        const onHandAfterSync = Number(syncResult.product?.stock);
+        const alertResult = await evaluateProductStockAlert({
+          req,
+          productId: String(pid),
+          companyId: companyIdForStock,
+          onHand: onHandAfterSync,
+          pathQty: onHandAfterSync,
+          session: mongoSession,
+          logUrl: req.originalUrl || req.path || "/api/purchase_order/update",
+        });
+        if (!alertResult.success) {
+          throw new Error(
+            alertResult.message ||
+              alertResult.error ||
+              "Product stock alert check failed",
+          );
+        }
       }
 
       poLineReplaceSnapshot = {

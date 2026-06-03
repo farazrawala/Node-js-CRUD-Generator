@@ -118,13 +118,17 @@ async function loadWarehouseNamesById(warehouseIds) {
   const ids = [
     ...new Set(
       (warehouseIds || [])
-        .filter((id) => id != null && mongoose.Types.ObjectId.isValid(String(id)))
+        .filter(
+          (id) => id != null && mongoose.Types.ObjectId.isValid(String(id)),
+        )
         .map((id) => new mongoose.Types.ObjectId(String(id))),
     ),
   ];
   if (!ids.length) return new Map();
 
-  const rows = await Warehouse.find({ _id: { $in: ids } }).select("name").lean();
+  const rows = await Warehouse.find({ _id: { $in: ids } })
+    .select("name")
+    .lean();
   const map = new Map();
   for (const row of rows) {
     const name = row?.name != null ? String(row.name).trim() : "";
@@ -571,27 +575,57 @@ async function runInventoryMovementTxnBody(req, session) {
   const resolvedCompanyId = coalesceObjectId(
     req.body.company_id ?? req.user?.company_id,
   );
+
+  const movementId =
+    response.data?._id != null ? String(response.data._id) : "";
+  const productIdStr =
+    req.body.product_id instanceof mongoose.Types.ObjectId ?
+      String(req.body.product_id)
+    : String(req.body.product_id ?? "").trim();
+  const warehouseIdStr =
+    req.body.warehouse_id != null ? String(req.body.warehouse_id).trim() : "";
+  const movementType =
+    String(req.body.movement_type || "")
+      .trim()
+      .toLowerCase() || "movement";
+  const logQty = toFiniteNumber(req.body.quantity);
+  const logUnitCost = toFiniteNumber(req.body.unit_cost);
+  const logTotalCost = toFiniteNumber(req.body.total_cost);
+  const refType =
+    req.body.reference_type != null ?
+      String(req.body.reference_type).trim()
+    : "";
+  const refId =
+    req.body.reference_id != null ? String(req.body.reference_id).trim() : "";
+  const refName =
+    req.body.reference_name != null ?
+      String(req.body.reference_name).trim()
+    : "";
+  const productName =
+    productData.data?.product_name ?
+      String(productData.data.product_name).trim()
+    : "";
+  const productLabel =
+    productName ? `"${productName}"` : `id ${productIdStr || "?"}`;
+  const refLabel = refName || refType || "";
+  const refPart =
+    refLabel || refId ?
+      ` Linked to ${refLabel || "reference"}${refId ? ` (${refId})` : ""}.`
+    : "";
+  const movementLogMessage =
+    `Inventory movement ${movementType}: qty ${logQty} @ unit ${logUnitCost} ` +
+    `(total ${logTotalCost}) for product ${productLabel} in warehouse `;
+
   await createApplicationLog(
     req,
     {
-      action: "Inventory movement created",
+      action: "Inventory movement created :: " + productLabel,
       url: req.originalUrl || req.path || "/api/inventory_movements/save",
       tags: [
         "inventory_movement",
         String(req.body.movement_type || "").trim() || "movement",
       ],
-      description: {
-        inventory_movement_id: response.data?._id,
-        product_id: req.body.product_id,
-        warehouse_id: req.body.warehouse_id,
-        movement_type: req.body.movement_type,
-        quantity: req.body.quantity,
-        unit_cost: req.body.unit_cost,
-        total_cost: req.body.total_cost,
-        reference_type: req.body.reference_type,
-        reference_id: req.body.reference_id,
-        reference_name: req.body.reference_name,
-      },
+      description: movementLogMessage,
       company_id: resolvedCompanyId,
     },
     { session, silent: true },
@@ -803,6 +837,7 @@ async function inventoryMovementsCreate(req, res) {
  * @param {string|import("mongoose").Types.ObjectId} productId
  * @param {string|import("mongoose").Types.ObjectId} companyObjectId
  * @param {{ req?: object, mongoSession?: import("mongoose").ClientSession | null, logUrl?: string }} [options]
+ *   When `mongoSession` is set, product read/update, ledger aggregate, and audit log insert use the same session (rollback together).
  * @returns {Promise<object>} success payload or `{ success: false, status, error, ... }`
  */
 async function syncProductStockFromMovementLedger(
@@ -840,14 +875,12 @@ async function syncProductStockFromMovementLedger(
     _id: productObjectId,
     company_id: companyObj,
     deletedAt: null,
-  }).select(
-    "product_name product_code sku wholesale_price status stock",
-  );
+  }).select("product_name product_code sku wholesale_price status stock");
   if (mongoSession) productQuery = productQuery.session(mongoSession);
 
   const [product, warehouseRows] = await Promise.all([
     productQuery.lean(),
-    aggregateNetQtyByWarehouse(productObjectId, companyObj),
+    aggregateNetQtyByWarehouse(productObjectId, companyObj, mongoSession),
   ]);
 
   if (!product) {
@@ -917,34 +950,27 @@ async function syncProductStockFromMovementLedger(
 
     if (req) {
       const productName =
-        product.product_name != null ?
-          String(product.product_name).trim()
-        : "";
+        product.product_name != null ? String(product.product_name).trim() : "";
       const nameLabel = productName || `id ${productIdStr}`;
       const description =
         `Product "${nameLabel}" stock synced from ledger (in ${totalIn}, out ${totalOut}): ` +
         `updated from ${previousStock} to ${productStock}.`;
 
-      await createApplicationLog(req, {
-        action: "Product stock synced from ledger",
-        url:
-          logUrl ||
-          req.originalUrl ||
-          req.path ||
-          "/api/inventory_movements/stock-by-product",
-        tags: ["product", "stock", "inventory_movement", "sync"],
-        description: {
-          product_id: productIdStr,
-          product_name: productName || null,
-          qty_in: totalIn,
-          qty_out: totalOut,
-          net_qty,
-          previous_stock: previousStock,
-          stock: productStock,
-          message: description,
+      await createApplicationLog(
+        req,
+        {
+          action: "Product stock synced from ledger",
+          url:
+            logUrl ||
+            req.originalUrl ||
+            req.path ||
+            "/api/inventory_movements/stock-by-product",
+          tags: ["product", "stock", "inventory_movement", "sync"],
+          description: description,
+          company_id: companyObj,
         },
-        company_id: companyObj,
-      });
+        { session: mongoSession, silent: true },
+      );
     }
   }
 
