@@ -227,6 +227,12 @@ async function handleUserUpdate(req, res) {
     excludeFields: ["password"], // Don't return password in response
     // allowedFields: [] - Empty array means allow all fields except password (dynamic)
     beforeUpdate: async (updateData, req, existingUser) => {
+      const rawPassword = req.body?.password;
+      if (rawPassword != null && String(rawPassword).trim()) {
+        const bcrypt = require("bcrypt");
+        const salt = await bcrypt.genSalt(10);
+        updateData.password = await bcrypt.hash(String(rawPassword).trim(), salt);
+      }
       console.log("🔧 Processing user update...", {
         userId: existingUser._id,
         currentName: existingUser.name,

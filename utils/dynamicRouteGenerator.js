@@ -6,6 +6,7 @@
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
+const bcrypt = require("bcrypt");
 const {
   handleGenericCreate,
   handleGenericUpdate,
@@ -382,6 +383,23 @@ function generateControllerFunctions(modelName) {
       const updateOptions = {
         excludeFields: ["password"], // Don't return password in response
         filter: filter,
+      };
+
+      const priorBeforeUpdate = updateOptions.beforeUpdate;
+      updateOptions.beforeUpdate = async (updateData, req, existingRecord) => {
+        if (modelName === "user") {
+          const rawPassword = req.body?.password;
+          if (rawPassword != null && String(rawPassword).trim()) {
+            const salt = await bcrypt.genSalt(10);
+            updateData.password = await bcrypt.hash(
+              String(rawPassword).trim(),
+              salt,
+            );
+          }
+        }
+        if (priorBeforeUpdate) {
+          await priorBeforeUpdate(updateData, req, existingRecord);
+        }
       };
 
       const priorAfterUpdate = updateOptions.afterUpdate;

@@ -15,14 +15,34 @@ function companyIdRequiredForRoles(roles) {
  * Includes `order` (SPA) alongside `orders`; `proces` tolerates a common client typo for `process`.
  */
 const PERMISSION_MODULE_KEYS = [
-  "integration",
+  "pos",
   "orders",
-  "order",
-  "analytics",
-  "inventory",
-  "category",
-  "process",
-  "proces",
+  "purchase-orders",
+  "products",
+  "categories",
+  "warehouse",
+  "stock",
+  "adjustments",
+
+  "barcode-print",
+  "attributes",
+  "users",
+
+  "amount-transfers",
+  "branch",
+
+  "accounts",
+  "balance-sheet",
+  "income-statement",
+  "ledger",
+  "payments",
+  "payment-receipts",
+
+  "expenses",
+  "transactions",
+  "logs",
+  // "payments",
+  // "payments",
 ];
 
 /** Keys allowed on each permission row (matches permissionSetSchema). */
