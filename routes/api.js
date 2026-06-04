@@ -20,6 +20,8 @@ const {
   handleUserLogin,
   handleAdminLogin,
   handleUserSignupCompany,
+  countTotalCustomers,
+  countTotalUsers,
 } = require("../controllers/user");
 
 const { assetsSave, assetsUpdate } = require("../controllers/assets");
@@ -47,6 +49,7 @@ const {
   inventoryMovementsCreate,
   findStockByProductId,
   stockTransfer,
+  updateWholeSalePrice,
 } = require("../controllers/inventory_movements");
 
 const { expenseCreate, expenseUpdate } = require("../controllers/expense");
@@ -58,6 +61,8 @@ const {
   getOrderByOrderNo,
   findProfitByOrderItem,
   findSales,
+  findTotalSalesByOrder,
+  findSalesDayWise,
   invoiceUpdate,
 } = require("../controllers/order");
 const { costOfGoodsSoldByOrderItem } = require("../controllers/order_item");
@@ -90,6 +95,12 @@ const {
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
+const {
+  purchaseReturnCreate,
+  purchase_return_update,
+  getPurchaseReturnByReturnItem,
+  getPurchaseReturnByReturnNo,
+} = require("../controllers/purchase_return");
 const {
   companyCreate,
   getMyBranches,
@@ -173,6 +184,8 @@ router.post("/user/user_company", handleUserSignupCompany);
 // router.post("/user/create", handleUserSignup);
 // router.patch("/user/update/:id", handleUserUpdate);
 router.post("/user/login", handleUserLogin);
+router.get("/user/total-customers", countTotalCustomers);
+router.get("/user/total-users", countTotalUsers);
 // router.get("/user/get-all", getAllUser);
 // router.get("/user/get/:id", userById);
 // router.post("/user/get-one", findUserByEmail);
@@ -197,12 +210,34 @@ router.get(
   getPurchaseOrderByOrderNo,
 );
 
+router.post("/purchase_return/purchase_return_create", purchaseReturnCreate);
+router.patch(
+  "/purchase_return/purchase_return_update/:id",
+  purchase_return_update,
+);
+router.get(
+  "/purchase_return/get-purchase-return-by-return-item",
+  getPurchaseReturnByReturnItem,
+);
+router.get(
+  "/purchase_return/get-purchase-return-by-return-item/:id",
+  getPurchaseReturnByReturnItem,
+);
+router.get(
+  "/purchase_return/get-purchase-return-by-return-no/:id",
+  getPurchaseReturnByReturnNo,
+);
+
 // Expense routes
 router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
 
 // Amount transfer routes
 // Inventory movements routes
+router.get(
+  "inventory_movements/update_wholesale_price/:type/:order_item_id/:product_id",
+  updateWholeSalePrice,
+);
 router.post("/inventory_movements/save", inventoryMovementsCreate);
 router.post("/inventory_movements/stock-transfer", stockTransfer);
 
@@ -302,6 +337,8 @@ router.get(
   costOfGoodsSoldByOrderItem,
 );
 router.get("/order/sales", findSales);
+router.get("/order/sales-day-wise", findSalesDayWise);
+router.get("/order/total-sales-current-month", findTotalSalesByOrder);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
 router.post("/payment_receipt/save", paymentReceiptCreate);
@@ -393,6 +430,14 @@ registerAllModelRoutes(router, {
       excludedRoutes: [],
     },
     purchase_order_item: {
+      enabled: true,
+      excludedRoutes: [],
+    },
+    purchase_return: {
+      enabled: true,
+      excludedRoutes: [],
+    },
+    purchase_return_item: {
       enabled: true,
       excludedRoutes: [],
     },

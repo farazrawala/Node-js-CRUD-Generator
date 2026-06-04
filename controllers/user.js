@@ -9,6 +9,7 @@ const {
   handleGenericGetAll,
   handleGenericGetById,
   handleGenericFindOne,
+  coalesceObjectId,
 } = require("../utils/modelHelper");
 const { performAccountCreate } = require("./account");
 const Company = require("../models/company");
@@ -492,6 +493,117 @@ async function runUserCompanySignupWithOptionalTransaction(runFlow) {
     }
   }
   return txnError;
+}
+
+/**
+ * GET count of tenant users whose `role` includes CUSTOMER (active, not soft-deleted).
+ */
+async function countTotalCustomers(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const customer_count = await User.countDocuments({
+      company_id: cid,
+      role: "CUSTOMER",
+      status: "active",
+      deletedAt: null,
+    });
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      customer_count,
+    });
+  } catch (error) {
+    console.error("countTotalCustomers:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
+/**
+ * GET count of all tenant users (active, not soft-deleted) for the authenticated company.
+ */
+async function countTotalUsers(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const user_count = await User.countDocuments({
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    });
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      user_count,
+    });
+  } catch (error) {
+    console.error("countTotalUsers:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
 }
 
 /**
@@ -993,6 +1105,8 @@ module.exports = {
   findUserByEmail,
   findUserByCompany,
   findActiveUserByRole,
+  countTotalCustomers,
+  countTotalUsers,
   postTransactionsForUserInitialBalance,
   reconcileUserInitialBalanceOnUpdate,
 };

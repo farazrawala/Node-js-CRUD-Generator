@@ -848,6 +848,9 @@ async function findProfitByOrderItem(req, res) {
 /** Default reporting window when GET /order/sales omits `from` and `to` (multi-tenant safety). */
 const FIND_SALES_DEFAULT_RANGE_DAYS = 365;
 
+/** Max inclusive span for GET /order/sales-day-wise (`from`–`to`). */
+const SALES_DAYWISE_MAX_RANGE_DAYS = 366;
+
 /**
  * GET sum of `total_amount` from `order` for the authenticated user's `company_id` only.
  * Query: `order_status`, optional `from` / `to` on `createdAt`.
@@ -2074,6 +2077,410 @@ async function invoiceUpdate(req, res) {
   return res.status(response.status).json(response);
 }
 
+/** Inclusive start/end of a local calendar month (`month` = 0–11). */
+function calendarMonthDateRange(year, month) {
+  const fromDate = new Date(year, month, 1);
+  const toDate = new Date(year, month + 1, 0, 23, 59, 59, 999);
+  return { fromDate, toDate, year, month: month + 1 };
+}
+
+function currentMonthDateRange(refDate = new Date()) {
+  const d = refDate instanceof Date ? refDate : new Date(refDate);
+  return calendarMonthDateRange(d.getFullYear(), d.getMonth());
+}
+
+function lastMonthDateRange(refDate = new Date()) {
+  const d = refDate instanceof Date ? refDate : new Date(refDate);
+  const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  return calendarMonthDateRange(prev.getFullYear(), prev.getMonth());
+}
+
+const ORDER_SALES_SUMMARY_GROUP = [
+  {
+    $group: {
+      _id: null,
+      total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+      order_count: { $sum: 1 },
+    },
+  },
+  {
+    $project: {
+      _id: 0,
+      total_amount: { $round: ["$total_amount", 2] },
+      order_count: 1,
+    },
+  },
+];
+
+function salesSummaryFromAggregateRows(rows) {
+  const row = rows?.[0];
+  return {
+    total_amount: row?.total_amount ?? 0,
+    order_count: row?.order_count ?? 0,
+  };
+}
+
+function periodPayload(label, range) {
+  return {
+    label,
+    year: range.year,
+    month: range.month,
+    from: range.fromDate.toISOString(),
+    to: range.toDate.toISOString(),
+  };
+}
+
+function formatLocalDateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function startOfLocalDay(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/**
+ * @param {import("express").Request} req
+ * @returns {{ fromDate: Date, toDate: Date, periodLabel: string } | { error: object }}
+ */
+function resolveOrderSalesDateRange(req) {
+  const hasFrom =
+    req.query?.from != null && String(req.query.from).trim() !== "";
+  const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+
+  if (hasFrom || hasTo) {
+    const fromDate = hasFrom ?
+      new Date(String(req.query.from).trim())
+    : null;
+    const toDate =
+      hasTo ? new Date(String(req.query.to).trim()) : new Date();
+    if (hasFrom && Number.isNaN(fromDate.getTime())) {
+      return {
+        error: {
+          status: 400,
+          body: { success: false, status: 400, error: "Invalid from date" },
+        },
+      };
+    }
+    if (hasTo && Number.isNaN(toDate.getTime())) {
+      return {
+        error: {
+          status: 400,
+          body: { success: false, status: 400, error: "Invalid to date" },
+        },
+      };
+    }
+    const rangeStart = startOfLocalDay(hasFrom ? fromDate : toDate);
+    const rangeEnd = startOfLocalDay(toDate);
+    if (rangeStart > rangeEnd) {
+      return {
+        error: {
+          status: 400,
+          body: {
+            success: false,
+            status: 400,
+            error: "Invalid date range",
+            message: "`from` must be on or before `to`",
+          },
+        },
+      };
+    }
+    const spanDays =
+      Math.floor((rangeEnd - rangeStart) / (24 * 60 * 60 * 1000)) + 1;
+    if (spanDays > SALES_DAYWISE_MAX_RANGE_DAYS) {
+      return {
+        error: {
+          status: 400,
+          body: {
+            success: false,
+            status: 400,
+            error: "Date range too large",
+            message: `Maximum range is ${SALES_DAYWISE_MAX_RANGE_DAYS} days`,
+          },
+        },
+      };
+    }
+    return {
+      fromDate: hasFrom ? fromDate : rangeStart,
+      toDate: hasTo ? toDate : new Date(rangeEnd.getTime() + 86400000 - 1),
+      periodLabel: "custom",
+    };
+  }
+
+  const period = String(req.query?.period || "current_month")
+    .trim()
+    .toLowerCase();
+  if (period === "last_month") {
+    const r = lastMonthDateRange();
+    return {
+      fromDate: r.fromDate,
+      toDate: r.toDate,
+      periodLabel: "last_month",
+    };
+  }
+  const r = currentMonthDateRange();
+  return {
+    fromDate: r.fromDate,
+    toDate: r.toDate,
+    periodLabel: "current_month",
+  };
+}
+
+/** Merge aggregation rows into every local calendar day (zeros for days with no orders). */
+function buildDayWiseSalesSeries(fromDate, toDate, aggregatedRows) {
+  const byDate = new Map(
+    (aggregatedRows || []).map((row) => [
+      String(row.date),
+      {
+        total_amount: Number(row.total_amount) || 0,
+        order_count: Number(row.order_count) || 0,
+      },
+    ]),
+  );
+
+  const days = [];
+  const cur = startOfLocalDay(fromDate);
+  const end = startOfLocalDay(toDate);
+  let total_amount = 0;
+  let order_count = 0;
+
+  while (cur <= end) {
+    const key = formatLocalDateKey(cur);
+    const row = byDate.get(key);
+    const dayTotal = row?.total_amount ?? 0;
+    const dayCount = row?.order_count ?? 0;
+    total_amount += dayTotal;
+    order_count += dayCount;
+    days.push({
+      date: key,
+      total_amount: Math.round(dayTotal * 100) / 100,
+      order_count: dayCount,
+    });
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return {
+    days,
+    summary: {
+      total_amount: Math.round(total_amount * 100) / 100,
+      order_count,
+    },
+  };
+}
+
+/**
+ * GET daily sales totals for charts (`total_amount` + `order_count` per calendar day).
+ * Query: optional `from` / `to`, or `period=current_month` (default) | `last_month`, optional `order_status`.
+ * Response `days` includes every day in range (zero-filled) for graph axes.
+ */
+async function findSalesDayWise(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const rangeResolved = resolveOrderSalesDateRange(req);
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
+
+    const rawOrderStatus = req.query?.order_status;
+    if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
+      match.order_status = String(rawOrderStatus).trim();
+    }
+
+    const aggregatedRows = await Order.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+          },
+          total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+          order_count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id",
+          total_amount: { $round: ["$total_amount", 2] },
+          order_count: 1,
+        },
+      },
+    ]);
+
+    const { days, summary } = buildDayWiseSalesSeries(
+      fromDate,
+      toDate,
+      aggregatedRows,
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      period: {
+        label: periodLabel,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+      summary,
+      days,
+    });
+  } catch (error) {
+    console.error("findSalesDayWise:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
+/**
+ * GET total sales (`SUM(order.total_amount)`) for the authenticated company:
+ * **current calendar month** and **previous calendar month** (server local time).
+ * Same tenant + status filters as `findSales`; optional `?order_status=`.
+ */
+async function findTotalSalesByOrder(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const currentRange = currentMonthDateRange();
+    const lastRange = lastMonthDateRange();
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const baseMatch = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    };
+
+    const rawOrderStatus = req.query?.order_status;
+    if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
+      baseMatch.order_status = String(rawOrderStatus).trim();
+    }
+
+    const [facetResult] = await Order.aggregate([
+      { $match: baseMatch },
+      {
+        $facet: {
+          current_month: [
+            {
+              $match: {
+                createdAt: {
+                  $gte: currentRange.fromDate,
+                  $lte: currentRange.toDate,
+                },
+              },
+            },
+            ...ORDER_SALES_SUMMARY_GROUP,
+          ],
+          last_month: [
+            {
+              $match: {
+                createdAt: {
+                  $gte: lastRange.fromDate,
+                  $lte: lastRange.toDate,
+                },
+              },
+            },
+            ...ORDER_SALES_SUMMARY_GROUP,
+          ],
+        },
+      },
+    ]);
+
+    const currentSummary = salesSummaryFromAggregateRows(
+      facetResult?.current_month,
+    );
+    const lastSummary = salesSummaryFromAggregateRows(facetResult?.last_month);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      current_month: {
+        ...currentSummary,
+        period: periodPayload("current_month", currentRange),
+      },
+      last_month: {
+        ...lastSummary,
+        period: periodPayload("last_month", lastRange),
+      },
+    });
+  } catch (error) {
+    console.error("findTotalSalesByOrder:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -2084,4 +2491,6 @@ module.exports = {
   getOrderByorderItem,
   findProfitByOrderItem,
   findSales,
+  findTotalSalesByOrder,
+  findSalesDayWise,
 };

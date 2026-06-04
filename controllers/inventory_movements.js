@@ -386,9 +386,34 @@ async function cost_of_goods_available(req, res) {
 }
 
 /**
- * Runs movement insert + optional product wholesale update in one logical unit.
+ * Insert one `inventory_movements` row only — for purchase order / purchase return lines.
+ * No ledger aggregate, stock check, product read, wholesale update, or application log.
+ * Callers must set `req.body` (product_id, warehouse_id, quantity, movement_type, costs, reference_*).
+ *
+ * @param {import("express").Request} req
+ * @param {import("mongoose").ClientSession | null} [session]
+ * @returns {Promise<{ response: object, consoleLog: string[], logWholesale: null }>}
+ */
+async function insertInventoryMovementRecord(req, session = null) {
+  const response = await handleGenericCreate(req, "inventory_movements", {
+    session,
+  });
+
+  if (!response.success || !response.data) {
+    const createFailure = new Error(
+      response.error || "Inventory movement create failed",
+    );
+    createFailure.clientPayload = response;
+    throw createFailure;
+  }
+
+  return { response, consoleLog: [], logWholesale: null };
+}
+
+/**
+ * Full movement pipeline: ledger reads, stock check on `out`, optional wholesale update, audit log.
+ * Use `insertInventoryMovementRecord` for PO/PR; use this for orders, adjustments, manual save, transfers.
  * When `session` is set, all reads/writes use it so `withTransaction` can roll back on failure.
- * @returns {{ response: object, consoleLog: string[], logWholesale: null | { productName: string, previousWholesale: unknown, nextWholesale: unknown } }}
  */
 async function runInventoryMovementTxnBody(req, session) {
   const { match, pid, productId } = (() => {
@@ -1389,14 +1414,23 @@ async function stockTransfer(req, res) {
   }
 }
 
+// purchase_return/purchase_order_item_id/product_id
+// purchase create
+
+async function updateWholeSalePrice(req, res) {}
+{
+}
+
 module.exports = {
   cost_of_goods_available,
   inventoryMovementsCreate,
   runInventoryMovementTxnBody,
+  insertInventoryMovementRecord,
   buildActiveMovementLedgerMatch,
   aggregateNetQtyByWarehouse,
   getLedgerNetQtyForWarehouse,
   syncProductStockFromMovementLedger,
   findStockByProductId,
   stockTransfer,
+  updateWholeSalePrice,
 };

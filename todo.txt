@@ -145,3 +145,11 @@ Fix: Add gl_period_balances (1 row per account per month) and customer_balances.
 3. Pagination — skip/limit Breaks at Deep Pages
 When a user goes to page 500 of invoices, MongoDB has to scan and discard 499 pages of data. On billions of rows this is very slow.
 Fix: Switch to keyset pagination using createdAt + _id as a cursor instead of skip.
+
+
+
+flowchart LR
+  A[insertMany lines] --> B[PO inbound movements]
+  B --> C[syncProductStockFromMovementLedger per product]
+  C --> D[syncHeaderTotals]
+  D --> E[optional async alerts]
