@@ -412,7 +412,7 @@ async function insertInventoryMovementRecord(req, session = null) {
 
 /**
  * Full movement pipeline: ledger reads, stock check on `out`, optional wholesale update, audit log.
- * Use `insertInventoryMovementRecord` for PO/PR; use this for orders, adjustments, manual save, transfers.
+ * Use `insertInventoryMovementRecord` for PO/PR and order_save; use this for adjustments, manual save, transfers.
  * When `session` is set, all reads/writes use it so `withTransaction` can roll back on failure.
  */
 async function runInventoryMovementTxnBody(req, session) {

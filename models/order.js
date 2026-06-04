@@ -626,11 +626,7 @@ async function dropObsoleteOrderNoUniqueIndex() {
     const indexes = await coll.indexes();
     for (const idx of indexes) {
       const k = idx.key || {};
-      if (
-        idx.unique &&
-        Object.keys(k).length === 1 &&
-        k.order_no === 1
-      ) {
+      if (idx.unique && Object.keys(k).length === 1 && k.order_no === 1) {
         await coll.dropIndex(idx.name);
         console.log(
           "[order] Dropped obsolete global order_no unique index:",
