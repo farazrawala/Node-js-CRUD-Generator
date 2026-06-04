@@ -88,11 +88,11 @@ const modelSchema = new mongoose.Schema(
       enum: ["Single", "Variable"],
       default: "Single",
     },
-    stock: {
-      type: Number,
-      default: 0,
-      field_name: "Stock",
-    },
+    // stock: {
+    //   type: Number,
+    //   default: 0,
+    //   field_name: "Stock",
+    // },
     category_id: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "category",
@@ -187,6 +187,16 @@ const modelSchema = new mongoose.Schema(
   },
   { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
+
+/** Rows in `warehouse_inventory` for this product (separate collection, not embedded). */
+modelSchema.virtual("warehouse_inventory", {
+  ref: "warehouse_inventory",
+  localField: "_id",
+  foreignField: "product_id",
+});
+
+modelSchema.set("toObject", { virtuals: true });
+modelSchema.set("toJSON", { virtuals: true });
 
 // Pre-validate hook to handle slug generation before validation (runs first)
 modelSchema.pre("validate", function (next) {

@@ -1752,6 +1752,12 @@ async function getAllActiveProductsPOS(req, res) {
     filter.category_id = categoryOid;
   }
 
+  const warehouseInventoryMatch = {
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    ...(tenantCo ? { company_id: tenantCo } : {}),
+  };
+
   const response = await handleGenericGetAll(req, "product", {
     filter,
     excludeFields: [],
@@ -1764,6 +1770,15 @@ async function getAllActiveProductsPOS(req, res) {
       {
         path: "parent_product_id",
         select: "product_name",
+      },
+      {
+        path: "warehouse_inventory",
+        match: warehouseInventoryMatch,
+        select: "warehouse_id quantity status company_id",
+        populate: {
+          path: "warehouse_id",
+          select: "name code",
+        },
       },
     ],
   });

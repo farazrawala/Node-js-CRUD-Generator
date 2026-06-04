@@ -105,6 +105,72 @@ modelSchema.index(
 
 modelSchema.index({ company_id: 1, warehouse_id: 1 });
 
+/** PO/PR/update soft-delete: `updateMany` by tenant + reference (not full ledger scan). */
+modelSchema.index(
+  { company_id: 1, reference_type: 1, reference_id: 1 },
+  {
+    name: "inv_mov_company_ref",
+    partialFilterExpression: {
+      status: "active",
+      deletedAt: null,
+      company_id: { $exists: true, $ne: null },
+    },
+  },
+);
+
+/**
+ * Soft-delete active movement rows for one document reference (e.g. purchase_order id).
+ * Include `companyId` so Mongo can use `inv_mov_company_ref` index.
+ */
+modelSchema.statics.softDeleteActiveByReference = async function ({
+  referenceType,
+  referenceId,
+  companyId = null,
+  session = null,
+  userId = null,
+} = {}) {
+  const refType = String(referenceType ?? "").trim();
+  const refIdStr = String(referenceId ?? "").trim();
+  if (!refType || !mongoose.Types.ObjectId.isValid(refIdStr)) {
+    return { acknowledged: true, modifiedCount: 0, matchedCount: 0 };
+  }
+
+  const refOid =
+    referenceId instanceof mongoose.Types.ObjectId ?
+      referenceId
+    : new mongoose.Types.ObjectId(refIdStr);
+
+  const filter = {
+    reference_type: refType,
+    reference_id: refOid,
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+
+  const companyIdStr = String(companyId ?? "").trim();
+  if (companyId != null && mongoose.Types.ObjectId.isValid(companyIdStr)) {
+    filter.company_id =
+      companyId instanceof mongoose.Types.ObjectId ?
+        companyId
+      : new mongoose.Types.ObjectId(companyIdStr);
+  }
+
+  const $set = {
+    deletedAt: new Date(),
+    status: "inactive",
+  };
+  const userIdStr = String(userId ?? "").trim();
+  if (userId != null && mongoose.Types.ObjectId.isValid(userIdStr)) {
+    $set.updated_by =
+      userId instanceof mongoose.Types.ObjectId ?
+        userId
+      : new mongoose.Types.ObjectId(userIdStr);
+  }
+
+  const opts = session ? { session } : {};
+  return this.updateMany(filter, { $set }, opts);
+};
+
 const MODEL = mongoose.model("inventory_movements", modelSchema);
 
 async function dropObsoleteInventoryMovementUniqueIndex() {

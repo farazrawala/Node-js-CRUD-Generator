@@ -23,6 +23,7 @@ const { insertInventoryMovementRecord } = require("./inventory_movements");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const { createApplicationLog } = require("../utils/applicationLogs");
 
 /**
  * Purchase order HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -686,52 +687,474 @@ function sessionOpts(sess) {
   return sess ? { session: sess } : {};
 }
 
+/** Soft-delete active GL rows for one `transaction_number` (PO update / replace). */
+async function softDeleteActiveGlByTransactionNumber({
+  transactionNumber,
+  mongoSession = null,
+  userId = null,
+}) {
+  const txnNo = String(transactionNumber ?? "").trim();
+  if (!txnNo) {
+    return { modifiedCount: 0, matchedCount: 0 };
+  }
+
+  const $set = {
+    deletedAt: new Date(),
+    status: "inactive",
+  };
+  const userIdStr = String(userId ?? "").trim();
+  if (userId != null && mongoose.Types.ObjectId.isValid(userIdStr)) {
+    $set.updated_by =
+      userId instanceof mongoose.Types.ObjectId ?
+        userId
+      : new mongoose.Types.ObjectId(userIdStr);
+  }
+
+  return Transaction.updateMany(
+    {
+      transaction_number: txnNo,
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    },
+    { $set },
+    sessionOpts(mongoSession),
+  );
+}
+
+/** Five GL postings for a PO — same row order as `PURCHASE_ORDER_GL_LINE_META` / create. */
+async function rebuildPurchaseOrderGlTransactions(
+  record,
+  orderReq,
+  remainingAmount,
+  mongoSession,
+) {
+  const transaction_number = record?.transaction_number;
+  const { created, failed } = await transactionBulkCreate(
+    orderReq,
+    [
+      {
+        account_id: orderReq.user.company_id.default_purchase_account,
+        type: "debit",
+        amount: record?.lines_subtotal ?? 0,
+        reference_user_id: record?.vendor_id,
+        transaction_number,
+        description: "Purchase Order",
+        reference_id: {
+          module: "purchase_order",
+          ref_id: record._id,
+        },
+      },
+      {
+        account_id: orderReq.user.company_id.default_shipping_account,
+        type: "debit",
+        amount: record?.shipment ?? 0,
+        reference_user_id: record?.vendor_id,
+        transaction_number,
+        description: "Purchase Shipment",
+        reference_id: {
+          module: "purchase_order",
+          ref_id: record._id,
+        },
+      },
+      {
+        account_id: orderReq.user.company_id.default_purchase_discount_account,
+        type: "credit",
+        amount: record?.discount ?? 0,
+        reference_user_id: record?.vendor_id,
+        transaction_number,
+        description: "Purchase Discount",
+      },
+      {
+        account_id: record?.payment_method_accounts_id,
+        type: "credit",
+        amount: record?.amount_paid ?? 0,
+        reference_user_id: record?.vendor_id,
+        transaction_number,
+        description: "Mode of Payment",
+        reference_id: {
+          module: "purchase_order",
+          ref_id: record._id,
+        },
+      },
+      {
+        account_id: orderReq.user.company_id.default_account_payable_account,
+        type: "credit",
+        amount: remainingAmount || 0,
+        reference_user_id: record?.vendor_id,
+        transaction_number,
+        description: "A/c Payable",
+        reference_id: {
+          module: "purchase_order",
+          ref_id: record._id,
+        },
+      },
+    ],
+    { stopOnError: true, session: mongoSession },
+  );
+
+  if (failed.length) {
+    await throwPurchaseOrderGlBulkFailed(orderReq, failed);
+  }
+  if (created[0]?.data?._id) {
+    console.log(
+      "✅ Transaction(s) created:",
+      created.map((c) => c.data._id),
+    );
+  }
+  return { created, failed };
+}
+
 /**
- * Per `product_id` on PO lines: any warehouse line (ledger path) and qty on lines without warehouse.
- * @param {object[]} lines Parsed PO line payloads
- * @returns {Map<string, { hasWarehouseLine: boolean, qtyWithoutWarehouse: number }>}
+ * Line replace teardown: GL soft-delete (step 2), movement soft-delete (step 3), line `deleteMany` (step 6).
+ * Call after snapshotting existing `purchase_order_item` rows.
  */
-function summarizeLineStockByProduct(lines) {
+async function teardownPurchaseOrderForLineReplace({
+  purchaseOrderId,
+  transactionNumber,
+  companyId,
+  mongoSession = null,
+  userId = null,
+}) {
+  const poIdStr = String(purchaseOrderId ?? "").trim();
+  if (!mongoose.Types.ObjectId.isValid(poIdStr)) {
+    throw new Error("Valid purchase_order id is required for line replace teardown");
+  }
+
+  const transactions = await softDeleteActiveGlByTransactionNumber({
+    transactionNumber,
+    mongoSession,
+    userId,
+  });
+  if (transactions.modifiedCount > 0) {
+    console.log(
+      "✅ Transaction rows soft-deleted:",
+      transactions.modifiedCount,
+    );
+  }
+
+  const inventoryMovements =
+    await InventoryMovements.softDeleteActiveByReference({
+      referenceType: "purchase_order",
+      referenceId: purchaseOrderId,
+      companyId,
+      session: mongoSession,
+      userId,
+    });
+  if (inventoryMovements.modifiedCount > 0) {
+    console.log(
+      "✅ Inventory movement rows soft-deleted:",
+      inventoryMovements.modifiedCount,
+    );
+  }
+
+  const lineItems = await PurchaseOrderItem.deleteMany(
+    { purchase_order_id: purchaseOrderId },
+    sessionOpts(mongoSession),
+  );
+  if (lineItems.deletedCount > 0) {
+    console.log(
+      "✅ Purchase order line items removed:",
+      lineItems.deletedCount,
+    );
+  }
+
+  return { transactions, inventoryMovements, lineItems };
+}
+
+function roundPoMoney(n) {
+  return Math.round(Number(n) * 100) / 100;
+}
+
+/** Per product: inbound qty and extended cost (qty × line `price`) for lines with a valid `warehouse_id`. */
+function summarizePoWarehouseInboundByProduct(lines) {
   const map = new Map();
-  for (const line of lines) {
+  for (const line of lines || []) {
     const productIdStr = String(line.product_id ?? "").trim();
+    const warehouseIdStr =
+      line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
     if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
       continue;
     }
-    const lineQtyNum = Number(line.qty);
-    if (!Number.isFinite(lineQtyNum) || lineQtyNum <= 0) {
+    if (!warehouseIdStr || !mongoose.Types.ObjectId.isValid(warehouseIdStr)) {
       continue;
     }
-    const warehouseIdStr =
-      line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-    const hasWarehouse =
-      Boolean(warehouseIdStr) &&
-      mongoose.Types.ObjectId.isValid(warehouseIdStr);
-    const entry = map.get(productIdStr) || {
-      hasWarehouseLine: false,
-      qtyWithoutWarehouse: 0,
-    };
-    if (hasWarehouse) {
-      entry.hasWarehouseLine = true;
-    } else {
-      entry.qtyWithoutWarehouse =
-        Math.round((entry.qtyWithoutWarehouse + lineQtyNum) * 100) / 100;
-    }
+    const qty = Number(line.qty);
+    const unitCost = Number(line.price);
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    if (!Number.isFinite(unitCost) || unitCost < 0) continue;
+
+    const entry = map.get(productIdStr) || { qty: 0, extendedCost: 0 };
+    entry.qty = roundPoMoney(entry.qty + qty);
+    entry.extendedCost = roundPoMoney(entry.extendedCost + qty * unitCost);
     map.set(productIdStr, entry);
   }
   return map;
 }
 
+/** Application log when `product.wholesale_price` changes on a PO flow. */
+async function logProductWholesalePriceChange(
+  req,
+  {
+    productIdStr,
+    productName,
+    wholesaleBefore,
+    averageCost,
+    companyId,
+    mongoSession = null,
+    fallbackUrl = "/api/purchase_order/purchase_order_create",
+  },
+) {
+  const namePart =
+    productName && String(productName).trim() ?
+      ` "${String(productName).trim()}"`
+    : "";
+  const description =
+    `Wholesale price of product${namePart} (id ${productIdStr}) has been updated ` +
+    `from ${wholesaleBefore} to ${averageCost}.`;
+  await createApplicationLog(
+    req,
+    {
+      action: "Product wholesale_price updated",
+      url: req?.originalUrl || req?.path || fallbackUrl,
+      tags: ["wholesale_price", "product", "purchase_order"],
+      description,
+      company_id: companyId,
+    },
+    { session: mongoSession, silent: true },
+  );
+}
+
+/** Sum `warehouse_inventory.quantity` for one product (all warehouses, tenant-scoped). */
+async function sumWarehouseInventoryQtyForProduct(
+  productId,
+  companyId,
+  mongoSession = null,
+) {
+  const pid = coalesceObjectId(productId);
+  const cid = coalesceObjectId(companyId);
+  if (!pid || !cid) return 0;
+
+  let agg = WarehouseInventory.aggregate([
+    {
+      $match: {
+        product_id: pid,
+        company_id: cid,
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$quantity" } } },
+  ]);
+  if (mongoSession) agg = agg.session(mongoSession);
+  const rows = await agg;
+  return Math.max(0, roundPoMoney(rows[0]?.total || 0));
+}
+
 /**
- * Apply stock after PO line items and `inventory_movements` inserts (PO create step 3–4; same on line replace update).
+ * Weighted-average `product.wholesale_price` from warehouse on-hand + PO inbound cost.
  *
- * Warehouse rows: `WarehouseInventory.applyStockChangesFromLines` (see `models/warehouse_inventory.js`).
- * Product-level stock (no `warehouse_id`): `incrementProductStockForPoLine` below (PO-only).
+ * previous_total = warehouse_qty × current wholesale_price
+ * new_total = inbound qty × line unit cost (`price`)
+ * average_cost = (previous_total + new_total) / (warehouse_qty + inbound qty)
+ *
+ * @param {object} options
+ * @param {object[]} options.lines PO line payloads
+ * @param {*} options.companyId
+ * @param {object} req Express request (for application log URL / user)
+ * @param {object|null} [options.mongoSession]
+ */
+async function applyWholesalePriceRemoveForPoLines({
+  lines,
+  companyId,
+  req,
+  mongoSession = null,
+}) {
+  const removedByProduct = summarizePoWarehouseInboundByProduct(lines);
+  const wholesaleUpdates = [];
+
+  for (const [productIdStr, removed] of removedByProduct) {
+    const removedQty = removed.qty;
+    const removedCost = removed.extendedCost;
+    if (removedQty <= 0) continue;
+
+    const warehouseQty = await sumWarehouseInventoryQtyForProduct(
+      productIdStr,
+      companyId,
+      mongoSession,
+    );
+    const warehouseQtyBeforeRemove = roundPoMoney(warehouseQty + removedQty);
+
+    const pid = coalesceObjectId(productIdStr);
+    const cid = coalesceObjectId(companyId);
+    let productQuery = Product.findOne({
+      _id: pid,
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    }).select("product_name wholesale_price");
+    if (mongoSession) productQuery = productQuery.session(mongoSession);
+    const productDoc = await productQuery.lean();
+    if (!productDoc) {
+      throw new Error(
+        `Product not found for wholesale price reverse (id ${productIdStr})`,
+      );
+    }
+
+    const wholesaleBefore =
+      Number.isFinite(Number(productDoc.wholesale_price)) ?
+        Number(productDoc.wholesale_price)
+      : 0;
+    const grandTotalBefore = roundPoMoney(
+      warehouseQtyBeforeRemove * wholesaleBefore,
+    );
+    const grandTotalAfter = roundPoMoney(grandTotalBefore - removedCost);
+    const averageCost =
+      warehouseQty > 0 ?
+        roundPoMoney(Math.max(0, grandTotalAfter) / warehouseQty)
+      : 0;
+
+    if (roundPoMoney(wholesaleBefore) === roundPoMoney(averageCost)) {
+      continue;
+    }
+
+    const updateOpts = mongoSession ? { session: mongoSession } : {};
+    const updated = await Product.findOneAndUpdate(
+      { _id: pid, company_id: cid, status: "active", deletedAt: null },
+      { $set: { wholesale_price: averageCost } },
+      { new: true, ...updateOpts },
+    ).lean();
+
+    if (!updated) {
+      throw new Error(
+        `Failed to reverse wholesale_price for product (id ${productIdStr})`,
+      );
+    }
+
+    wholesaleUpdates.push({
+      product_id: productIdStr,
+      product_name: productDoc.product_name,
+      warehouse_qty_after_reverse: warehouseQty,
+      removed_qty: removedQty,
+      removed_cost: removedCost,
+      wholesale_price_before: wholesaleBefore,
+      grand_total_before: grandTotalBefore,
+      grand_total_after: grandTotalAfter,
+      wholesale_price: averageCost,
+      direction: "remove",
+    });
+
+    await logProductWholesalePriceChange(req, {
+      productIdStr,
+      productName: productDoc.product_name,
+      wholesaleBefore,
+      averageCost,
+      companyId: cid,
+      mongoSession,
+      fallbackUrl: "/api/purchase_order/update",
+    });
+  }
+
+  return wholesaleUpdates;
+}
+
+async function applyWholesalePriceWeightedAverageForPoLines({
+  lines,
+  companyId,
+  req,
+  mongoSession = null,
+}) {
+  const inboundByProduct = summarizePoWarehouseInboundByProduct(lines);
+  const wholesaleUpdates = [];
+
+  for (const [productIdStr, inbound] of inboundByProduct) {
+    const currentQty = inbound.qty;
+    const newTotal = inbound.extendedCost;
+    if (currentQty <= 0) continue;
+
+    const warehouseQty = await sumWarehouseInventoryQtyForProduct(
+      productIdStr,
+      companyId,
+      mongoSession,
+    );
+
+    const pid = coalesceObjectId(productIdStr);
+    const cid = coalesceObjectId(companyId);
+    let productQuery = Product.findOne({
+      _id: pid,
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    }).select("product_name wholesale_price");
+    if (mongoSession) productQuery = productQuery.session(mongoSession);
+    const productDoc = await productQuery.lean();
+    if (!productDoc) {
+      throw new Error(
+        `Product not found for wholesale price update (id ${productIdStr})`,
+      );
+    }
+
+    const wholesaleBefore =
+      Number.isFinite(Number(productDoc.wholesale_price)) ?
+        Number(productDoc.wholesale_price)
+      : 0;
+    const previousTotal = roundPoMoney(warehouseQty * wholesaleBefore);
+    const totalQty = roundPoMoney(warehouseQty + currentQty);
+    const grandTotal = roundPoMoney(previousTotal + newTotal);
+    const averageCost =
+      totalQty > 0 ?
+        roundPoMoney(grandTotal / totalQty)
+      : roundPoMoney(newTotal / currentQty);
+
+    const updateOpts = mongoSession ? { session: mongoSession } : {};
+    const updated = await Product.findOneAndUpdate(
+      { _id: pid, company_id: cid, status: "active", deletedAt: null },
+      { $set: { wholesale_price: averageCost } },
+      { new: true, ...updateOpts },
+    ).lean();
+
+    if (!updated) {
+      throw new Error(
+        `Failed to update wholesale_price for product (id ${productIdStr})`,
+      );
+    }
+
+    wholesaleUpdates.push({
+      product_id: productIdStr,
+      product_name: productDoc.product_name,
+      warehouse_qty_before: warehouseQty,
+      inbound_qty: currentQty,
+      total_qty: totalQty,
+      wholesale_price_before: wholesaleBefore,
+      previous_total: previousTotal,
+      new_total: newTotal,
+      grand_total: grandTotal,
+      wholesale_price: averageCost,
+      direction: "inbound",
+    });
+
+    if (roundPoMoney(wholesaleBefore) !== roundPoMoney(averageCost)) {
+      await logProductWholesalePriceChange(req, {
+        productIdStr,
+        productName: productDoc.product_name,
+        wholesaleBefore,
+        averageCost,
+        companyId: cid,
+        mongoSession,
+      });
+    }
+  }
+
+  return wholesaleUpdates;
+}
+
+/**
+ * Apply warehouse on-hand after PO line items and `inventory_movements` inserts (create step 3–4; update line replace).
+ * Only updates `warehouse_inventory` (lines with valid `warehouse_id`). Does not change `product.stock`.
  *
  * @param {object[]} lines `poLinePayloads` — parsed client lines (same order as `savedPurchaseOrderItems`).
  * @param {object[]} insertedLineDocs `savedPurchaseOrderItems` — rows from `insertMany`.
  * @param {object[]} [reverseLines] `previousPoLinesBeforeReplace` — snapshot before line replace (update only).
- * @returns {{ productStockUpdates: object[] }} `stockChangeAuditLog` for API `product_stock_updates`.
+ * @returns {{ productStockUpdates: object[] }} Audit entries for API `product_stock_updates` (warehouse rows only).
  */
 async function applyWarehouseInventoryForPoLines({
   lines: poLinePayloads,
@@ -741,8 +1164,6 @@ async function applyWarehouseInventoryForPoLines({
   req,
   reverseLines: previousPoLinesBeforeReplace = [],
 }) {
-  const stockByProductSummary = summarizeLineStockByProduct(poLinePayloads);
-
   const stockChangeAuditLog =
     await WarehouseInventory.applyStockChangesFromLines({
       inboundLines: poLinePayloads,
@@ -753,28 +1174,6 @@ async function applyWarehouseInventoryForPoLines({
       userId: req.user?._id,
     });
 
-  // Lines with no warehouse_id: bump product-level stock only
-  for (const [productId, lineStockSummary] of stockByProductSummary) {
-    const quantityWithoutWarehouse = lineStockSummary.qtyWithoutWarehouse;
-    if (quantityWithoutWarehouse <= 0) continue;
-
-    const productStockBumpResult = await incrementProductStockForPoLine({
-      productId,
-      lineQty: quantityWithoutWarehouse,
-      companyId: tenantCompanyId,
-      mongoSession,
-    });
-    stockChangeAuditLog.push({
-      ...productStockBumpResult,
-      source:
-        lineStockSummary.hasWarehouseLine ?
-          "non_warehouse_qty_on_product"
-        : "non_warehouse_lines_only",
-      qty_added: quantityWithoutWarehouse,
-    });
-  }
-
-  // Step 6 — return audit trail for `product_stock_updates` on PO response
   return { productStockUpdates: stockChangeAuditLog };
 }
 
@@ -788,69 +1187,6 @@ function shapePurchaseOrderWithItems(poPlain, items) {
     purchase_order_items: items,
     no_of_items: items.length,
     purchase_order_items_total,
-  };
-}
-
-/**
- * Read `product.stock`, add PO line qty, persist on `product` (before line / movement inserts).
- * @param {{ productId: unknown, lineQty: unknown, companyId: unknown, mongoSession?: object | null }} params
- */
-async function incrementProductStockForPoLine({
-  productId,
-  lineQty,
-  companyId,
-  mongoSession = null,
-}) {
-  const pid = coalesceObjectId(productId);
-  const cid = coalesceObjectId(companyId);
-  if (!pid || !mongoose.Types.ObjectId.isValid(String(pid))) {
-    throw new Error("Valid product_id is required to update product stock");
-  }
-  if (!cid || !mongoose.Types.ObjectId.isValid(String(cid))) {
-    throw new Error("company_id is required to update product stock");
-  }
-
-  const qtyToAdd = Number(lineQty);
-  if (!Number.isFinite(qtyToAdd) || qtyToAdd <= 0) {
-    throw new Error(
-      "Each purchase order line needs a positive quantity to update product stock",
-    );
-  }
-
-  let productQuery = Product.findOne({
-    _id: pid,
-    company_id: cid,
-    status: "active",
-    deletedAt: null,
-  }).select("stock product_name");
-  if (mongoSession) {
-    productQuery = productQuery.session(mongoSession);
-  }
-  const productDoc = await productQuery.lean();
-  if (!productDoc) {
-    throw new Error(`Product not found for stock update (id ${String(pid)})`);
-  }
-
-  const previousStock = Number(productDoc.stock) || 0;
-  const nextStock = Math.round((previousStock + qtyToAdd) * 100) / 100;
-
-  const updateOpts = mongoSession ? { session: mongoSession } : {};
-  const updated = await Product.findOneAndUpdate(
-    { _id: pid, company_id: cid, status: "active", deletedAt: null },
-    { $set: { stock: nextStock } },
-    { new: true, ...updateOpts },
-  ).lean();
-
-  if (!updated) {
-    throw new Error(`Failed to update product stock (id ${String(pid)})`);
-  }
-
-  return {
-    product_id: pid,
-    product_name: productDoc.product_name,
-    previous_stock: previousStock,
-    stock: nextStock,
-    qty_added: qtyToAdd,
   };
 }
 
@@ -1029,9 +1365,10 @@ async function getPurchaseOrderByOrderNo(req, res) {
  * |------|-------------------------|--------------------|--------------|--------|-------|
  * |    1 | purchase_order          | insert             | one          | low    | `handleGenericCreate` (header; model may assign `purchase_order_no`) |
  * |    2 | transaction             | insert             | many (5)     | medium | `transactionBulkCreate` in `afterCreate` — purchase, shipment, discount, payment, A/P |
- * |    3 | warehouse_inventory     | read / upsert      | one × N      | medium | `applyWarehouseInventoryForPoLines` (+ `product.stock` if no warehouse) |
+ * |    3 | warehouse_inventory     | read / upsert      | one × N      | medium | `applyWarehouseInventoryForPoLines` (warehouse lines only) |
  * |    5 | purchase_order_item     | insert             | many (1×)    | medium | `insertMany` via `buildPurchaseOrderItemDocuments` |
  * |    6 | inventory_movements     | insert             | one × N      | low    | `insertInventoryMovementRecord` — one row per warehouse line |
+ * |  6b | product                 | read / update      | one × P      | medium | `applyWholesalePriceWeightedAverageForPoLines` — weighted `wholesale_price` |
  * |    7 | purchase_order          | read               | one          | low    | `findById` for response payload (totals from step 1 insert) |
  * |    8 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path only |
  *
@@ -1069,6 +1406,7 @@ async function purchaseOrderCreate(req, res) {
     let purchaseOrderCreateResult = null;
     const persistedLineItems = [];
     const productStockUpdates = [];
+    const wholesaleUpdates = [];
     /** Set when `withTransaction` fails for a non–transaction-support reason, or when the non-session retry throws. */
     let createPipelineError = null;
     poStepTimer = startPoCreateStepTimer();
@@ -1333,7 +1671,16 @@ async function purchaseOrderCreate(req, res) {
       }
       // step 6 end
 
-      // step 3–4 start — warehouse_inventory upsert (+ non-warehouse product.stock bump)
+      // Weighted-average wholesale_price (warehouse qty × current cost + inbound line cost)
+      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
+        lines: lineItemsFromClient,
+        companyId,
+        req,
+        mongoSession,
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+
+      // step 3–4 start — warehouse_inventory upsert
       const stockReconcile = await applyWarehouseInventoryForPoLines({
         lines: lineItemsFromClient,
         insertedLineDocs: persistedLineItems,
@@ -1380,6 +1727,7 @@ async function purchaseOrderCreate(req, res) {
         try {
           persistedLineItems.length = 0;
           productStockUpdates.length = 0;
+          wholesaleUpdates.length = 0;
           purchaseOrderCreateResult = null;
           poStepTimer.resetSteps();
           const endTxnRetry = poStepTimer.start(
@@ -1495,7 +1843,7 @@ async function purchaseOrderCreate(req, res) {
       items: persistedLineItems,
       items_total,
       product_stock_updates: productStockUpdates,
-      wholesale_updates: [],
+      wholesale_updates: wholesaleUpdates,
       step_timings_ms: stepTimingsMs,
     });
   } catch (unexpectedError) {
@@ -1522,63 +1870,49 @@ async function purchaseOrderCreate(req, res) {
 /**
  * PUT/PATCH purchase order — header update, GL rebuild, optional full line replace + inventory replay.
  *
- * Flow: (1) parse `collectLineItems` from body, (2) normalize header on `req.body` (restore `originalBody`
- * before response), (3) `handleGenericUpdate` inside `session.withTransaction` when supported,
- * (4) in `afterUpdate`: soft-delete prior `transaction` rows for this PO's `transaction_number`, soft-delete
- *     prior `inventory_movements` with `reference_type: purchase_order`, then insert five new GL lines
- *     (same order as `purchaseOrderCreate` / `PURCHASE_ORDER_GL_LINE_META`),
- * (5) when client sends lines: replace all `purchase_order_item` rows, post new `in` movements per line
- *     with `warehouse_id` via `insertInventoryMovementRecord`, then `applyWarehouseInventoryForPoLines`
- *     (reverse old line qty on `warehouse_inventory`, upsert new line qty),
- * (6) `PurchaseOrder.syncHeaderTotalsFromLineItems`.
- *
- * Header-only update (no lines in body): keeps existing line items and does not touch inventory movements
- * in the post-update block (GL + movement soft-delete in `afterUpdate` still runs on every successful header save).
- *
- * Standalone `mongod`: retries `runPurchaseOrderUpdateBody` without a session (partial writes possible on failure).
+ * Flow — **line replace** (steps 1–13): prep → PO update → validate/build/snapshot → teardown → GL → lines → stock.
+ * **Header-only** (steps 1–3, 14–15): prep → PO update + GL in `afterUpdate` → response reads.
  *
  * Collections (Mongo) — op = insert | update | delete | read; scope = one | many
- * Cost (relative): **low** = single cheap round-trip; **medium** = few docs or scales modestly;
- * **high** = bulk soft-delete, ledger replay, or per-line movement txn (see `purchaseOrderCreate` table).
+ * Cost (relative): **low** | **medium** | **high** (ledger aggregate / full scan).
  *
- * | Step | When                                          | Collection              | Op               | One or many  | Cost   | Notes |
- * |------|-----------------------------------------------|-------------------------|--------------------|--------------|--------|-------|
- * |    1 | Pre-txn (no lines in body)                    | purchase_order_item     | read               | many         | medium | Sum subtotals → `lines_subtotal` on header |
- * |    2 | In txn — always                               | purchase_order          | update             | one          | low    | `handleGenericUpdate` (header fields) |
- * |    3 | In txn — always (`afterUpdate`)               | transaction             | update             | many         | medium | Soft-delete active rows for `transaction_number` |
- * |    4 | In txn — always (`afterUpdate`)               | transaction             | insert             | many (5)     | medium | `transactionBulkCreate` — new GL set |
- * |    5 | In txn — always (`afterUpdate`)               | inventory_movements     | update             | many         | high   | Soft-delete rows for this PO `reference_id` |
- * |    6 | In txn — lines in body                        | purchase_order_item     | read               | many         | low    | Snapshot before replace (`product_id`) |
- * |    7 | In txn — lines in body                        | purchase_order_item     | delete             | many         | medium | `deleteMany` by `purchase_order_id` |
- * |    8 | In txn — lines in body                        | purchase_order_item     | insert             | many         | medium | `insertMany` from `built.docs` |
- * |    9 | In txn — lines in body (per line w/ warehouse) | inventory_movements     | insert             | one × N      | low    | `insertInventoryMovementRecord` |
- * |   10 | In txn — lines in body (per line w/ warehouse) | product                 | update             | one × N      | medium | Optional `wholesale_price` on `in` (weighted avg) |
- * |   11 | In txn — lines in body (per line w/ warehouse) | logs                    | insert             | one × N      | low    | Movement + optional wholesale audit rows |
- * |   12 | In txn — lines in body                        | warehouse_inventory     | read / upsert      | one × N (+ reverse) | medium | `applyWarehouseInventoryForPoLines` |
- * |   13 | In txn — always                               | purchase_order          | update             | one          | medium | `syncHeaderTotalsFromLineItems` (`lines_subtotal`, `total_amount`) |
- * |   14 | Post-txn success                              | purchase_order_item     | read               | many         | medium | Populate for response `data` |
- * |   15 | Post-txn success                              | purchase_order          | read               | one          | low    | Reload header for response |
- * |   16 | On failure                                    | logs                    | insert             | one          | low    | `logRollbackFailure` (`PURCHASE ORDER UPDATE ROLLBACK`) |
+ * | Step | When              | Collection              | Op                 | One or many  | Cost   | Notes |
+ * |------|-------------------|-------------------------|--------------------|--------------|--------|-------|
+ * |    1 | Pre-txn           | —                       | —                  | —            | low    | `collectLineItems`, normalize header, `lines_subtotal` (from body lines or DB items) |
+ * |    2 | In txn — always   | purchase_order          | update             | one          | low    | `handleGenericUpdate`; `total_amount` via model hook (one PO write) |
+ * |    3 | In txn — header-only | transaction          | update + insert    | many (5)     | medium | In `afterUpdate`: soft-delete GL + `rebuildPurchaseOrderGlTransactions` |
+ * |    4 | In txn — lines    | —                       | —                  | —            | low    | Validate each line (`product_id`, positive `qty`) |
+ * |    5 | In txn — lines    | purchase_order_item     | —                  | —            | low    | `buildPurchaseOrderItemDocuments` |
+ * |    6 | In txn — lines    | purchase_order_item     | read               | many         | low    | Snapshot existing lines before teardown |
+ * |    7 | In txn — lines    | transaction, inventory_movements, purchase_order_item | update/delete | few–many | medium | `teardownPurchaseOrderForLineReplace` |
+ * |    8 | In txn — lines    | transaction             | insert             | many (5)     | medium | `rebuildPurchaseOrderGlTransactions` (after teardown) |
+ * |    9 | In txn — lines    | purchase_order_item     | insert             | many         | medium | `insertMany` |
+ * |   10 | In txn — lines    | inventory_movements     | insert             | one × N      | low    | `insertInventoryMovementRecord` per warehouse line |
+ * |   11 | In txn — lines    | warehouse_inventory, product, logs | read / update | one × R | medium | Reverse stock; `applyWholesalePriceRemoveForPoLines` + wholesale audit logs |
+ * |   12 | In txn — lines    | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceWeightedAverageForPoLines` + logs when price changes |
+ * |   13 | In txn — lines    | warehouse_inventory     | read / upsert      | one × N      | medium | Inbound new line qty (`applyWarehouseInventoryForPoLines`) |
+ * |   14 | Post-txn success  | purchase_order_item     | read               | many         | medium | Populate for response `data` |
+ * |   15 | Post-txn success  | purchase_order          | read               | one          | low    | Reload header for response |
+ * |   16 | On failure        | logs                    | insert             | one          | low    | `logRollbackFailure` (`PURCHASE ORDER UPDATE ROLLBACK`) |
  *
- * P = distinct product ids on old ∪ new lines. N = lines with valid `warehouse_id`. Does not call
- * `incrementProductStockForPoLine` (create-only direct `product.stock` bump).
+ * L = line count; N = warehouse lines; P = distinct products (wholesale); R = old lines reversed.
  */
 async function purchase_order_update(req, res) {
+  // step 1 start — parse lines + normalize header for `handleGenericUpdate`
   const lines = collectLineItems(req.body);
   const originalBody = req.body;
-  // `handleGenericUpdate` reads header fields only; strip embedded line keys from multipart / indexed payloads.
   req.body = normalizePurchaseOrderNumericFields(
     stripLineItemKeysFromBody(originalBody),
   );
   delete req.body._id;
-  // Mode-of-payment GL row needs `payment_method_accounts_id`; same fallback as create when client omits it.
   resolvePoPaymentMethodAccount(req.body, req.user);
 
   const recordId = String(req.params?.id || "").trim();
   if (lines.length > 0) {
+    // step 1 — same parsed lines as insertMany; no post-line `syncHeaderTotalsFromLineItems`
     req.body.lines_subtotal = purchaseOrderLinesSubtotalSum(lines);
   } else if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
-    // Header-only update: derive subtotal from persisted lines so GL purchase line amount stays correct.
+    // step 1 — header-only: subtotal from persisted lines for GL purchase debit
     const existingItems = await PurchaseOrderItem.find({
       purchase_order_id: recordId,
       status: "active",
@@ -1588,155 +1922,41 @@ async function purchase_order_update(req, res) {
       .lean();
     req.body.lines_subtotal = purchaseOrderLinesSubtotalSum(existingItems);
   }
+  // step 1 end
 
   let clientSession = null;
   let response = null;
   let txnError = null;
-  /** Set when lines are replaced: product ids on old rows vs incoming `built.docs` + ledger stock sync. */
+  const persistedLineItems = [];
+  const productStockUpdates = [];
+  const wholesaleUpdates = [];
+  /** Set when lines are replaced: product ids on old rows vs incoming `built.docs` + stock sync. */
   let poLineReplaceSnapshot = null;
 
   /** @param {import("mongoose").ClientSession | null} mongoSession */
   const runPurchaseOrderUpdateBody = async (mongoSession) => {
+    // step 2 start — purchase_order update (header)
     response = await handleGenericUpdate(req, "purchase_order", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterUpdate: async (record, orderReq, _existing, sess) => {
-        const transaction_number = record?.transaction_number;
-        // Invalidate old GL rows (soft delete) before inserting the replacement set for this PO.
-        if (transaction_number) {
-          const softDeleteTransc = await Transaction.updateMany(
-            {
-              transaction_number,
-              status: "active",
-              $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-            },
-            {
-              $set: {
-                deletedAt: new Date(),
-                status: "inactive",
-                ...((
-                  orderReq.user?._id &&
-                  mongoose.Types.ObjectId.isValid(String(orderReq.user._id))
-                ) ?
-                  { updated_by: orderReq.user._id }
-                : {}),
-              },
-            },
-            sessionOpts(sess),
-          );
-          if (softDeleteTransc.modifiedCount > 0) {
-            console.log(
-              "✅ Transaction rows soft-deleted:",
-              softDeleteTransc.modifiedCount,
-            );
-          }
-        }
-
-        // Prior inbound movements for this PO are inactive so new line qty is not double-counted in the ledger.
-        const invMovementSoftDelete = await InventoryMovements.updateMany(
-          {
-            reference_type: "purchase_order",
-            reference_id: record._id,
-            status: "active",
-            $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-          },
-          {
-            $set: {
-              deletedAt: new Date(),
-              status: "inactive",
-              ...((
-                orderReq.user?._id &&
-                mongoose.Types.ObjectId.isValid(String(orderReq.user._id))
-              ) ?
-                { updated_by: orderReq.user._id }
-              : {}),
-            },
-          },
-          sessionOpts(sess),
-        );
-        if (invMovementSoftDelete.modifiedCount > 0) {
-          console.log(
-            "✅ Inventory movement rows soft-deleted:",
-            invMovementSoftDelete.modifiedCount,
-          );
-        }
-
-        const { created, failed } = await transactionBulkCreate(
-          orderReq,
-          [
-            // Same five rows / index order as create — keep in sync with PURCHASE_ORDER_GL_LINE_META.
-            {
-              account_id: orderReq.user.company_id.default_purchase_account,
-              type: "debit",
-              amount: record?.lines_subtotal ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Order",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-            {
-              account_id: orderReq.user.company_id.default_shipping_account,
-              type: "debit",
-              amount: record?.shipment ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Shipment",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-            {
-              account_id:
-                orderReq.user.company_id.default_purchase_discount_account,
-              type: "credit",
-              amount: record?.discount ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Discount",
-            },
-            {
-              account_id: record?.payment_method_accounts_id,
-              type: "credit",
-              amount: record?.amount_paid ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Mode of Payment",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-            {
-              account_id:
-                orderReq.user.company_id.default_account_payable_account,
-              type: "credit",
-              amount: req.body?.remaining_amount || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "A/c Payable",
-              reference_id: {
-                module: "purchase_order",
-                ref_id: record._id,
-              },
-            },
-          ],
-          { stopOnError: true, session: sess },
-        );
-        if (failed.length) {
-          await throwPurchaseOrderGlBulkFailed(orderReq, failed);
-        }
-        if (created[0]?.data?._id) {
-          console.log(
-            "✅ Transaction(s) created:",
-            created.map((c) => c.data._id),
+        // Header-only: step 3 — line replace runs steps 7–13 in the line block.
+        if (lines.length === 0) {
+          await softDeleteActiveGlByTransactionNumber({
+            transactionNumber: record?.transaction_number,
+            mongoSession: sess,
+            userId: orderReq.user?._id,
+          });
+          await rebuildPurchaseOrderGlTransactions(
+            record,
+            orderReq,
+            req.body?.remaining_amount,
+            sess,
           );
         }
       },
       filter: { status: "active", deletedAt: null },
     });
+    // step 2 end
 
     if (!response?.success || !response?.data) {
       throwWithGenericFailure(response, "Purchase order update failed");
@@ -1745,6 +1965,36 @@ async function purchase_order_update(req, res) {
     const poId = response.data._id;
 
     if (lines.length > 0) {
+      // steps 4–13 — full line replace + inventory
+      const companyId =
+        coalesceObjectId(response.data.company_id) ||
+        coalesceObjectId(req.user?.company_id);
+
+      if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+        throw new Error(
+          "company_id is required to update purchase order line items",
+        );
+      }
+
+      // step 4 start — validate line payloads
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const line = lines[lineIndex];
+        const productIdStr = String(line.product_id).trim();
+        const lineQtyNum = Number(line.qty);
+        if (
+          !productIdStr ||
+          !mongoose.Types.ObjectId.isValid(productIdStr) ||
+          !Number.isFinite(lineQtyNum) ||
+          lineQtyNum <= 0
+        ) {
+          throw new Error(
+            "Each purchase order line needs a valid product_id and positive qty",
+          );
+        }
+      }
+      // step 4 end
+
+      // step 5 start — build purchase_order_item documents
       const built = buildPurchaseOrderItemDocuments(
         poId,
         response.data,
@@ -1754,8 +2004,12 @@ async function purchase_order_update(req, res) {
       if (built.error) {
         throw new Error(built.error);
       }
+      if (built.docs.length !== lines.length) {
+        throw new Error("Could not build purchase order line documents");
+      }
+      // step 5 end
 
-      // Snapshot existing lines before replace (for ledger stock sync and API metadata).
+      // step 6 start — snapshot existing lines before teardown
       let existingPoItemsQuery = PurchaseOrderItem.find({
         purchase_order_id: poId,
         status: "active",
@@ -1765,124 +2019,151 @@ async function purchase_order_update(req, res) {
         existingPoItemsQuery = existingPoItemsQuery.session(mongoSession);
       }
       const existingPoItems = await existingPoItemsQuery.lean();
+      // step 6 end
 
       const previous_product_ids =
         collectUniqueProductIdsFromLineRows(existingPoItems);
       const new_product_ids = collectUniqueProductIdsFromLineRows(built.docs);
 
-      // Full line replace: delete all items for this PO, then insert the new set from the request.
-      await PurchaseOrderItem.deleteMany(
-        { purchase_order_id: poId },
-        sessionOpts(mongoSession),
+      // step 7 start — teardown: GL + movements soft-delete, line deleteMany
+      await teardownPurchaseOrderForLineReplace({
+        purchaseOrderId: poId,
+        transactionNumber: response.data.transaction_number,
+        companyId,
+        mongoSession,
+        userId: req.user?._id,
+      });
+      // step 7 end
+
+      // step 8 start — transaction insert ×5 (GL rebuild after teardown)
+      await rebuildPurchaseOrderGlTransactions(
+        response.data,
+        req,
+        req.body?.remaining_amount,
+        mongoSession,
       );
+      // step 8 end
+
+      // step 9 start — purchase_order_item insertMany
       const insertedLineDocs = await PurchaseOrderItem.insertMany(
         built.docs,
         sessionOpts(mongoSession),
       );
+      persistedLineItems.push(...insertedLineDocs);
+      // step 9 end
 
-      // Inbound ledger per line (lines without valid `warehouse_id` are skipped — no movement, no stock path).
-      const companyIdForMovement =
-        coalesceObjectId(response.data.company_id) ||
-        coalesceObjectId(req.user?.company_id);
-
-      for (const line of lines) {
+      // step 10 start — inventory_movements insert per warehouse line
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const line = lines[lineIndex];
+        const lineQtyNum = Number(line.qty);
         const warehouseIdStr =
           line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-        if (
-          !warehouseIdStr ||
-          !mongoose.Types.ObjectId.isValid(warehouseIdStr)
-        ) {
-          continue;
-        }
-        const unitCost = Number(line.price);
-        const lineQtyNum = Number(line.qty);
-        if (
-          !Number.isFinite(unitCost) ||
-          unitCost < 0 ||
-          !Number.isFinite(lineQtyNum) ||
-          lineQtyNum <= 0
-        ) {
-          throw new Error(
-            "Each PO line with a warehouse needs a finite unit price (price) and positive quantity for inventory movement",
-          );
-        }
-        const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
 
-        // `insertInventoryMovementRecord` expects movement fields on `req.body`; save/restore header + route id.
-        const bodyBeforeInventoryMovement = req.body;
-        const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-          req.params,
-          "id",
-        );
-        const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-        req.body = {
-          product_id: String(line.product_id).trim(),
-          warehouse_id: warehouseIdStr,
-          quantity: lineQtyNum,
-          movement_type: "in",
-          unit_cost: unitCost,
-          total_cost: totalCostMovement,
-          reference_type: "purchase_order",
-          reference_id: poId,
-          reference_name: "Purchase Order",
-          company_id: companyIdForMovement,
-          status: "active",
-        };
-
-        try {
-          await insertInventoryMovementRecord(req, mongoSession);
-        } catch (inventoryMovementErr) {
-          if (inventoryMovementErr.clientPayload) {
-            throwWithGenericFailure(
-              inventoryMovementErr.clientPayload,
-              "Inventory movement for purchase order update failed",
+        if (warehouseIdStr && mongoose.Types.ObjectId.isValid(warehouseIdStr)) {
+          const unitCost = Number(line.price);
+          if (!Number.isFinite(unitCost) || unitCost < 0) {
+            throw new Error(
+              "Each PO line with a warehouse needs a finite unit price (price) and positive quantity for inventory movement",
             );
           }
-          throw inventoryMovementErr;
-        } finally {
-          req.body = bodyBeforeInventoryMovement;
-          if (hadRouteParamId) {
-            req.params.id = savedRouteParamId;
-          } else {
-            delete req.params.id;
+          const totalCostMovement =
+            Math.round(lineQtyNum * unitCost * 100) / 100;
+
+          const bodyBeforeInventoryMovement = req.body;
+          const hadRouteParamId = Object.prototype.hasOwnProperty.call(
+            req.params,
+            "id",
+          );
+          const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+
+          req.body = {
+            product_id: String(line.product_id).trim(),
+            warehouse_id: warehouseIdStr,
+            quantity: lineQtyNum,
+            movement_type: "in",
+            unit_cost: unitCost,
+            total_cost: totalCostMovement,
+            reference_type: "purchase_order",
+            reference_id: poId,
+            reference_name: "Purchase Order",
+            company_id: companyId,
+            status: "active",
+          };
+
+          try {
+            await insertInventoryMovementRecord(req, mongoSession);
+          } catch (inventoryMovementErr) {
+            if (inventoryMovementErr.clientPayload) {
+              throwWithGenericFailure(
+                inventoryMovementErr.clientPayload,
+                "Inventory movement for purchase order update failed",
+              );
+            }
+            throw inventoryMovementErr;
+          } finally {
+            req.body = bodyBeforeInventoryMovement;
+            if (hadRouteParamId) {
+              req.params.id = savedRouteParamId;
+            } else {
+              delete req.params.id;
+            }
           }
         }
       }
+      // step 10 end
 
-      const companyIdForStock =
-        coalesceObjectId(response.data.company_id) ||
-        coalesceObjectId(req.user?.company_id);
+      // step 11 start — warehouse_inventory reverse (old PO line qty) + wholesale undo
+      await WarehouseInventory.applyStockChangesFromLines({
+        reverseLines: existingPoItems,
+        inboundLines: [],
+        savedLineItemRows: [],
+        companyId,
+        session: mongoSession,
+        userId: req.user?._id,
+      });
+      const wholesaleReverseRows = await applyWholesalePriceRemoveForPoLines({
+        lines: existingPoItems,
+        companyId,
+        req,
+        mongoSession,
+      });
+      wholesaleUpdates.push(...wholesaleReverseRows);
+      // step 11 end
 
+      // step 12 start — weighted-average product.wholesale_price (new lines)
+      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
+        lines,
+        companyId,
+        req,
+        mongoSession,
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+      // step 12 end
+
+      // step 13 start — warehouse_inventory inbound (new line qty)
       const stockReconcile = await applyWarehouseInventoryForPoLines({
         lines,
-        insertedLineDocs,
-        companyId: companyIdForStock,
+        insertedLineDocs: persistedLineItems,
+        companyId,
         mongoSession,
         req,
-        reverseLines: existingPoItems,
+        reverseLines: [],
       });
-
-      const stockSyncResults = stockReconcile.productStockUpdates;
+      productStockUpdates.push(...stockReconcile.productStockUpdates);
+      // step 13 end
 
       poLineReplaceSnapshot = {
         previous_product_ids,
         new_product_ids,
-        stock_sync: stockSyncResults,
-        warehouse_inventory_updates: stockSyncResults,
+        stock_sync: productStockUpdates,
+        warehouse_inventory_updates: productStockUpdates,
+        wholesale_updates: wholesaleUpdates,
       };
-
-      await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, {
-        session: mongoSession || undefined,
-      });
-    } else {
-      // No new lines in payload: header totals still reconciled from existing `purchase_order_item` rows.
-      await PurchaseOrder.syncHeaderTotalsFromLineItems(poId, {
-        session: mongoSession || undefined,
-      });
     }
+    // Header-only: step 1 set `lines_subtotal`; step 2 is the only PO update; step 3 rebuilds GL.
   };
 
+  // txn start — MongoDB transaction wrapper (or standalone retry)
   try {
     clientSession = await mongoose.startSession();
     await clientSession.withTransaction(async () => {
@@ -1904,6 +2185,10 @@ async function purchase_order_update(req, res) {
       );
       try {
         response = null;
+        persistedLineItems.length = 0;
+        productStockUpdates.length = 0;
+        wholesaleUpdates.length = 0;
+        poLineReplaceSnapshot = null;
         await runPurchaseOrderUpdateBody(null);
       } catch (e2) {
         txnError = e2;
@@ -1920,10 +2205,11 @@ async function purchase_order_update(req, res) {
       }
     }
   }
+  // txn end
 
   req.body = originalBody;
 
-  // Failure path — `logs` row (`PURCHASE ORDER UPDATE ROLLBACK`) + client JSON.
+  // step 16 start — failure path (`logs` + client JSON)
   if (txnError) {
     await logRollbackFailure(req, txnError, {
       action: "PURCHASE ORDER UPDATE ROLLBACK",
@@ -1951,6 +2237,7 @@ async function purchase_order_update(req, res) {
       details: txnError.message,
     });
   }
+  // step 16 end (failure)
 
   if (!response || !response.success || !response.data) {
     return res
@@ -1960,7 +2247,7 @@ async function purchase_order_update(req, res) {
 
   const poId = response.data._id;
 
-  // Success: reload lines + header for shaped `data` (post-txn read; not inside the session).
+  // step 14 start — purchase_order_item read (response)
   const items = await PurchaseOrderItem.find({
     purchase_order_id: poId,
     status: "active",
@@ -1969,17 +2256,30 @@ async function purchase_order_update(req, res) {
     .populate("product_id")
     .sort({ createdAt: 1 })
     .lean();
+  // step 14 end
 
+  // step 15 start — purchase_order read (response reload)
   const poFresh = await PurchaseOrder.findById(poId).lean();
   const data = shapePurchaseOrderWithItems(poFresh || response.data, items);
+  // step 15 end
+
+  const items_total = items.reduce(
+    (sumSubtotals, lineItemDoc) =>
+      sumSubtotals + (Number(lineItemDoc.subtotal) || 0),
+    0,
+  );
 
   return res.status(200).json({
     success: true,
     status: 200,
     data,
-    wholesale_updates: [], // reserved; create may populate wholesale side-effects in future
+    items: persistedLineItems.length > 0 ? persistedLineItems : items,
+    items_total,
+    product_stock_updates: productStockUpdates,
+    wholesale_updates: wholesaleUpdates,
     ...(poLineReplaceSnapshot ? { line_replace: poLineReplaceSnapshot } : {}),
   });
+  // steps 14–15 complete — 200 response
 }
 
 module.exports = {
