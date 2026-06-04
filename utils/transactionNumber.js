@@ -2,8 +2,8 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-function formatDateDDMMYYYY(d) {
-  return `${pad2(d.getDate())}${pad2(d.getMonth() + 1)}${d.getFullYear()}`;
+function formatDateDDMMYY(d) {
+  return `${pad2(d.getDate())}${pad2(d.getMonth() + 1)}${pad2(d.getFullYear() % 100)}`;
 }
 
 function formatTimeHHMMSS(d) {
@@ -14,15 +14,15 @@ function formatTimeHHMMSS(d) {
  * Generate transaction number.
  *
  * Examples:
- * - default: TXN-1715199548123-123456
- * - date only: TXN-08052026-123456
- * - date + time: TXN-08052026-205532-123456
+ * - default: TXN-040626-143022-1234567 (DDMMYY-HHMMSS + 7 random digits)
+ * - date only: TXN-040626-1234567 (`includeTime: false`)
+ * - legacy timestamp: TXN-1715199548123-1234567 (`includeDate: false`)
  */
 function generateTransactionNumber(options = {}) {
   const {
     prefix = "TXN",
-    includeDate = false,
-    includeTime = false,
+    includeDate = true,
+    includeTime = true,
     randomDigits = 7,
     now = new Date(),
   } = options;
@@ -33,7 +33,7 @@ function generateTransactionNumber(options = {}) {
 
   const parts = [prefix];
   if (includeDate) {
-    parts.push(formatDateDDMMYYYY(now));
+    parts.push(formatDateDDMMYY(now));
     if (includeTime) {
       parts.push(formatTimeHHMMSS(now));
     }

@@ -92,6 +92,7 @@ const {
 const {
   purchaseOrderCreate,
   purchase_order_update,
+  purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
 } = require("../controllers/purchase_order");
@@ -196,6 +197,10 @@ router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
 router.patch(
   "/purchase_order/purchase_order_update/:id",
   purchase_order_update,
+);
+router.delete(
+  "/purchase_order/purchase_order_delete/:id",
+  purchase_order_delete,
 );
 router.get(
   "/purchase_order/get-purchase-order-by-purchase-item",

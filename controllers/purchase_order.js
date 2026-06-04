@@ -2282,9 +2282,517 @@ async function purchase_order_update(req, res) {
   // steps 14–15 complete — 200 response
 }
 
+
+/**
+ * Soft-delete a purchase order and reverse inventory / GL effects.
+ *
+ * URL: `DELETE /api/purchase_order/purchase_order_delete/:id` — `:id` is `purchase_order._id`.
+ *
+ * **Session:** Tries `mongoose.startSession` + `withTransaction` first. On standalone mongod
+ * (replica-set–only errors), retries the same pipeline without a session — see `isMongoTransactionUnsupportedError`.
+ * All writes inside `runPurchaseOrderDeleteBody` pass `sessionOpts(mongoSession)` so they participate in the txn when present.
+ *
+ * Collections (Mongo) — op = insert | update | delete | read; scope = one | many
+ *
+ * | Step | Collection              | Op                 | One or many  | Cost   | Notes |
+ * |------|-------------------------|--------------------|--------------|--------|-------|
+ * |    0 | purchase_order, purchase_order_item | read     | one + many   | low    | Pre-txn validation (404 if missing) |
+ * |    1 | purchase_order          | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
+ * |    2 | transaction             | update (soft)      | many         | medium | By PO header `transaction_number` |
+ * |    3 | inventory_movements     | update (soft)      | many         | medium | Active rows for this PO `reference_id` |
+ * |    4 | purchase_order_item     | update (soft)      | many         | medium | All active lines for this PO |
+ * |    5 | inventory_movements     | insert             | one × N      | low    | One `out` row per warehouse line (reverses original `in`) |
+ * |    6 | warehouse_inventory     | read / update      | one × N      | medium | Subtract line qty via `reverseLines` |
+ * |    7 | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceRemoveForPoLines` when applicable |
+ * |    8 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only |
+ * |    9 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE ORDER DELETE ROLLBACK`) |
+ *
+ * N = warehouse lines; P = distinct products (wholesale reverse).
+ */
+async function purchase_order_delete(req, res) {
+  let poDeleteStepTimer = null;
+
+  try {
+    const poId = String(req.params?.id || "").trim();
+    if (!poId || !mongoose.Types.ObjectId.isValid(poId)) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid id",
+        details: "id must be a valid purchase_order ObjectId",
+        type: "invalid_id",
+      });
+    }
+
+    const companyId = coalesceObjectId(req.user?.company_id);
+    if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        details:
+          "Authenticated user must have company_id to delete a purchase order",
+        type: "validation",
+      });
+    }
+
+    // step 0 — pre-txn read (PO header + line items)
+    const existingPo = await PurchaseOrder.findOne({
+      _id: poId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (!existingPo) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `purchase_order with id "${poId}" not found or already deleted`,
+        type: "not_found",
+      });
+    }
+
+    const transactionNumber = String(existingPo.transaction_number ?? "").trim();
+
+    const existingPoItems = await PurchaseOrderItem.find({
+      purchase_order_id: poId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    poDeleteStepTimer = startPoCreateStepTimer();
+
+    let clientSession = null;
+    let txnError = null;
+    /** @type {"mongodb_transaction"|"standalone_no_transaction"|null} */
+    let txnMode = null;
+    let softDeletedPo = null;
+    const productStockUpdates = [];
+    const wholesaleUpdates = [];
+    const deletedAt = new Date();
+    const userId = req.user?._id;
+    const deleteSnapshot = {
+      gl_rows_soft_deleted: 0,
+      movements_soft_deleted: 0,
+      items_soft_deleted: 0,
+      reversal_movements_inserted: 0,
+    };
+
+    /** @param {import("mongoose").ClientSession | null} mongoSession */
+    const runPurchaseOrderDeleteBody = async (mongoSession) => {
+      const poSoftDeleteFilter = {
+        _id: poId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      };
+      const poSoftDeleteSet = {
+        deletedAt,
+        status: "inactive",
+      };
+      if (userId) {
+        poSoftDeleteSet.updated_by = userId;
+      }
+
+      // step 1 start — soft-delete purchase_order header
+      const endStep1 = poDeleteStepTimer.start(
+        1,
+        "purchase_order soft-delete",
+      );
+      softDeletedPo = await PurchaseOrder.findOneAndUpdate(
+        poSoftDeleteFilter,
+        { $set: poSoftDeleteSet },
+        { new: true, ...sessionOpts(mongoSession) },
+      ).lean();
+      endStep1();
+      // step 1 end
+      if (!softDeletedPo) {
+        throw new Error("Purchase order not found or already deleted");
+      }
+
+      // step 2 start — soft-delete GL rows for this PO transaction_number
+      const endStep2 = poDeleteStepTimer.start(
+        2,
+        "transaction soft-delete by transaction_number",
+      );
+      const glSoftDelete = await softDeleteActiveGlByTransactionNumber({
+        transactionNumber,
+        mongoSession,
+        userId,
+      });
+      deleteSnapshot.gl_rows_soft_deleted = glSoftDelete.modifiedCount || 0;
+      endStep2({ modified_count: deleteSnapshot.gl_rows_soft_deleted });
+      // step 2 end
+      if (deleteSnapshot.gl_rows_soft_deleted > 0) {
+        console.log(
+          "✅ Transaction rows soft-deleted:",
+          deleteSnapshot.gl_rows_soft_deleted,
+        );
+      }
+
+      // step 3 start — soft-delete active inventory_movements for this PO
+      const endStep3 = poDeleteStepTimer.start(
+        3,
+        "inventory_movements soft-delete by reference",
+      );
+      const movementSoftDelete =
+        await InventoryMovements.softDeleteActiveByReference({
+          referenceType: "purchase_order",
+          referenceId: poId,
+          companyId,
+          session: mongoSession,
+          userId,
+        });
+      deleteSnapshot.movements_soft_deleted =
+        movementSoftDelete.modifiedCount || 0;
+      endStep3({ modified_count: deleteSnapshot.movements_soft_deleted });
+      // step 3 end
+      if (deleteSnapshot.movements_soft_deleted > 0) {
+        console.log(
+          "✅ Inventory movement rows soft-deleted:",
+          deleteSnapshot.movements_soft_deleted,
+        );
+      }
+
+      // step 4 start — soft-delete purchase_order_item rows
+      const endStep4 = poDeleteStepTimer.start(
+        4,
+        "purchase_order_item soft-delete",
+      );
+      const itemSoftDeleteSet = {
+        deletedAt,
+        status: "inactive",
+      };
+      if (userId) {
+        itemSoftDeleteSet.updated_by = userId;
+      }
+      const itemSoftDelete = await PurchaseOrderItem.updateMany(
+        {
+          purchase_order_id: poId,
+          company_id: companyId,
+          status: "active",
+          deletedAt: null,
+        },
+        { $set: itemSoftDeleteSet },
+        sessionOpts(mongoSession),
+      );
+      deleteSnapshot.items_soft_deleted = itemSoftDelete.modifiedCount || 0;
+      endStep4({ modified_count: deleteSnapshot.items_soft_deleted });
+      // step 4 end
+      if (deleteSnapshot.items_soft_deleted > 0) {
+        console.log(
+          "✅ Purchase order line items soft-deleted:",
+          deleteSnapshot.items_soft_deleted,
+        );
+      }
+
+      // step 5 start — insert reversal inventory_movements (`out`) per warehouse line
+      for (let lineIndex = 0; lineIndex < existingPoItems.length; lineIndex++) {
+        const line = existingPoItems[lineIndex];
+        const productIdStr = String(line.product_id ?? "").trim();
+        const lineQtyNum = Number(line.qty);
+        const warehouseIdStr =
+          line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+
+        if (
+          !productIdStr ||
+          !mongoose.Types.ObjectId.isValid(productIdStr) ||
+          !Number.isFinite(lineQtyNum) ||
+          lineQtyNum <= 0 ||
+          !warehouseIdStr ||
+          !mongoose.Types.ObjectId.isValid(warehouseIdStr)
+        ) {
+          continue;
+        }
+
+        const unitCost = Number(line.price);
+        if (!Number.isFinite(unitCost) || unitCost < 0) {
+          throw new Error(
+            "Each PO line with a warehouse needs a finite unit price (price) and positive quantity for inventory reversal",
+          );
+        }
+        const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
+
+        const bodyBeforeInventoryMovement = req.body;
+        const hadRouteParamId = Object.prototype.hasOwnProperty.call(
+          req.params,
+          "id",
+        );
+        const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+
+        req.body = {
+          product_id: productIdStr,
+          warehouse_id: warehouseIdStr,
+          quantity: lineQtyNum,
+          movement_type: "out",
+          unit_cost: unitCost,
+          total_cost: totalCostMovement,
+          reference_type: "purchase_order",
+          reference_id: poId,
+          reference_name: "Purchase Order Delete",
+          company_id: companyId,
+          status: "active",
+        };
+
+        const endStep5Line = poDeleteStepTimer.start(
+          5,
+          "inventory_movements insert (out reversal)",
+          { line_index: lineIndex, warehouse_id: warehouseIdStr },
+        );
+        try {
+          await insertInventoryMovementRecord(req, mongoSession);
+          deleteSnapshot.reversal_movements_inserted += 1;
+        } catch (inventoryMovementErr) {
+          if (inventoryMovementErr.clientPayload) {
+            throwWithGenericFailure(
+              inventoryMovementErr.clientPayload,
+              "Inventory movement reversal for purchase order delete failed",
+            );
+          }
+          throw inventoryMovementErr;
+        } finally {
+          endStep5Line();
+          req.body = bodyBeforeInventoryMovement;
+          if (hadRouteParamId) {
+            req.params.id = savedRouteParamId;
+          } else {
+            delete req.params.id;
+          }
+        }
+      }
+      // step 5 end
+
+      // step 6 start — reverse warehouse_inventory (subtract received qty)
+      const endStep6 = poDeleteStepTimer.start(
+        6,
+        "warehouse_inventory reverse (reverseLines)",
+        { line_count: existingPoItems.length },
+      );
+      const stockReconcile = await WarehouseInventory.applyStockChangesFromLines(
+        {
+          reverseLines: existingPoItems,
+          inboundLines: [],
+          savedLineItemRows: [],
+          companyId,
+          session: mongoSession,
+          userId,
+        },
+      );
+      for (const row of stockReconcile || []) {
+        productStockUpdates.push({ ...row, source: "warehouse_inventory" });
+      }
+      endStep6({ warehouse_updates: productStockUpdates.length });
+      // step 6 end
+
+      // step 7 start — reverse weighted-average wholesale_price when warehouse lines existed
+      const endStep7 = poDeleteStepTimer.start(
+        7,
+        "product wholesale_price reverse",
+      );
+      const wholesaleRows = await applyWholesalePriceRemoveForPoLines({
+        lines: existingPoItems,
+        companyId,
+        req,
+        mongoSession,
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+      endStep7({ wholesale_updates: wholesaleUpdates.length });
+      // step 7 end
+    };
+
+    // txn start — MongoDB transaction wrapper (or standalone retry)
+    let endTxnWrap = () => {};
+    endTxnWrap = poDeleteStepTimer.start("txn", "MongoDB transaction wrapper");
+    let txnWrapEnded = false;
+    const finishTxnWrap = (extra) => {
+      if (!txnWrapEnded) {
+        txnWrapEnded = true;
+        endTxnWrap(extra);
+      }
+    };
+
+    try {
+      clientSession = await mongoose.startSession();
+      await clientSession.withTransaction(async () => {
+        await runPurchaseOrderDeleteBody(clientSession);
+      });
+      txnMode = "mongodb_transaction";
+      finishTxnWrap({ mode: txnMode });
+    } catch (e) {
+      if (isMongoTransactionUnsupportedError(e)) {
+        finishTxnWrap({ mode: "txn_unavailable_retry" });
+        if (clientSession) {
+          try {
+            clientSession.endSession();
+          } catch (_) {
+            /* ignore */
+          }
+          clientSession = null;
+        }
+        console.warn(
+          "[purchase_order] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
+        );
+        try {
+          softDeletedPo = null;
+          productStockUpdates.length = 0;
+          wholesaleUpdates.length = 0;
+          deleteSnapshot.gl_rows_soft_deleted = 0;
+          deleteSnapshot.movements_soft_deleted = 0;
+          deleteSnapshot.items_soft_deleted = 0;
+          deleteSnapshot.reversal_movements_inserted = 0;
+          poDeleteStepTimer.resetSteps();
+          const endTxnRetry = poDeleteStepTimer.start(
+            "txn",
+            "pipeline retry (no Mongo transaction)",
+          );
+          await runPurchaseOrderDeleteBody(null);
+          endTxnRetry({ mode: "standalone_no_transaction" });
+          txnMode = "standalone_no_transaction";
+        } catch (e2) {
+          txnError = e2;
+        }
+      } else {
+        finishTxnWrap({ mode: "mongodb_transaction_failed" });
+        txnError = e;
+      }
+    } finally {
+      if (clientSession) {
+        try {
+          clientSession.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+    // txn end
+
+    // step 9 start — failure path (`logs` + client JSON)
+    if (txnError) {
+      const stepTimingsOnError = poDeleteStepTimer.log(
+        "[purchase_order_delete] failed —",
+      );
+      console.error("Purchase order delete error:", txnError);
+      await logRollbackFailure(req, txnError, {
+        action: "PURCHASE ORDER DELETE ROLLBACK",
+        tags: ["api", "purchase_order", "rollback", "delete"],
+        fallbackUrl: "/api/purchase_order/purchase_order_delete",
+        context: {
+          purchase_order_id: poId,
+          purchase_order_no: existingPo.purchase_order_no ?? null,
+          transaction_number: transactionNumber,
+          line_count: existingPoItems.length,
+          txn_mode: txnMode,
+          in_transaction: txnMode === "mongodb_transaction",
+          delete_snapshot: deleteSnapshot,
+          step_timings_ms: stepTimingsOnError,
+        },
+      });
+      // step 9 end
+      if (txnError.clientErrorPayload) {
+        const p = txnError.clientErrorPayload;
+        return res.status(p.status || 400).json({
+          success: false,
+          message: "Purchase order delete rolled back",
+          ...p,
+          step_timings_ms: stepTimingsOnError,
+          txn_mode: txnMode,
+        });
+      }
+      const msg = String(txnError.message || "");
+      const is400 =
+        msg.includes("Insufficient warehouse inventory") ||
+        msg.includes("Validation failed") ||
+        msg.includes("company_id is required") ||
+        msg.includes("Purchase order not found");
+      return res.status(is400 ? 400 : 500).json({
+        success: false,
+        status: is400 ? 400 : 500,
+        error: "Purchase order delete rolled back",
+        details: txnError.message,
+        step_timings_ms: stepTimingsOnError,
+        txn_mode: txnMode,
+      });
+    }
+
+    const stepTimingsMs = poDeleteStepTimer.log("[purchase_order_delete]");
+
+    // step 8 start — success audit log (post-commit; no session)
+    await createApplicationLog(
+      req,
+      {
+        action: "Purchase order deleted",
+        url:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_order/purchase_order_delete",
+        tags: ["purchase_order", "delete", "soft_delete", "inventory"],
+        description: {
+          purchase_order_id: poId,
+          purchase_order_no: softDeletedPo?.purchase_order_no ?? null,
+          transaction_number: transactionNumber,
+          line_count: existingPoItems.length,
+          txn_mode: txnMode,
+          delete_snapshot: deleteSnapshot,
+          warehouse_inventory_updates: productStockUpdates.length,
+          wholesale_updates: wholesaleUpdates.length,
+          message: `Purchase order ${softDeletedPo?.purchase_order_no || poId} soft-deleted; inventory and GL reversed.`,
+        },
+        company_id: companyId,
+      },
+      { silent: true },
+    );
+    // step 8 end
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Purchase order deleted successfully",
+      data: {
+        ...softDeletedPo,
+        purchase_order_items: existingPoItems,
+        transaction_number: transactionNumber,
+      },
+      product_stock_updates: productStockUpdates,
+      wholesale_updates: wholesaleUpdates,
+      delete_snapshot: deleteSnapshot,
+      step_timings_ms: stepTimingsMs,
+      txn_mode: txnMode,
+    });
+  } catch (unexpectedError) {
+    if (poDeleteStepTimer) {
+      poDeleteStepTimer.log("[purchase_order_delete] unexpected —");
+    }
+    console.error("Purchase order delete unexpected error:", unexpectedError);
+    await logRollbackFailure(req, unexpectedError, {
+      action: "PURCHASE ORDER DELETE ROLLBACK",
+      tags: ["api", "purchase_order", "rollback", "delete", "unexpected"],
+      fallbackUrl: "/api/purchase_order/purchase_order_delete",
+      context: {
+        purchase_order_id: req.params?.id ?? null,
+        stage: "unexpected",
+      },
+    });
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: "Purchase order delete failed",
+      details: unexpectedError.message,
+      ...(poDeleteStepTimer ?
+        { step_timings_ms: poDeleteStepTimer.report() }
+      : {}),
+    });
+  }
+}
+
 module.exports = {
   purchaseOrderCreate,
   purchase_order_update,
+  purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
   // purchase_orderUpdate,

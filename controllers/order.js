@@ -736,7 +736,10 @@ async function applyOrderLineReplaceInventory({
       }
       const wid =
         findPriorWarehouseForProduct(oldMap, pid) ||
-        (defaultWarehouseId && mongoose.Types.ObjectId.isValid(defaultWarehouseId) ?
+        ((
+          defaultWarehouseId &&
+          mongoose.Types.ObjectId.isValid(defaultWarehouseId)
+        ) ?
           String(defaultWarehouseId).trim()
         : null);
       if (!wid) continue;
@@ -799,7 +802,13 @@ async function applyOrderLineReplaceInventory({
     warehouseIdStr = String(warehouseIdStr).trim();
     const key = warehouseStockKey(productIdStr, warehouseIdStr);
     newMap.set(key, roundMoney2((newMap.get(key) || 0) + lineQtyNum));
-    resolvedNewLines.push({ line, productIdStr, warehouseIdStr, lineQtyNum, unitCost });
+    resolvedNewLines.push({
+      line,
+      productIdStr,
+      warehouseIdStr,
+      lineQtyNum,
+      unitCost,
+    });
   }
 
   const productStockUpdates = [];
@@ -831,7 +840,9 @@ async function applyOrderLineReplaceInventory({
         });
       }
     } catch (whErr) {
-      const whMsg = String(whErr?.message || "Warehouse inventory update failed");
+      const whMsg = String(
+        whErr?.message || "Warehouse inventory update failed",
+      );
       const mapped = new Error(whMsg);
       mapped.clientErrorPayload = {
         success: false,
