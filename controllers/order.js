@@ -1136,6 +1136,173 @@ async function applyOrderOutboundLines({
   return productStockUpdates;
 }
 
+/**
+ * Delete / void order: restore warehouse qty and insert reversal `in` movements from prior `out` snapshot.
+ */
+async function applyOrderDeleteInventoryRestore({
+  oldOutMovements,
+  existingOrderItems,
+  orderId,
+  companyId,
+  companyIdOid,
+  req,
+  mongoSession = null,
+  logUrl = "/api/order/order_delete",
+}) {
+  const oldMap = buildOutboundQtyMapFromMovements(oldOutMovements);
+
+  if (oldMap.size === 0 && (existingOrderItems || []).length > 0) {
+    const defaultWarehouseId = resolveDefaultWarehouseId(req);
+    for (const item of existingOrderItems) {
+      const pid = item.product_id != null ? String(item.product_id).trim() : "";
+      const qty = Number(item.qty);
+      if (
+        !pid ||
+        !mongoose.Types.ObjectId.isValid(pid) ||
+        !Number.isFinite(qty) ||
+        qty <= 0
+      ) {
+        continue;
+      }
+      const wid =
+        findPriorWarehouseForProduct(oldMap, pid) ||
+        ((
+          defaultWarehouseId &&
+          mongoose.Types.ObjectId.isValid(defaultWarehouseId)
+        ) ?
+          String(defaultWarehouseId).trim()
+        : null);
+      if (!wid) continue;
+      const key = warehouseStockKey(pid, wid);
+      oldMap.set(key, roundMoney2((oldMap.get(key) || 0) + qty));
+    }
+  }
+
+  const priceByProduct = new Map();
+  for (const item of existingOrderItems || []) {
+    const pid = item.product_id != null ? String(item.product_id).trim() : "";
+    if (!pid || priceByProduct.has(pid)) continue;
+    const p = Number(item.price);
+    if (Number.isFinite(p) && p >= 0) {
+      priceByProduct.set(pid, p);
+    }
+  }
+
+  const productStockUpdates = [];
+  let reversalMovementsInserted = 0;
+
+  for (const [key, lineQtyNum] of oldMap.entries()) {
+    const [productIdStr, warehouseIdStr] = key.split(":");
+    const unitCost = Number(priceByProduct.get(productIdStr));
+    if (!Number.isFinite(unitCost) || unitCost < 0) {
+      throw new Error(
+        `Each order line needs a finite unit price (price) for inventory reversal (product ${productIdStr})`,
+      );
+    }
+
+    try {
+      const whChange = await WarehouseInventory.applyQuantityDelta({
+        productId: productIdStr,
+        warehouseId: warehouseIdStr,
+        companyId: companyIdOid || companyId,
+        qtyDelta: lineQtyNum,
+        userId: req.user?._id,
+        session: mongoSession,
+      });
+      if (whChange) {
+        productStockUpdates.push({
+          ...whChange,
+          source: "warehouse_inventory",
+          qty_delta_reason: "order_delete_restore",
+        });
+      }
+    } catch (whErr) {
+      const whMsg = String(
+        whErr?.message || "Warehouse inventory restore failed",
+      );
+      const mapped = new Error(whMsg);
+      mapped.clientErrorPayload = {
+        success: false,
+        status: 400,
+        error: "Warehouse inventory restore failed",
+        message: whMsg,
+        details: whMsg,
+        type: "validation",
+        product_id: productIdStr,
+        warehouse_id: warehouseIdStr,
+        qty_restore: lineQtyNum,
+      };
+      throw mapped;
+    }
+
+    const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
+    const bodyBeforeInventoryMovement = req.body;
+    const hadRouteParamId = Object.prototype.hasOwnProperty.call(
+      req.params,
+      "id",
+    );
+    const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+
+    req.body = {
+      product_id: productIdStr,
+      warehouse_id: warehouseIdStr,
+      quantity: lineQtyNum,
+      movement_type: "in",
+      unit_cost: unitCost,
+      total_cost: totalCostMovement,
+      reference_type: "order",
+      reference_id: orderId,
+      reference_name: "Order Delete",
+      company_id: companyIdOid || companyId,
+      status: "active",
+    };
+
+    try {
+      await insertInventoryMovementRecord(req, mongoSession);
+      reversalMovementsInserted += 1;
+    } catch (inventoryMovementErr) {
+      if (inventoryMovementErr.clientPayload) {
+        throwOrderCreateFromGenericFailure(
+          inventoryMovementErr.clientPayload,
+          "Inventory movement reversal for order delete failed",
+        );
+      }
+      throw inventoryMovementErr;
+    } finally {
+      req.body = bodyBeforeInventoryMovement;
+      if (hadRouteParamId) {
+        req.params.id = savedRouteParamId;
+      } else {
+        delete req.params.id;
+      }
+    }
+
+    const onHandAfter = await sumWarehouseInventoryQtyForProduct(
+      productIdStr,
+      companyIdOid || companyId,
+      mongoSession,
+    );
+    const alertResult = await evaluateProductStockAlert({
+      req,
+      productId: productIdStr,
+      companyId: companyIdOid || companyId,
+      onHand: onHandAfter,
+      pathQty: onHandAfter,
+      session: mongoSession,
+      logUrl,
+    });
+    if (!alertResult.success) {
+      throw new Error(
+        alertResult.message ||
+          alertResult.error ||
+          "Product stock alert check failed",
+      );
+    }
+  }
+
+  return { productStockUpdates, reversalMovementsInserted };
+}
+
 function normalizeOrderNumericFields(obj) {
   const out = { ...obj };
   for (const key of [
@@ -3063,6 +3230,357 @@ async function findTotalSalesByOrder(req, res) {
   }
 }
 
+/**
+ * DELETE /api/order/order_delete/:id — soft-delete order and reverse GL / outbound inventory.
+ *
+ * **Session:** Tries `withTransaction` first; on standalone mongod retries without a session.
+ *
+ * | Step | Collection              | Op                 | Notes |
+ * |------|-------------------------|--------------------|-------|
+ * |    0 | order, order_item, inventory_movements | read | Pre-txn validation + outbound snapshot |
+ * |    1 | order                   | update (soft)      | `status: inactive`, `deletedAt` |
+ * |    2 | transaction             | update (soft)      | By header `transaction_number` |
+ * |    3 | inventory_movements     | update (soft)      | Active rows for this order `reference_id` |
+ * |    4 | order_item              | update (soft)      | All active lines for this order |
+ * |    5 | warehouse_inventory, inventory_movements, logs | update / insert | Restore qty + `in` reversal per prior `out` |
+ * |    6 | logs                    | insert             | `createApplicationLog` — success |
+ * |    7 | logs                    | insert             | `logRollbackFailure` — failure |
+ */
+async function order_delete(req, res) {
+  const orderId = String(req.params?.id || "").trim();
+  if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid id",
+      details: "id must be a valid order ObjectId",
+      type: "invalid_id",
+    });
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      details: "Authenticated user must have company_id to delete an order",
+      type: "validation",
+    });
+  }
+
+  // step 0 — pre-txn read
+  const existingOrder = await Order.findOne({
+    _id: orderId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  }).lean();
+
+  if (!existingOrder) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `order with id "${orderId}" not found or already deleted`,
+      type: "not_found",
+    });
+  }
+
+  const transactionNumber = String(existingOrder.transaction_number ?? "").trim();
+
+  const existingOrderItems = await OrderItem.find({
+    order_id: orderId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const oldOutMovementsPreTxn = await InventoryMovements.find({
+    reference_type: "order",
+    reference_id: orderId,
+    movement_type: "out",
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  })
+    .select("product_id warehouse_id quantity")
+    .lean();
+
+  let clientSession = null;
+  let txnError = null;
+  /** @type {string|null} */
+  let orderDeleteExecutionMode = null;
+  let softDeletedOrder = null;
+  const productStockUpdates = [];
+  const deletedAt = new Date();
+  const userId = req.user?._id;
+  const deleteSnapshot = {
+    gl_rows_soft_deleted: 0,
+    movements_soft_deleted: 0,
+    items_soft_deleted: 0,
+    reversal_movements_inserted: 0,
+  };
+
+  /** @param {import("mongoose").ClientSession | null} mongoSession */
+  const runOrderDeleteBody = async (mongoSession) => {
+    const orderSoftDeleteFilter = {
+      _id: orderId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    };
+    const orderSoftDeleteSet = {
+      deletedAt,
+      status: "inactive",
+    };
+    if (userId) {
+      orderSoftDeleteSet.updated_by = userId;
+    }
+
+    // step 1 — soft-delete order header
+    softDeletedOrder = await Order.findOneAndUpdate(
+      orderSoftDeleteFilter,
+      { $set: orderSoftDeleteSet },
+      { new: true, ...orderSessionOpts(mongoSession) },
+    ).lean();
+    if (!softDeletedOrder) {
+      throw new Error("Order not found or already deleted");
+    }
+
+    // step 2 — soft-delete GL rows
+    const glSoftDelete = await softDeleteActiveGlByTransactionNumber({
+      transactionNumber,
+      mongoSession,
+      userId,
+    });
+    deleteSnapshot.gl_rows_soft_deleted = glSoftDelete.modifiedCount || 0;
+    if (deleteSnapshot.gl_rows_soft_deleted > 0) {
+      console.log(
+        "✅ Transaction rows soft-deleted:",
+        deleteSnapshot.gl_rows_soft_deleted,
+      );
+    }
+
+    // step 3 — snapshot outbound movements (in txn) then soft-delete movement rows
+    let movQuery = InventoryMovements.find({
+      reference_type: "order",
+      reference_id: orderId,
+      movement_type: "out",
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    }).select("product_id warehouse_id quantity");
+    if (mongoSession) movQuery = movQuery.session(mongoSession);
+    const oldOutMovementsInTxn = await movQuery.lean();
+    const oldOutMovements =
+      oldOutMovementsInTxn.length > 0 ?
+        oldOutMovementsInTxn
+      : oldOutMovementsPreTxn;
+
+    const movementSoftDelete =
+      await InventoryMovements.softDeleteActiveByReference({
+        referenceType: "order",
+        referenceId: orderId,
+        companyId,
+        session: mongoSession,
+        userId,
+      });
+    deleteSnapshot.movements_soft_deleted =
+      movementSoftDelete.modifiedCount || 0;
+    if (deleteSnapshot.movements_soft_deleted > 0) {
+      console.log(
+        "✅ Order inventory movement rows soft-deleted:",
+        deleteSnapshot.movements_soft_deleted,
+      );
+    }
+
+    // step 4 — soft-delete order_item rows
+    const itemSoftDeleteSet = {
+      deletedAt,
+      status: "inactive",
+    };
+    if (userId) {
+      itemSoftDeleteSet.updated_by = userId;
+    }
+    const itemSoftDelete = await OrderItem.updateMany(
+      {
+        order_id: orderId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      },
+      { $set: itemSoftDeleteSet },
+      orderSessionOpts(mongoSession),
+    );
+    deleteSnapshot.items_soft_deleted = itemSoftDelete.modifiedCount || 0;
+    if (deleteSnapshot.items_soft_deleted > 0) {
+      console.log(
+        "✅ Order line items soft-deleted:",
+        deleteSnapshot.items_soft_deleted,
+      );
+    }
+
+    // step 5 — restore warehouse_inventory + insert reversal `in` movements
+    const restoreResult = await applyOrderDeleteInventoryRestore({
+      oldOutMovements,
+      existingOrderItems,
+      orderId,
+      companyId,
+      companyIdOid: companyId,
+      req,
+      mongoSession,
+      logUrl: req.originalUrl || req.path || "/api/order/order_delete",
+    });
+    productStockUpdates.push(...restoreResult.productStockUpdates);
+    deleteSnapshot.reversal_movements_inserted =
+      restoreResult.reversalMovementsInserted;
+  };
+
+  // txn start — MongoDB transaction wrapper (or standalone retry)
+  try {
+    clientSession = await mongoose.startSession();
+    await clientSession.withTransaction(async () => {
+      await runOrderDeleteBody(clientSession);
+    });
+    orderDeleteExecutionMode = "mongodb_transaction_committed";
+  } catch (e) {
+    if (isMongoTransactionUnsupportedError(e)) {
+      if (clientSession) {
+        try {
+          clientSession.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+        clientSession = null;
+      }
+      console.warn(
+        "[order_delete] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
+      );
+      try {
+        softDeletedOrder = null;
+        productStockUpdates.length = 0;
+        deleteSnapshot.gl_rows_soft_deleted = 0;
+        deleteSnapshot.movements_soft_deleted = 0;
+        deleteSnapshot.items_soft_deleted = 0;
+        deleteSnapshot.reversal_movements_inserted = 0;
+        orderDeleteExecutionMode = "standalone_no_transaction_retry";
+        await runOrderDeleteBody(null);
+      } catch (e2) {
+        txnError = e2;
+        console.error(
+          "[order_delete] non-session retry failed:\n",
+          serializeErrorForLog(e2),
+        );
+      }
+    } else {
+      txnError = e;
+      orderDeleteExecutionMode = "mongodb_transaction_aborted";
+      console.error(
+        "[order_delete] withTransaction failed:\n",
+        serializeErrorForLog(e),
+      );
+    }
+  } finally {
+    if (clientSession) {
+      try {
+        clientSession.endSession();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  // txn end
+
+  // step 7 — failure path
+  if (txnError) {
+    await logRollbackFailure(req, txnError, {
+      action: "ORDER DELETE ROLLBACK",
+      tags: ["api", "order", "rollback", "delete"],
+      fallbackUrl: `/api/order/order_delete/${orderId}`,
+      context: {
+        execution_mode: orderDeleteExecutionMode,
+        rollback_note:
+          (
+            orderDeleteExecutionMode === "mongodb_transaction_aborted" ||
+            orderDeleteExecutionMode === "mongodb_transaction"
+          ) ?
+            "MongoDB multi-document transaction aborted; no partial commit from this attempt."
+          : "Standalone / no transaction: partial writes may exist if a step failed mid-flow.",
+        order_id: orderId,
+        order_no: existingOrder.order_no ?? null,
+        transaction_number: transactionNumber,
+        line_count: existingOrderItems.length,
+        delete_snapshot: deleteSnapshot,
+        api_client_error: txnError.clientErrorPayload ?? null,
+        error_message: String(txnError.message || ""),
+      },
+    });
+    if (
+      txnError.clientErrorPayload &&
+      typeof txnError.clientErrorPayload === "object"
+    ) {
+      const p = txnError.clientErrorPayload;
+      return res.status(Number(p.status) || 400).json({
+        success: false,
+        message: "Order delete rolled back",
+        ...p,
+        execution_mode: orderDeleteExecutionMode,
+      });
+    }
+    const msg = String(txnError.message || "");
+    const is400 =
+      msg.includes("Insufficient warehouse inventory") ||
+      msg.includes("Warehouse inventory restore failed") ||
+      msg.includes("Validation failed") ||
+      msg.includes("company_id is required") ||
+      msg.includes("Order not found");
+    return res.status(is400 ? 400 : 500).json({
+      success: false,
+      status: is400 ? 400 : 500,
+      error: "Order delete rolled back",
+      details: txnError.message,
+      execution_mode: orderDeleteExecutionMode,
+    });
+  }
+
+  // step 6 — success audit log
+  await createApplicationLog(
+    req,
+    {
+      action: "Order deleted",
+      url: req.originalUrl || req.path || "/api/order/order_delete",
+      tags: ["order", "delete", "soft_delete", "inventory"],
+      description: {
+        order_id: orderId,
+        order_no: softDeletedOrder?.order_no ?? existingOrder.order_no ?? null,
+        transaction_number: transactionNumber,
+        line_count: existingOrderItems.length,
+        execution_mode: orderDeleteExecutionMode,
+        delete_snapshot: deleteSnapshot,
+        warehouse_inventory_updates: productStockUpdates.length,
+        message: `Order ${softDeletedOrder?.order_no || orderId} soft-deleted; inventory and GL reversed.`,
+      },
+      company_id: companyId,
+    },
+    { silent: true },
+  );
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Order deleted successfully",
+    data: {
+      ...softDeletedOrder,
+      order_items: existingOrderItems,
+      transaction_number: transactionNumber,
+    },
+    product_stock_updates: productStockUpdates,
+    delete_snapshot: deleteSnapshot,
+    execution_mode: orderDeleteExecutionMode,
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -3070,6 +3588,7 @@ module.exports = {
   getOrderByOrderNo,
   order_save,
   order_update,
+  order_delete,
   getOrderByorderItem,
   findProfitByOrderItem,
   findSales,

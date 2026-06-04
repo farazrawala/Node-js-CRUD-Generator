@@ -57,6 +57,7 @@ const { expenseCreate, expenseUpdate } = require("../controllers/expense");
 const {
   order_save,
   order_update,
+  order_delete,
   getOrderByorderItem,
   getOrderByOrderNo,
   findProfitByOrderItem,
@@ -335,6 +336,7 @@ router.patch("/amount_transfer/update_record/:id", amountTransferUpdate);
 // Order routes
 router.post("/order/order_save", order_save);
 router.patch("/order/order_update/:id", order_update);
+router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/profit-by-order-item", findProfitByOrderItem);
 router.get(
