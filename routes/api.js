@@ -106,6 +106,13 @@ const {
   getPurchaseReturnByReturnNo,
 } = require("../controllers/purchase_return");
 const {
+  salesReturnCreate,
+  sales_return_update,
+  sales_return_delete,
+  getSalesReturnByReturnItem,
+  getSalesReturnByReturnNo,
+} = require("../controllers/sales_return");
+const {
   companyCreate,
   getMyBranches,
   removeCache,
@@ -238,6 +245,28 @@ router.get(
 router.get(
   "/purchase_return/get-purchase-return-by-return-no/:id",
   getPurchaseReturnByReturnNo,
+);
+
+router.post("/sales_return/sales_return_create", salesReturnCreate);
+router.patch(
+  "/sales_return/sales_return_update/:id",
+  sales_return_update,
+);
+router.delete(
+  "/sales_return/sales_return_delete/:id",
+  sales_return_delete,
+);
+router.get(
+  "/sales_return/get-sales-return-by-return-item",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_return/get-sales-return-by-return-item/:id",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_return/get-sales-return-by-return-no/:id",
+  getSalesReturnByReturnNo,
 );
 
 // Expense routes
@@ -451,6 +480,14 @@ registerAllModelRoutes(router, {
       excludedRoutes: [],
     },
     purchase_return_item: {
+      enabled: true,
+      excludedRoutes: [],
+    },
+    sales_return: {
+      enabled: true,
+      excludedRoutes: [],
+    },
+    sales_return_item: {
       enabled: true,
       excludedRoutes: [],
     },

@@ -8,6 +8,7 @@ const TRANSACTION_REFERENCE_MODULES = [
   "order",
   "purchase_order",
   "purchase_return",
+  "sales_return",
   "payment_receipt",
   "expense",
   "assets",
