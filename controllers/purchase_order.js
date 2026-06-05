@@ -817,7 +817,9 @@ async function teardownPurchaseOrderForLineReplace({
 }) {
   const poIdStr = String(purchaseOrderId ?? "").trim();
   if (!mongoose.Types.ObjectId.isValid(poIdStr)) {
-    throw new Error("Valid purchase_order id is required for line replace teardown");
+    throw new Error(
+      "Valid purchase_order id is required for line replace teardown",
+    );
   }
 
   const transactions = await softDeleteActiveGlByTransactionNumber({
@@ -2282,7 +2284,6 @@ async function purchase_order_update(req, res) {
   // steps 14–15 complete — 200 response
 }
 
-
 /**
  * Soft-delete a purchase order and reverse inventory / GL effects.
  *
@@ -2354,7 +2355,9 @@ async function purchase_order_delete(req, res) {
       });
     }
 
-    const transactionNumber = String(existingPo.transaction_number ?? "").trim();
+    const transactionNumber = String(
+      existingPo.transaction_number ?? "",
+    ).trim();
 
     const existingPoItems = await PurchaseOrderItem.find({
       purchase_order_id: poId,
@@ -2400,10 +2403,7 @@ async function purchase_order_delete(req, res) {
       }
 
       // step 1 start — soft-delete purchase_order header
-      const endStep1 = poDeleteStepTimer.start(
-        1,
-        "purchase_order soft-delete",
-      );
+      const endStep1 = poDeleteStepTimer.start(1, "purchase_order soft-delete");
       softDeletedPo = await PurchaseOrder.findOneAndUpdate(
         poSoftDeleteFilter,
         { $set: poSoftDeleteSet },
@@ -2573,16 +2573,15 @@ async function purchase_order_delete(req, res) {
         "warehouse_inventory reverse (reverseLines)",
         { line_count: existingPoItems.length },
       );
-      const stockReconcile = await WarehouseInventory.applyStockChangesFromLines(
-        {
+      const stockReconcile =
+        await WarehouseInventory.applyStockChangesFromLines({
           reverseLines: existingPoItems,
           inboundLines: [],
           savedLineItemRows: [],
           companyId,
           session: mongoSession,
           userId,
-        },
-      );
+        });
       for (const row of stockReconcile || []) {
         productStockUpdates.push({ ...row, source: "warehouse_inventory" });
       }

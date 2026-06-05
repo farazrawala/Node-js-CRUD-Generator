@@ -95,13 +95,13 @@ async function assertVendorUserMatchesCompany(vendorId, companyId) {
   return null;
 }
 
-/** Source PO must exist, not be deleted, and match tenant `company_id`. */
+/** When set, source PO must exist, not be deleted, and match tenant `company_id`. */
 async function assertPurchaseOrderRefMatchesCompany(
   purchaseOrderId,
   companyId,
 ) {
   if (!purchaseOrderId) {
-    return "purchase_order_id is required";
+    return null;
   }
   if (!companyId) {
     return "company_id is required";
@@ -125,7 +125,7 @@ async function assertPurchaseOrderRefMatchesCompany(
 const RETURN_STATUS_VALUES = ["drafted", "pending", "completed", "cancelled"];
 
 /**
- * Purchase return header — mirrors PO money fields; links to source `purchase_order_id`.
+ * Purchase return header — mirrors PO money fields; optional link to `purchase_order_id`.
  * Document number: `purchase_return_no` (`PR-####`). Line rows: `purchase_return_item`.
  */
 const modelSchema = new mongoose.Schema(
@@ -134,6 +134,13 @@ const modelSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Vendor",
+    },
+
+    /** Optional link to source purchase order (validated only when provided). */
+    purchase_order_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "purchase_order",
+      field_name: "Purchase Order",
     },
 
     /** Denormalized from source PO for lists/reports (optional on create). */

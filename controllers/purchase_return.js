@@ -3,7 +3,10 @@ const PurchaseReturn = require("../models/purchase_return");
 const PurchaseReturnItem = require("../models/purchase_return_item");
 require("../models/purchase_order");
 const Product = require("../models/product");
+const WarehouseInventory = require("../models/warehouse_inventory");
 
+const Account = require("../models/account");
+const Company = require("../models/company");
 const Transaction = require("../models/transaction");
 const InventoryMovements = require("../models/inventory_movements");
 
@@ -11,6 +14,7 @@ const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
 const { logRollbackFailure } = require("../utils/logControllerError");
+const { createApplicationLog } = require("../utils/applicationLogs");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   handleGenericCreate,
@@ -18,8 +22,12 @@ const {
   handleGenericGetAll,
   coalesceObjectId,
   buildPopulateFromQuery,
+  activeNotDeletedCriteria,
 } = require("../utils/modelHelper");
-const { insertInventoryMovementRecord } = require("./inventory_movements");
+const {
+  insertInventoryMovementRecord,
+  syncProductStockFromMovementLedger,
+} = require("./inventory_movements");
 const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
@@ -65,6 +73,228 @@ const PURCHASE_RETURN_GL_LINE_META = [
   },
 ];
 
+/** Legacy tenants: resolve GL ids by signup COA name when `company.default_*` was never set. */
+const PR_GL_ACCOUNT_NAME_FALLBACKS = {
+  default_purchase_account: /^purchase$/i,
+  default_shipping_account: /^shipping$/i,
+  default_purchase_discount_account: /^purchase discount$/i,
+  default_cash_account: /^cash$/i,
+  default_account_payable_account: /^accounts payable$/i,
+};
+
+const PR_GL_ACCOUNT_TYPE_FALLBACKS = {
+  default_purchase_account: "cost_of_goods_sold_account",
+  default_shipping_account: "operating_expense",
+  default_purchase_discount_account: "other",
+  default_cash_account: "current_asset",
+  default_account_payable_account: "current_liability",
+};
+
+function pickObjectId(value) {
+  return coalesceObjectId(value);
+}
+
+function activeAccountFilter(companyId) {
+  return {
+    company_id: companyId,
+    status: "active",
+    ...activeNotDeletedCriteria(),
+  };
+}
+
+async function findCompanyAccountByName(
+  companyId,
+  namePattern,
+  session = null,
+) {
+  let q = Account.findOne({
+    ...activeAccountFilter(companyId),
+    name: namePattern,
+  })
+    .select("_id name")
+    .sort({ createdAt: 1 });
+  if (session) q = q.session(session);
+  return q.lean();
+}
+
+async function findCompanyAccountByType(
+  companyId,
+  accountType,
+  session = null,
+) {
+  let q = Account.findOne({
+    ...activeAccountFilter(companyId),
+    account_type: accountType,
+  })
+    .select("_id name")
+    .sort({ createdAt: 1 });
+  if (session) q = q.session(session);
+  return q.lean();
+}
+
+async function resolveOneCompanyGlAccount(
+  companyId,
+  field,
+  companyDoc,
+  session = null,
+) {
+  const fromCompany = pickObjectId(companyDoc?.[field]);
+  if (fromCompany && mongoose.Types.ObjectId.isValid(String(fromCompany))) {
+    return fromCompany;
+  }
+
+  const namePattern = PR_GL_ACCOUNT_NAME_FALLBACKS[field];
+  if (namePattern) {
+    const byName = await findCompanyAccountByName(
+      companyId,
+      namePattern,
+      session,
+    );
+    if (byName?._id) return pickObjectId(byName._id);
+  }
+
+  const accountType = PR_GL_ACCOUNT_TYPE_FALLBACKS[field];
+  if (accountType) {
+    const byType = await findCompanyAccountByType(
+      companyId,
+      accountType,
+      session,
+    );
+    if (byType?._id) return pickObjectId(byType._id);
+  }
+
+  return null;
+}
+
+/**
+ * Resolve five company GL account ids for PR postings. Heals missing `company.default_*`
+ * from signup COA names/types when found (same pattern as adjustment create).
+ */
+async function resolvePurchaseReturnGlAccounts(orderReq, session = null) {
+  const companyDoc = orderReq?.user?.company_id;
+  const companyId = pickObjectId(companyDoc);
+  if (!companyId) {
+    const err = new Error(
+      "company_id is required for purchase return GL postings",
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const resolved = {};
+  const patch = {};
+  for (const meta of PURCHASE_RETURN_GL_LINE_META) {
+    const field = meta.companyAccountField;
+    if (!field) continue;
+    const id = await resolveOneCompanyGlAccount(
+      companyId,
+      field,
+      companyDoc,
+      session,
+    );
+    resolved[field] = id;
+    if (id && !pickObjectId(companyDoc?.[field])) {
+      patch[field] = id;
+    }
+  }
+
+  if (Object.keys(patch).length) {
+    await Company.updateOne(
+      { _id: companyId },
+      { $set: patch },
+      session ? { session } : {},
+    );
+    if (companyDoc && typeof companyDoc === "object") {
+      for (const [key, value] of Object.entries(patch)) {
+        companyDoc[key] = value;
+      }
+    }
+  }
+
+  const missing = PURCHASE_RETURN_GL_LINE_META.filter(
+    (meta) => meta.companyAccountField && !resolved[meta.companyAccountField],
+  ).map((meta) => `company.${meta.companyAccountField}`);
+
+  if (missing.length) {
+    const err = new Error(
+      `Configure company default GL accounts (${missing.join(", ")}). ` +
+        "Create chart-of-accounts rows or set defaults on the company record.",
+    );
+    err.statusCode = 400;
+    err.details = { missing_company_fields: missing };
+    throw err;
+  }
+
+  return resolved;
+}
+
+/** Five GL rows for create/update — order must match PURCHASE_RETURN_GL_LINE_META. */
+function buildPurchaseReturnGlTransactionItems(
+  record,
+  transaction_number,
+  remainingAmount,
+  glAccounts,
+) {
+  return [
+    {
+      account_id: glAccounts.default_purchase_account,
+      type: "credit",
+      amount: record?.lines_subtotal ?? 0,
+      reference_user_id: record?.vendor_id,
+      transaction_number,
+      description: "Purchase Return",
+      reference_id: {
+        module: "purchase_return",
+        ref_id: record._id,
+      },
+    },
+    {
+      account_id: glAccounts.default_shipping_account,
+      type: "credit",
+      amount: record?.shipment ?? 0,
+      reference_user_id: record?.vendor_id,
+      transaction_number,
+      description: "Purchase Shipment",
+      reference_id: {
+        module: "purchase_return",
+        ref_id: record._id,
+      },
+    },
+    {
+      account_id: glAccounts.default_purchase_discount_account,
+      type: "debit",
+      amount: record?.discount ?? 0,
+      reference_user_id: record?.vendor_id,
+      transaction_number,
+      description: "Purchase Discount",
+    },
+    {
+      account_id: record?.payment_method_accounts_id,
+      type: "debit",
+      amount: record?.amount_paid ?? 0,
+      reference_user_id: record?.vendor_id,
+      transaction_number,
+      description: "Mode of Payment",
+      reference_id: {
+        module: "purchase_return",
+        ref_id: record._id,
+      },
+    },
+    {
+      account_id: glAccounts.default_account_payable_account,
+      type: "debit",
+      amount: remainingAmount || 0,
+      reference_user_id: record?.vendor_id,
+      transaction_number,
+      description: "A/c Payable",
+      reference_id: {
+        module: "purchase_return",
+        ref_id: record._id,
+      },
+    },
+  ];
+}
+
 /** Human-readable hint for API errors: which company / body fields to set for a failed GL row. */
 function purchaseReturnGlLineFixHint(meta) {
   if (!meta) {
@@ -99,6 +329,8 @@ function enrichPurchaseReturnGlFailures(failed) {
       gl_line_description: meta?.description ?? `GL row ${idx}`,
       missing_fields: missing,
       where_to_fix: purchaseReturnGlLineFixHint(meta),
+      message: f.message,
+      error: f.error,
     };
   });
 }
@@ -110,7 +342,12 @@ function formatPurchaseReturnGlBulkErrorMessage(enriched) {
       e.missing_fields?.length ?
         ` — missing: ${e.missing_fields.join(", ")}`
       : "";
-    return `index ${e.gl_line_index} «${e.gl_line_description}»${miss}. ${e.where_to_fix}`;
+    const reason =
+      e.message && e.message !== e.error ? ` — ${e.message}`
+      : e.error && !String(e.error).startsWith("Post-purchase_return") ?
+        ` — ${e.error}`
+      : "";
+    return `index ${e.gl_line_index} «${e.gl_line_description}»${miss}${reason}. ${e.where_to_fix}`;
   });
   return `Post-purchase_return transaction bulk insert failed. ${lines.join(" | ")}`;
 }
@@ -188,6 +425,7 @@ function clientErrorFromGenericResponse(response, fallbackError) {
       success: false,
       status: 500,
       error: fallbackError || "Request failed",
+      message: fallbackError || "Request failed",
     };
   }
   const status = response.status || 400;
@@ -202,14 +440,45 @@ function clientErrorFromGenericResponse(response, fallbackError) {
   if (response.missing != null) out.missing = response.missing;
   if (response.required != null) out.required = response.required;
   if (response.received != null) out.received = response.received;
+
+  if (!out.message) {
+    if (Array.isArray(out.details) && out.details.length) {
+      out.message = out.details
+        .map((d) =>
+          typeof d === "string" ? d
+          : d?.field ? `${d.field}: ${d.message}`
+          : String(d?.message ?? d),
+        )
+        .filter(Boolean)
+        .join("; ");
+    } else if (typeof out.details === "string" && out.details.trim()) {
+      out.message = out.details.trim();
+    } else if (Array.isArray(out.missing) && out.missing.length) {
+      out.message = `Missing required fields: ${out.missing.join(", ")}`;
+    }
+  }
+  if (!out.message) {
+    out.message = out.error;
+  }
+
   return out;
 }
 
 /** Prefer validation `details` / `missing` strings for thrown Error.message (retry detection looks at message too). */
 function logMessageFromGenericFailure(response, fallbackError) {
   const r = response || {};
+  if (typeof r.message === "string" && r.message.trim()) {
+    return r.message.trim();
+  }
   if (Array.isArray(r.details) && r.details.length) {
-    return r.details.join("; ");
+    return r.details
+      .map((d) =>
+        typeof d === "string" ? d
+        : d?.field ? `${d.field}: ${d.message}`
+        : String(d?.message ?? d),
+      )
+      .filter(Boolean)
+      .join("; ");
   }
   if (Array.isArray(r.missing) && r.missing.length) {
     return `Missing required fields: ${r.missing.join(", ")}`;
@@ -675,6 +944,361 @@ function sessionOpts(sess) {
   return sess ? { session: sess } : {};
 }
 
+/** Soft-delete active GL rows for one `transaction_number` (PR update / delete). */
+async function softDeleteActiveGlByTransactionNumber({
+  transactionNumber,
+  mongoSession = null,
+  userId = null,
+}) {
+  const txnNo = String(transactionNumber ?? "").trim();
+  if (!txnNo) {
+    return { modifiedCount: 0, matchedCount: 0 };
+  }
+
+  const $set = {
+    deletedAt: new Date(),
+    status: "inactive",
+  };
+  const userIdStr = String(userId ?? "").trim();
+  if (userId != null && mongoose.Types.ObjectId.isValid(userIdStr)) {
+    $set.updated_by =
+      userId instanceof mongoose.Types.ObjectId ?
+        userId
+      : new mongoose.Types.ObjectId(userIdStr);
+  }
+
+  return Transaction.updateMany(
+    {
+      transaction_number: txnNo,
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    },
+    { $set },
+    sessionOpts(mongoSession),
+  );
+}
+
+function resolveDefaultWarehouseId(req) {
+  const co = req?.user?.company_id;
+  if (!co || typeof co !== "object") return null;
+  return coalesceObjectId(co.warehouse_id);
+}
+
+function warehouseStockKey(productId, warehouseId) {
+  return `${String(productId).trim()}:${String(warehouseId).trim()}`;
+}
+
+function buildOutboundQtyMapFromMovements(movements) {
+  const map = new Map();
+  for (const mov of movements || []) {
+    const pid = mov.product_id != null ? String(mov.product_id).trim() : "";
+    const wid = mov.warehouse_id != null ? String(mov.warehouse_id).trim() : "";
+    const qty = Number(mov.quantity);
+    if (
+      !pid ||
+      !mongoose.Types.ObjectId.isValid(pid) ||
+      !wid ||
+      !mongoose.Types.ObjectId.isValid(wid) ||
+      !Number.isFinite(qty) ||
+      qty <= 0
+    ) {
+      continue;
+    }
+    const key = warehouseStockKey(pid, wid);
+    map.set(key, Math.round(((map.get(key) || 0) + qty) * 100) / 100);
+  }
+  return map;
+}
+
+function findPriorWarehouseForProduct(oldMap, productIdStr) {
+  const prefix = `${String(productIdStr).trim()}:`;
+  for (const key of oldMap.keys()) {
+    if (key.startsWith(prefix)) return key.split(":")[1];
+  }
+  return null;
+}
+
+/**
+ * Delete / void purchase return: restore warehouse qty and insert reversal `in` movements
+ * from prior `out` snapshot (mirrors order delete — PR create posts outbound stock).
+ */
+async function applyPurchaseReturnDeleteInventoryRestore({
+  oldOutMovements,
+  existingReturnItems,
+  purchaseReturnId,
+  companyId,
+  req,
+  mongoSession = null,
+  logUrl = "/api/purchase_return/purchase_return_delete",
+}) {
+  const oldMap = buildOutboundQtyMapFromMovements(oldOutMovements);
+
+  if (oldMap.size === 0 && (existingReturnItems || []).length > 0) {
+    const defaultWarehouseId = resolveDefaultWarehouseId(req);
+    for (const item of existingReturnItems) {
+      const pid = item.product_id != null ? String(item.product_id).trim() : "";
+      const qty = Number(item.qty);
+      if (
+        !pid ||
+        !mongoose.Types.ObjectId.isValid(pid) ||
+        !Number.isFinite(qty) ||
+        qty <= 0
+      ) {
+        continue;
+      }
+      const wid =
+        item.warehouse_id != null &&
+        mongoose.Types.ObjectId.isValid(String(item.warehouse_id).trim()) ?
+          String(item.warehouse_id).trim()
+        : findPriorWarehouseForProduct(oldMap, pid) ||
+          ((
+            defaultWarehouseId &&
+            mongoose.Types.ObjectId.isValid(String(defaultWarehouseId))
+          ) ?
+            String(defaultWarehouseId).trim()
+          : null);
+      if (!wid) continue;
+      const key = warehouseStockKey(pid, wid);
+      oldMap.set(key, Math.round(((oldMap.get(key) || 0) + qty) * 100) / 100);
+    }
+  }
+
+  const priceByProduct = new Map();
+  for (const item of existingReturnItems || []) {
+    const pid = item.product_id != null ? String(item.product_id).trim() : "";
+    if (!pid || priceByProduct.has(pid)) continue;
+    const p = Number(item.price);
+    if (Number.isFinite(p) && p >= 0) {
+      priceByProduct.set(pid, p);
+    }
+  }
+
+  const productStockUpdates = [];
+  let reversalMovementsInserted = 0;
+
+  for (const [key, lineQtyNum] of oldMap.entries()) {
+    const [productIdStr, warehouseIdStr] = key.split(":");
+    const unitCost = Number(priceByProduct.get(productIdStr));
+    if (!Number.isFinite(unitCost) || unitCost < 0) {
+      throw new Error(
+        `Each return line needs a finite unit price (price) for inventory reversal (product ${productIdStr})`,
+      );
+    }
+
+    try {
+      const whChange = await WarehouseInventory.applyQuantityDelta({
+        productId: productIdStr,
+        warehouseId: warehouseIdStr,
+        companyId,
+        qtyDelta: lineQtyNum,
+        userId: req.user?._id,
+        session: mongoSession,
+      });
+      if (whChange) {
+        productStockUpdates.push({
+          ...whChange,
+          source: "warehouse_inventory",
+          qty_delta_reason: "purchase_return_delete_restore",
+        });
+      }
+    } catch (whErr) {
+      const whMsg = String(
+        whErr?.message || "Warehouse inventory restore failed",
+      );
+      const mapped = new Error(whMsg);
+      mapped.clientErrorPayload = {
+        success: false,
+        status: 400,
+        error: "Warehouse inventory restore failed",
+        message: whMsg,
+        details: whMsg,
+        type: "validation",
+        product_id: productIdStr,
+        warehouse_id: warehouseIdStr,
+        qty_restore: lineQtyNum,
+      };
+      throw mapped;
+    }
+
+    await insertPurchaseReturnOutboundMovement(req, {
+      productId: productIdStr,
+      warehouseId: warehouseIdStr,
+      quantity: lineQtyNum,
+      unitCost,
+      referenceId: purchaseReturnId,
+      referenceName: "Purchase Return Delete",
+      companyId,
+      mongoSession,
+      movementType: "in",
+    });
+    reversalMovementsInserted += 1;
+  }
+
+  const summary = summarizeLineStockByProduct(existingReturnItems || []);
+  for (const [productIdStr, info] of summary) {
+    if (info.hasWarehouseLine) {
+      const syncResult = await syncProductStockFromMovementLedger(
+        productIdStr,
+        companyId,
+        { req, mongoSession, logUrl },
+      );
+      if (!syncResult.success) {
+        throw new Error(
+          syncResult.message ||
+            syncResult.error ||
+            "Product stock sync from ledger failed",
+        );
+      }
+      productStockUpdates.push({
+        product_id: productIdStr,
+        source: "ledger_sync",
+        previous_stock: syncResult.product?.previous_stock,
+        stock: syncResult.product?.stock,
+        qty_in: syncResult.qty_in,
+        qty_out: syncResult.qty_out,
+        warehouses: syncResult.warehouses,
+      });
+    }
+    if (info.qtyWithoutWarehouse > 0) {
+      const bump = await incrementProductStockForReturnLineDelete({
+        productId: productIdStr,
+        lineQty: info.qtyWithoutWarehouse,
+        companyId,
+        mongoSession,
+      });
+      productStockUpdates.push({ ...bump, source: "product_stock_restore" });
+    }
+  }
+
+  return { productStockUpdates, reversalMovementsInserted };
+}
+
+async function insertPurchaseReturnOutboundMovement(
+  req,
+  {
+    productId,
+    warehouseId,
+    quantity,
+    unitCost,
+    referenceId,
+    referenceName,
+    companyId,
+    mongoSession,
+    movementType = "out",
+  },
+) {
+  const allocQty = Number(quantity);
+  const totalCostMovement = Math.round(allocQty * unitCost * 100) / 100;
+  const bodyBeforeInventoryMovement = req.body;
+  const hadRouteParamId = Object.prototype.hasOwnProperty.call(
+    req.params,
+    "id",
+  );
+  const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+
+  req.body = {
+    product_id: String(productId).trim(),
+    warehouse_id: String(warehouseId).trim(),
+    quantity: allocQty,
+    movement_type: movementType,
+    unit_cost: unitCost,
+    total_cost: totalCostMovement,
+    reference_type: "purchase_return",
+    reference_id: referenceId,
+    reference_name: referenceName,
+    company_id: companyId,
+    status: "active",
+  };
+
+  try {
+    await insertInventoryMovementRecord(req, mongoSession);
+  } finally {
+    req.body = bodyBeforeInventoryMovement;
+    if (hadRouteParamId) {
+      req.params.id = savedRouteParamId;
+    } else {
+      delete req.params.id;
+    }
+  }
+}
+
+/**
+ * Outbound return line: subtract across warehouses (preferred line warehouse first),
+ * then one inventory_movements `out` row per warehouse chunk.
+ */
+async function applyPurchaseReturnOutboundForLine({
+  line,
+  referenceId,
+  referenceName = "Purchase Return",
+  companyId,
+  req,
+  mongoSession = null,
+}) {
+  const productIdStr = String(line.product_id ?? "").trim();
+  const lineQtyNum = Number(line.qty);
+  const unitCost = Number(line.price);
+
+  if (
+    !productIdStr ||
+    !mongoose.Types.ObjectId.isValid(productIdStr) ||
+    !Number.isFinite(lineQtyNum) ||
+    lineQtyNum <= 0
+  ) {
+    throw new Error(
+      "Each purchase return line needs a valid product_id and positive qty",
+    );
+  }
+  if (!Number.isFinite(unitCost) || unitCost < 0) {
+    throw new Error(
+      "Each return line needs a finite unit price (price) and positive quantity for inventory movement",
+    );
+  }
+
+  const preferredRaw =
+    line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+  const preferredWarehouseId =
+    preferredRaw && mongoose.Types.ObjectId.isValid(preferredRaw) ?
+      preferredRaw
+    : null;
+
+  let allocations;
+  let stockChanges;
+  try {
+    ({ allocations, stockChanges } =
+      await WarehouseInventory.applySplitWarehouseOutbound({
+        productId: productIdStr,
+        companyId,
+        qtyNeeded: lineQtyNum,
+        preferredWarehouseId,
+        userId: req.user?._id,
+        session: mongoSession,
+      }));
+  } catch (err) {
+    if (err.clientPayload) {
+      throwWithGenericFailure(
+        err.clientPayload,
+        "Insufficient stock for purchase return line",
+      );
+    }
+    throw err;
+  }
+
+  for (const alloc of allocations) {
+    await insertPurchaseReturnOutboundMovement(req, {
+      productId: productIdStr,
+      warehouseId: alloc.warehouse_id,
+      quantity: alloc.quantity,
+      unitCost,
+      referenceId,
+      referenceName,
+      companyId,
+      mongoSession,
+    });
+  }
+
+  return stockChanges;
+}
+
 /**
  * Per `product_id` on return lines: any warehouse line (ledger path) and qty on lines without warehouse.
  * @param {object[]} lines Parsed return line payloads
@@ -890,6 +1514,66 @@ async function decrementProductStockForReturnLine({
     previous_stock: previousStock,
     stock: nextStock,
     qty_removed: qtyToRemove,
+  };
+}
+
+/** Inverse of `decrementProductStockForReturnLine` — restore qty when voiding a return. */
+async function incrementProductStockForReturnLineDelete({
+  productId,
+  lineQty,
+  companyId,
+  mongoSession = null,
+}) {
+  const pid = coalesceObjectId(productId);
+  const cid = coalesceObjectId(companyId);
+  if (!pid || !mongoose.Types.ObjectId.isValid(String(pid))) {
+    throw new Error("Valid product_id is required to update product stock");
+  }
+  if (!cid || !mongoose.Types.ObjectId.isValid(String(cid))) {
+    throw new Error("company_id is required to update product stock");
+  }
+
+  const qtyToAdd = Number(lineQty);
+  if (!Number.isFinite(qtyToAdd) || qtyToAdd <= 0) {
+    throw new Error(
+      "Each purchase return line needs a positive quantity to restore product stock",
+    );
+  }
+
+  let productQuery = Product.findOne({
+    _id: pid,
+    company_id: cid,
+    status: "active",
+    deletedAt: null,
+  }).select("stock product_name");
+  if (mongoSession) {
+    productQuery = productQuery.session(mongoSession);
+  }
+  const productDoc = await productQuery.lean();
+  if (!productDoc) {
+    throw new Error(`Product not found for stock update (id ${String(pid)})`);
+  }
+
+  const previousStock = Number(productDoc.stock) || 0;
+  const nextStock = Math.round((previousStock + qtyToAdd) * 100) / 100;
+
+  const updateOpts = mongoSession ? { session: mongoSession } : {};
+  const updated = await Product.findOneAndUpdate(
+    { _id: pid, company_id: cid, status: "active", deletedAt: null },
+    { $set: { stock: nextStock } },
+    { new: true, ...updateOpts },
+  ).lean();
+
+  if (!updated) {
+    throw new Error(`Failed to update product stock (id ${String(pid)})`);
+  }
+
+  return {
+    product_id: pid,
+    product_name: productDoc.product_name,
+    previous_stock: previousStock,
+    stock: nextStock,
+    qty_restored: qtyToAdd,
   };
 }
 
@@ -1126,6 +1810,17 @@ async function purchaseReturnCreate(req, res) {
      * @param {object | null} mongoSession Mongoose client session when in a transaction; null on standalone mongod.
      */
     const runPurchaseReturnCreateBody = async (mongoSession) => {
+      const prGlAccounts = await resolvePurchaseReturnGlAccounts(
+        req,
+        mongoSession,
+      );
+      if (
+        !req.body.payment_method_accounts_id &&
+        prGlAccounts.default_cash_account
+      ) {
+        req.body.payment_method_accounts_id = prGlAccounts.default_cash_account;
+      }
+
       // step 1 start — purchase_order insert
       let step1Closed = false;
       let endStep1 = () => {};
@@ -1148,68 +1843,12 @@ async function purchaseReturnCreate(req, res) {
             const endStep2 = prStepTimer.start(2, "transaction insert ×5 (GL)");
             const { created, failed } = await transactionBulkCreate(
               orderReq,
-              [
-                // [0]–[4] must stay aligned with PURCHASE_RETURN_GL_LINE_META for error messages.
-                {
-                  account_id: orderReq.user.company_id.default_purchase_account,
-                  type: "credit",
-                  amount: record?.lines_subtotal ?? 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Purchase Return",
-                  reference_id: {
-                    module: "purchase_return",
-                    ref_id: record._id,
-                  },
-                },
-
-                {
-                  account_id: orderReq.user.company_id.default_shipping_account,
-                  type: "credit",
-                  amount: record?.shipment ?? 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Purchase Shipment",
-                  reference_id: {
-                    module: "purchase_return",
-                    ref_id: record._id,
-                  },
-                },
-                {
-                  account_id:
-                    orderReq.user.company_id.default_purchase_discount_account,
-                  type: "debit",
-                  amount: record?.discount ?? 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Purchase Discount",
-                },
-                {
-                  account_id: record?.payment_method_accounts_id,
-                  type: "debit",
-                  amount: record?.amount_paid ?? 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "Mode of Payment",
-                  reference_id: {
-                    module: "purchase_return",
-                    ref_id: record._id,
-                  },
-                },
-                {
-                  account_id:
-                    orderReq.user.company_id.default_account_payable_account,
-                  type: "debit",
-                  amount: req.body?.remaining_amount || 0,
-                  reference_user_id: record?.vendor_id,
-                  transaction_number,
-                  description: "A/c Payable",
-                  reference_id: {
-                    module: "purchase_return",
-                    ref_id: record._id,
-                  },
-                },
-              ],
+              buildPurchaseReturnGlTransactionItems(
+                record,
+                transaction_number,
+                req.body?.remaining_amount,
+                prGlAccounts,
+              ),
               { stopOnError: true, session: sess },
             );
             try {
@@ -1302,76 +1941,38 @@ async function purchaseReturnCreate(req, res) {
       persistedLineItems.push(...insertedLineDocs);
       // step 5 end
 
-      // step 6–11 start — inventory movement txn per line with warehouse_id
+      // step 6–11 start — warehouse_inventory outbound + inventory_movements per line
       for (
         let lineIndex = 0;
         lineIndex < lineItemsFromClient.length;
         lineIndex++
       ) {
         const line = lineItemsFromClient[lineIndex];
-        const productIdStr = String(line.product_id).trim();
-        const lineQtyNum = Number(line.qty);
-        const warehouseIdStr =
-          line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-
-        if (warehouseIdStr && mongoose.Types.ObjectId.isValid(warehouseIdStr)) {
-          const unitCost = Number(line.price);
-          if (!Number.isFinite(unitCost) || unitCost < 0) {
-            throw new Error(
-              "Each return line with a warehouse needs a finite unit price (price) and positive quantity for inventory movement",
+        const endSteps611 = prStepTimer.start(
+          6,
+          "warehouse outbound + inventory_movements",
+          { line_index: lineIndex },
+        );
+        try {
+          const stockChanges = await applyPurchaseReturnOutboundForLine({
+            line,
+            referenceId: newPurchaseReturnId,
+            referenceName: "Purchase Return",
+            companyId,
+            req,
+            mongoSession,
+          });
+          productStockUpdates.push(...stockChanges);
+        } catch (inventoryMovementErr) {
+          if (inventoryMovementErr.clientPayload) {
+            throwWithGenericFailure(
+              inventoryMovementErr.clientPayload,
+              "Inventory movement for purchase return failed",
             );
           }
-          const totalCostMovement =
-            Math.round(lineQtyNum * unitCost * 100) / 100;
-
-          // `insertInventoryMovementRecord` → `handleGenericCreate`; uses the real Express `req`
-          // (e.g. `req.get("Content-Type")`, `req.get("host")` for URLs). Use the live `req` and
-          // restore `body` / `params.id` afterward; the helper temporarily overwrites `req.params.id`.
-          const bodyBeforeInventoryMovement = req.body;
-          const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-            req.params,
-            "id",
-          );
-          const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-          req.body = {
-            product_id: String(line.product_id).trim(),
-            warehouse_id: warehouseIdStr,
-            quantity: lineQtyNum,
-            movement_type: "out",
-            unit_cost: unitCost,
-            total_cost: totalCostMovement,
-            reference_type: "purchase_return",
-            reference_id: newPurchaseReturnId,
-            reference_name: "Purchase Return",
-            company_id: companyId,
-            status: "active",
-          };
-
-          const endSteps611 = prStepTimer.start(
-            6,
-            "inventory movement txn (steps 6–11)",
-            { line_index: lineIndex, warehouse_id: warehouseIdStr },
-          );
-          try {
-            await insertInventoryMovementRecord(req, mongoSession);
-          } catch (inventoryMovementErr) {
-            if (inventoryMovementErr.clientPayload) {
-              throwWithGenericFailure(
-                inventoryMovementErr.clientPayload,
-                "Inventory movement for purchase return failed",
-              );
-            }
-            throw inventoryMovementErr;
-          } finally {
-            endSteps611();
-            req.body = bodyBeforeInventoryMovement;
-            if (hadRouteParamId) {
-              req.params.id = savedRouteParamId;
-            } else {
-              delete req.params.id;
-            }
-          }
+          throw inventoryMovementErr;
+        } finally {
+          endSteps611();
         }
       }
       // step 6–11 end
@@ -1501,29 +2102,46 @@ async function purchaseReturnCreate(req, res) {
       console.error("Purchase Return creation error:", createPipelineError);
       // Step 20 — logs insert (failure path)
       await logRollbackFailure(req, createPipelineError, {
-        action: "PURCHASE ORDER CREATE ROLLBACK",
+        action: "PURCHASE RETURN CREATE ROLLBACK",
         tags: ["api", "purchase_return", "rollback", "create"],
         fallbackUrl: "/api/purchase_return/purchase_return_create",
       });
       // step 20 end
       if (createPipelineError.clientErrorPayload) {
-        return res.status(createPipelineError.clientErrorPayload.status).json({
-          ...createPipelineError.clientErrorPayload,
+        const p = createPipelineError.clientErrorPayload;
+        return res.status(p.status || 400).json({
+          ...p,
+          success: false,
+          message:
+            p.message ||
+            createPipelineError.message ||
+            p.error ||
+            "Purchase return creation rolled back",
           step_timings_ms: stepTimingsOnError,
         });
       }
       const errorMessage = String(createPipelineError.message || "");
       const isGeneralLedgerRelatedError =
         errorMessage.includes("Post-purchase_return") ||
-        errorMessage.includes("company_id is required");
-      return res.status(isGeneralLedgerRelatedError ? 400 : 500).json({
+        errorMessage.includes("company_id is required") ||
+        errorMessage.includes("Configure company default GL accounts");
+      const httpStatus =
+        (
+          createPipelineError.statusCode >= 400 &&
+          createPipelineError.statusCode < 600
+        ) ?
+          createPipelineError.statusCode
+        : isGeneralLedgerRelatedError ? 400
+        : 500;
+      return res.status(httpStatus).json({
         success: false,
-        status: isGeneralLedgerRelatedError ? 400 : 500,
+        status: httpStatus,
         error:
           isGeneralLedgerRelatedError ?
-            "Purchase order creation rolled back"
+            "Purchase return creation rolled back"
           : "Failed to create purchase return",
-        details: createPipelineError.message,
+        message: errorMessage,
+        details: createPipelineError.details ?? errorMessage,
         step_timings_ms: stepTimingsOnError,
       });
     }
@@ -1589,7 +2207,7 @@ async function purchaseReturnCreate(req, res) {
     console.error("Purchase Return creation error:", unexpectedError);
     // step 20 start — rollback log (outer catch)
     await logRollbackFailure(req, unexpectedError, {
-      action: "PURCHASE ORDER CREATE ROLLBACK",
+      action: "PURCHASE RETURN CREATE ROLLBACK",
       tags: ["api", "purchase_return", "rollback", "create", "outer"],
       fallbackUrl: "/api/purchase_return/purchase_return_create",
     });
@@ -1682,6 +2300,17 @@ async function purchase_return_update(req, res) {
 
   /** @param {import("mongoose").ClientSession | null} mongoSession */
   const runPurchaseReturnUpdateBody = async (mongoSession) => {
+    const prGlAccounts = await resolvePurchaseReturnGlAccounts(
+      req,
+      mongoSession,
+    );
+    if (
+      !req.body.payment_method_accounts_id &&
+      prGlAccounts.default_cash_account
+    ) {
+      req.body.payment_method_accounts_id = prGlAccounts.default_cash_account;
+    }
+
     response = await handleGenericUpdate(req, "purchase_return", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterUpdate: async (record, orderReq, _existing, sess) => {
@@ -1747,67 +2376,12 @@ async function purchase_return_update(req, res) {
 
         const { created, failed } = await transactionBulkCreate(
           orderReq,
-          [
-            // Same five rows / index order as create — keep in sync with PURCHASE_RETURN_GL_LINE_META.
-            {
-              account_id: orderReq.user.company_id.default_purchase_account,
-              type: "credit",
-              amount: record?.lines_subtotal ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Return",
-              reference_id: {
-                module: "purchase_return",
-                ref_id: record._id,
-              },
-            },
-            {
-              account_id: orderReq.user.company_id.default_shipping_account,
-              type: "credit",
-              amount: record?.shipment ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Shipment",
-              reference_id: {
-                module: "purchase_return",
-                ref_id: record._id,
-              },
-            },
-            {
-              account_id:
-                orderReq.user.company_id.default_purchase_discount_account,
-              type: "debit",
-              amount: record?.discount ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Purchase Discount",
-            },
-            {
-              account_id: record?.payment_method_accounts_id,
-              type: "debit",
-              amount: record?.amount_paid ?? 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "Mode of Payment",
-              reference_id: {
-                module: "purchase_return",
-                ref_id: record._id,
-              },
-            },
-            {
-              account_id:
-                orderReq.user.company_id.default_account_payable_account,
-              type: "debit",
-              amount: req.body?.remaining_amount || 0,
-              reference_user_id: record?.vendor_id,
-              transaction_number,
-              description: "A/c Payable",
-              reference_id: {
-                module: "purchase_return",
-                ref_id: record._id,
-              },
-            },
-          ],
+          buildPurchaseReturnGlTransactionItems(
+            record,
+            transaction_number,
+            req.body?.remaining_amount,
+            prGlAccounts,
+          ),
           { stopOnError: true, session: sess },
         );
         if (failed.length) {
@@ -1865,58 +2439,21 @@ async function purchase_return_update(req, res) {
         sessionOpts(mongoSession),
       );
 
-      // Outbound ledger per line (lines without valid `warehouse_id` are skipped — no movement, no stock path).
+      // Outbound warehouse_inventory + ledger per line (split across warehouses when needed).
       const companyIdForMovement =
         coalesceObjectId(response.data.company_id) ||
         coalesceObjectId(req.user?.company_id);
 
       for (const line of lines) {
-        const warehouseIdStr =
-          line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
-        if (
-          !warehouseIdStr ||
-          !mongoose.Types.ObjectId.isValid(warehouseIdStr)
-        ) {
-          continue;
-        }
-        const unitCost = Number(line.price);
-        const lineQtyNum = Number(line.qty);
-        if (
-          !Number.isFinite(unitCost) ||
-          unitCost < 0 ||
-          !Number.isFinite(lineQtyNum) ||
-          lineQtyNum <= 0
-        ) {
-          throw new Error(
-            "Each return line with a warehouse needs a finite unit price (price) and positive quantity for inventory movement",
-          );
-        }
-        const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
-
-        // `insertInventoryMovementRecord` expects movement fields on `req.body`; save/restore header + route id.
-        const bodyBeforeInventoryMovement = req.body;
-        const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-          req.params,
-          "id",
-        );
-        const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-        req.body = {
-          product_id: String(line.product_id).trim(),
-          warehouse_id: warehouseIdStr,
-          quantity: lineQtyNum,
-          movement_type: "out",
-          unit_cost: unitCost,
-          total_cost: totalCostMovement,
-          reference_type: "purchase_return",
-          reference_id: prId,
-          reference_name: "Purchase Return",
-          company_id: companyIdForMovement,
-          status: "active",
-        };
-
         try {
-          await insertInventoryMovementRecord(req, mongoSession);
+          await applyPurchaseReturnOutboundForLine({
+            line,
+            referenceId: prId,
+            referenceName: "Purchase Return",
+            companyId: companyIdForMovement,
+            req,
+            mongoSession,
+          });
         } catch (inventoryMovementErr) {
           if (inventoryMovementErr.clientPayload) {
             throwWithGenericFailure(
@@ -1925,13 +2462,6 @@ async function purchase_return_update(req, res) {
             );
           }
           throw inventoryMovementErr;
-        } finally {
-          req.body = bodyBeforeInventoryMovement;
-          if (hadRouteParamId) {
-            req.params.id = savedRouteParamId;
-          } else {
-            delete req.params.id;
-          }
         }
       }
 
@@ -2055,9 +2585,13 @@ async function purchase_return_update(req, res) {
     if (txnError.clientErrorPayload) {
       const p = txnError.clientErrorPayload;
       return res.status(p.status || 400).json({
-        success: false,
-        message: "Purchase return update rolled back",
         ...p,
+        success: false,
+        message:
+          p.message ||
+          txnError.message ||
+          p.error ||
+          "Purchase return update rolled back",
       });
     }
     const msg = String(txnError.message || "");
@@ -2070,7 +2604,8 @@ async function purchase_return_update(req, res) {
       success: false,
       status: is400 ? 400 : 500,
       error: "Purchase return update rolled back",
-      details: txnError.message,
+      message: msg,
+      details: msg,
     });
   }
 
@@ -2104,9 +2639,415 @@ async function purchase_return_update(req, res) {
   });
 }
 
+async function purchase_return_delete(req, res) {
+  let prDeleteStepTimer = null;
+
+  try {
+    const prId = String(req.params?.id || "").trim();
+    if (!prId || !mongoose.Types.ObjectId.isValid(prId)) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid id",
+        details: "id must be a valid purchase_return ObjectId",
+        type: "invalid_id",
+      });
+    }
+
+    const companyId = coalesceObjectId(req.user?.company_id);
+    if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        details:
+          "Authenticated user must have company_id to delete a purchase return",
+        type: "validation",
+      });
+    }
+
+    // step 0 — pre-txn read (return header + line items + outbound movement snapshot)
+    const existingPr = await PurchaseReturn.findOne({
+      _id: prId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (!existingPr) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `purchase_return with id "${prId}" not found or already deleted`,
+        type: "not_found",
+      });
+    }
+
+    const transactionNumber = String(
+      existingPr.transaction_number ?? "",
+    ).trim();
+
+    const existingPrItems = await PurchaseReturnItem.find({
+      purchase_return_id: prId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const oldOutMovementsPreTxn = await InventoryMovements.find({
+      reference_type: "purchase_return",
+      reference_id: prId,
+      movement_type: "out",
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    })
+      .select("product_id warehouse_id quantity")
+      .lean();
+
+    prDeleteStepTimer = startPrCreateStepTimer();
+
+    let clientSession = null;
+    let txnError = null;
+    /** @type {"mongodb_transaction"|"standalone_no_transaction"|null} */
+    let txnMode = null;
+    let softDeletedPr = null;
+    const productStockUpdates = [];
+    const deletedAt = new Date();
+    const userId = req.user?._id;
+    const deleteSnapshot = {
+      gl_rows_soft_deleted: 0,
+      movements_soft_deleted: 0,
+      items_soft_deleted: 0,
+      reversal_movements_inserted: 0,
+    };
+
+    /** @param {import("mongoose").ClientSession | null} mongoSession */
+    const runPurchaseReturnDeleteBody = async (mongoSession) => {
+      const prSoftDeleteFilter = {
+        _id: prId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      };
+      const prSoftDeleteSet = {
+        deletedAt,
+        status: "inactive",
+      };
+      if (userId) {
+        prSoftDeleteSet.updated_by = userId;
+      }
+
+      // step 1 start — soft-delete purchase_return header
+      const endStep1 = prDeleteStepTimer.start(1, "purchase_return soft-delete");
+      softDeletedPr = await PurchaseReturn.findOneAndUpdate(
+        prSoftDeleteFilter,
+        { $set: prSoftDeleteSet },
+        { new: true, ...sessionOpts(mongoSession) },
+      ).lean();
+      endStep1();
+      if (!softDeletedPr) {
+        throw new Error("Purchase return not found or already deleted");
+      }
+
+      // step 2 start — soft-delete GL rows for this return transaction_number
+      const endStep2 = prDeleteStepTimer.start(
+        2,
+        "transaction soft-delete by transaction_number",
+      );
+      const glSoftDelete = await softDeleteActiveGlByTransactionNumber({
+        transactionNumber,
+        mongoSession,
+        userId,
+      });
+      deleteSnapshot.gl_rows_soft_deleted = glSoftDelete.modifiedCount || 0;
+      endStep2({ modified_count: deleteSnapshot.gl_rows_soft_deleted });
+      if (deleteSnapshot.gl_rows_soft_deleted > 0) {
+        console.log(
+          "✅ Transaction rows soft-deleted:",
+          deleteSnapshot.gl_rows_soft_deleted,
+        );
+      }
+
+      // step 3 start — snapshot outbound movements then soft-delete movement rows
+      const endStep3 = prDeleteStepTimer.start(
+        3,
+        "inventory_movements soft-delete by reference",
+      );
+      let movQuery = InventoryMovements.find({
+        reference_type: "purchase_return",
+        reference_id: prId,
+        movement_type: "out",
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      }).select("product_id warehouse_id quantity");
+      if (mongoSession) movQuery = movQuery.session(mongoSession);
+      const oldOutMovementsInTxn = await movQuery.lean();
+      const oldOutMovements =
+        oldOutMovementsInTxn.length > 0 ?
+          oldOutMovementsInTxn
+        : oldOutMovementsPreTxn;
+
+      const movementSoftDelete =
+        await InventoryMovements.softDeleteActiveByReference({
+          referenceType: "purchase_return",
+          referenceId: prId,
+          companyId,
+          session: mongoSession,
+          userId,
+        });
+      deleteSnapshot.movements_soft_deleted =
+        movementSoftDelete.modifiedCount || 0;
+      endStep3({ modified_count: deleteSnapshot.movements_soft_deleted });
+      if (deleteSnapshot.movements_soft_deleted > 0) {
+        console.log(
+          "✅ Inventory movement rows soft-deleted:",
+          deleteSnapshot.movements_soft_deleted,
+        );
+      }
+
+      // step 4 start — soft-delete purchase_return_item rows
+      const endStep4 = prDeleteStepTimer.start(
+        4,
+        "purchase_return_item soft-delete",
+      );
+      const itemSoftDeleteSet = {
+        deletedAt,
+        status: "inactive",
+      };
+      if (userId) {
+        itemSoftDeleteSet.updated_by = userId;
+      }
+      const itemSoftDelete = await PurchaseReturnItem.updateMany(
+        {
+          purchase_return_id: prId,
+          company_id: companyId,
+          status: "active",
+          deletedAt: null,
+        },
+        { $set: itemSoftDeleteSet },
+        sessionOpts(mongoSession),
+      );
+      deleteSnapshot.items_soft_deleted = itemSoftDelete.modifiedCount || 0;
+      endStep4({ modified_count: deleteSnapshot.items_soft_deleted });
+      if (deleteSnapshot.items_soft_deleted > 0) {
+        console.log(
+          "✅ Purchase return line items soft-deleted:",
+          deleteSnapshot.items_soft_deleted,
+        );
+      }
+
+      // step 5 start — restore warehouse_inventory + insert reversal `in` movements
+      const endStep5 = prDeleteStepTimer.start(
+        5,
+        "warehouse_inventory restore + inventory_movements insert (in reversal)",
+        { line_count: existingPrItems.length },
+      );
+      const restoreResult = await applyPurchaseReturnDeleteInventoryRestore({
+        oldOutMovements,
+        existingReturnItems: existingPrItems,
+        purchaseReturnId: prId,
+        companyId,
+        req,
+        mongoSession,
+        logUrl:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_return/purchase_return_delete",
+      });
+      productStockUpdates.push(...restoreResult.productStockUpdates);
+      deleteSnapshot.reversal_movements_inserted =
+        restoreResult.reversalMovementsInserted;
+      endStep5({
+        warehouse_updates: productStockUpdates.length,
+        reversal_movements_inserted: deleteSnapshot.reversal_movements_inserted,
+      });
+    };
+
+    // txn start — MongoDB transaction wrapper (or standalone retry)
+    let endTxnWrap = () => {};
+    endTxnWrap = prDeleteStepTimer.start("txn", "MongoDB transaction wrapper");
+    let txnWrapEnded = false;
+    const finishTxnWrap = (extra) => {
+      if (!txnWrapEnded) {
+        txnWrapEnded = true;
+        endTxnWrap(extra);
+      }
+    };
+
+    try {
+      clientSession = await mongoose.startSession();
+      await clientSession.withTransaction(async () => {
+        await runPurchaseReturnDeleteBody(clientSession);
+      });
+      txnMode = "mongodb_transaction";
+      finishTxnWrap({ mode: txnMode });
+    } catch (e) {
+      if (isMongoTransactionUnsupportedError(e)) {
+        finishTxnWrap({ mode: "txn_unavailable_retry" });
+        if (clientSession) {
+          try {
+            clientSession.endSession();
+          } catch (_) {
+            /* ignore */
+          }
+          clientSession = null;
+        }
+        console.warn(
+          "[purchase_return] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
+        );
+        try {
+          softDeletedPr = null;
+          productStockUpdates.length = 0;
+          deleteSnapshot.gl_rows_soft_deleted = 0;
+          deleteSnapshot.movements_soft_deleted = 0;
+          deleteSnapshot.items_soft_deleted = 0;
+          deleteSnapshot.reversal_movements_inserted = 0;
+          prDeleteStepTimer.resetSteps();
+          const endTxnRetry = prDeleteStepTimer.start(
+            "txn",
+            "pipeline retry (no Mongo transaction)",
+          );
+          await runPurchaseReturnDeleteBody(null);
+          endTxnRetry({ mode: "standalone_no_transaction" });
+          txnMode = "standalone_no_transaction";
+        } catch (e2) {
+          txnError = e2;
+        }
+      } else {
+        finishTxnWrap({ mode: "mongodb_transaction_failed" });
+        txnError = e;
+      }
+    } finally {
+      if (clientSession) {
+        try {
+          clientSession.endSession();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+
+    if (txnError) {
+      const stepTimingsOnError = prDeleteStepTimer.log(
+        "[purchase_return_delete] failed —",
+      );
+      console.error("Purchase return delete error:", txnError);
+      await logRollbackFailure(req, txnError, {
+        action: "PURCHASE RETURN DELETE ROLLBACK",
+        tags: ["api", "purchase_return", "rollback", "delete"],
+        fallbackUrl: "/api/purchase_return/purchase_return_delete",
+        context: {
+          purchase_return_id: prId,
+          purchase_return_no: existingPr.purchase_return_no ?? null,
+          transaction_number: transactionNumber,
+          line_count: existingPrItems.length,
+          txn_mode: txnMode,
+          in_transaction: txnMode === "mongodb_transaction",
+          delete_snapshot: deleteSnapshot,
+          step_timings_ms: stepTimingsOnError,
+        },
+      });
+      if (txnError.clientErrorPayload) {
+        const p = txnError.clientErrorPayload;
+        return res.status(p.status || 400).json({
+          success: false,
+          message: "Purchase return delete rolled back",
+          ...p,
+          step_timings_ms: stepTimingsOnError,
+          txn_mode: txnMode,
+        });
+      }
+      const msg = String(txnError.message || "");
+      const is400 =
+        msg.includes("Insufficient") ||
+        msg.includes("Validation failed") ||
+        msg.includes("company_id is required") ||
+        msg.includes("Purchase return not found") ||
+        msg.includes("Product stock sync");
+      return res.status(is400 ? 400 : 500).json({
+        success: false,
+        status: is400 ? 400 : 500,
+        error: "Purchase return delete rolled back",
+        message: msg,
+        details: msg,
+        step_timings_ms: stepTimingsOnError,
+        txn_mode: txnMode,
+      });
+    }
+
+    const stepTimingsMs = prDeleteStepTimer.log("[purchase_return_delete]");
+
+    await createApplicationLog(
+      req,
+      {
+        action: "Purchase return deleted",
+        url:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_return/purchase_return_delete",
+        tags: ["purchase_return", "delete", "soft_delete", "inventory"],
+        description: {
+          purchase_return_id: prId,
+          purchase_return_no: softDeletedPr?.purchase_return_no ?? null,
+          transaction_number: transactionNumber,
+          line_count: existingPrItems.length,
+          txn_mode: txnMode,
+          delete_snapshot: deleteSnapshot,
+          warehouse_inventory_updates: productStockUpdates.length,
+          message: `Purchase return ${softDeletedPr?.purchase_return_no || prId} soft-deleted; inventory and GL reversed.`,
+        },
+        company_id: companyId,
+      },
+      { silent: true },
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Purchase return deleted successfully",
+      data: {
+        ...softDeletedPr,
+        purchase_return_items: existingPrItems,
+        transaction_number: transactionNumber,
+      },
+      product_stock_updates: productStockUpdates,
+      delete_snapshot: deleteSnapshot,
+      step_timings_ms: stepTimingsMs,
+      txn_mode: txnMode,
+    });
+  } catch (unexpectedError) {
+    if (prDeleteStepTimer) {
+      prDeleteStepTimer.log("[purchase_return_delete] unexpected —");
+    }
+    console.error("Purchase return delete unexpected error:", unexpectedError);
+    await logRollbackFailure(req, unexpectedError, {
+      action: "PURCHASE RETURN DELETE ROLLBACK",
+      tags: ["api", "purchase_return", "rollback", "delete", "unexpected"],
+      fallbackUrl: "/api/purchase_return/purchase_return_delete",
+      context: {
+        purchase_return_id: req.params?.id ?? null,
+        stage: "unexpected",
+      },
+    });
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: "Purchase return delete failed",
+      details: unexpectedError.message,
+      ...(prDeleteStepTimer ?
+        { step_timings_ms: prDeleteStepTimer.report() }
+      : {}),
+    });
+  }
+}
+
 module.exports = {
   purchaseReturnCreate,
   purchase_return_update,
+  purchase_return_delete,
   getPurchaseReturnByReturnItem,
   getPurchaseReturnByReturnNo,
   // purchase_orderUpdate,

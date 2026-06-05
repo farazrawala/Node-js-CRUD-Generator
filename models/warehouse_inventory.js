@@ -197,6 +197,133 @@ modelSchema.statics.applyQuantityDelta = async function ({
 };
 
 /**
+ * Plan outbound qty across one or more warehouses (preferred first, then highest on-hand).
+ * @returns {Promise<Array<{ warehouse_id: string, quantity: number }>>}
+ */
+modelSchema.statics.planOutboundAllocation = async function ({
+  productId,
+  companyId,
+  qtyNeeded,
+  preferredWarehouseId = null,
+  session = null,
+} = {}) {
+  const qty = roundQty(qtyNeeded);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new Error("Invalid quantity for warehouse allocation");
+  }
+
+  const pid = toObjectId(productId);
+  const cid = toObjectId(companyId);
+  if (!pid || !cid) {
+    throw new Error(
+      "product_id and company_id are required for warehouse allocation",
+    );
+  }
+
+  let whQuery = this.find({
+    product_id: pid,
+    company_id: cid,
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    quantity: { $gt: 0 },
+  }).select("warehouse_id quantity");
+  if (session) whQuery = whQuery.session(session);
+  const rows = await whQuery.lean();
+
+  const pref =
+    (
+      preferredWarehouseId &&
+      mongoose.Types.ObjectId.isValid(String(preferredWarehouseId).trim())
+    ) ?
+      String(preferredWarehouseId).trim()
+    : null;
+
+  const sorted = [...rows].sort((a, b) => {
+    const aId = String(a.warehouse_id);
+    const bId = String(b.warehouse_id);
+    if (pref) {
+      if (aId === pref && bId !== pref) return -1;
+      if (bId === pref && aId !== pref) return 1;
+    }
+    return (Number(b.quantity) || 0) - (Number(a.quantity) || 0);
+  });
+
+  let remaining = qty;
+  const allocations = [];
+  for (const row of sorted) {
+    if (remaining <= 0) break;
+    const onHand = roundQty(Number(row.quantity) || 0);
+    if (onHand <= 0) continue;
+    const take = roundQty(Math.min(remaining, onHand));
+    allocations.push({
+      warehouse_id: String(row.warehouse_id),
+      quantity: take,
+    });
+    remaining = roundQty(remaining - take);
+  }
+
+  if (remaining > 0.0001) {
+    const totalAvailable = roundQty(qty - remaining);
+    const err = new Error(
+      `Insufficient warehouse inventory for product ${String(pid)}: need ${qty}, available ${totalAvailable} across warehouses`,
+    );
+    err.clientPayload = {
+      success: false,
+      status: 400,
+      error: "Insufficient stock",
+      details: err.message,
+      type: "validation",
+      qty_needed: qty,
+      qty_available: totalAvailable,
+      product_id: String(pid),
+      company_id: String(cid),
+      preferred_warehouse_id: pref,
+    };
+    throw err;
+  }
+
+  return allocations;
+};
+
+/**
+ * Subtract outbound qty from warehouse_inventory, splitting across warehouses when needed.
+ * @returns {Promise<{ allocations: object[], stockChanges: object[] }>}
+ */
+modelSchema.statics.applySplitWarehouseOutbound = async function ({
+  productId,
+  companyId,
+  qtyNeeded,
+  preferredWarehouseId = null,
+  userId = null,
+  session = null,
+} = {}) {
+  const allocations = await this.planOutboundAllocation({
+    productId,
+    companyId,
+    qtyNeeded,
+    preferredWarehouseId,
+    session,
+  });
+
+  const stockChanges = [];
+  for (const alloc of allocations) {
+    const change = await this.applyQuantityDelta({
+      productId,
+      warehouseId: alloc.warehouse_id,
+      companyId,
+      qtyDelta: -alloc.quantity,
+      userId,
+      session,
+    });
+    if (change) {
+      stockChanges.push({ ...change, source: "warehouse_inventory" });
+    }
+  }
+
+  return { allocations, stockChanges };
+};
+
+/**
  * Generic warehouse stock from document lines (purchase return, PO, etc.).
  *
  * | Step | When | Op |
@@ -233,14 +360,17 @@ modelSchema.statics.applyStockChangesFromLines = async function ({
     const quantityToReverse = parsePositiveQty(previousLine);
     if (!warehouseIdToReverse || quantityToReverse == null) continue;
 
-    await this.applyQuantityDelta({
+    const reverseChanges = await this.applySplitWarehouseOutbound({
       productId: previousLine.product_id,
-      warehouseId: warehouseIdToReverse,
       companyId,
-      qtyDelta: -quantityToReverse,
+      qtyNeeded: quantityToReverse,
+      preferredWarehouseId: warehouseIdToReverse,
       userId,
       session,
     });
+    for (const row of reverseChanges.stockChanges || []) {
+      stockChangeAuditLog.push({ ...row, source: auditSource });
+    }
   }
 
   const pairedLineCount = Math.min(

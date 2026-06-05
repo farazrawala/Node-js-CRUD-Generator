@@ -822,22 +822,44 @@ async function applyOrderLineReplaceInventory({
 
     const [productIdStr, warehouseIdStr] = key.split(":");
     try {
-      const whChange = await WarehouseInventory.applyQuantityDelta({
-        productId: productIdStr,
-        warehouseId: warehouseIdStr,
-        companyId: companyIdOid || companyId,
-        qtyDelta: delta,
-        userId: req.user?._id,
-        session: mongoSession,
-      });
-      if (whChange) {
-        productStockUpdates.push({
-          ...whChange,
-          source: "warehouse_inventory",
-          qty_delta_reason: "order_line_replace",
-          old_outbound_qty: oldQty,
-          new_outbound_qty: newQty,
+      if (delta < 0) {
+        const { stockChanges } = await WarehouseInventory.applySplitWarehouseOutbound(
+          {
+            productId: productIdStr,
+            companyId: companyIdOid || companyId,
+            qtyNeeded: Math.abs(delta),
+            preferredWarehouseId: warehouseIdStr,
+            userId: req.user?._id,
+            session: mongoSession,
+          },
+        );
+        for (const whChange of stockChanges) {
+          productStockUpdates.push({
+            ...whChange,
+            source: "warehouse_inventory",
+            qty_delta_reason: "order_line_replace",
+            old_outbound_qty: oldQty,
+            new_outbound_qty: newQty,
+          });
+        }
+      } else {
+        const whChange = await WarehouseInventory.applyQuantityDelta({
+          productId: productIdStr,
+          warehouseId: warehouseIdStr,
+          companyId: companyIdOid || companyId,
+          qtyDelta: delta,
+          userId: req.user?._id,
+          session: mongoSession,
         });
+        if (whChange) {
+          productStockUpdates.push({
+            ...whChange,
+            source: "warehouse_inventory",
+            qty_delta_reason: "order_line_replace",
+            old_outbound_qty: oldQty,
+            new_outbound_qty: newQty,
+          });
+        }
       }
     } catch (whErr) {
       const whMsg = String(
@@ -1015,16 +1037,24 @@ async function applyOrderOutboundLines({
       throw new Error("Each order line needs a valid product_id");
     }
 
-    let warehouseIdStr;
+    const preferredWarehouseId = resolveOrderLineWarehouseId(line, req);
+
+    let allocations;
+    let stockChanges;
     try {
-      warehouseIdStr = await resolveWarehouseForOutboundLine({
-        productId: line.product_id,
-        companyId: companyIdOid || companyId,
-        qtyNeeded: lineQtyNum,
-        preferredWarehouseId:
-          resolveOrderLineWarehouseId(line, req) || undefined,
-        mongoSession,
-      });
+      ({ allocations, stockChanges } =
+        await WarehouseInventory.applySplitWarehouseOutbound({
+          productId: productIdStr,
+          companyId: companyIdOid || companyId,
+          qtyNeeded: lineQtyNum,
+          preferredWarehouseId:
+            preferredWarehouseId &&
+            mongoose.Types.ObjectId.isValid(preferredWarehouseId) ?
+              preferredWarehouseId
+            : null,
+          userId: req.user?._id,
+          session: mongoSession,
+        }));
     } catch (warehouseResolveErr) {
       if (warehouseResolveErr.clientPayload) {
         throwOrderCreateFromGenericFailure(
@@ -1035,78 +1065,51 @@ async function applyOrderOutboundLines({
       throw warehouseResolveErr;
     }
 
-    try {
-      const whChange = await WarehouseInventory.applyQuantityDelta({
-        productId: productIdStr,
-        warehouseId: warehouseIdStr,
-        companyId: companyIdOid || companyId,
-        qtyDelta: -lineQtyNum,
-        userId: req.user?._id,
-        session: mongoSession,
-      });
-      if (whChange) {
-        productStockUpdates.push({
-          ...whChange,
-          source: "warehouse_inventory",
-        });
-      }
-    } catch (whErr) {
-      const whMsg = String(
-        whErr?.message || "Warehouse inventory update failed",
-      );
-      const mapped = new Error(whMsg);
-      mapped.clientErrorPayload = {
-        success: false,
-        status: 400,
-        error: "Insufficient warehouse inventory",
-        message: whMsg,
-        details: whMsg,
-        type: "validation",
-        product_id: productIdStr,
-        warehouse_id: warehouseIdStr,
-        qty_needed: lineQtyNum,
-      };
-      throw mapped;
+    for (const whChange of stockChanges) {
+      productStockUpdates.push(whChange);
     }
 
-    const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
-    const bodyBeforeInventoryMovement = req.body;
-    const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-      req.params,
-      "id",
-    );
-    const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+    for (const alloc of allocations) {
+      const allocQty = Number(alloc.quantity);
+      const totalCostMovement = Math.round(allocQty * unitCost * 100) / 100;
+      const bodyBeforeInventoryMovement = req.body;
+      const hadRouteParamId = Object.prototype.hasOwnProperty.call(
+        req.params,
+        "id",
+      );
+      const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
 
-    req.body = {
-      product_id: productIdStr,
-      warehouse_id: warehouseIdStr,
-      quantity: lineQtyNum,
-      movement_type: "out",
-      unit_cost: unitCost,
-      total_cost: totalCostMovement,
-      reference_type: "order",
-      reference_id: orderId,
-      reference_name: "Order",
-      company_id: companyIdOid || companyId,
-      status: "active",
-    };
+      req.body = {
+        product_id: productIdStr,
+        warehouse_id: alloc.warehouse_id,
+        quantity: allocQty,
+        movement_type: "out",
+        unit_cost: unitCost,
+        total_cost: totalCostMovement,
+        reference_type: "order",
+        reference_id: orderId,
+        reference_name: "Order",
+        company_id: companyIdOid || companyId,
+        status: "active",
+      };
 
-    try {
-      await insertInventoryMovementRecord(req, mongoSession);
-    } catch (inventoryMovementErr) {
-      if (inventoryMovementErr.clientPayload) {
-        throwOrderCreateFromGenericFailure(
-          inventoryMovementErr.clientPayload,
-          "Inventory movement for order failed",
-        );
-      }
-      throw inventoryMovementErr;
-    } finally {
-      req.body = bodyBeforeInventoryMovement;
-      if (hadRouteParamId) {
-        req.params.id = savedRouteParamId;
-      } else {
-        delete req.params.id;
+      try {
+        await insertInventoryMovementRecord(req, mongoSession);
+      } catch (inventoryMovementErr) {
+        if (inventoryMovementErr.clientPayload) {
+          throwOrderCreateFromGenericFailure(
+            inventoryMovementErr.clientPayload,
+            "Inventory movement for order failed",
+          );
+        }
+        throw inventoryMovementErr;
+      } finally {
+        req.body = bodyBeforeInventoryMovement;
+        if (hadRouteParamId) {
+          req.params.id = savedRouteParamId;
+        } else {
+          delete req.params.id;
+        }
       }
     }
 

@@ -234,6 +234,19 @@ app.use("/api", checkHeaderAuthentication, apiRoute);
 app.use("/admin", adminRoute);
 app.use("/", staticRoute);
 
+/** Fallback JSON 404 when no route matched (avoids opaque HTML from proxies/browsers). */
+app.use((req, res) => {
+  const fullPath = req.originalUrl || req.url || "/";
+  console.error(`[app] 404 ${req.method} ${fullPath}`);
+  return res.status(404).json({
+    success: false,
+    status: 404,
+    error: "Not found",
+    details: `No handler for ${req.method} ${fullPath}. API routes are under /api on port ${port}.`,
+    type: "not_found",
+  });
+});
+
 app.listen(port, () => {
   console.log("🚀 Server started at port " + port);
   console.log("📝 Nodemon is watching for changes...");

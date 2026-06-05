@@ -53,6 +53,60 @@ function responseFromExplicitHttpError(error) {
   };
 }
 
+/** Turn Mongoose / string validation entries into `{ field, message }` + human `message` for API clients. */
+function normalizeValidationDetailEntry(err) {
+  if (typeof err === "string") {
+    return { field: null, message: err.trim() };
+  }
+  if (err && typeof err === "object") {
+    const field = err.path ?? err.field ?? null;
+    const message = String(err.message ?? err).trim();
+    return { field, message };
+  }
+  return { field: null, message: String(err ?? "").trim() };
+}
+
+function buildValidationFailurePayload(
+  errorOrEntries,
+  headline = "Validation failed",
+) {
+  const entries =
+    Array.isArray(errorOrEntries) ?
+      errorOrEntries.map(normalizeValidationDetailEntry)
+    : Object.values(errorOrEntries?.errors || {}).map((err) =>
+        normalizeValidationDetailEntry({
+          field: err.path,
+          message: err.message,
+        }),
+      );
+  const message = entries
+    .map((e) => (e.field ? `${e.field}: ${e.message}` : e.message))
+    .filter(Boolean)
+    .join("; ");
+  return {
+    success: false,
+    status: 400,
+    error: headline,
+    message: message || headline,
+    details: entries,
+    type: "validation",
+  };
+}
+
+function buildMissingFieldsPayload(missingFields, requiredFields, received) {
+  const message = `Missing required fields: ${missingFields.join(", ")}`;
+  return {
+    success: false,
+    status: 400,
+    error: "Missing required fields",
+    message,
+    required: requiredFields,
+    missing: missingFields,
+    received,
+    type: "validation",
+  };
+}
+
 /** Remove `password` from nested objects (e.g. populated `user_id`) before API JSON. */
 function stripPasswordFieldsDeep(value) {
   if (value == null) return;
@@ -1008,14 +1062,11 @@ const handleGenericCreateCore = async (
       return !value;
     });
     if (missingFields.length > 0) {
-      return {
-        success: false,
-        status: 400,
-        error: "Missing required fields",
-        required: requiredFields,
-        missing: missingFields,
-        received: Object.keys(modelData),
-      };
+      return buildMissingFieldsPayload(
+        missingFields,
+        requiredFields,
+        Object.keys(modelData),
+      );
     }
 
     console.log(`✅ Creating ${modelName} with data:`, {
@@ -1091,16 +1142,7 @@ const handleGenericCreateCore = async (
     // Handle specific error types
     switch (error.name) {
       case "ValidationError":
-        const validationErrors = Object.values(error.errors).map(
-          (err) => err.message,
-        );
-        return {
-          success: false,
-          status: 400,
-          error: "Validation failed",
-          details: validationErrors,
-          type: "validation",
-        };
+        return buildValidationFailurePayload(error);
 
       case "CastError":
         return {
@@ -1108,6 +1150,7 @@ const handleGenericCreateCore = async (
           status: 400,
           error: "Invalid data type",
           details: `${error.path} should be ${error.kind}`,
+          message: `${error.path} should be ${error.kind}`,
           type: "cast",
         };
 
@@ -1122,6 +1165,7 @@ const handleGenericCreateCore = async (
               status: 409,
               error: "Duplicate entry",
               details: `${duplicateField} already exists`,
+              message: `${duplicateField} already exists`,
               type: "duplicate",
             };
           case 121:
@@ -1945,16 +1989,7 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
     // Handle specific error types
     switch (error.name) {
       case "ValidationError":
-        const validationErrors = Object.values(error.errors).map(
-          (err) => err.message,
-        );
-        return {
-          success: false,
-          status: 400,
-          error: "Validation failed",
-          details: validationErrors,
-          type: "validation",
-        };
+        return buildValidationFailurePayload(error);
 
       case "CastError":
         if (error.path === "_id") {
@@ -1963,6 +1998,7 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
             status: 400,
             error: "Invalid ID format",
             details: "The provided ID is not in the correct format",
+            message: "The provided ID is not in the correct format",
             type: "invalid_id",
           };
         }
@@ -1971,6 +2007,7 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
           status: 400,
           error: "Invalid data type",
           details: `${error.path} should be ${error.kind}`,
+          message: `${error.path} should be ${error.kind}`,
           type: "cast",
         };
 
@@ -2319,16 +2356,7 @@ const handleGenericSoftDelete = async (req, controllerName, options = {}) => {
 
     switch (error.name) {
       case "ValidationError": {
-        const validationErrors = Object.values(error.errors).map(
-          (err) => err.message,
-        );
-        return {
-          success: false,
-          status: 400,
-          error: "Validation failed",
-          details: validationErrors,
-          type: "validation",
-        };
+        return buildValidationFailurePayload(error);
       }
 
       case "CastError":
@@ -3569,18 +3597,12 @@ const handleGenericFindOne = async (
         };
 
       case "ValidationError":
-        const validationErrors = Object.values(error.errors).map((err) => ({
-          field: err.path,
-          message: err.message,
-        }));
-
-        return {
-          success: false,
-          status: 400,
-          error: "Validation failed",
-          details: validationErrors,
-          type: "validation",
-        };
+        return buildValidationFailurePayload(
+          Object.values(error.errors).map((err) => ({
+            field: err.path,
+            message: err.message,
+          })),
+        );
 
       default:
         return {

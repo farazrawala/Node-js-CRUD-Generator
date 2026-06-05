@@ -76,6 +76,7 @@ const {
 } = require("../controllers/integration");
 
 const { execute_process } = require("../controllers/process");
+const { logControllerError } = require("../utils/logControllerError");
 
 const {
   apiCreateStockTransfer,
@@ -100,6 +101,7 @@ const {
 const {
   purchaseReturnCreate,
   purchase_return_update,
+  purchase_return_delete,
   getPurchaseReturnByReturnItem,
   getPurchaseReturnByReturnNo,
 } = require("../controllers/purchase_return");
@@ -220,6 +222,10 @@ router.post("/purchase_return/purchase_return_create", purchaseReturnCreate);
 router.patch(
   "/purchase_return/purchase_return_update/:id",
   purchase_return_update,
+);
+router.delete(
+  "/purchase_return/purchase_return_delete/:id",
+  purchase_return_delete,
 );
 router.get(
   "/purchase_return/get-purchase-return-by-return-item",
@@ -492,5 +498,34 @@ const categoryController =
 // router.get("/category/get-all", categoryController.getAll);
 // router.get("/category/get-all-active", categoryController.getAllActive);
 // router.delete("/category/delete/:id", categoryController.delete);
+
+/** Unmatched /api/* — JSON 404 + best-effort row in `logs` (never reaches controllers). */
+router.use(async (req, res) => {
+  const fullPath = req.originalUrl || `${req.baseUrl || ""}${req.path || ""}`;
+  const description = [
+    "API route not found",
+    `method: ${req.method}`,
+    `path: ${fullPath}`,
+    `query: ${JSON.stringify(req.query || {})}`,
+    "hint: use base URL http://localhost:8000/api/... (Node), not Apache/XAMPP HTML 404",
+  ].join("\n");
+
+  console.error(`[api] 404 ${req.method} ${fullPath}`);
+
+  await logControllerError(req, description, {
+    action: "API ROUTE NOT FOUND",
+    tags: ["api", "404", "not_found"],
+    fallbackUrl: fullPath,
+    fallbackCompanyId: req.user?.company_id,
+  });
+
+  return res.status(404).json({
+    success: false,
+    status: 404,
+    error: "Route not found",
+    details: `No handler for ${req.method} ${fullPath}`,
+    type: "not_found",
+  });
+});
 
 module.exports = router;
