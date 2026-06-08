@@ -117,6 +117,8 @@ async function logListAccess(req, options = {}) {
  *   description?: string | Record<string, unknown>,
  *   company_id?: unknown,
  *   created_by?: unknown,
+ *   reference_id?: unknown,
+ *   reference_type?: string,
  *   status?: string,
  * }} entry
  * @param {{ silent?: boolean, session?: import("mongoose").ClientSession | null }} [options] silent=false rethrows after console.error; session participates in the same Mongo transaction when set.
@@ -164,12 +166,26 @@ async function createApplicationLog(req, entry, options = {}) {
       doc.created_by = created_by;
     }
 
-    const createOptions =
-      session != null && typeof session === "object" ? { session } : {};
-    const row = await Logs.create(
-      Logs.sanitizeLogPlainObject(doc),
-      createOptions,
-    );
+    const reference_id = coalesceObjectId(entry.reference_id);
+    if (
+      reference_id != null &&
+      mongoose.Types.ObjectId.isValid(String(reference_id))
+    ) {
+      doc.reference_id = reference_id;
+    }
+
+    const reference_type =
+      entry.reference_type != null ? String(entry.reference_type).trim() : "";
+    if (reference_type) {
+      doc.reference_type = reference_type;
+    }
+
+    const sanitized = Logs.sanitizeLogPlainObject(doc);
+    // Mongoose 8: `Model.create(doc, options)` treats the 2nd arg as another doc.
+    const row =
+      session != null && typeof session === "object" ?
+        (await Logs.create([sanitized], { session }))[0]
+      : await Logs.create(sanitized);
     return { ok: true, _id: row?._id };
   } catch (err) {
     console.error(

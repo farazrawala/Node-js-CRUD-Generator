@@ -394,6 +394,74 @@ async function cost_of_goods_available(req, res) {
  * @param {import("mongoose").ClientSession | null} [session]
  * @returns {Promise<{ response: object, consoleLog: string[], logWholesale: null }>}
  */
+async function logInventoryMovementCreated(
+  req,
+  { movementId = null, productName = "", session = null } = {},
+) {
+  const resolvedCompanyId = coalesceObjectId(
+    req.body.company_id ?? req.user?.company_id,
+  );
+  const productIdStr =
+    req.body.product_id instanceof mongoose.Types.ObjectId ?
+      String(req.body.product_id)
+    : String(req.body.product_id ?? "").trim();
+  const warehouseIdStr =
+    req.body.warehouse_id != null ? String(req.body.warehouse_id).trim() : "";
+  const movementType =
+    String(req.body.movement_type || "")
+      .trim()
+      .toLowerCase() || "movement";
+  const logQty = toFiniteNumber(req.body.quantity);
+  const logUnitCost = toFiniteNumber(req.body.unit_cost);
+  const logTotalCost = toFiniteNumber(req.body.total_cost);
+  const refType =
+    req.body.reference_type != null ?
+      String(req.body.reference_type).trim()
+    : "";
+  const refId = req.body.reference_id;
+  const refName =
+    req.body.reference_name != null ?
+      String(req.body.reference_name).trim()
+    : "";
+  const productLabel =
+    productName && String(productName).trim() ?
+      `"${String(productName).trim()}"`
+    : `id ${productIdStr || "?"}`;
+  const refLabel = refName || refType || "";
+  const refPart =
+    refLabel || refId != null ?
+      ` Linked to ${refLabel || "reference"}${refId != null ? ` (${refId})` : ""}.`
+    : "";
+  const movementLogMessage =
+    `Inventory movement ${movementType}: qty ${logQty} @ unit ${logUnitCost} ` +
+    `(total ${logTotalCost}) for product ${productLabel} in warehouse ` +
+    `${warehouseIdStr || "?"}.${refPart}`;
+
+  const reference_type = refType || "inventory_movement";
+  const reference_id =
+    coalesceObjectId(refId) ??
+    coalesceObjectId(movementId) ??
+    coalesceObjectId(productIdStr);
+
+  await createApplicationLog(
+    req,
+    {
+      action: "Inventory movement created :: " + productLabel,
+      url: req.originalUrl || req.path || "/api/inventory_movements/save",
+      tags: [
+        "inventory_movement",
+        movementType,
+        ...(refType ? [refType] : []),
+      ],
+      description: movementLogMessage,
+      reference_id,
+      reference_type,
+      company_id: resolvedCompanyId,
+    },
+    { session, silent: true },
+  );
+}
+
 async function insertInventoryMovementRecord(req, session = null) {
   const response = await handleGenericCreate(req, "inventory_movements", {
     session,
@@ -406,6 +474,11 @@ async function insertInventoryMovementRecord(req, session = null) {
     createFailure.clientPayload = response;
     throw createFailure;
   }
+
+  await logInventoryMovementCreated(req, {
+    movementId: response.data?._id,
+    session,
+  });
 
   return { response, consoleLog: [], logWholesale: null };
 }
@@ -597,76 +670,33 @@ async function runInventoryMovementTxnBody(req, session) {
     throw createFailure;
   }
 
-  const resolvedCompanyId = coalesceObjectId(
-    req.body.company_id ?? req.user?.company_id,
-  );
-
-  const movementId =
-    response.data?._id != null ? String(response.data._id) : "";
-  const productIdStr =
-    req.body.product_id instanceof mongoose.Types.ObjectId ?
-      String(req.body.product_id)
-    : String(req.body.product_id ?? "").trim();
-  const warehouseIdStr =
-    req.body.warehouse_id != null ? String(req.body.warehouse_id).trim() : "";
-  const movementType =
-    String(req.body.movement_type || "")
-      .trim()
-      .toLowerCase() || "movement";
-  const logQty = toFiniteNumber(req.body.quantity);
-  const logUnitCost = toFiniteNumber(req.body.unit_cost);
-  const logTotalCost = toFiniteNumber(req.body.total_cost);
-  const refType =
-    req.body.reference_type != null ?
-      String(req.body.reference_type).trim()
-    : "";
-  const refId =
-    req.body.reference_id != null ? String(req.body.reference_id).trim() : "";
-  const refName =
-    req.body.reference_name != null ?
-      String(req.body.reference_name).trim()
-    : "";
   const productName =
     productData.data?.product_name ?
       String(productData.data.product_name).trim()
     : "";
-  const productLabel =
-    productName ? `"${productName}"` : `id ${productIdStr || "?"}`;
-  const refLabel = refName || refType || "";
-  const refPart =
-    refLabel || refId ?
-      ` Linked to ${refLabel || "reference"}${refId ? ` (${refId})` : ""}.`
-    : "";
-  const movementLogMessage =
-    `Inventory movement ${movementType}: qty ${logQty} @ unit ${logUnitCost} ` +
-    `(total ${logTotalCost}) for product ${productLabel} in warehouse `;
+  const productIdStr =
+    req.body.product_id instanceof mongoose.Types.ObjectId ?
+      String(req.body.product_id)
+    : String(req.body.product_id ?? "").trim();
+  const poLinkedMovement =
+    String(req.body.reference_type || "")
+      .trim()
+      .toLowerCase() === "purchase_order";
 
-  await createApplicationLog(
-    req,
-    {
-      action: "Inventory movement created :: " + productLabel,
-      url: req.originalUrl || req.path || "/api/inventory_movements/save",
-      tags: [
-        "inventory_movement",
-        String(req.body.movement_type || "").trim() || "movement",
-      ],
-      description: movementLogMessage,
-      company_id: resolvedCompanyId,
-    },
-    { session, silent: true },
-  );
+  await logInventoryMovementCreated(req, {
+    movementId: response.data?._id,
+    productName,
+    session,
+  });
 
   let logWholesale = null;
 
   if (
+    !poLinkedMovement &&
     request_type === "in" &&
     total_qty !== 0 &&
     Number.isFinite(average_cost)
   ) {
-    const productName =
-      productData.data?.product_name ?
-        String(productData.data.product_name).trim()
-      : "";
     const wholesalePrevForLog = productData.data?.wholesale_price;
 
     const previousBody = req.body;
@@ -710,12 +740,11 @@ async function runInventoryMovementTxnBody(req, session) {
           "n/a"
         : String(nextWholesale);
       const namePart = wlName ? ` "${wlName}"` : "";
-      const productIdForDescription =
-        req.body.product_id instanceof mongoose.Types.ObjectId ?
-          String(req.body.product_id)
-        : String(req.body.product_id).trim();
+      const resolvedCompanyId = coalesceObjectId(
+        req.body.company_id ?? req.user?.company_id,
+      );
       const description =
-        `wholesale_price for product${namePart} (id ${productIdForDescription}) ` +
+        `wholesale_price for product${namePart} (id ${productIdStr}) ` +
         `changed from ${previousWholesaleText} to ${nextWholesaleText}.`;
       await createApplicationLog(
         req,
@@ -724,6 +753,8 @@ async function runInventoryMovementTxnBody(req, session) {
           url: req.originalUrl || req.path || "/api/inventory_movements/save",
           tags: ["wholesale_price", "product", "inventory_movement"],
           description,
+          reference_id: productIdStr,
+          reference_type: "product",
           company_id: resolvedCompanyId,
         },
         { session, silent: true },

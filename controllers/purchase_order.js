@@ -911,7 +911,7 @@ async function logProductWholesalePriceChange(
       ` "${String(productName).trim()}"`
     : "";
   const description =
-    `Wholesale price of product${namePart} (id ${productIdStr}) has been updated ` +
+    `Wholesale price of product${namePart} has been updated ` +
     `from ${wholesaleBefore} to ${averageCost}.`;
   await createApplicationLog(
     req,
@@ -920,6 +920,8 @@ async function logProductWholesalePriceChange(
       url: req?.originalUrl || req?.path || fallbackUrl,
       tags: ["wholesale_price", "product", "purchase_order"],
       description,
+      reference_id: productIdStr,
+      reference_type: "product",
       company_id: companyId,
     },
     { session: mongoSession, silent: true },

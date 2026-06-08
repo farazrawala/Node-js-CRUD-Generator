@@ -6,6 +6,7 @@ const MAX_URL_LEN = 2000;
 const MAX_DESCRIPTION_LEN = 8000;
 const MAX_TAGS = 30;
 const MAX_TAG_LEN = 64;
+const MAX_REFERENCE_TYPE_LEN = 64;
 
 /** Case-normalized key names (alphanumeric only) we never persist verbatim. */
 const SENSITIVE_KEY_NORMALIZED = new Set([
@@ -63,7 +64,7 @@ function sanitizeLogDescription(raw) {
 
   s = s.replace(
     /("(?:password|passwd|secret|token|authorization|apikey|api_key|client_secret|access_token|refresh_token)"\s*:\s*")([^"]*)(")/gi,
-    '$1[REDACTED]$3',
+    "$1[REDACTED]$3",
   );
   s = s.replace(
     /(?:^|[?&])(password|secret|token|api_key|client_secret|access_token|refresh_token)=([^&\s#]+)/gi,
@@ -95,6 +96,9 @@ function sanitizeLogPlainObject(doc) {
   if (out.tags !== undefined) {
     out.tags = clampTags(out.tags);
   }
+  if (out.reference_type != null) {
+    out.reference_type = truncate(out.reference_type, MAX_REFERENCE_TYPE_LEN);
+  }
   return out;
 }
 
@@ -122,6 +126,15 @@ const modelSchema = new mongoose.Schema(
     description: {
       type: String,
       maxlength: MAX_DESCRIPTION_LEN,
+    },
+    reference_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      field_name: "Reference ID",
+    },
+    reference_type: {
+      type: String,
+      maxlength: MAX_REFERENCE_TYPE_LEN,
+      field_name: "Reference Type",
     },
 
     // default fields
@@ -170,6 +183,9 @@ modelSchema.pre("validate", function (next) {
     if (this.tags != null) {
       this.tags = clampTags(this.tags);
     }
+    if (this.reference_type != null) {
+      this.reference_type = truncate(this.reference_type, MAX_REFERENCE_TYPE_LEN);
+    }
     next();
   } catch (e) {
     next(e);
@@ -186,6 +202,12 @@ function patchUpdateDescriptionTags(u) {
   }
   if (target.url != null) target.url = truncate(target.url, MAX_URL_LEN);
   if (target.tags != null) target.tags = clampTags(target.tags);
+  if (target.reference_type != null) {
+    target.reference_type = truncate(
+      target.reference_type,
+      MAX_REFERENCE_TYPE_LEN,
+    );
+  }
 }
 
 modelSchema.pre(["findOneAndUpdate", "findByIdAndUpdate"], function (next) {
@@ -209,6 +231,7 @@ modelSchema.index(
 );
 
 modelSchema.index({ company_id: 1, createdAt: -1 });
+modelSchema.index({ company_id: 1, reference_type: 1, reference_id: 1 });
 
 const MODEL = mongoose.model("logs", modelSchema);
 
