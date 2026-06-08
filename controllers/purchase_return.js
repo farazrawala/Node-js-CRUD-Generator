@@ -2999,6 +2999,8 @@ async function purchase_return_delete(req, res) {
           warehouse_inventory_updates: productStockUpdates.length,
           message: `Purchase return ${softDeletedPr?.purchase_return_no || prId} soft-deleted; inventory and GL reversed.`,
         },
+        reference_id: prId,
+        reference_type: "purchase_return",
         company_id: companyId,
       },
       { silent: true },

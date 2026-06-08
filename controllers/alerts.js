@@ -267,6 +267,8 @@ async function evaluateProductStockAlert({
 
         description: logMessage,
 
+        reference_id: productIdStr,
+        reference_type: "product",
         company_id: companyId,
       },
 

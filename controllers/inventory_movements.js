@@ -1023,6 +1023,8 @@ async function syncProductStockFromMovementLedger(
             "/api/inventory_movements/stock-by-product",
           tags: ["product", "stock", "inventory_movement", "sync"],
           description: description,
+          reference_id: productIdStr,
+          reference_type: "product",
           company_id: companyObj,
         },
         { session: mongoSession, silent: true },
@@ -1406,7 +1408,7 @@ async function stockTransfer(req, res) {
       url: req.originalUrl || "/api/inventory_movements/stock-transfer",
       tags: ["stock_transfer", "inventory_movement"],
       description: {
-        reference_id: transferReferenceId,
+        transfer_reference_id: transferReferenceId,
         product_id: productIdStr,
         from_warehouse_id: fromWarehouseIdStr,
         to_warehouse_id: toWarehouseIdStr,
@@ -1414,6 +1416,8 @@ async function stockTransfer(req, res) {
         out_movement_id: outResult?.response?.data?._id,
         in_movement_id: inResult?.response?.data?._id,
       },
+      reference_id: transferReferenceId,
+      reference_type: "stock_transfer",
       company_id: companyId,
     });
 

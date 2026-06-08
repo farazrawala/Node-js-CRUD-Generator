@@ -254,6 +254,8 @@ async function logEntityFieldChange(req, params, options = {}) {
       url,
       tags: [...merged],
       description,
+      reference_id: entityId,
+      reference_type: entityType,
     },
     options,
   );

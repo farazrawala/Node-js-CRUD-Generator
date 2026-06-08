@@ -2993,6 +2993,8 @@ async function sales_return_delete(req, res) {
           warehouse_inventory_updates: productStockUpdates.length,
           message: `Sales return ${softDeletedSr?.sales_return_no || srId} soft-deleted; inventory and GL reversed.`,
         },
+        reference_id: srId,
+        reference_type: "sales_return",
         company_id: companyId,
       },
       { silent: true },

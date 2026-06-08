@@ -2743,6 +2743,8 @@ async function purchase_order_delete(req, res) {
           wholesale_updates: wholesaleUpdates.length,
           message: `Purchase order ${softDeletedPo?.purchase_order_no || poId} soft-deleted; inventory and GL reversed.`,
         },
+        reference_id: poId,
+        reference_type: "purchase_order",
         company_id: companyId,
       },
       { silent: true },
