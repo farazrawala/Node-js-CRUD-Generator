@@ -280,10 +280,7 @@ modelSchema.pre("validate", async function (next) {
       return next();
     }
 
-    if (
-      (!this.order_no || !String(this.order_no).trim()) &&
-      this.order_id
-    ) {
+    if ((!this.order_no || !String(this.order_no).trim()) && this.order_id) {
       const Order = mongoose.model("order");
       const order = await Order.findById(this.order_id)
         .select("order_no")

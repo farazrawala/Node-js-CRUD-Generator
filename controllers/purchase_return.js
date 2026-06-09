@@ -1047,8 +1047,10 @@ async function applyPurchaseReturnDeleteInventoryRestore({
         continue;
       }
       const wid =
-        item.warehouse_id != null &&
-        mongoose.Types.ObjectId.isValid(String(item.warehouse_id).trim()) ?
+        (
+          item.warehouse_id != null &&
+          mongoose.Types.ObjectId.isValid(String(item.warehouse_id).trim())
+        ) ?
           String(item.warehouse_id).trim()
         : findPriorWarehouseForProduct(oldMap, pid) ||
           ((
@@ -2741,7 +2743,10 @@ async function purchase_return_delete(req, res) {
       }
 
       // step 1 start — soft-delete purchase_return header
-      const endStep1 = prDeleteStepTimer.start(1, "purchase_return soft-delete");
+      const endStep1 = prDeleteStepTimer.start(
+        1,
+        "purchase_return soft-delete",
+      );
       softDeletedPr = await PurchaseReturn.findOneAndUpdate(
         prSoftDeleteFilter,
         { $set: prSoftDeleteSet },

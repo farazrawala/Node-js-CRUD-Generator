@@ -823,16 +823,15 @@ async function applyOrderLineReplaceInventory({
     const [productIdStr, warehouseIdStr] = key.split(":");
     try {
       if (delta < 0) {
-        const { stockChanges } = await WarehouseInventory.applySplitWarehouseOutbound(
-          {
+        const { stockChanges } =
+          await WarehouseInventory.applySplitWarehouseOutbound({
             productId: productIdStr,
             companyId: companyIdOid || companyId,
             qtyNeeded: Math.abs(delta),
             preferredWarehouseId: warehouseIdStr,
             userId: req.user?._id,
             session: mongoSession,
-          },
-        );
+          });
         for (const whChange of stockChanges) {
           productStockUpdates.push({
             ...whChange,
@@ -1048,8 +1047,10 @@ async function applyOrderOutboundLines({
           companyId: companyIdOid || companyId,
           qtyNeeded: lineQtyNum,
           preferredWarehouseId:
-            preferredWarehouseId &&
-            mongoose.Types.ObjectId.isValid(preferredWarehouseId) ?
+            (
+              preferredWarehouseId &&
+              mongoose.Types.ObjectId.isValid(preferredWarehouseId)
+            ) ?
               preferredWarehouseId
             : null,
           userId: req.user?._id,
@@ -3292,7 +3293,9 @@ async function order_delete(req, res) {
     });
   }
 
-  const transactionNumber = String(existingOrder.transaction_number ?? "").trim();
+  const transactionNumber = String(
+    existingOrder.transaction_number ?? "",
+  ).trim();
 
   const existingOrderItems = await OrderItem.find({
     order_id: orderId,

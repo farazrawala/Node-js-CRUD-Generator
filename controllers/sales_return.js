@@ -271,7 +271,7 @@ function buildSalesReturnGlTransactionItems(
     {
       account_id: record?.payment_method_accounts_id,
       type: "credit",
-      amount: record?.amount_refunded ?? 0,
+      amount: record?.lines_subtotal ?? 0,
       reference_user_id: record?.customer_id,
       transaction_number,
       description: "Mode of Payment",
@@ -319,9 +319,7 @@ function enrichSalesReturnGlFailures(failed) {
   return failed.map((f) => {
     const idx = Number(f.index);
     const meta =
-      Number.isFinite(idx) && idx >= 0 ?
-        SALES_RETURN_GL_LINE_META[idx]
-      : null;
+      Number.isFinite(idx) && idx >= 0 ? SALES_RETURN_GL_LINE_META[idx] : null;
     const missing = Array.isArray(f.missing) ? f.missing : [];
     return {
       ...f,
@@ -1047,8 +1045,10 @@ async function applySalesReturnDeleteInventoryRestore({
         continue;
       }
       const wid =
-        item.warehouse_id != null &&
-        mongoose.Types.ObjectId.isValid(String(item.warehouse_id).trim()) ?
+        (
+          item.warehouse_id != null &&
+          mongoose.Types.ObjectId.isValid(String(item.warehouse_id).trim())
+        ) ?
           String(item.warehouse_id).trim()
         : findPriorWarehouseForProduct(oldMap, pid) ||
           ((
@@ -1344,9 +1344,7 @@ async function reconcileProductStockAfterSrCreate({
   const productStockUpdates = [];
   const stockByProductId = new Map();
   const logUrl =
-    req.originalUrl ||
-    req.path ||
-    "/api/sales_return/sales_return_create";
+    req.originalUrl || req.path || "/api/sales_return/sales_return_create";
   const summary = summarizeLineStockByProduct(lines);
 
   for (const [productIdStr, info] of summary) {
@@ -1648,13 +1646,10 @@ async function getSalesReturnByReturnItem(req, res) {
 
   const data = response.data.map((po) => {
     const sales_return_items = itemsBySrId.get(String(po._id)) || [];
-    const sales_return_items_total = sales_return_items.reduce(
-      (sum, row) => {
-        const sub = Number(row.subtotal);
-        return sum + (Number.isFinite(sub) ? sub : 0);
-      },
-      0,
-    );
+    const sales_return_items_total = sales_return_items.reduce((sum, row) => {
+      const sub = Number(row.subtotal);
+      return sum + (Number.isFinite(sub) ? sub : 0);
+    }, 0);
     return {
       ...po,
       sales_return_items,
@@ -1779,8 +1774,7 @@ async function salesReturnCreate(req, res) {
     // Mode-of-payment GL row needs `payment_method_accounts_id`; same fallback pattern as order / POS flows.
     resolveSrPaymentMethodAccount(req.body, req.user);
 
-    req.body.lines_subtotal =
-      salesReturnLinesSubtotalSum(lineItemsFromClient);
+    req.body.lines_subtotal = salesReturnLinesSubtotalSum(lineItemsFromClient);
 
     const transaction_number = generateTransactionNumber();
     req.body.transaction_number = transaction_number;
@@ -1825,47 +1819,40 @@ async function salesReturnCreate(req, res) {
           endStep1();
         }
       };
-      salesReturnCreateResult = await handleGenericCreate(
-        req,
-        "sales_return",
-        {
-          ...modelHelperOptions(mongoSession),
-          afterCreate: async (record, orderReq, sess) => {
-            closeStep1();
-            // step 1 end
-            // step 2 start — transaction insert ×5 (GL)
-            const endStep2 = srStepTimer.start(2, "transaction insert ×5 (GL)");
-            const { created, failed } = await transactionBulkCreate(
-              orderReq,
-              buildSalesReturnGlTransactionItems(
-                record,
-                transaction_number,
-                req.body?.remaining_amount,
-                srGlAccounts,
-              ),
-              { stopOnError: true, session: sess },
+      salesReturnCreateResult = await handleGenericCreate(req, "sales_return", {
+        ...modelHelperOptions(mongoSession),
+        afterCreate: async (record, orderReq, sess) => {
+          closeStep1();
+          // step 1 end
+          // step 2 start — transaction insert ×5 (GL)
+          const endStep2 = srStepTimer.start(2, "transaction insert ×5 (GL)");
+          const { created, failed } = await transactionBulkCreate(
+            orderReq,
+            buildSalesReturnGlTransactionItems(
+              record,
+              transaction_number,
+              req.body?.remaining_amount,
+              srGlAccounts,
+            ),
+            { stopOnError: true, session: sess },
+          );
+          try {
+            if (failed.length) {
+              await throwSalesReturnGlBulkFailed(orderReq, failed);
+            }
+          } finally {
+            endStep2();
+          }
+          // step 2 end
+          if (created[0]?.data?._id) {
+            console.log(
+              "✅ Transaction(s) created:",
+              created.map((c) => c.data._id),
             );
-            try {
-              if (failed.length) {
-                await throwSalesReturnGlBulkFailed(orderReq, failed);
-              }
-            } finally {
-              endStep2();
-            }
-            // step 2 end
-            if (created[0]?.data?._id) {
-              console.log(
-                "✅ Transaction(s) created:",
-                created.map((c) => c.data._id),
-              );
-            }
-          },
+          }
         },
-      );
-      if (
-        !salesReturnCreateResult?.success ||
-        !salesReturnCreateResult.data
-      ) {
+      });
+      if (!salesReturnCreateResult?.success || !salesReturnCreateResult.data) {
         closeStep1();
         throwWithGenericFailure(
           salesReturnCreateResult,
@@ -2140,10 +2127,7 @@ async function salesReturnCreate(req, res) {
       });
     }
 
-    if (
-      !salesReturnCreateResult?.success ||
-      !salesReturnCreateResult.data
-    ) {
+    if (!salesReturnCreateResult?.success || !salesReturnCreateResult.data) {
       return res
         .status(salesReturnCreateResult?.status || 400)
         .json(salesReturnCreateResult);
@@ -2173,9 +2157,8 @@ async function salesReturnCreate(req, res) {
       19,
       "purchase_order read (response reload)",
     );
-    const headerReloadedFromDb = await SalesReturn.findById(
-      createdSalesReturnId,
-    ).lean();
+    const headerReloadedFromDb =
+      await SalesReturn.findById(createdSalesReturnId).lean();
     endStep19();
     // step 19 end
 
@@ -2294,10 +2277,7 @@ async function sales_return_update(req, res) {
 
   /** @param {import("mongoose").ClientSession | null} mongoSession */
   const runSalesReturnUpdateBody = async (mongoSession) => {
-    const srGlAccounts = await resolveSalesReturnGlAccounts(
-      req,
-      mongoSession,
-    );
+    const srGlAccounts = await resolveSalesReturnGlAccounts(req, mongoSession);
     if (
       !req.body.payment_method_accounts_id &&
       srGlAccounts.default_cash_account
@@ -2428,10 +2408,7 @@ async function sales_return_update(req, res) {
         { sales_return_id: prId },
         sessionOpts(mongoSession),
       );
-      await SalesReturnItem.insertMany(
-        built.docs,
-        sessionOpts(mongoSession),
-      );
+      await SalesReturnItem.insertMany(built.docs, sessionOpts(mongoSession));
 
       // Outbound warehouse_inventory + ledger per line (split across warehouses when needed).
       const companyIdForMovement =
@@ -3040,12 +3017,188 @@ async function sales_return_delete(req, res) {
   }
 }
 
+/** Default reporting window when GET /sales_return/profit-by-sales-return-item omits `from` and `to`. */
+const FIND_PROFIT_DEFAULT_RANGE_DAYS = 90;
+
+/**
+ * GET `SUM(profit)` from `sales_return_item` for the authenticated user's `company_id` only.
+ * Uses denormalized line `profit` ((wholesale_price − price) × qty).
+ * Query: `sales_return_id`, `order_id` (via parent return), `product_id`, optional `from` / `to` on line `createdAt`.
+ * If both dates are omitted, only the last {@link FIND_PROFIT_DEFAULT_RANGE_DAYS} days are included.
+ */
+async function findProfitBySalesReturnItem(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    };
+
+    const rawSalesReturnId =
+      req.query?.sales_return_id ?? req.params?.sales_return_id;
+    if (rawSalesReturnId != null && String(rawSalesReturnId).trim() !== "") {
+      const salesReturnIdStr = String(rawSalesReturnId).trim();
+      if (!mongoose.Types.ObjectId.isValid(salesReturnIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid sales_return_id",
+        });
+      }
+      match.sales_return_id = new mongoose.Types.ObjectId(salesReturnIdStr);
+    } else {
+      const rawOrderId = req.query?.order_id ?? req.params?.order_id;
+      if (rawOrderId != null && String(rawOrderId).trim() !== "") {
+        const orderIdStr = String(rawOrderId).trim();
+        if (!mongoose.Types.ObjectId.isValid(orderIdStr)) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid order_id",
+          });
+        }
+        const linkedReturns = await SalesReturn.find({
+          company_id: cid,
+          order_id: new mongoose.Types.ObjectId(orderIdStr),
+          deletedAt: null,
+        })
+          .select("_id")
+          .lean();
+        const returnIds = linkedReturns.map((row) => row._id);
+        if (returnIds.length === 0) {
+          return res.status(200).json({
+            success: true,
+            status: 200,
+            company_id: String(cid),
+            profit: 0,
+            line_count: 0,
+          });
+        }
+        match.sales_return_id = { $in: returnIds };
+      }
+    }
+
+    const rawProductId = req.query?.product_id;
+    if (rawProductId != null && String(rawProductId).trim() !== "") {
+      const productIdStr = String(rawProductId).trim();
+      if (!mongoose.Types.ObjectId.isValid(productIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid product_id",
+        });
+      }
+      match.product_id = new mongoose.Types.ObjectId(productIdStr);
+    }
+
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+
+    if (!hasFrom && !hasTo) {
+      const toDate = new Date();
+      const fromDate = new Date(toDate);
+      fromDate.setDate(fromDate.getDate() - FIND_PROFIT_DEFAULT_RANGE_DAYS);
+      match.createdAt = { $gte: fromDate, $lte: toDate };
+    } else {
+      match.createdAt = {};
+      if (hasFrom) {
+        const fromDate = new Date(String(req.query.from).trim());
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid from date",
+          });
+        }
+        match.createdAt.$gte = fromDate;
+      }
+      if (hasTo) {
+        const toDate = new Date(String(req.query.to).trim());
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid to date",
+          });
+        }
+        match.createdAt.$lte = toDate;
+      }
+    }
+
+    const rows = await SalesReturnItem.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          profit: { $sum: { $ifNull: ["$profit", 0] } },
+          line_count: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          profit: { $round: ["$profit", 2] },
+          line_count: 1,
+        },
+      },
+    ]);
+
+    const profit = rows[0]?.profit ?? 0;
+    const line_count = rows[0]?.line_count ?? 0;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      profit,
+      line_count,
+    });
+  } catch (error) {
+    console.error("❌ findProfitBySalesReturnItem:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   salesReturnCreate,
   sales_return_update,
   sales_return_delete,
   getSalesReturnByReturnItem,
   getSalesReturnByReturnNo,
+  findProfitBySalesReturnItem,
   // purchase_orderUpdate,
   // purchase_orderById,
   // getAllpurchase_order,

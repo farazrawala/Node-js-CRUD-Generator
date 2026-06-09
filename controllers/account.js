@@ -20,6 +20,9 @@ const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
+const {
+  computeBalanceSheetDifference,
+} = require("../utils/balanceSheetReconcile");
 
 const ACCOUNT_TRANSACTION_ERROR_LOG = {
   action: "POST ACCOUNT TRANSACTION ERROR",
@@ -906,9 +909,64 @@ async function fetchAccountsByType(req, res) {
   return res.status(response.status || 200).json(response);
 }
 
+/**
+ * GET /api/account/balance-sheet-difference
+ * Optional query: company_id (must match authenticated tenant if provided).
+ * Returns assets vs liabilities+equity and the equation difference.
+ */
+async function getBalanceSheetDifference(req, res) {
+  try {
+    const tenantCo = coalesceObjectId(req.user?.company_id);
+    const queryCo = coalesceObjectId(req.query?.company_id);
+    const companyId = queryCo || tenantCo;
+
+    if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message:
+          "Provide company_id query param or authenticate with a user that has company_id",
+      });
+    }
+
+    if (tenantCo && queryCo && String(tenantCo) !== String(queryCo)) {
+      return res.status(403).json({
+        success: false,
+        status: 403,
+        error: "Forbidden",
+        message: "company_id does not match authenticated tenant",
+      });
+    }
+
+    const report = await computeBalanceSheetDifference(companyId);
+    if (!report.ok) {
+      return res.status(report.status || 400).json({
+        success: false,
+        status: report.status || 400,
+        error: report.error,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      data: report,
+    });
+  } catch (error) {
+    console.error("❌ getBalanceSheetDifference:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to compute balance sheet difference",
+    });
+  }
+}
+
 module.exports = {
   accountCreate,
   performAccountCreate,
   accountUpdate,
   fetchAccountsByType,
+  getBalanceSheetDifference,
 };

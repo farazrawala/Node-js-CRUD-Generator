@@ -111,6 +111,7 @@ const {
   sales_return_delete,
   getSalesReturnByReturnItem,
   getSalesReturnByReturnNo,
+  findProfitBySalesReturnItem,
 } = require("../controllers/sales_return");
 const {
   companyCreate,
@@ -127,6 +128,7 @@ const {
   accountCreate,
   accountUpdate,
   fetchAccountsByType,
+  getBalanceSheetDifference,
 } = require("../controllers/account");
 
 const {
@@ -248,14 +250,12 @@ router.get(
 );
 
 router.post("/sales_return/sales_return_create", salesReturnCreate);
-router.patch(
-  "/sales_return/sales_return_update/:id",
-  sales_return_update,
+router.get(
+  "/sales_return/profit-by-sales-return-item",
+  findProfitBySalesReturnItem,
 );
-router.delete(
-  "/sales_return/sales_return_delete/:id",
-  sales_return_delete,
-);
+router.patch("/sales_return/sales_return_update/:id", sales_return_update);
+router.delete("/sales_return/sales_return_delete/:id", sales_return_delete);
 router.get(
   "/sales_return/get-sales-return-by-return-item",
   getSalesReturnByReturnItem,
@@ -359,6 +359,7 @@ router.patch("/product/:id/update-default-warehouse", updateWarehouseDefault);
 router.post("/account/custom-create", accountCreate);
 router.patch("/account/custom-update/:id", accountUpdate);
 router.get("/account/fetch-account-by-type", fetchAccountsByType);
+router.get("/account/balance-sheet-difference", getBalanceSheetDifference);
 
 // Adjustment routes
 router.post("/adjustment/save", adjustmentCreate);

@@ -31,6 +31,12 @@ const modelSchema = new mongoose.Schema(
       min: 0,
     },
 
+    /** (product.wholesale_price − price) × qty at save time. */
+    profit: {
+      type: Number,
+      default: 0,
+    },
+
     total_shipping: {
       type: Number,
       required: true,
@@ -90,12 +96,53 @@ function computeLineSubtotal(price, qty) {
   return Math.round(p * q * 100) / 100;
 }
 
-modelSchema.pre("validate", function (next) {
-  const computed = computeLineSubtotal(this.price, this.qty);
-  if (computed !== null) {
-    this.subtotal = computed;
+/** Margin per line: wholesale unit cost minus return price, × qty. */
+function computeLineProfit(wholesalePrice, price, qty) {
+  const wp = Number(wholesalePrice);
+  const p = Number(price);
+  const q = Number(qty);
+  if (!Number.isFinite(wp) || !Number.isFinite(p) || !Number.isFinite(q)) {
+    return 0;
   }
-  next();
+  return Math.round((wp - p) * q * 100) / 100;
+}
+
+function wholesaleUnitFromProduct(product) {
+  if (!product || typeof product !== "object") return 0;
+  const wp = Number(product.wholesale_price);
+  if (Number.isFinite(wp) && wp >= 0) {
+    return Math.round(wp * 100) / 100;
+  }
+  return 0;
+}
+
+modelSchema.pre("validate", async function (next) {
+  try {
+    const computed = computeLineSubtotal(this.price, this.qty);
+    if (computed !== null) {
+      this.subtotal = computed;
+    }
+
+    if (this.product_id) {
+      const Product = mongoose.model("product");
+      const session =
+        typeof this.$session === "function" ? this.$session() : null;
+      let productQuery = Product.findById(this.product_id).select(
+        "wholesale_price",
+      );
+      if (session) productQuery = productQuery.session(session);
+      const product = await productQuery.lean();
+      this.profit = computeLineProfit(
+        wholesaleUnitFromProduct(product),
+        this.price,
+        this.qty,
+      );
+    }
+
+    next();
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**
@@ -109,7 +156,7 @@ modelSchema.pre(
       const raw = this.getUpdate();
       if (!raw || Array.isArray(raw)) return next();
 
-      const moneyKeys = ["price", "qty", "subtotal"];
+      const moneyKeys = ["price", "qty", "subtotal", "product_id"];
       const plain =
         raw.$set && typeof raw.$set === "object" ?
           { ...raw.$set }
@@ -127,7 +174,7 @@ modelSchema.pre(
 
       const existing = await this.model
         .findOne(filter)
-        .select("price qty")
+        .select("price qty product_id")
         .lean();
       if (!existing) return next();
 
@@ -140,12 +187,31 @@ modelSchema.pre(
       const computed = computeLineSubtotal(price, qty);
       if (computed === null) return next();
 
+      const productId =
+        plain.product_id !== undefined ?
+          plain.product_id
+        : existing.product_id;
+      let profit = 0;
+      if (productId) {
+        const Product = mongoose.model("product");
+        const product = await Product.findById(productId)
+          .select("wholesale_price")
+          .lean();
+        profit = computeLineProfit(
+          wholesaleUnitFromProduct(product),
+          price,
+          qty,
+        );
+      }
+
+      const extraFields = { subtotal: computed, profit };
+
       if (raw.$set && typeof raw.$set === "object") {
         this.setUpdate({
           ...raw,
           $set: {
             ...raw.$set,
-            subtotal: computed,
+            ...extraFields,
           },
         });
       } else {
@@ -159,7 +225,7 @@ modelSchema.pre(
           ...operators,
           $set: {
             ...top,
-            subtotal: computed,
+            ...extraFields,
           },
         });
       }
@@ -169,6 +235,44 @@ modelSchema.pre(
     }
   },
 );
+
+/** `insertMany` does not run document `validate` hooks; set subtotal and profit here. */
+modelSchema.pre("insertMany", async function (next, docs) {
+  try {
+    const rows = Array.isArray(docs) ? docs : [];
+    if (rows.length === 0) return next();
+
+    const Product = mongoose.model("product");
+    const productIds = [
+      ...new Set(
+        rows
+          .map((d) => String(d.product_id ?? "").trim())
+          .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+      ),
+    ];
+    const products =
+      productIds.length === 0 ?
+        []
+      : await Product.find({ _id: { $in: productIds } })
+          .select("wholesale_price")
+          .lean();
+    const productById = new Map(products.map((p) => [String(p._id), p]));
+
+    for (const doc of rows) {
+      const sub = computeLineSubtotal(doc.price, doc.qty);
+      if (sub !== null) doc.subtotal = sub;
+      const product = productById.get(String(doc.product_id));
+      doc.profit = computeLineProfit(
+        wholesaleUnitFromProduct(product),
+        doc.price,
+        doc.qty,
+      );
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 modelSchema.index({ sales_return_id: 1, company_id: 1 });
 
