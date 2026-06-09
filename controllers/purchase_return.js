@@ -32,6 +32,10 @@ const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  applyWholesalePriceRemoveForPoLines,
+  applyWholesalePriceWeightedAverageForPoLines,
+} = require("./purchase_order");
 
 /**
  * Purchase return HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -1760,6 +1764,7 @@ async function getPurchaseReturnByReturnNo(req, res) {
  * |    3 | product                 | read / update      | one × P      | medium | `syncProductStockFromMovementLedger` (+ bump if no warehouse qty) |
  * |    5 | purchase_return_item     | insert             | many (1×)    | medium | `insertMany` via `buildPurchaseReturnItemDocuments` |
  * |    6 | inventory_movements     | insert             | one × N      | low    | `insertInventoryMovementRecord` — one row per warehouse line |
+ * |  6b | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceRemoveForPoLines` — reverse weighted `wholesale_price` after outbound |
  * |    7 | product                 | read               | one × P      | medium | `evaluateProductStockAlert` — one read per distinct product |
  * |    8 | alerts                  | read               | one × P      | low    | Skip insert when active alert already exists |
  * |    9 | alerts                  | insert or update   | one × P      | low    | Insert alert when low; soft-delete when above threshold |
@@ -1800,6 +1805,7 @@ async function purchaseReturnCreate(req, res) {
     let purchaseReturnCreateResult = null;
     const persistedLineItems = [];
     const productStockUpdates = [];
+    const wholesaleUpdates = [];
     /** Set when `withTransaction` fails for a non–transaction-support reason, or when the non-session retry throws. */
     let createPipelineError = null;
     prStepTimer = startPrCreateStepTimer();
@@ -1982,6 +1988,20 @@ async function purchaseReturnCreate(req, res) {
       }
       // step 6–11 end
 
+      // Reverse weighted-average wholesale_price after outbound warehouse qty (mirrors PO delete).
+      const wholesaleRows = await applyWholesalePriceRemoveForPoLines({
+        lines: lineItemsFromClient,
+        companyId,
+        req,
+        mongoSession,
+        logTags: PURCHASE_RETURN_LOG_TAGS,
+        fallbackUrl:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_return/purchase_return_create",
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+
       // step 3–4 start — product stock (ledger sync + non-warehouse bump)
       const stockReconcile = await reconcileProductStockAfterPrCreate({
         lines: lineItemsFromClient,
@@ -2071,6 +2091,7 @@ async function purchaseReturnCreate(req, res) {
         try {
           persistedLineItems.length = 0;
           productStockUpdates.length = 0;
+          wholesaleUpdates.length = 0;
           purchaseReturnCreateResult = null;
           prStepTimer.resetSteps();
           const endTxnRetry = prStepTimer.start(
@@ -2203,7 +2224,7 @@ async function purchaseReturnCreate(req, res) {
       items: persistedLineItems,
       items_total,
       product_stock_updates: productStockUpdates,
-      wholesale_updates: [],
+      wholesale_updates: wholesaleUpdates,
       step_timings_ms: stepTimingsMs,
     });
   } catch (unexpectedError) {
@@ -2664,6 +2685,7 @@ async function purchase_return_update(req, res) {
  * |    1 | purchase_return         | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | many         | medium | By return header `transaction_number` |
  * |    3 | purchase_return_item    | update (soft)      | many         | medium | All active lines for this return |
+ * |  3b | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceWeightedAverageForPoLines` — restore weighted `wholesale_price` before warehouse restore |
  * |    4 | warehouse_inventory, inventory_movements, product | read / update / insert | one × N | medium | `applyPurchaseReturnDeleteInventoryRestore`: add warehouse qty back, insert `in` reversal rows, ledger `product.stock` sync |
  * |    5 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only (post-commit; no session) |
  * |    6 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE RETURN DELETE ROLLBACK`) |
@@ -2746,6 +2768,7 @@ async function purchase_return_delete(req, res) {
     let txnMode = null;
     let softDeletedPr = null;
     const productStockUpdates = [];
+    const wholesaleUpdates = [];
     const deletedAt = new Date();
     const userId = req.user?._id;
     const deleteSnapshot = {
@@ -2838,6 +2861,25 @@ async function purchase_return_delete(req, res) {
       }
       // step 3 end
 
+      // step 3b — restore weighted-average wholesale_price before warehouse qty is added back (mirrors PO create).
+      const endStep3b = prDeleteStepTimer.start(
+        "3b",
+        "product wholesale_price restore (weighted avg)",
+      );
+      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
+        lines: existingPrItems,
+        companyId,
+        req,
+        mongoSession,
+        logTags: PURCHASE_RETURN_LOG_TAGS,
+        fallbackUrl:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_return/purchase_return_delete",
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+      endStep3b({ wholesale_updates: wholesaleUpdates.length });
+
       // step 4 start — restore warehouse_inventory + insert reversal `in` movements
       const endStep4 = prDeleteStepTimer.start(
         4,
@@ -2901,6 +2943,7 @@ async function purchase_return_delete(req, res) {
         try {
           softDeletedPr = null;
           productStockUpdates.length = 0;
+          wholesaleUpdates.length = 0;
           deleteSnapshot.gl_rows_soft_deleted = 0;
           deleteSnapshot.items_soft_deleted = 0;
           deleteSnapshot.reversal_movements_inserted = 0;
@@ -3020,6 +3063,7 @@ async function purchase_return_delete(req, res) {
         transaction_number: transactionNumber,
       },
       product_stock_updates: productStockUpdates,
+      wholesale_updates: wholesaleUpdates,
       delete_snapshot: deleteSnapshot,
       step_timings_ms: stepTimingsMs,
       txn_mode: txnMode,

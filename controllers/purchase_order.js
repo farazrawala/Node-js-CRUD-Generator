@@ -904,6 +904,7 @@ async function logProductWholesalePriceChange(
     companyId,
     mongoSession = null,
     fallbackUrl = "/api/purchase_order/purchase_order_create",
+    logTags = ["purchase_order"],
   },
 ) {
   const namePart =
@@ -918,7 +919,7 @@ async function logProductWholesalePriceChange(
     {
       action: "Product wholesale_price updated",
       url: req?.originalUrl || req?.path || fallbackUrl,
-      tags: ["wholesale_price", "product", "purchase_order"],
+      tags: ["wholesale_price", "product", ...logTags],
       description,
       reference_id: productIdStr,
       reference_type: "product",
@@ -972,6 +973,8 @@ async function applyWholesalePriceRemoveForPoLines({
   companyId,
   req,
   mongoSession = null,
+  logTags = ["purchase_order"],
+  fallbackUrl = "/api/purchase_order/update",
 }) {
   const removedByProduct = summarizePoWarehouseInboundByProduct(lines);
   const wholesaleUpdates = [];
@@ -1055,7 +1058,8 @@ async function applyWholesalePriceRemoveForPoLines({
       averageCost,
       companyId: cid,
       mongoSession,
-      fallbackUrl: "/api/purchase_order/update",
+      fallbackUrl,
+      logTags,
     });
   }
 
@@ -1067,6 +1071,8 @@ async function applyWholesalePriceWeightedAverageForPoLines({
   companyId,
   req,
   mongoSession = null,
+  logTags = ["purchase_order"],
+  fallbackUrl = "/api/purchase_order/purchase_order_create",
 }) {
   const inboundByProduct = summarizePoWarehouseInboundByProduct(lines);
   const wholesaleUpdates = [];
@@ -1144,6 +1150,8 @@ async function applyWholesalePriceWeightedAverageForPoLines({
       averageCost,
       companyId: cid,
       mongoSession,
+      fallbackUrl,
+      logTags,
     });
   }
 
@@ -2770,6 +2778,8 @@ module.exports = {
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
+  applyWholesalePriceRemoveForPoLines,
+  applyWholesalePriceWeightedAverageForPoLines,
   // purchase_orderUpdate,
   // purchase_orderById,
   // getAllpurchase_order,
