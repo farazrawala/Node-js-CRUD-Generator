@@ -2204,7 +2204,7 @@ async function salesReturnCreate(req, res) {
  * Flow: (1) parse `collectLineItems` from body, (2) normalize header on `req.body` (restore `originalBody`
  * before response), (3) `handleGenericUpdate` inside `session.withTransaction` when supported,
  * (4) in `afterUpdate`: soft-delete prior `transaction` rows for this return's `transaction_number`, soft-delete
- *     prior `inventory_movements` with `reference_type: purchase_order`, then insert five new GL lines
+ *     prior `inventory_movements` with `reference_type: sales_return`, then insert five new GL lines
  *     (same order as `salesReturnCreate` / `SALES_RETURN_GL_LINE_META`),
  * (5) when client sends lines: replace all `sales_return_item` rows, post new `in` movements per line
  *     with `warehouse_id` via `insertInventoryMovementRecord`, then stock reconcile for
@@ -2223,22 +2223,20 @@ async function salesReturnCreate(req, res) {
  * | Step | When                                          | Collection              | Op               | One or many  | Cost   | Notes |
  * |------|-----------------------------------------------|-------------------------|--------------------|--------------|--------|-------|
  * |    1 | Pre-txn (no lines in body)                    | sales_return_item     | read               | many         | medium | Sum subtotals → `lines_subtotal` on header |
- * |    2 | In txn — always                               | purchase_order          | update             | one          | low    | `handleGenericUpdate` (header fields) |
+ * |    2 | In txn — always                               | sales_return            | update             | one          | low    | `handleGenericUpdate` (header fields) |
  * |    3 | In txn — always (`afterUpdate`)               | transaction             | update             | many         | medium | Soft-delete active rows for `transaction_number` |
- * |    4 | In txn — always (`afterUpdate`)               | transaction             | insert             | many (5)     | medium | `transactionBulkCreate` — new GL set |
- * |    5 | In txn — always (`afterUpdate`)               | inventory_movements     | update             | many         | high   | Soft-delete rows for this return `reference_id` |
- * |    6 | In txn — lines in body                        | sales_return_item     | read               | many         | low    | Snapshot before replace (`product_id`) |
- * |    7 | In txn — lines in body                        | sales_return_item     | delete             | many         | medium | `deleteMany` by `order_id` |
- * |    8 | In txn — lines in body                        | sales_return_item     | insert             | many         | medium | `insertMany` from `built.docs` |
- * |    9 | In txn — lines in body (per line w/ warehouse) | inventory_movements     | insert             | one × N      | low    | `insertInventoryMovementRecord` |
- * |   10 | In txn — lines in body (per line w/ warehouse) | product                 | update             | one × N      | medium | Optional `wholesale_price` on `in` (weighted avg) |
- * |   11 | In txn — lines in body (per line w/ warehouse) | logs                    | insert             | one × N      | low    | Movement + optional wholesale audit rows |
- * |   12 | In txn — lines in body                        | product                 | read / update      | one × P      | high   | `syncProductStockFromMovementLedger` (ledger + stock + log) |
- * |   13 | In txn — lines in body                        | logs                    | insert             | one × P      | low    | Stock-sync audit when stock changed (same session) |
- * |   14 | In txn — always                               | purchase_order          | update             | one          | medium | `syncHeaderTotalsFromLineItems` (`lines_subtotal`, `total_amount`) |
- * |   15 | Post-txn success                              | sales_return_item     | read               | many         | medium | Populate for response `data` |
- * |   16 | Post-txn success                              | purchase_order          | read               | one          | low    | Reload header for response |
- * |   17 | On failure                                    | logs                    | insert             | one          | low    | `logRollbackFailure` (`SALES RETURN UPDATE ROLLBACK`) |
+ * |    4 | In txn — always (`afterUpdate`)               | inventory_movements     | update             | many         | medium | Soft-delete rows for this return `reference_id` |
+ * |    5 | In txn — always (`afterUpdate`)               | transaction             | insert             | many (5)     | medium | `transactionBulkCreate` — new GL set |
+ * |    6 | In txn — lines in body                        | sales_return_item       | read               | many         | low    | Snapshot before replace (`product_id`) |
+ * |    7 | In txn — lines in body                        | sales_return_item       | delete             | many         | medium | `deleteMany` by `sales_return_id` |
+ * |    8 | In txn — lines in body                        | sales_return_item       | insert             | many         | medium | `insertMany` from `built.docs` |
+ * |    9 | In txn — lines in body (per line w/ warehouse) | warehouse_inventory, inventory_movements | read / update / insert | one × N | medium | `applySalesReturnInboundForLine` — qty `in` + movement row |
+ * |   10 | In txn — lines in body                        | product, logs           | read / update      | one × P      | high   | `syncProductStockFromMovementLedger` per old ∪ new product |
+ * |   11 | In txn — lines in body                        | alerts, logs            | read / insert      | one × P      | low    | `evaluateProductStockAlert` per synced product |
+ * |   12 | In txn — always                               | sales_return            | update             | one          | low    | `syncHeaderTotalsFromLineItems` (`lines_subtotal`, `total_amount`) |
+ * |   13 | Post-txn success                              | sales_return_item       | read               | many         | medium | Populate for response `data` |
+ * |   14 | Post-txn success                              | sales_return            | read               | one          | low    | Reload header for response |
+ * |   15 | On failure                                    | logs                    | insert             | one          | low    | `logRollbackFailure` (`SALES RETURN UPDATE ROLLBACK`) |
  *
  * P = distinct product ids on old ∪ new lines. N = lines with valid `warehouse_id`. Does not call
  * `incrementProductStockForReturnLine` (create-only direct `product.stock` bump).
@@ -2258,7 +2256,7 @@ async function sales_return_update(req, res) {
   if (lines.length > 0) {
     req.body.lines_subtotal = salesReturnLinesSubtotalSum(lines);
   } else if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
-    // Header-only update: derive subtotal from persisted lines so GL purchase line amount stays correct.
+    // step 1 start — header-only: derive `lines_subtotal` from persisted lines
     const existingItems = await SalesReturnItem.find({
       sales_return_id: recordId,
       status: "active",
@@ -2267,6 +2265,7 @@ async function sales_return_update(req, res) {
       .select("subtotal")
       .lean();
     req.body.lines_subtotal = salesReturnLinesSubtotalSum(existingItems);
+    // step 1 end
   }
 
   let clientSession = null;
@@ -2285,11 +2284,12 @@ async function sales_return_update(req, res) {
       req.body.payment_method_accounts_id = srGlAccounts.default_cash_account;
     }
 
+    // step 2 start — sales_return header update (`handleGenericUpdate`)
     response = await handleGenericUpdate(req, "sales_return", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterUpdate: async (record, orderReq, _existing, sess) => {
         const transaction_number = record?.transaction_number;
-        // Invalidate old GL rows (soft delete) before inserting the replacement set for this return.
+        // step 3 start — soft-delete prior GL rows for this `transaction_number`
         if (transaction_number) {
           const softDeleteTransc = await Transaction.updateMany(
             {
@@ -2318,36 +2318,39 @@ async function sales_return_update(req, res) {
             );
           }
         }
+        // step 3 end
 
-        // Prior inbound movements for this return are inactive so new line qty is not double-counted in the ledger.
-        const invMovementSoftDelete = await InventoryMovements.updateMany(
-          {
-            reference_type: "sales_return",
-            reference_id: record._id,
-            status: "active",
-            $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-          },
-          {
-            $set: {
-              deletedAt: new Date(),
-              status: "inactive",
-              ...((
-                orderReq.user?._id &&
-                mongoose.Types.ObjectId.isValid(String(orderReq.user._id))
-              ) ?
-                { updated_by: orderReq.user._id }
-              : {}),
-            },
-          },
-          sessionOpts(sess),
-        );
-        if (invMovementSoftDelete.modifiedCount > 0) {
-          console.log(
-            "✅ Inventory movement rows soft-deleted:",
-            invMovementSoftDelete.modifiedCount,
-          );
-        }
+        // step 4 start — soft-delete prior inbound `inventory_movements` for this return
+        // const invMovementSoftDelete = await InventoryMovements.updateMany(
+        //   {
+        //     reference_type: "sales_return",
+        //     reference_id: record._id,
+        //     status: "active",
+        //     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        //   },
+        //   {
+        //     $set: {
+        //       deletedAt: new Date(),
+        //       status: "inactive",
+        //       ...((
+        //         orderReq.user?._id &&
+        //         mongoose.Types.ObjectId.isValid(String(orderReq.user._id))
+        //       ) ?
+        //         { updated_by: orderReq.user._id }
+        //       : {}),
+        //     },
+        //   },
+        //   sessionOpts(sess),
+        // );
+        // if (invMovementSoftDelete.modifiedCount > 0) {
+        //   console.log(
+        //     "✅ Inventory movement rows soft-deleted:",
+        //     invMovementSoftDelete.modifiedCount,
+        //   );
+        // }
+        // step 4 end
 
+        // step 5 start — insert replacement GL rows (×5)
         const { created, failed } = await transactionBulkCreate(
           orderReq,
           buildSalesReturnGlTransactionItems(
@@ -2367,9 +2370,11 @@ async function sales_return_update(req, res) {
             created.map((c) => c.data._id),
           );
         }
+        // step 5 end
       },
       filter: { status: "active", deletedAt: null },
     });
+    // step 2 end
 
     if (!response?.success || !response?.data) {
       throwWithGenericFailure(response, "Sales return update failed");
@@ -2388,7 +2393,7 @@ async function sales_return_update(req, res) {
         throw new Error(built.error);
       }
 
-      // Snapshot existing lines before replace (for ledger stock sync and API metadata).
+      // step 6 start — snapshot existing lines before replace
       let existingSrItemsQuery = SalesReturnItem.find({
         sales_return_id: prId,
         status: "active",
@@ -2402,15 +2407,20 @@ async function sales_return_update(req, res) {
       const previous_product_ids =
         collectUniqueProductIdsFromLineRows(existingSrItems);
       const new_product_ids = collectUniqueProductIdsFromLineRows(built.docs);
+      // step 6 end
 
-      // Full line replace: delete all items for this return, then insert the new set from the request.
+      // step 7 start — full line replace: `deleteMany` existing items
       await SalesReturnItem.deleteMany(
         { sales_return_id: prId },
         sessionOpts(mongoSession),
       );
-      await SalesReturnItem.insertMany(built.docs, sessionOpts(mongoSession));
+      // step 7 end
 
-      // Outbound warehouse_inventory + ledger per line (split across warehouses when needed).
+      // step 8 start — `insertMany` new line items from request
+      await SalesReturnItem.insertMany(built.docs, sessionOpts(mongoSession));
+      // step 8 end
+
+      // step 9 start — warehouse inbound + `inventory_movements` per line
       const companyIdForMovement =
         coalesceObjectId(response.data.company_id) ||
         coalesceObjectId(req.user?.company_id);
@@ -2435,8 +2445,9 @@ async function sales_return_update(req, res) {
           throw inventoryMovementErr;
         }
       }
+      // step 9 end
 
-      // Reconcile `product.stock` from movement ledger after new `out` rows are posted.
+      // step 10 start — `product.stock` ledger sync per old ∪ new product
       const companyIdForStock =
         coalesceObjectId(response.data.company_id) ||
         coalesceObjectId(req.user?.company_id);
@@ -2470,6 +2481,7 @@ async function sales_return_update(req, res) {
           qty_out: syncResult.qty_out,
         });
 
+        // step 11 start — stock alert per synced product
         const onHandAfterSync = Number(syncResult.product?.stock);
         const alertResult = await evaluateProductStockAlert({
           req,
@@ -2487,7 +2499,9 @@ async function sales_return_update(req, res) {
               "Product stock alert check failed",
           );
         }
+        // step 11 end
       }
+      // step 10 end
 
       srLineReplaceSnapshot = {
         previous_product_ids,
@@ -2495,17 +2509,21 @@ async function sales_return_update(req, res) {
         stock_sync: stockSyncResults,
       };
 
+      // step 12 start — sync header totals from line items
       await SalesReturn.syncHeaderTotalsFromLineItems(prId, {
         session: mongoSession || undefined,
       });
+      // step 12 end
     } else {
-      // No new lines in payload: header totals still reconciled from existing `sales_return_item` rows.
+      // step 12 start — header-only: sync totals from existing lines
       await SalesReturn.syncHeaderTotalsFromLineItems(prId, {
         session: mongoSession || undefined,
       });
+      // step 12 end
     }
   };
 
+  // txn start — MongoDB transaction wrapper (or standalone retry)
   try {
     clientSession = await mongoose.startSession();
     await clientSession.withTransaction(async () => {
@@ -2543,10 +2561,11 @@ async function sales_return_update(req, res) {
       }
     }
   }
+  // txn end
 
   req.body = originalBody;
 
-  // Failure path — `logs` row (`SALES RETURN UPDATE ROLLBACK`) + client JSON.
+  // step 15 start — failure path (`logRollbackFailure` + client JSON)
   if (txnError) {
     await logRollbackFailure(req, txnError, {
       action: "SALES RETURN UPDATE ROLLBACK",
@@ -2579,6 +2598,7 @@ async function sales_return_update(req, res) {
       details: msg,
     });
   }
+  // step 15 end
 
   if (!response || !response.success || !response.data) {
     return res
@@ -2588,7 +2608,7 @@ async function sales_return_update(req, res) {
 
   const prId = response.data._id;
 
-  // Success: reload lines + header for shaped `data` (post-txn read; not inside the session).
+  // step 13 start — post-txn reload line items for response
   const items = await SalesReturnItem.find({
     sales_return_id: prId,
     status: "active",
@@ -2597,9 +2617,12 @@ async function sales_return_update(req, res) {
     .populate("product_id")
     .sort({ createdAt: 1 })
     .lean();
+  // step 13 end
 
+  // step 14 start — post-txn reload header for response
   const prFresh = await SalesReturn.findById(prId).lean();
   const data = shapeSalesReturnWithItems(prFresh || response.data, items);
+  // step 14 end
 
   return res.status(200).json({
     success: true,
@@ -2610,6 +2633,30 @@ async function sales_return_update(req, res) {
   });
 }
 
+/**
+ * Soft-delete a sales return and reverse inventory / GL effects.
+ *
+ * URL: `DELETE /api/sales_return/sales_return_delete/:id` — `:id` is `sales_return._id`.
+ *
+ * **Session:** Tries `mongoose.startSession` + `withTransaction` first. On standalone mongod
+ * (replica-set–only errors), retries the same pipeline without a session — see `isMongoTransactionUnsupportedError`.
+ * All writes inside `runSalesReturnDeleteBody` pass `sessionOpts(mongoSession)` when a session is active.
+ *
+ * Collections (Mongo) — op = insert | update | delete | read; scope = one | many
+ *
+ * | Step | Collection              | Op                 | One or many  | Cost   | Notes |
+ * |------|-------------------------|--------------------|--------------|--------|-------|
+ * |    0 | sales_return, sales_return_item, inventory_movements | read | one + many | low | Pre-txn validation (404 if missing); snapshot active `in` movements for this return |
+ * |    1 | sales_return            | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
+ * |    2 | transaction             | update (soft)      | many         | medium | By return header `transaction_number` |
+ * |    3 | inventory_movements     | read + update (soft) | many       | medium | Re-read `in` rows in txn; `softDeleteActiveByReference` for `reference_type: sales_return` |
+ * |    4 | sales_return_item       | update (soft)      | many         | medium | All active lines for this return |
+ * |    5 | warehouse_inventory, inventory_movements, product | read / update / insert | one × N | medium | `applySalesReturnDeleteInventoryRestore`: subtract warehouse qty, insert `out` reversal rows, ledger `product.stock` sync |
+ * |    6 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only (post-commit; no session) |
+ * |    7 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`SALES RETURN DELETE ROLLBACK`) |
+ *
+ * N = distinct product/warehouse pairs from prior inbound movements (or line items when movement snapshot is empty).
+ */
 async function sales_return_delete(req, res) {
   let srDeleteStepTimer = null;
 

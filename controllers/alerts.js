@@ -50,6 +50,8 @@ function queryWithSession(query, session) {
 
  *   logUrl?: string,
 
+ *   logTags?: string[],
+
  * }} params
 
  */
@@ -68,6 +70,8 @@ async function evaluateProductStockAlert({
   session = null,
 
   logUrl = null,
+
+  logTags = [],
 }) {
   const productIdStr = String(productId ?? "").trim();
 
@@ -263,7 +267,7 @@ async function evaluateProductStockAlert({
           req?.path ||
           "/api/alerts/check-product-alert",
 
-        tags: ["stock_alert"],
+        tags: ["stock_alert", ...logTags],
 
         description: logMessage,
 

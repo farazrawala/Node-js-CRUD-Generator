@@ -1017,35 +1017,36 @@ async function applyWholesalePriceRemoveForPoLines({
         roundPoMoney(Math.max(0, grandTotalAfter) / warehouseQty)
       : 0;
 
-    if (roundPoMoney(wholesaleBefore) === roundPoMoney(averageCost)) {
-      continue;
+    const priceUnchanged =
+      roundPoMoney(wholesaleBefore) === roundPoMoney(averageCost);
+
+    if (!priceUnchanged) {
+      const updateOpts = mongoSession ? { session: mongoSession } : {};
+      const updated = await Product.findOneAndUpdate(
+        { _id: pid, company_id: cid, status: "active", deletedAt: null },
+        { $set: { wholesale_price: averageCost } },
+        { new: true, ...updateOpts },
+      ).lean();
+
+      if (!updated) {
+        throw new Error(
+          `Failed to reverse wholesale_price for product (id ${productIdStr})`,
+        );
+      }
+
+      wholesaleUpdates.push({
+        product_id: productIdStr,
+        product_name: productDoc.product_name,
+        warehouse_qty_after_reverse: warehouseQty,
+        removed_qty: removedQty,
+        removed_cost: removedCost,
+        wholesale_price_before: wholesaleBefore,
+        grand_total_before: grandTotalBefore,
+        grand_total_after: grandTotalAfter,
+        wholesale_price: averageCost,
+        direction: "remove",
+      });
     }
-
-    const updateOpts = mongoSession ? { session: mongoSession } : {};
-    const updated = await Product.findOneAndUpdate(
-      { _id: pid, company_id: cid, status: "active", deletedAt: null },
-      { $set: { wholesale_price: averageCost } },
-      { new: true, ...updateOpts },
-    ).lean();
-
-    if (!updated) {
-      throw new Error(
-        `Failed to reverse wholesale_price for product (id ${productIdStr})`,
-      );
-    }
-
-    wholesaleUpdates.push({
-      product_id: productIdStr,
-      product_name: productDoc.product_name,
-      warehouse_qty_after_reverse: warehouseQty,
-      removed_qty: removedQty,
-      removed_cost: removedCost,
-      wholesale_price_before: wholesaleBefore,
-      grand_total_before: grandTotalBefore,
-      grand_total_after: grandTotalAfter,
-      wholesale_price: averageCost,
-      direction: "remove",
-    });
 
     await logProductWholesalePriceChange(req, {
       productIdStr,
@@ -1136,16 +1137,14 @@ async function applyWholesalePriceWeightedAverageForPoLines({
       direction: "inbound",
     });
 
-    if (roundPoMoney(wholesaleBefore) !== roundPoMoney(averageCost)) {
-      await logProductWholesalePriceChange(req, {
-        productIdStr,
-        productName: productDoc.product_name,
-        wholesaleBefore,
-        averageCost,
-        companyId: cid,
-        mongoSession,
-      });
-    }
+    await logProductWholesalePriceChange(req, {
+      productIdStr,
+      productName: productDoc.product_name,
+      wholesaleBefore,
+      averageCost,
+      companyId: cid,
+      mongoSession,
+    });
   }
 
   return wholesaleUpdates;
@@ -1893,7 +1892,7 @@ async function purchaseOrderCreate(req, res) {
  * |    9 | In txn — lines    | purchase_order_item     | insert             | many         | medium | `insertMany` |
  * |   10 | In txn — lines    | inventory_movements     | insert             | one × N      | low    | `insertInventoryMovementRecord` per warehouse line |
  * |   11 | In txn — lines    | warehouse_inventory, product, logs | read / update | one × R | medium | Reverse stock; `applyWholesalePriceRemoveForPoLines` + wholesale audit logs |
- * |   12 | In txn — lines    | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceWeightedAverageForPoLines` + logs when price changes |
+ * |   12 | In txn — lines    | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceWeightedAverageForPoLines` + wholesale audit log (even if unchanged) |
  * |   13 | In txn — lines    | warehouse_inventory     | read / upsert      | one × N      | medium | Inbound new line qty (`applyWarehouseInventoryForPoLines`) |
  * |   14 | Post-txn success  | purchase_order_item     | read               | many         | medium | Populate for response `data` |
  * |   15 | Post-txn success  | purchase_order          | read               | one          | low    | Reload header for response |
@@ -2302,13 +2301,12 @@ async function purchase_order_update(req, res) {
  * |    0 | purchase_order, purchase_order_item | read     | one + many   | low    | Pre-txn validation (404 if missing) |
  * |    1 | purchase_order          | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | many         | medium | By PO header `transaction_number` |
- * |    3 | inventory_movements     | update (soft)      | many         | medium | Active rows for this PO `reference_id` |
- * |    4 | purchase_order_item     | update (soft)      | many         | medium | All active lines for this PO |
- * |    5 | inventory_movements     | insert             | one × N      | low    | One `out` row per warehouse line (reverses original `in`) |
- * |    6 | warehouse_inventory     | read / update      | one × N      | medium | Subtract line qty via `reverseLines` |
- * |    7 | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceRemoveForPoLines` when applicable |
- * |    8 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only |
- * |    9 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE ORDER DELETE ROLLBACK`) |
+ * |    3 | purchase_order_item     | update (soft)      | many         | medium | All active lines for this PO |
+ * |    4 | inventory_movements     | insert             | one × N      | low    | One `out` row per warehouse line (reverses original `in`) |
+ * |    5 | warehouse_inventory     | read / update      | one × N      | medium | Subtract line qty via `reverseLines` |
+ * |    6 | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceRemoveForPoLines` when applicable |
+ * |    7 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only |
+ * |    8 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE ORDER DELETE ROLLBACK`) |
  *
  * N = warehouse lines; P = distinct products (wholesale reverse).
  */
@@ -2383,7 +2381,6 @@ async function purchase_order_delete(req, res) {
     const userId = req.user?._id;
     const deleteSnapshot = {
       gl_rows_soft_deleted: 0,
-      movements_soft_deleted: 0,
       items_soft_deleted: 0,
       reversal_movements_inserted: 0,
     };
@@ -2437,33 +2434,9 @@ async function purchase_order_delete(req, res) {
         );
       }
 
-      // step 3 start — soft-delete active inventory_movements for this PO
+      // step 3 start — soft-delete purchase_order_item rows
       const endStep3 = poDeleteStepTimer.start(
         3,
-        "inventory_movements soft-delete by reference",
-      );
-      const movementSoftDelete =
-        await InventoryMovements.softDeleteActiveByReference({
-          referenceType: "purchase_order",
-          referenceId: poId,
-          companyId,
-          session: mongoSession,
-          userId,
-        });
-      deleteSnapshot.movements_soft_deleted =
-        movementSoftDelete.modifiedCount || 0;
-      endStep3({ modified_count: deleteSnapshot.movements_soft_deleted });
-      // step 3 end
-      if (deleteSnapshot.movements_soft_deleted > 0) {
-        console.log(
-          "✅ Inventory movement rows soft-deleted:",
-          deleteSnapshot.movements_soft_deleted,
-        );
-      }
-
-      // step 4 start — soft-delete purchase_order_item rows
-      const endStep4 = poDeleteStepTimer.start(
-        4,
         "purchase_order_item soft-delete",
       );
       const itemSoftDeleteSet = {
@@ -2484,8 +2457,8 @@ async function purchase_order_delete(req, res) {
         sessionOpts(mongoSession),
       );
       deleteSnapshot.items_soft_deleted = itemSoftDelete.modifiedCount || 0;
-      endStep4({ modified_count: deleteSnapshot.items_soft_deleted });
-      // step 4 end
+      endStep3({ modified_count: deleteSnapshot.items_soft_deleted });
+      // step 3 end
       if (deleteSnapshot.items_soft_deleted > 0) {
         console.log(
           "✅ Purchase order line items soft-deleted:",
@@ -2493,7 +2466,7 @@ async function purchase_order_delete(req, res) {
         );
       }
 
-      // step 5 start — insert reversal inventory_movements (`out`) per warehouse line
+      // step 4 start — insert reversal inventory_movements (`out`) per warehouse line
       for (let lineIndex = 0; lineIndex < existingPoItems.length; lineIndex++) {
         const line = existingPoItems[lineIndex];
         const productIdStr = String(line.product_id ?? "").trim();
@@ -2541,8 +2514,8 @@ async function purchase_order_delete(req, res) {
           status: "active",
         };
 
-        const endStep5Line = poDeleteStepTimer.start(
-          5,
+        const endStep4Line = poDeleteStepTimer.start(
+          4,
           "inventory_movements insert (out reversal)",
           { line_index: lineIndex, warehouse_id: warehouseIdStr },
         );
@@ -2558,7 +2531,7 @@ async function purchase_order_delete(req, res) {
           }
           throw inventoryMovementErr;
         } finally {
-          endStep5Line();
+          endStep4Line();
           req.body = bodyBeforeInventoryMovement;
           if (hadRouteParamId) {
             req.params.id = savedRouteParamId;
@@ -2567,11 +2540,11 @@ async function purchase_order_delete(req, res) {
           }
         }
       }
-      // step 5 end
+      // step 4 end
 
-      // step 6 start — reverse warehouse_inventory (subtract received qty)
-      const endStep6 = poDeleteStepTimer.start(
-        6,
+      // step 5 start — reverse warehouse_inventory (subtract received qty)
+      const endStep5 = poDeleteStepTimer.start(
+        5,
         "warehouse_inventory reverse (reverseLines)",
         { line_count: existingPoItems.length },
       );
@@ -2587,12 +2560,12 @@ async function purchase_order_delete(req, res) {
       for (const row of stockReconcile || []) {
         productStockUpdates.push({ ...row, source: "warehouse_inventory" });
       }
-      endStep6({ warehouse_updates: productStockUpdates.length });
-      // step 6 end
+      endStep5({ warehouse_updates: productStockUpdates.length });
+      // step 5 end
 
-      // step 7 start — reverse weighted-average wholesale_price when warehouse lines existed
-      const endStep7 = poDeleteStepTimer.start(
-        7,
+      // step 6 start — reverse weighted-average wholesale_price when warehouse lines existed
+      const endStep6 = poDeleteStepTimer.start(
+        6,
         "product wholesale_price reverse",
       );
       const wholesaleRows = await applyWholesalePriceRemoveForPoLines({
@@ -2602,8 +2575,8 @@ async function purchase_order_delete(req, res) {
         mongoSession,
       });
       wholesaleUpdates.push(...wholesaleRows);
-      endStep7({ wholesale_updates: wholesaleUpdates.length });
-      // step 7 end
+      endStep6({ wholesale_updates: wholesaleUpdates.length });
+      // step 6 end
     };
 
     // txn start — MongoDB transaction wrapper (or standalone retry)
@@ -2643,7 +2616,6 @@ async function purchase_order_delete(req, res) {
           productStockUpdates.length = 0;
           wholesaleUpdates.length = 0;
           deleteSnapshot.gl_rows_soft_deleted = 0;
-          deleteSnapshot.movements_soft_deleted = 0;
           deleteSnapshot.items_soft_deleted = 0;
           deleteSnapshot.reversal_movements_inserted = 0;
           poDeleteStepTimer.resetSteps();
@@ -2672,7 +2644,7 @@ async function purchase_order_delete(req, res) {
     }
     // txn end
 
-    // step 9 start — failure path (`logs` + client JSON)
+    // step 8 start — failure path (`logs` + client JSON)
     if (txnError) {
       const stepTimingsOnError = poDeleteStepTimer.log(
         "[purchase_order_delete] failed —",
@@ -2693,7 +2665,7 @@ async function purchase_order_delete(req, res) {
           step_timings_ms: stepTimingsOnError,
         },
       });
-      // step 9 end
+      // step 8 end
       if (txnError.clientErrorPayload) {
         const p = txnError.clientErrorPayload;
         return res.status(p.status || 400).json({
@@ -2722,7 +2694,7 @@ async function purchase_order_delete(req, res) {
 
     const stepTimingsMs = poDeleteStepTimer.log("[purchase_order_delete]");
 
-    // step 8 start — success audit log (post-commit; no session)
+    // step 7 start — success audit log (post-commit; no session)
     await createApplicationLog(
       req,
       {
@@ -2749,7 +2721,7 @@ async function purchase_order_delete(req, res) {
       },
       { silent: true },
     );
-    // step 8 end
+    // step 7 end
 
     return res.status(200).json({
       success: true,

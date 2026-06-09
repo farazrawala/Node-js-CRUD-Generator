@@ -40,6 +40,9 @@ const {
  * Standalone MongoDB: tries `withTransaction` first; on replica-set–only errors, retries without a session.
  */
 
+/** Merged into every `logs` row written from purchase return create / update / delete flows. */
+const PURCHASE_RETURN_LOG_TAGS = ["purchase_return"];
+
 /**
  * One entry per row sent to `transactionBulkCreate` in afterCreate/afterUpdate (order matters).
  * - `companyAccountField`: populated on `req.user.company_id` (auth middleware).
@@ -1142,7 +1145,7 @@ async function applyPurchaseReturnDeleteInventoryRestore({
       const syncResult = await syncProductStockFromMovementLedger(
         productIdStr,
         companyId,
-        { req, mongoSession, logUrl },
+        { req, mongoSession, logUrl, logTags: PURCHASE_RETURN_LOG_TAGS },
       );
       if (!syncResult.success) {
         throw new Error(
@@ -1368,7 +1371,7 @@ async function reconcileProductStockAfterPrCreate({
       const syncResult = await syncProductStockFromMovementLedger(
         productIdStr,
         companyId,
-        { req, mongoSession, logUrl },
+        { req, mongoSession, logUrl, logTags: PURCHASE_RETURN_LOG_TAGS },
       );
       endSync?.();
       if (!syncResult.success) {
@@ -2008,6 +2011,7 @@ async function purchaseReturnCreate(req, res) {
             req.originalUrl ||
             req.path ||
             "/api/purchase_return/purchase_return_create",
+          logTags: PURCHASE_RETURN_LOG_TAGS,
         });
         endSteps1215();
         if (!alertResult.success) {
@@ -2483,6 +2487,7 @@ async function purchase_return_update(req, res) {
             req,
             mongoSession,
             logUrl: req.originalUrl || "/api/purchase_return/update",
+            logTags: PURCHASE_RETURN_LOG_TAGS,
           },
         );
         if (!syncResult.success) {
@@ -2510,6 +2515,7 @@ async function purchase_return_update(req, res) {
           pathQty: onHandAfterSync,
           session: mongoSession,
           logUrl: req.originalUrl || req.path || "/api/purchase_return/update",
+          logTags: PURCHASE_RETURN_LOG_TAGS,
         });
         if (!alertResult.success) {
           throw new Error(
@@ -2641,6 +2647,29 @@ async function purchase_return_update(req, res) {
   });
 }
 
+/**
+ * Soft-delete a purchase return and reverse inventory / GL effects.
+ *
+ * URL: `DELETE /api/purchase_return/purchase_return_delete/:id` — `:id` is `purchase_return._id`.
+ *
+ * **Session:** Tries `mongoose.startSession` + `withTransaction` first. On standalone mongod
+ * (replica-set–only errors), retries the same pipeline without a session — see `isMongoTransactionUnsupportedError`.
+ * All writes inside `runPurchaseReturnDeleteBody` pass `sessionOpts(mongoSession)` when a session is active.
+ *
+ * Collections (Mongo) — op = insert | update | delete | read; scope = one | many
+ *
+ * | Step | Collection              | Op                 | One or many  | Cost   | Notes |
+ * |------|-------------------------|--------------------|--------------|--------|-------|
+ * |    0 | purchase_return, purchase_return_item, inventory_movements | read | one + many | low | Pre-txn validation (404 if missing); snapshot active `out` movements for this return |
+ * |    1 | purchase_return         | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
+ * |    2 | transaction             | update (soft)      | many         | medium | By return header `transaction_number` |
+ * |    3 | purchase_return_item    | update (soft)      | many         | medium | All active lines for this return |
+ * |    4 | warehouse_inventory, inventory_movements, product | read / update / insert | one × N | medium | `applyPurchaseReturnDeleteInventoryRestore`: add warehouse qty back, insert `in` reversal rows, ledger `product.stock` sync |
+ * |    5 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only (post-commit; no session) |
+ * |    6 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE RETURN DELETE ROLLBACK`) |
+ *
+ * N = distinct product/warehouse pairs from prior outbound movements (or line items when movement snapshot is empty).
+ */
 async function purchase_return_delete(req, res) {
   let prDeleteStepTimer = null;
 
@@ -2721,7 +2750,6 @@ async function purchase_return_delete(req, res) {
     const userId = req.user?._id;
     const deleteSnapshot = {
       gl_rows_soft_deleted: 0,
-      movements_soft_deleted: 0,
       items_soft_deleted: 0,
       reversal_movements_inserted: 0,
     };
@@ -2753,6 +2781,7 @@ async function purchase_return_delete(req, res) {
         { new: true, ...sessionOpts(mongoSession) },
       ).lean();
       endStep1();
+      // step 1 end
       if (!softDeletedPr) {
         throw new Error("Purchase return not found or already deleted");
       }
@@ -2775,47 +2804,11 @@ async function purchase_return_delete(req, res) {
           deleteSnapshot.gl_rows_soft_deleted,
         );
       }
+      // step 2 end
 
-      // step 3 start — snapshot outbound movements then soft-delete movement rows
+      // step 3 start — soft-delete purchase_return_item rows
       const endStep3 = prDeleteStepTimer.start(
         3,
-        "inventory_movements soft-delete by reference",
-      );
-      let movQuery = InventoryMovements.find({
-        reference_type: "purchase_return",
-        reference_id: prId,
-        movement_type: "out",
-        status: "active",
-        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-      }).select("product_id warehouse_id quantity");
-      if (mongoSession) movQuery = movQuery.session(mongoSession);
-      const oldOutMovementsInTxn = await movQuery.lean();
-      const oldOutMovements =
-        oldOutMovementsInTxn.length > 0 ?
-          oldOutMovementsInTxn
-        : oldOutMovementsPreTxn;
-
-      const movementSoftDelete =
-        await InventoryMovements.softDeleteActiveByReference({
-          referenceType: "purchase_return",
-          referenceId: prId,
-          companyId,
-          session: mongoSession,
-          userId,
-        });
-      deleteSnapshot.movements_soft_deleted =
-        movementSoftDelete.modifiedCount || 0;
-      endStep3({ modified_count: deleteSnapshot.movements_soft_deleted });
-      if (deleteSnapshot.movements_soft_deleted > 0) {
-        console.log(
-          "✅ Inventory movement rows soft-deleted:",
-          deleteSnapshot.movements_soft_deleted,
-        );
-      }
-
-      // step 4 start — soft-delete purchase_return_item rows
-      const endStep4 = prDeleteStepTimer.start(
-        4,
         "purchase_return_item soft-delete",
       );
       const itemSoftDeleteSet = {
@@ -2836,22 +2829,23 @@ async function purchase_return_delete(req, res) {
         sessionOpts(mongoSession),
       );
       deleteSnapshot.items_soft_deleted = itemSoftDelete.modifiedCount || 0;
-      endStep4({ modified_count: deleteSnapshot.items_soft_deleted });
+      endStep3({ modified_count: deleteSnapshot.items_soft_deleted });
       if (deleteSnapshot.items_soft_deleted > 0) {
         console.log(
           "✅ Purchase return line items soft-deleted:",
           deleteSnapshot.items_soft_deleted,
         );
       }
+      // step 3 end
 
-      // step 5 start — restore warehouse_inventory + insert reversal `in` movements
-      const endStep5 = prDeleteStepTimer.start(
-        5,
+      // step 4 start — restore warehouse_inventory + insert reversal `in` movements
+      const endStep4 = prDeleteStepTimer.start(
+        4,
         "warehouse_inventory restore + inventory_movements insert (in reversal)",
         { line_count: existingPrItems.length },
       );
       const restoreResult = await applyPurchaseReturnDeleteInventoryRestore({
-        oldOutMovements,
+        oldOutMovements: oldOutMovementsPreTxn,
         existingReturnItems: existingPrItems,
         purchaseReturnId: prId,
         companyId,
@@ -2865,10 +2859,11 @@ async function purchase_return_delete(req, res) {
       productStockUpdates.push(...restoreResult.productStockUpdates);
       deleteSnapshot.reversal_movements_inserted =
         restoreResult.reversalMovementsInserted;
-      endStep5({
+      endStep4({
         warehouse_updates: productStockUpdates.length,
         reversal_movements_inserted: deleteSnapshot.reversal_movements_inserted,
       });
+      // step 4 end
     };
 
     // txn start — MongoDB transaction wrapper (or standalone retry)
@@ -2907,7 +2902,6 @@ async function purchase_return_delete(req, res) {
           softDeletedPr = null;
           productStockUpdates.length = 0;
           deleteSnapshot.gl_rows_soft_deleted = 0;
-          deleteSnapshot.movements_soft_deleted = 0;
           deleteSnapshot.items_soft_deleted = 0;
           deleteSnapshot.reversal_movements_inserted = 0;
           prDeleteStepTimer.resetSteps();
@@ -2934,7 +2928,9 @@ async function purchase_return_delete(req, res) {
         }
       }
     }
+    // txn end
 
+    // step 6 start — failure path (`logRollbackFailure` + client JSON)
     if (txnError) {
       const stepTimingsOnError = prDeleteStepTimer.log(
         "[purchase_return_delete] failed —",
@@ -2982,9 +2978,11 @@ async function purchase_return_delete(req, res) {
         txn_mode: txnMode,
       });
     }
+    // step 6 end
 
     const stepTimingsMs = prDeleteStepTimer.log("[purchase_return_delete]");
 
+    // step 5 start — success audit log (post-commit; no session)
     await createApplicationLog(
       req,
       {
@@ -3010,6 +3008,7 @@ async function purchase_return_delete(req, res) {
       },
       { silent: true },
     );
+    // step 5 end
 
     return res.status(200).json({
       success: true,

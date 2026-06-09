@@ -899,7 +899,7 @@ async function inventoryMovementsCreate(req, res) {
 async function syncProductStockFromMovementLedger(
   productId,
   companyObjectId,
-  { req = null, mongoSession = null, logUrl = null } = {},
+  { req = null, mongoSession = null, logUrl = null, logTags = [] } = {},
 ) {
   const productIdStr = String(productId ?? "").trim();
   if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
@@ -1021,7 +1021,13 @@ async function syncProductStockFromMovementLedger(
             req.originalUrl ||
             req.path ||
             "/api/inventory_movements/stock-by-product",
-          tags: ["product", "stock", "inventory_movement", "sync"],
+          tags: [
+            "product",
+            "stock",
+            "inventory_movement",
+            "sync",
+            ...logTags,
+          ],
           description: description,
           reference_id: productIdStr,
           reference_type: "product",
