@@ -33,6 +33,13 @@ const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  applyWholesalePriceRemoveForPoLines,
+  applyWholesalePriceWeightedAverageForPoLines,
+} = require("./purchase_order");
+
+/** Merged into wholesale audit logs from sales return create / delete flows. */
+const SALES_RETURN_LOG_TAGS = ["sales_return"];
 
 /**
  * Sales return HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -1025,6 +1032,21 @@ async function enrichSalesReturnLineDocsWithFrozenCost({
   applyFrozenCostAndProfitToSrLineDocs(docs, costByProduct);
 }
 
+/** Map SR lines for PO wholesale helpers (`price` = frozen `cost_price_at_return`). */
+function mapSrLinesForWholesaleAverage(lines) {
+  return (lines || []).map((line) => {
+    const frozen = Number(line.cost_price_at_return);
+    const unitCost =
+      Number.isFinite(frozen) && frozen >= 0 ? frozen : Number(line.price);
+    return {
+      product_id: line.product_id,
+      warehouse_id: line.warehouse_id,
+      qty: line.qty,
+      price: unitCost,
+    };
+  });
+}
+
 function buildSalesReturnItemDocuments(prId, prSnapshot, lines, req) {
   const companyId = prSnapshot.company_id || req.user?.company_id;
   if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
@@ -1909,6 +1931,7 @@ async function salesReturnCreate(req, res) {
     let salesReturnCreateResult = null;
     const persistedLineItems = [];
     const productStockUpdates = [];
+    const wholesaleUpdates = [];
     /** Set when `withTransaction` fails for a non–transaction-support reason, or when the non-session retry throws. */
     let createPipelineError = null;
     srStepTimer = startSrCreateStepTimer();
@@ -2055,7 +2078,21 @@ async function salesReturnCreate(req, res) {
       persistedLineItems.push(...insertedLineDocs);
       // step 5 end
 
-      // step 6–11 start — warehouse_inventory outbound + inventory_movements per line
+      // step 5b — weighted-average wholesale_price before warehouse inbound (cost_price_at_return × qty)
+      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
+        lines: mapSrLinesForWholesaleAverage(built.docs),
+        companyId,
+        req,
+        mongoSession,
+        logTags: SALES_RETURN_LOG_TAGS,
+        fallbackUrl:
+          req.originalUrl ||
+          req.path ||
+          "/api/sales_return/sales_return_create",
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+
+      // step 6–11 start — warehouse_inventory inbound + inventory_movements per line
       for (
         let lineIndex = 0;
         lineIndex < lineItemsFromClient.length;
@@ -2179,6 +2216,7 @@ async function salesReturnCreate(req, res) {
         try {
           persistedLineItems.length = 0;
           productStockUpdates.length = 0;
+          wholesaleUpdates.length = 0;
           salesReturnCreateResult = null;
           srStepTimer.resetSteps();
           const endTxnRetry = srStepTimer.start(
@@ -2307,7 +2345,7 @@ async function salesReturnCreate(req, res) {
       items: persistedLineItems,
       items_total,
       product_stock_updates: productStockUpdates,
-      wholesale_updates: [],
+      wholesale_updates: wholesaleUpdates,
       step_timings_ms: stepTimingsMs,
     });
   } catch (unexpectedError) {
@@ -2874,6 +2912,7 @@ async function sales_return_delete(req, res) {
     let txnMode = null;
     let softDeletedSr = null;
     const productStockUpdates = [];
+    const wholesaleUpdates = [];
     const deletedAt = new Date();
     const userId = req.user?._id;
     const deleteSnapshot = {
@@ -3007,6 +3046,25 @@ async function sales_return_delete(req, res) {
         warehouse_updates: productStockUpdates.length,
         reversal_movements_inserted: deleteSnapshot.reversal_movements_inserted,
       });
+
+      // step 5b — reverse weighted-average wholesale after warehouse qty removed (cost_price_at_return × qty)
+      const endStep5b = srDeleteStepTimer.start(
+        "5b",
+        "product wholesale_price reverse (weighted avg)",
+      );
+      const wholesaleRows = await applyWholesalePriceRemoveForPoLines({
+        lines: mapSrLinesForWholesaleAverage(existingSrItems),
+        companyId,
+        req,
+        mongoSession,
+        logTags: SALES_RETURN_LOG_TAGS,
+        fallbackUrl:
+          req.originalUrl ||
+          req.path ||
+          "/api/sales_return/sales_return_delete",
+      });
+      wholesaleUpdates.push(...wholesaleRows);
+      endStep5b({ wholesale_updates: wholesaleUpdates.length });
     };
 
     // txn start — MongoDB transaction wrapper (or standalone retry)
@@ -3048,6 +3106,7 @@ async function sales_return_delete(req, res) {
           deleteSnapshot.movements_soft_deleted = 0;
           deleteSnapshot.items_soft_deleted = 0;
           deleteSnapshot.reversal_movements_inserted = 0;
+          wholesaleUpdates.length = 0;
           srDeleteStepTimer.resetSteps();
           const endTxnRetry = srDeleteStepTimer.start(
             "txn",
@@ -3159,6 +3218,7 @@ async function sales_return_delete(req, res) {
         transaction_number: transactionNumber,
       },
       product_stock_updates: productStockUpdates,
+      wholesale_updates: wholesaleUpdates,
       delete_snapshot: deleteSnapshot,
       step_timings_ms: stepTimingsMs,
       txn_mode: txnMode,
