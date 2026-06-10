@@ -128,6 +128,7 @@ const {
   accountCreate,
   accountUpdate,
   fetchAccountsByType,
+  getBalanceSheet,
   getBalanceSheetDifference,
 } = require("../controllers/account");
 
@@ -359,6 +360,7 @@ router.patch("/product/:id/update-default-warehouse", updateWarehouseDefault);
 router.post("/account/custom-create", accountCreate);
 router.patch("/account/custom-update/:id", accountUpdate);
 router.get("/account/fetch-account-by-type", fetchAccountsByType);
+router.get("/account/balance-sheet", getBalanceSheet);
 router.get("/account/balance-sheet-difference", getBalanceSheetDifference);
 
 // Adjustment routes

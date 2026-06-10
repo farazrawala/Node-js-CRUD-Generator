@@ -22,6 +22,7 @@ const {
 } = require("./transaction");
 const {
   computeBalanceSheetDifference,
+  computeBalanceSheetReport,
 } = require("../utils/balanceSheetReconcile");
 
 const ACCOUNT_TRANSACTION_ERROR_LOG = {
@@ -909,6 +910,79 @@ async function fetchAccountsByType(req, res) {
   return res.status(response.status || 200).json(response);
 }
 
+function resolveBalanceSheetCompanyId(req) {
+  const tenantCo = coalesceObjectId(req.user?.company_id);
+  const queryCo = coalesceObjectId(req.query?.company_id);
+  const companyId = queryCo || tenantCo;
+
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return {
+      error: {
+        status: 400,
+        body: {
+          success: false,
+          status: 400,
+          error: "company_id is required",
+          message:
+            "Provide company_id query param or authenticate with a user that has company_id",
+        },
+      },
+    };
+  }
+
+  if (tenantCo && queryCo && String(tenantCo) !== String(queryCo)) {
+    return {
+      error: {
+        status: 403,
+        body: {
+          success: false,
+          status: 403,
+          error: "Forbidden",
+          message: "company_id does not match authenticated tenant",
+        },
+      },
+    };
+  }
+
+  return { companyId };
+}
+
+/**
+ * GET /api/account/balance-sheet
+ * Optional query: company_id (must match authenticated tenant if provided).
+ * Returns all balance-sheet sections and totals for UI display.
+ */
+async function getBalanceSheet(req, res) {
+  try {
+    const resolved = resolveBalanceSheetCompanyId(req);
+    if (resolved.error) {
+      return res.status(resolved.error.status).json(resolved.error.body);
+    }
+
+    const report = await computeBalanceSheetReport(resolved.companyId);
+    if (!report.ok) {
+      return res.status(report.status || 400).json({
+        success: false,
+        status: report.status || 400,
+        error: report.error,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      data: report,
+    });
+  } catch (error) {
+    console.error("❌ getBalanceSheet:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to build balance sheet report",
+    });
+  }
+}
+
 /**
  * GET /api/account/balance-sheet-difference
  * Optional query: company_id (must match authenticated tenant if provided).
@@ -916,30 +990,12 @@ async function fetchAccountsByType(req, res) {
  */
 async function getBalanceSheetDifference(req, res) {
   try {
-    const tenantCo = coalesceObjectId(req.user?.company_id);
-    const queryCo = coalesceObjectId(req.query?.company_id);
-    const companyId = queryCo || tenantCo;
-
-    if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
-      return res.status(400).json({
-        success: false,
-        status: 400,
-        error: "company_id is required",
-        message:
-          "Provide company_id query param or authenticate with a user that has company_id",
-      });
+    const resolved = resolveBalanceSheetCompanyId(req);
+    if (resolved.error) {
+      return res.status(resolved.error.status).json(resolved.error.body);
     }
 
-    if (tenantCo && queryCo && String(tenantCo) !== String(queryCo)) {
-      return res.status(403).json({
-        success: false,
-        status: 403,
-        error: "Forbidden",
-        message: "company_id does not match authenticated tenant",
-      });
-    }
-
-    const report = await computeBalanceSheetDifference(companyId);
+    const report = await computeBalanceSheetDifference(resolved.companyId);
     if (!report.ok) {
       return res.status(report.status || 400).json({
         success: false,
@@ -968,5 +1024,6 @@ module.exports = {
   performAccountCreate,
   accountUpdate,
   fetchAccountsByType,
+  getBalanceSheet,
   getBalanceSheetDifference,
 };

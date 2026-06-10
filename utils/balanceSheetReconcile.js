@@ -4,7 +4,14 @@ const Transaction = require("../models/transaction");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const PurchaseOrderItem = require("../models/purchase_order_item");
+const OrderItem = require("../models/order_item");
+const SalesReturnItem = require("../models/sales_return_item");
 const { coalesceObjectId } = require("./modelHelper");
+
+const GL_POOL_ACCOUNT_TYPES = new Set([
+  "revenue",
+  "cost_of_goods_sold_account",
+]);
 
 const ASSET_ACCOUNT_TYPES = new Set(["current_asset", "fixed_asset"]);
 const LIABILITY_ACCOUNT_TYPES = new Set([
@@ -186,6 +193,95 @@ async function findLineSubtotalMismatches(companyId, limit = 20) {
     .slice(0, limit);
 }
 
+async function aggregateLineProfitSums(companyId) {
+  const lineMatch = {
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  };
+
+  const [orderRows, srRows] = await Promise.all([
+    OrderItem.aggregate([
+      { $match: lineMatch },
+      {
+        $group: {
+          _id: null,
+          profit: { $sum: { $ifNull: ["$profit", 0] } },
+          line_count: { $sum: 1 },
+        },
+      },
+    ]),
+    SalesReturnItem.aggregate([
+      { $match: lineMatch },
+      {
+        $group: {
+          _id: null,
+          profit: { $sum: { $ifNull: ["$profit", 0] } },
+          line_count: { $sum: 1 },
+        },
+      },
+    ]),
+  ]);
+
+  const profitFromOrders = roundMoney2(orderRows[0]?.profit || 0);
+  const profitFromSalesReturns = roundMoney2(srRows[0]?.profit || 0);
+
+  return {
+    profit_from_orders: profitFromOrders,
+    profit_from_sales_returns: profitFromSalesReturns,
+    line_profit_total: roundMoney2(profitFromOrders + profitFromSalesReturns),
+    order_line_count: orderRows[0]?.line_count || 0,
+    sales_return_line_count: srRows[0]?.line_count || 0,
+  };
+}
+
+function computeGlBridgedEquity(accounts, sumByAccount, inventoryValue) {
+  let salesRevenueBalance = 0;
+  let purchaseAccountNetDebit = 0;
+
+  for (const acc of accounts) {
+    const sums = sumByAccount.get(String(acc._id));
+    if (acc.account_type === "revenue") {
+      salesRevenueBalance = roundMoney2(
+        salesRevenueBalance + signedBalanceForAccountType("revenue", sums),
+      );
+    } else if (acc.account_type === "cost_of_goods_sold_account") {
+      purchaseAccountNetDebit = roundMoney2(
+        purchaseAccountNetDebit + (sums?.net_debit_minus_credit || 0),
+      );
+    }
+  }
+
+  const impliedCogsSold = roundMoney2(
+    purchaseAccountNetDebit - inventoryValue,
+  );
+  const glBridgedEquity = roundMoney2(
+    salesRevenueBalance - impliedCogsSold,
+  );
+
+  return {
+    sales_revenue_gl_balance: salesRevenueBalance,
+    purchase_account_net_debit: purchaseAccountNetDebit,
+    implied_cogs_sold: impliedCogsSold,
+    gl_bridged_equity: glBridgedEquity,
+  };
+}
+
+function partitionEquityAccounts(equitySection) {
+  const glPoolAccounts = [];
+  const otherEquityAccounts = [];
+
+  for (const row of equitySection) {
+    if (GL_POOL_ACCOUNT_TYPES.has(row.account_type)) {
+      glPoolAccounts.push(row);
+    } else {
+      otherEquityAccounts.push(row);
+    }
+  }
+
+  return { glPoolAccounts, otherEquityAccounts };
+}
+
 async function sumPurchaseOrderGlDebits(companyId) {
   const rows = await Transaction.aggregate([
     {
@@ -347,7 +443,175 @@ async function computeBalanceSheetDifference(companyId) {
   };
 }
 
+/**
+ * Full balance-sheet payload for UI: assets, liabilities, equity rows, line profits,
+ * GL-bridged equity, and out-of-balance summary.
+ *
+ * @param {import("mongoose").Types.ObjectId|string} companyId
+ * @returns {Promise<object>}
+ */
+async function computeBalanceSheetReport(companyId) {
+  const base = await computeBalanceSheetDifference(companyId);
+  if (!base.ok) return base;
+
+  const cid = base.company_id;
+  const lineProfits = await aggregateLineProfitSums(cid);
+
+  const accounts = await Account.find(activeAccountFilter(cid))
+    .select("_id name account_type")
+    .lean();
+  const sumByAccount = await aggregateTransactionSumsByAccountIds(
+    accounts.map((a) => a._id),
+    cid,
+  );
+  const glBridgeAccurate = computeGlBridgedEquity(
+    accounts,
+    sumByAccount,
+    base.assets.inventory.total,
+  );
+
+  const { glPoolAccounts, otherEquityAccounts } = partitionEquityAccounts(
+    base.liabilities_equity.owners_equity.accounts,
+  );
+  const otherEquityTotal = roundMoney2(
+    otherEquityAccounts.reduce((t, r) => t + r.balance, 0),
+  );
+  const ownersEquityLineProfitSubtotal = roundMoney2(
+    lineProfits.line_profit_total + otherEquityTotal,
+  );
+
+  const currentLiabilitiesTotal = base.liabilities_equity.current_liabilities.total;
+  const longTermLiabilitiesTotal =
+    base.liabilities_equity.long_term_liabilities.total;
+  const liabilitiesTotal = roundMoney2(
+    currentLiabilitiesTotal + longTermLiabilitiesTotal,
+  );
+
+  const totalLiabilitiesEquityLineProfit = roundMoney2(
+    liabilitiesTotal + ownersEquityLineProfitSubtotal,
+  );
+  const totalLiabilitiesEquityGlBridged = roundMoney2(
+    liabilitiesTotal + glBridgeAccurate.gl_bridged_equity,
+  );
+
+  const outOfBalanceLineProfit = roundMoney2(
+    base.assets.total - totalLiabilitiesEquityLineProfit,
+  );
+  const outOfBalanceGlBridged = roundMoney2(
+    base.assets.total - totalLiabilitiesEquityGlBridged,
+  );
+  const profitVsGlGap = roundMoney2(
+    glBridgeAccurate.gl_bridged_equity - lineProfits.line_profit_total,
+  );
+
+  return {
+    ok: true,
+    company_id: cid,
+    as_of: new Date().toISOString(),
+    assets: {
+      current_assets: {
+        label: "Current Assets",
+        accounts: base.assets.current_assets.accounts.map((row) => ({
+          account_id: row.account_id,
+          name: row.name,
+          balance: row.balance,
+        })),
+        subtotal: base.assets.current_assets.total,
+      },
+      inventory: {
+        label: "Inventory",
+        lines: base.assets.inventory.lines,
+        subtotal: base.assets.inventory.total,
+      },
+      fixed_assets: {
+        label: "Fixed Assets",
+        accounts: base.assets.fixed_assets.accounts.map((row) => ({
+          account_id: row.account_id,
+          name: row.name,
+          balance: row.balance,
+        })),
+        subtotal: base.assets.fixed_assets.total,
+      },
+      total: base.assets.total,
+    },
+    liabilities_and_equity: {
+      current_liabilities: {
+        label: "Current Liabilities",
+        accounts: base.liabilities_equity.current_liabilities.accounts.map(
+          (row) => ({
+            account_id: row.account_id,
+            name: row.name,
+            balance: row.balance,
+          }),
+        ),
+        subtotal: currentLiabilitiesTotal,
+      },
+      long_term_liabilities: {
+        label: "Long-Term Liabilities",
+        accounts: base.liabilities_equity.long_term_liabilities.accounts.map(
+          (row) => ({
+            account_id: row.account_id,
+            name: row.name,
+            balance: row.balance,
+          }),
+        ),
+        subtotal: longTermLiabilitiesTotal,
+      },
+      owners_equity: {
+        label: "Owner's Equity",
+        profit_from_orders: {
+          label: "Profit",
+          amount: lineProfits.profit_from_orders,
+          line_count: lineProfits.order_line_count,
+          source: "order_item.profit",
+        },
+        profit_from_sales_returns: {
+          label: "Sales Return Profit",
+          amount: lineProfits.profit_from_sales_returns,
+          line_count: lineProfits.sales_return_line_count,
+          source: "sales_return_item.profit",
+        },
+        other_accounts: otherEquityAccounts.map((row) => ({
+          account_id: row.account_id,
+          name: row.name,
+          account_type: row.account_type,
+          balance: row.balance,
+        })),
+        gl_pool_accounts: glPoolAccounts.map((row) => ({
+          account_id: row.account_id,
+          name: row.name,
+          account_type: row.account_type,
+          balance: row.balance,
+        })),
+        subtotal_line_profit_method: ownersEquityLineProfitSubtotal,
+        gl_bridged_equity: glBridgeAccurate.gl_bridged_equity,
+        gl_bridge: glBridgeAccurate,
+      },
+      total_line_profit_method: totalLiabilitiesEquityLineProfit,
+      total_gl_bridged_method: totalLiabilitiesEquityGlBridged,
+    },
+    summary: {
+      total_assets: base.assets.total,
+      total_liabilities_and_equity: totalLiabilitiesEquityLineProfit,
+      out_of_balance: outOfBalanceLineProfit,
+      balanced: Math.abs(outOfBalanceLineProfit) < 0.02,
+      status:
+        Math.abs(outOfBalanceLineProfit) < 0.02 ? "balanced"
+        : outOfBalanceLineProfit < 0 ?
+          "out_of_balance_liabilities_high"
+        : "out_of_balance_assets_high",
+      total_liabilities_and_equity_gl_bridged: totalLiabilitiesEquityGlBridged,
+      out_of_balance_gl_bridged: outOfBalanceGlBridged,
+      gl_bridged_balanced: Math.abs(outOfBalanceGlBridged) < 0.02,
+      profit_vs_gl_gap: profitVsGlGap,
+      profit_reconciliation_aligned: Math.abs(profitVsGlGap) < 0.02,
+    },
+    diagnostics: base.diagnostics,
+  };
+}
+
 module.exports = {
   computeBalanceSheetDifference,
+  computeBalanceSheetReport,
   roundMoney2,
 };
