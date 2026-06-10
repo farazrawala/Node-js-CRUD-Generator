@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const SalesReturn = require("../models/sales_return");
 const SalesReturnItem = require("../models/sales_return_item");
+const OrderItem = require("../models/order_item");
 require("../models/order");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
@@ -897,6 +898,131 @@ function collectUniqueProductIdsFromLineRows(rows) {
     }
   }
   return ids;
+}
+
+function roundSrMoney2(n) {
+  return Math.round(Number(n || 0) * 100) / 100;
+}
+
+function wholesaleUnitFromProductDoc(product) {
+  if (!product || typeof product !== "object") return null;
+  const wp = Number(product.wholesale_price);
+  if (Number.isFinite(wp) && wp >= 0) {
+    return roundSrMoney2(wp);
+  }
+  return null;
+}
+
+/**
+ * Per-product frozen unit cost for return lines.
+ * When `order_id` is set, uses weighted `cost_price_at_sale` from active order lines;
+ * otherwise (or for products not on the order) uses current `product.wholesale_price`.
+ */
+async function buildCostPriceAtReturnByProduct({
+  orderId,
+  productIds,
+  companyId,
+  mongoSession = null,
+}) {
+  const map = new Map();
+  const validIds = [
+    ...new Set(
+      (productIds || [])
+        .map((id) => String(id ?? "").trim())
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  if (validIds.length === 0) return map;
+
+  const companyOid = coalesceObjectId(companyId);
+  let productQuery = Product.find({
+    _id: { $in: validIds },
+    company_id: companyOid,
+    status: "active",
+    deletedAt: null,
+  }).select("wholesale_price");
+  if (mongoSession) productQuery = productQuery.session(mongoSession);
+  const products = await productQuery.lean();
+  for (const product of products) {
+    const unit = wholesaleUnitFromProductDoc(product);
+    if (unit != null) {
+      map.set(String(product._id), unit);
+    }
+  }
+
+  const orderIdStr = orderId != null ? String(orderId).trim() : "";
+  if (!orderIdStr || !mongoose.Types.ObjectId.isValid(orderIdStr)) {
+    return map;
+  }
+
+  let orderItemQuery = OrderItem.find({
+    order_id: orderIdStr,
+    company_id: companyOid,
+    product_id: { $in: validIds },
+    status: "active",
+    deletedAt: null,
+  }).select("product_id qty cost_price_at_sale");
+  if (mongoSession) orderItemQuery = orderItemQuery.session(mongoSession);
+  const orderItems = await orderItemQuery.lean();
+
+  const weighted = new Map();
+  for (const row of orderItems) {
+    const pid = String(row.product_id ?? "").trim();
+    const unit = Number(row.cost_price_at_sale);
+    const qty = Number(row.qty);
+    if (
+      !pid ||
+      !Number.isFinite(unit) ||
+      unit < 0 ||
+      !Number.isFinite(qty) ||
+      qty <= 0
+    ) {
+      continue;
+    }
+    const prev = weighted.get(pid) || { costQty: 0, qty: 0 };
+    prev.costQty += unit * qty;
+    prev.qty += qty;
+    weighted.set(pid, prev);
+  }
+  for (const [pid, totals] of weighted.entries()) {
+    if (totals.qty > 0) {
+      map.set(pid, roundSrMoney2(totals.costQty / totals.qty));
+    }
+  }
+
+  return map;
+}
+
+/** Set `cost_price_at_return` and `profit` on line docs before insertMany. */
+function applyFrozenCostAndProfitToSrLineDocs(docs, costByProduct) {
+  for (const doc of docs) {
+    const pid = String(doc.product_id ?? "").trim();
+    const cost = costByProduct.get(pid);
+    if (!Number.isFinite(cost) || cost < 0) {
+      throw new Error(
+        `Each sales return line needs a frozen unit cost (cost_price_at_return) for product ${pid}`,
+      );
+    }
+    doc.cost_price_at_return = roundSrMoney2(cost);
+    doc.profit = roundSrMoney2(
+      (cost - Number(doc.price)) * Number(doc.qty),
+    );
+  }
+}
+
+async function enrichSalesReturnLineDocsWithFrozenCost({
+  docs,
+  srSnapshot,
+  companyId,
+  mongoSession = null,
+}) {
+  const costByProduct = await buildCostPriceAtReturnByProduct({
+    orderId: srSnapshot?.order_id,
+    productIds: collectUniqueProductIdsFromLineRows(docs),
+    companyId,
+    mongoSession,
+  });
+  applyFrozenCostAndProfitToSrLineDocs(docs, costByProduct);
 }
 
 function buildSalesReturnItemDocuments(prId, prSnapshot, lines, req) {
@@ -1911,6 +2037,13 @@ async function salesReturnCreate(req, res) {
         throw new Error("Could not build sales return line documents");
       }
 
+      await enrichSalesReturnLineDocsWithFrozenCost({
+        docs: built.docs,
+        srSnapshot: salesReturnCreateResult.data,
+        companyId,
+        mongoSession,
+      });
+
       const endStep5 = srStepTimer.start(5, "sales_return_item insertMany", {
         line_count: built.docs.length,
       });
@@ -2416,14 +2549,22 @@ async function sales_return_update(req, res) {
       );
       // step 7 end
 
+      const companyIdForLines =
+        coalesceObjectId(response.data.company_id) ||
+        coalesceObjectId(req.user?.company_id);
+      await enrichSalesReturnLineDocsWithFrozenCost({
+        docs: built.docs,
+        srSnapshot: response.data,
+        companyId: companyIdForLines,
+        mongoSession,
+      });
+
       // step 8 start — `insertMany` new line items from request
       await SalesReturnItem.insertMany(built.docs, sessionOpts(mongoSession));
       // step 8 end
 
       // step 9 start — warehouse inbound + `inventory_movements` per line
-      const companyIdForMovement =
-        coalesceObjectId(response.data.company_id) ||
-        coalesceObjectId(req.user?.company_id);
+      const companyIdForMovement = companyIdForLines;
 
       for (const line of lines) {
         try {
@@ -2649,9 +2790,9 @@ async function sales_return_update(req, res) {
  * |    0 | sales_return, sales_return_item, inventory_movements | read | one + many | low | Pre-txn validation (404 if missing); snapshot active `in` movements for this return |
  * |    1 | sales_return            | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | many         | medium | By return header `transaction_number` |
- * |    3 | inventory_movements     | read + update (soft) | many       | medium | Re-read `in` rows in txn; `softDeleteActiveByReference` for `reference_type: sales_return` |
+ * |    3 | inventory_movements     | read               | many         | low    | Re-read `in` rows in txn (originals stay active for ledger) |
  * |    4 | sales_return_item       | update (soft)      | many         | medium | All active lines for this return |
- * |    5 | warehouse_inventory, inventory_movements, product | read / update / insert | one × N | medium | `applySalesReturnDeleteInventoryRestore`: subtract warehouse qty, insert `out` reversal rows, ledger `product.stock` sync |
+ * |    5 | warehouse_inventory, inventory_movements, product | read / update / insert | one × N | medium | `applySalesReturnDeleteInventoryRestore`: subtract warehouse qty, insert `out` reversal rows (no movement soft-delete) |
  * |    6 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only (post-commit; no session) |
  * |    7 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`SALES RETURN DELETE ROLLBACK`) |
  *
@@ -2789,10 +2930,10 @@ async function sales_return_delete(req, res) {
         );
       }
 
-      // step 3 start — snapshot inbound movements then soft-delete movement rows
+      // step 3 start — snapshot inbound movements (original `in` rows stay active; step 5 inserts `out` reversal)
       const endStep3 = srDeleteStepTimer.start(
         3,
-        "inventory_movements soft-delete by reference",
+        "inventory_movements snapshot (in rows)",
       );
       let movQuery = InventoryMovements.find({
         reference_type: "sales_return",
@@ -2807,24 +2948,8 @@ async function sales_return_delete(req, res) {
         oldInMovementsInTxn.length > 0 ?
           oldInMovementsInTxn
         : oldInMovementsPreTxn;
-
-      const movementSoftDelete =
-        await InventoryMovements.softDeleteActiveByReference({
-          referenceType: "sales_return",
-          referenceId: srId,
-          companyId,
-          session: mongoSession,
-          userId,
-        });
-      deleteSnapshot.movements_soft_deleted =
-        movementSoftDelete.modifiedCount || 0;
-      endStep3({ modified_count: deleteSnapshot.movements_soft_deleted });
-      if (deleteSnapshot.movements_soft_deleted > 0) {
-        console.log(
-          "✅ Inventory movement rows soft-deleted:",
-          deleteSnapshot.movements_soft_deleted,
-        );
-      }
+      deleteSnapshot.movements_soft_deleted = 0;
+      endStep3({ movement_rows_snapshotted: oldInMovements.length });
 
       // step 4 start — soft-delete sales_return_item rows
       const endStep4 = srDeleteStepTimer.start(
@@ -3069,7 +3194,7 @@ const FIND_PROFIT_DEFAULT_RANGE_DAYS = 90;
 
 /**
  * GET `SUM(profit)` from `sales_return_item` for the authenticated user's `company_id` only.
- * Uses denormalized line `profit` ((wholesale_price − price) × qty).
+ * Uses denormalized line `profit` ((cost_price_at_return − price) × qty; frozen at create/update).
  * Query: `sales_return_id`, `order_id` (via parent return), `product_id`, optional `from` / `to` on line `createdAt`.
  * If both dates are omitted, only the last {@link FIND_PROFIT_DEFAULT_RANGE_DAYS} days are included.
  */

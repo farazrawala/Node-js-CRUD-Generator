@@ -31,7 +31,13 @@ const modelSchema = new mongoose.Schema(
       min: 0,
     },
 
-    /** (product.wholesale_price − price) × qty at save time. */
+    /** Frozen unit cost at return (order line `cost_price_at_sale` or wholesale at save). */
+    cost_price_at_return: {
+      type: Number,
+      min: 0,
+    },
+
+    /** (`cost_price_at_return` − price) × qty; uses frozen cost, not live wholesale. */
     profit: {
       type: Number,
       default: 0,
@@ -96,15 +102,23 @@ function computeLineSubtotal(price, qty) {
   return Math.round(p * q * 100) / 100;
 }
 
-/** Margin per line: wholesale unit cost minus return price, × qty. */
-function computeLineProfit(wholesalePrice, price, qty) {
-  const wp = Number(wholesalePrice);
+/** Margin per line: frozen unit cost minus return price, × qty. */
+function computeLineProfit(unitCost, price, qty) {
+  const cost = Number(unitCost);
   const p = Number(price);
   const q = Number(qty);
-  if (!Number.isFinite(wp) || !Number.isFinite(p) || !Number.isFinite(q)) {
+  if (!Number.isFinite(cost) || !Number.isFinite(p) || !Number.isFinite(q)) {
     return 0;
   }
-  return Math.round((wp - p) * q * 100) / 100;
+  return Math.round((cost - p) * q * 100) / 100;
+}
+
+function frozenUnitCostFromLine(line) {
+  const stored = Number(line?.cost_price_at_return);
+  if (Number.isFinite(stored) && stored >= 0) {
+    return Math.round(stored * 100) / 100;
+  }
+  return null;
 }
 
 function wholesaleUnitFromProduct(product) {
@@ -123,7 +137,11 @@ modelSchema.pre("validate", async function (next) {
       this.subtotal = computed;
     }
 
-    if (this.product_id) {
+    const frozenCost = frozenUnitCostFromLine(this);
+    if (frozenCost != null) {
+      this.cost_price_at_return = frozenCost;
+      this.profit = computeLineProfit(frozenCost, this.price, this.qty);
+    } else if (this.product_id) {
       const Product = mongoose.model("product");
       const session =
         typeof this.$session === "function" ? this.$session() : null;
@@ -132,11 +150,9 @@ modelSchema.pre("validate", async function (next) {
       );
       if (session) productQuery = productQuery.session(session);
       const product = await productQuery.lean();
-      this.profit = computeLineProfit(
-        wholesaleUnitFromProduct(product),
-        this.price,
-        this.qty,
-      );
+      const unitCost = wholesaleUnitFromProduct(product);
+      this.cost_price_at_return = unitCost;
+      this.profit = computeLineProfit(unitCost, this.price, this.qty);
     }
 
     next();
@@ -174,7 +190,7 @@ modelSchema.pre(
 
       const existing = await this.model
         .findOne(filter)
-        .select("price qty product_id")
+        .select("price qty product_id cost_price_at_return")
         .lean();
       if (!existing) return next();
 
@@ -191,20 +207,26 @@ modelSchema.pre(
         plain.product_id !== undefined ?
           plain.product_id
         : existing.product_id;
-      let profit = 0;
-      if (productId) {
+      let unitCost = frozenUnitCostFromLine({
+        cost_price_at_return:
+          plain.cost_price_at_return !== undefined ?
+            plain.cost_price_at_return
+          : existing.cost_price_at_return,
+      });
+      if (unitCost == null && productId) {
         const Product = mongoose.model("product");
         const product = await Product.findById(productId)
           .select("wholesale_price")
           .lean();
-        profit = computeLineProfit(
-          wholesaleUnitFromProduct(product),
-          price,
-          qty,
-        );
+        unitCost = wholesaleUnitFromProduct(product);
       }
-
-      const extraFields = { subtotal: computed, profit };
+      const profit =
+        unitCost != null ? computeLineProfit(unitCost, price, qty) : 0;
+      const extraFields = {
+        subtotal: computed,
+        profit,
+        ...(unitCost != null ? { cost_price_at_return: unitCost } : {}),
+      };
 
       if (raw.$set && typeof raw.$set === "object") {
         this.setUpdate({
@@ -261,12 +283,15 @@ modelSchema.pre("insertMany", async function (next, docs) {
     for (const doc of rows) {
       const sub = computeLineSubtotal(doc.price, doc.qty);
       if (sub !== null) doc.subtotal = sub;
-      const product = productById.get(String(doc.product_id));
-      doc.profit = computeLineProfit(
-        wholesaleUnitFromProduct(product),
-        doc.price,
-        doc.qty,
-      );
+      const frozenCost = frozenUnitCostFromLine(doc);
+      const unitCost =
+        frozenCost != null ?
+          frozenCost
+        : wholesaleUnitFromProduct(productById.get(String(doc.product_id)));
+      if (frozenCost == null) {
+        doc.cost_price_at_return = unitCost;
+      }
+      doc.profit = computeLineProfit(unitCost, doc.price, doc.qty);
     }
     next();
   } catch (err) {
