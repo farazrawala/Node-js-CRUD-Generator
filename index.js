@@ -16,6 +16,7 @@ const {
   checkForAuthentication,
   checkHeaderAuthentication,
 } = require("./middlewares/auth");
+const { getBasePath, withBasePath } = require("./utils/basePath");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
@@ -31,7 +32,10 @@ modelFiles.forEach((file) => {
 });
 
 const app = express();
-const port = 8000;
+const BASE_PATH = getBasePath();
+const port = Number(process.env.PORT) || 8000;
+
+app.set("trust proxy", 1);
 
 const cookieParser = require("cookie-parser");
 const session = require("express-session");
@@ -89,8 +93,16 @@ app.use(cookieParser());
 app.set("view engine", "ejs");
 app.set("views", path.resolve("./views"));
 
+app.use((req, res, next) => {
+  res.locals.basePath = BASE_PATH;
+  next();
+});
+
 // Serve static files from uploads directory
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use(
+  withBasePath("/uploads"),
+  express.static(path.join(__dirname, "uploads")),
+);
 
 // Session middleware (must come before flash)
 app.use(
@@ -99,7 +111,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false, // Set to true if using HTTPS
+      secure: process.env.NODE_ENV === "production",
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
   }),
@@ -226,13 +238,15 @@ connectMonogodb(getMongoUri()).catch((err) => {
 
 app.use(checkForAuthentication); // <--- This line must be enabled
 
-app.use("/url", restrictTo(["NORMAL"]), urlRouter);
-// console.log("🔧 Mounting user routes at /user");
-app.use("/user", userRoute);
-// console.log("✅ User routes mounted successfully");
-app.use("/api", checkHeaderAuthentication, apiRoute);
-app.use("/admin", adminRoute);
-app.use("/", staticRoute);
+app.use(withBasePath("/url"), restrictTo(["NORMAL"]), urlRouter);
+app.use(withBasePath("/user"), userRoute);
+app.use(withBasePath("/api"), checkHeaderAuthentication, apiRoute);
+app.use(withBasePath("/admin"), adminRoute);
+app.use(withBasePath("/"), staticRoute);
+
+if (BASE_PATH) {
+  console.log(`📁 BASE_PATH mount: ${BASE_PATH}`);
+}
 
 /** Fallback JSON 404 when no route matched (avoids opaque HTML from proxies/browsers). */
 app.use((req, res) => {
@@ -242,7 +256,7 @@ app.use((req, res) => {
     success: false,
     status: 404,
     error: "Not found",
-    details: `No handler for ${req.method} ${fullPath}. API routes are under /api on port ${port}.`,
+    details: `No handler for ${req.method} ${fullPath}. API routes are under ${withBasePath("/api")} (port ${port}).`,
     type: "not_found",
   });
 });

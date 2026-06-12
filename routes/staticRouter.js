@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const URL = require("../models/url");
 const { restrictTo } = require("../middlewares/auth");
+const { withBasePath } = require("../utils/basePath");
 router.get("/", async (req, res) => {
   const allUrls = URL.find({});
   return res.render("home", {
@@ -36,7 +37,7 @@ router.get("/admin/dashboard", restrictTo(["ADMIN"]), (req, res) => {
 
 router.get("/admin/logout", (req, res) => {
   res.clearCookie("token");
-  res.redirect("/login/admin");
+  res.redirect(withBasePath("/login/admin"));
 });
 
 router.get("/thankyou", (req, res) => {

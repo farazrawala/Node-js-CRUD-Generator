@@ -242,6 +242,7 @@
     </div>
 
     <script>
+        const basePath = '<%= typeof basePath !== "undefined" ? basePath : "" %>';
         // Add some interactive features
         document.addEventListener('DOMContentLoaded', function() {
             const inputs = document.querySelectorAll('input');
@@ -271,7 +272,7 @@
                 const password = formData.get('password');
                 
                 try {
-                    const response = await fetch('/api/login/admin', {
+                    const response = await fetch(`${basePath}/api/login/admin`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -287,7 +288,7 @@
                         
                         // Redirect to admin dashboard after 1 second
                         setTimeout(() => {
-                            window.location.href = '/admin/dashboard';
+                            window.location.href = `${basePath}/admin/dashboard`;
                         }, 1000);
                     } else {
                         showMessage(data.message || 'Login failed', 'error');

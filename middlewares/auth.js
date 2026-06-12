@@ -9,6 +9,15 @@ const {
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
 const User = require("../models/user");
+const { getBasePath, withBasePath } = require("../utils/basePath");
+
+function stripBasePath(path) {
+  const base = getBasePath();
+  if (!base || !path) return path;
+  if (path === base) return "/";
+  if (path.startsWith(`${base}/`)) return path.slice(base.length);
+  return path;
+}
 
 /**
  * Helper function to log API requests
@@ -148,14 +157,18 @@ async function checkHeaderAuthentication(req, res, next) {
     `${req.baseUrl || ""}${req.path || ""}`,
     (req.originalUrl || "").split("?")[0],
   ].filter(Boolean);
+  const normalizedCandidates = [
+    ...new Set(pathCandidates.map((p) => stripBasePath(p))),
+  ];
 
   // Check if current route should be public
   const isPublicRoute = publicRoutePatterns.some((pattern) => {
+    const candidates = [...pathCandidates, ...normalizedCandidates];
     if (typeof pattern === "string") {
-      return pathCandidates.some((p) => p === pattern);
+      return candidates.some((p) => p === pattern || p === withBasePath(pattern));
     }
     if (pattern instanceof RegExp) {
-      return pathCandidates.some((p) => pattern.test(p));
+      return candidates.some((p) => pattern.test(p));
     }
     return false;
   });
@@ -207,7 +220,7 @@ async function checkHeaderAuthentication(req, res, next) {
 
 function restrictTo(roles) {
   return function (req, res, next) {
-    if (!req.user) return res.redirect("/login/admin");
+    if (!req.user) return res.redirect(withBasePath("/login/admin"));
 
     console.log("Current user : " + req.user.email, req.user.role);
 
