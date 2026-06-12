@@ -1,12 +1,12 @@
-# public_html/pos_admin/.htaccess
-# Node must be running: npm run start  (PORT=8000 in .env or cPanel env)
-# Upload latest index.js + utils/basePath.js after any code update, then restart Node.
+# Copy to: public_html/pos_admin/.htaccess
+# Node on 127.0.0.1:8000 (pm2 or cPanel Node.js App)
 
 RewriteEngine On
+RewriteBase /pos_admin/
 
-# Never expose server entry as a static download
+# Block downloading server source
 RewriteRule ^index\.js$ - [F,L]
 
-# Forward full URI to Node (app strips /pos_admin prefix internally)
-RewriteCond %{REQUEST_URI} ^/pos_admin [NC]
-RewriteRule ^ http://127.0.0.1:8000%{REQUEST_URI} [P,L,QSA]
+# IMPORTANT: strip /pos_admin before proxy — Node routes are /login/admin, /api/...
+# (not /pos_admin/login/admin). Works with old and new app code.
+RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]
