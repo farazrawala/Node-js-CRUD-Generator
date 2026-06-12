@@ -2,7 +2,19 @@ const express = require("express");
 const router = express.Router();
 const URL = require("../models/url");
 const { restrictTo } = require("../middlewares/auth");
-const { withBasePath } = require("../utils/basePath");
+const { withBasePath, getBasePath } = require("../utils/basePath");
+
+/** Public — verify Node is running (not Apache static index.js). */
+router.get("/health", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "pos-api",
+    basePath: getBasePath() || null,
+    nodeEnv: process.env.NODE_ENV || "development",
+    time: new Date().toISOString(),
+  });
+});
+
 router.get("/", async (req, res) => {
   const allUrls = URL.find({});
   return res.render("home", {

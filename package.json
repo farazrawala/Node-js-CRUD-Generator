@@ -7,6 +7,7 @@
     "dev": "node --watch index.js",
     "devs": "nodemon -L index.js",
     "server": "node index.js",
+    "start": "node index.js",
     "redis:inspect": "node scripts/redis-inspect.js"
   },
   "author": "",

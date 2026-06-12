@@ -1,0 +1,18 @@
+# Copy this file to the server's public_html/pos_admin/.htaccess
+# Requires: Node running on PORT (default 8000) with BASE_PATH=/pos_admin in .env
+# Requires Apache: mod_rewrite, mod_proxy, mod_proxy_http
+# (cPanel: "Setup Node.js App" is preferred — see deploy/README-deploy.txt)
+
+RewriteEngine On
+
+# Stop serving index.js as a downloadable/static page
+RewriteRule ^index\.js$ - [F,L]
+
+# Proxy all /pos_admin/* traffic to the Node process (preserve full URI)
+RewriteCond %{REQUEST_URI} ^/pos_admin
+RewriteRule ^(.*)$ http://127.0.0.1:8000%{REQUEST_URI} [P,L,QSA]
+
+# Fallback when .htaccess lives inside pos_admin/ (some hosts)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ http://127.0.0.1:8000/pos_admin/$1 [P,L,QSA]
