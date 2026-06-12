@@ -16,7 +16,12 @@ const {
   checkForAuthentication,
   checkHeaderAuthentication,
 } = require("./middlewares/auth");
-const { getBasePath, withBasePath } = require("./utils/basePath");
+const {
+  getBasePath,
+  withBasePath,
+  createStripBasePathMiddleware,
+  getCookiePath,
+} = require("./utils/basePath");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
@@ -93,16 +98,11 @@ app.use(cookieParser());
 app.set("view engine", "ejs");
 app.set("views", path.resolve("./views"));
 
-app.use((req, res, next) => {
-  res.locals.basePath = BASE_PATH;
-  next();
-});
+// Proxy sends /pos_admin/... — strip prefix before route matching
+app.use(createStripBasePathMiddleware());
 
 // Serve static files from uploads directory
-app.use(
-  withBasePath("/uploads"),
-  express.static(path.join(__dirname, "uploads")),
-);
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Session middleware (must come before flash)
 app.use(
@@ -238,15 +238,15 @@ connectMonogodb(getMongoUri()).catch((err) => {
 
 app.use(checkForAuthentication); // <--- This line must be enabled
 
-app.use(withBasePath("/url"), restrictTo(["NORMAL"]), urlRouter);
-app.use(withBasePath("/user"), userRoute);
-app.use(withBasePath("/api"), checkHeaderAuthentication, apiRoute);
-app.use(withBasePath("/admin"), adminRoute);
-app.use(withBasePath("/"), staticRoute);
+app.use("/url", restrictTo(["NORMAL"]), urlRouter);
+app.use("/user", userRoute);
+app.use("/api", checkHeaderAuthentication, apiRoute);
+app.use("/admin", adminRoute);
+app.use("/", staticRoute);
 
-if (BASE_PATH) {
-  console.log(`📁 BASE_PATH mount: ${BASE_PATH}`);
-}
+console.log(
+  `📁 Public base path: ${BASE_PATH || "(auto /pos_admin if proxied)"}`,
+);
 
 /** Fallback JSON 404 when no route matched (avoids opaque HTML from proxies/browsers). */
 app.use((req, res) => {
@@ -263,5 +263,7 @@ app.use((req, res) => {
 
 app.listen(port, () => {
   console.log("🚀 Server started at port " + port);
-  console.log("📝 Nodemon is watching for changes...");
+  console.log(
+    `📁 BASE_PATH=${BASE_PATH || "(unset)"} cookiePath=${getCookiePath()}`,
+  );
 });

@@ -21,6 +21,7 @@ const {
   buildUserCompanyPopulate,
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
+const { getCookiePath } = require("../utils/basePath");
 const {
   logRollbackFailure,
   serializeErrorForLog,
@@ -320,6 +321,7 @@ async function handleUserLogin(req, res) {
     res.cookie("token", userWithToken.token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
+      path: getCookiePath(),
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     });
 
@@ -981,6 +983,7 @@ async function handleUserSignupCompany(req, res) {
       res.cookie("token", userWithToken.token, {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
+        path: getCookiePath(),
         maxAge: 24 * 60 * 60 * 1000,
       });
     }
@@ -1066,6 +1069,7 @@ async function handleAdminLogin(req, res) {
     res.cookie("token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
+      path: getCookiePath(),
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     });
 

@@ -36,6 +36,12 @@ STEP 3 — Apache proxy (if not using cPanel Node app):
 
   Copy deploy/pos_admin.htaccess → public_html/pos_admin/.htaccess
 
+  IMPORTANT: After ANY code change, upload files and RESTART Node:
+    pm2 restart pos-api
+  cPanel often does NOT read .env from disk — add BASE_PATH=/pos_admin in
+  cPanel Node.js "Environment variables" anyway. New code also auto-strips
+  /pos_admin from proxied URLs even if BASE_PATH is missing.
+
 STEP 4 — Verify:
 
   https://testv3.websitedemolynk.com/pos_admin/health
