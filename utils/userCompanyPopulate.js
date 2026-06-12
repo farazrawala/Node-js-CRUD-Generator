@@ -18,6 +18,28 @@ const COMPANY_DEFAULT_ACCOUNT_PATHS = [
 
 const ACCOUNT_SELECT = "name account_number company_id account_type status";
 
+/** Scalar company fields the client expects on login / auth even when unset in MongoDB. */
+const COMPANY_CLIENT_SCALAR_FIELDS = [
+  "company_logo",
+  "barcode_settings",
+  "printer_settings",
+];
+
+/** Ensure populated `company_id` includes stable keys for the client (null when unset). */
+function normalizePopulatedCompanyForClient(company) {
+  if (!company || typeof company !== "object") return company;
+  [
+    ...COMPANY_DEFAULT_ACCOUNT_PATHS,
+    "warehouse_id",
+    ...COMPANY_CLIENT_SCALAR_FIELDS,
+  ].forEach((field) => {
+    if (company[field] === undefined) {
+      company[field] = null;
+    }
+  });
+  return company;
+}
+
 /** Full company document + populated default accounts and warehouse (login / auth). */
 function buildUserCompanyPopulate() {
   return {
@@ -34,5 +56,7 @@ function buildUserCompanyPopulate() {
 
 module.exports = {
   COMPANY_DEFAULT_ACCOUNT_PATHS,
+  COMPANY_CLIENT_SCALAR_FIELDS,
+  normalizePopulatedCompanyForClient,
   buildUserCompanyPopulate,
 };

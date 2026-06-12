@@ -130,6 +130,7 @@ const {
   fetchAccountsByType,
   getBalanceSheet,
   getBalanceSheetDifference,
+  getCompanyDefaultDiscountSums,
 } = require("../controllers/account");
 
 const {
@@ -362,6 +363,7 @@ router.patch("/account/custom-update/:id", accountUpdate);
 router.get("/account/fetch-account-by-type", fetchAccountsByType);
 router.get("/account/balance-sheet", getBalanceSheet);
 router.get("/account/balance-sheet-difference", getBalanceSheetDifference);
+router.get("/account/default-discount-sums", getCompanyDefaultDiscountSums);
 
 // Adjustment routes
 router.post("/adjustment/save", adjustmentCreate);
@@ -385,6 +387,7 @@ router.get("/order/sales", findSales);
 router.get("/order/sales-day-wise", findSalesDayWise);
 router.get("/order/total-sales-current-month", findTotalSalesByOrder);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
+router.get("/order/public-get-order-by-order-no/:id", getOrderByOrderNo);
 router.patch("/order/invoice-update/:id", invoiceUpdate);
 router.post("/payment_receipt/save", paymentReceiptCreate);
 router.patch("/payment_receipt/update_receipt/:id", paymentReceiptUpdate);

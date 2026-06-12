@@ -66,6 +66,20 @@ function tenantCompanyIdFromUser(user) {
   return coalesceObjectId(user.company_id);
 }
 
+/**
+ * Tenant scope for CRUD filters.
+ * `company` rows: root tenant has unset `company_id`; branches point at parent via `company_id`.
+ */
+function applyTenantFilterForModel(filter, modelName, tenantCo) {
+  if (!tenantCo) return filter;
+  if (modelName === "company") {
+    filter.$or = [{ _id: tenantCo }, { company_id: tenantCo }];
+  } else {
+    filter.company_id = tenantCo;
+  }
+  return filter;
+}
+
 /** `amount_gt=0` → `{ amount: { $gt: 0 } }` (see getAll / get-all-active query strings). */
 const QUERY_RANGE_FIELD_RE = /^([a-zA-Z][a-zA-Z0-9_]*)_(gt|gte|lt|lte)$/;
 
@@ -365,14 +379,21 @@ function generateControllerFunctions(modelName) {
     update: async (req, res) => {
       const filter = {};
 
-      // Always filter by company_id if user has one
+      // Profile edit: always update the authenticated user, not an arbitrary URL id.
+      if (modelName === "user" && req.user?._id) {
+        const loginUserId = String(coalesceObjectId(req.user._id));
+        if (req.params.id !== loginUserId) {
+          console.log(
+            `🔁 user update: using logged-in _id ${loginUserId} (URL had ${req.params.id})`,
+          );
+        }
+        req.params.id = loginUserId;
+      }
+
       const tenantCo = tenantCompanyIdFromUser(req.user);
       if (tenantCo) {
-        filter.company_id = tenantCo;
-        console.log(
-          `🔍 Filtering ${modelName} update by company_id:`,
-          tenantCo,
-        );
+        applyTenantFilterForModel(filter, modelName, tenantCo);
+        console.log(`🔍 Filtering ${modelName} update by tenant:`, tenantCo);
       }
 
       const userControllerPath = path.join(
@@ -481,11 +502,10 @@ function generateControllerFunctions(modelName) {
     getById: async (req, res) => {
       const filter = {};
 
-      // Always filter by company_id if user has one
       const tenantCo = tenantCompanyIdFromUser(req.user);
       if (tenantCo) {
-        filter.company_id = tenantCo;
-        console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
+        applyTenantFilterForModel(filter, modelName, tenantCo);
+        console.log(`🔍 Filtering ${modelName} getById by tenant:`, tenantCo);
       }
 
       const response = await handleGenericGetById(req, modelName, {
@@ -499,11 +519,10 @@ function generateControllerFunctions(modelName) {
     getAll: async (req, res) => {
       let filter = { deletedAt: null };
 
-      // Always filter by company_id if user has one
       const tenantCo = tenantCompanyIdFromUser(req.user);
       if (tenantCo) {
-        filter.company_id = tenantCo;
-        console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
+        applyTenantFilterForModel(filter, modelName, tenantCo);
+        console.log(`🔍 Filtering ${modelName} getAll by tenant:`, tenantCo);
       }
       filter = applyQueryFilters(filter, req.query, modelName);
       const roleFilter = applyUserRoleQueryFilter(filter, req.query, modelName);
@@ -562,8 +581,11 @@ function generateControllerFunctions(modelName) {
 
           const tenantCo = tenantCompanyIdFromUser(req.user);
           if (tenantCo) {
-            filter.company_id = tenantCo;
-            console.log(`🔍 Filtering ${modelName} by company_id:`, tenantCo);
+            applyTenantFilterForModel(filter, modelName, tenantCo);
+            console.log(
+              `🔍 Filtering ${modelName} getAllActive by tenant:`,
+              tenantCo,
+            );
           }
           filter = applyQueryFilters(filter, req.query, modelName);
           const roleFilter = applyUserRoleQueryFilter(
@@ -604,14 +626,10 @@ function generateControllerFunctions(modelName) {
 
       const filter = {};
 
-      // Always filter by company_id if user has one
       const tenantCo = tenantCompanyIdFromUser(req.user);
       if (tenantCo) {
-        filter.company_id = tenantCo;
-        console.log(
-          `🔍 Filtering ${modelName} delete by company_id:`,
-          tenantCo,
-        );
+        applyTenantFilterForModel(filter, modelName, tenantCo);
+        console.log(`🔍 Filtering ${modelName} delete by tenant:`, tenantCo);
       }
 
       const response = await handleGenericSoftDelete(req, modelName, {

@@ -17,7 +17,10 @@ const Warehouse = require("../models/warehouse");
 const Account = require("../models/account");
 const Transaction = require("../models/transaction");
 const { createTransactionsFromItems } = require("./transaction");
-const { buildUserCompanyPopulate } = require("../utils/userCompanyPopulate");
+const {
+  buildUserCompanyPopulate,
+  normalizePopulatedCompanyForClient,
+} = require("../utils/userCompanyPopulate");
 const {
   logRollbackFailure,
   serializeErrorForLog,
@@ -231,6 +234,10 @@ async function handleUserSignup(req, res) {
 }
 
 async function handleUserUpdate(req, res) {
+  if (req.user?._id) {
+    req.params.id = String(coalesceObjectId(req.user._id));
+  }
+
   const response = await handleGenericUpdate(req, "user", {
     excludeFields: ["password"], // Don't return password in response
     // allowedFields: [] - Empty array means allow all fields except password (dynamic)
@@ -300,6 +307,12 @@ async function handleUserLogin(req, res) {
     }
 
     const userWithToken = setUserToken(user);
+    if (
+      userWithToken?.company_id &&
+      typeof userWithToken.company_id === "object"
+    ) {
+      normalizePopulatedCompanyForClient(userWithToken.company_id);
+    }
     console.log("📞 setUserToken returned:", userWithToken);
     console.log("📞 userWithToken.company_id:", userWithToken.company_id);
 
@@ -946,10 +959,40 @@ async function handleUserSignupCompany(req, res) {
       });
     }
 
+    const newCompanyId = coalesceObjectId(signupData.company?._id);
+    if (req.user?._id && newCompanyId) {
+      await User.findByIdAndUpdate(req.user._id, { company_id: newCompanyId });
+      console.log(
+        `🔗 Linked logged-in user ${req.user._id} to company ${newCompanyId}`,
+      );
+    }
+
+    const createdAdmin = await User.findById(signupData.user._id).populate(
+      buildUserCompanyPopulate(),
+    );
+    const userWithToken = createdAdmin ? setUserToken(createdAdmin) : null;
+    if (
+      userWithToken?.company_id &&
+      typeof userWithToken.company_id === "object"
+    ) {
+      normalizePopulatedCompanyForClient(userWithToken.company_id);
+    }
+    if (userWithToken?.token) {
+      res.cookie("token", userWithToken.token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 24 * 60 * 60 * 1000,
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: "Company signup completed successfully",
-      data: signupData,
+      data: {
+        ...signupData,
+        user: userWithToken || signupData.user,
+      },
+      token: userWithToken?.token ?? null,
     });
   } catch (error) {
     console.error("❌ Company user signup error:", error);

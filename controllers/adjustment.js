@@ -7,6 +7,7 @@ const { performAccountCreate } = require("./account");
 const Product = require("../models/product");
 const Transaction = require("../models/transaction");
 const InventoryMovements = require("../models/inventory_movements");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   logRollbackFailure,
@@ -587,9 +588,39 @@ async function postAdjustmentInventoryMovement(
     status: "active",
   };
 
+  const qtyDelta = movement_type === "in" ? qty : -qty;
+  let whChange = null;
+
   try {
+    whChange = await WarehouseInventory.applyQuantityDelta({
+      productId: record.product_id,
+      warehouseId,
+      companyId,
+      qtyDelta,
+      userId: pickObjectId(adjustmentReq.user?._id),
+      session,
+    });
+
     await runInventoryMovementTxnBody(adjustmentReq, session);
   } catch (inventoryMovementErr) {
+    if (whChange?.qty_delta) {
+      try {
+        await WarehouseInventory.applyQuantityDelta({
+          productId: record.product_id,
+          warehouseId,
+          companyId,
+          qtyDelta: -whChange.qty_delta,
+          userId: pickObjectId(adjustmentReq.user?._id),
+          session,
+        });
+      } catch (revertErr) {
+        console.error(
+          "⚠️ Failed to revert warehouse_inventory after adjustment movement error:",
+          revertErr.message,
+        );
+      }
+    }
+
     if (inventoryMovementErr.clientPayload) {
       throwWithGenericFailure(
         inventoryMovementErr.clientPayload,

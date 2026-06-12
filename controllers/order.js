@@ -10,6 +10,7 @@ const {
   handleGenericUpdate,
   handleGenericGetAll,
   coalesceObjectId,
+  buildPopulateFromQuery,
 } = require("../utils/modelHelper");
 const {
   logControllerError,
@@ -26,6 +27,9 @@ const {
 } = require("../utils/mongoTransactionSupport");
 const { insertInventoryMovementRecord } = require("./inventory_movements");
 const { evaluateProductStockAlert } = require("./alerts");
+const {
+  normalizePopulatedCompanyForClient,
+} = require("../utils/userCompanyPopulate");
 
 const ORDER_TRANSACTION_ERROR_LOG = {
   action: "POST ORDER TRANSACTION ERROR",
@@ -2079,7 +2083,7 @@ async function order_save(req, res) {
               // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
               account_id: orderReq.body?.posPayMethod,
               type: "debit",
-              amount: record?.amount_received,
+              amount: orderTotal,
               reference_user_id: record?.customer_id,
               transaction_number,
               description: "Mode of Payment",
@@ -2782,10 +2786,22 @@ async function getOrderByOrderNo(req, res) {
   }
 
   const filter = { status: "active", deletedAt: null };
+  const popFields = buildPopulateFromQuery(req.query || {}, "order");
+  const findOneOrder = (extraFilter) => {
+    let q = Order.findOne({ ...extraFilter, ...filter });
+    for (const spec of popFields) {
+      if (typeof spec === "string") {
+        q = q.populate(spec);
+      } else if (spec && typeof spec === "object" && spec.path) {
+        q = q.populate(spec);
+      }
+    }
+    return q;
+  };
 
-  let order = await Order.findOne({ order_no: param, ...filter });
+  let order = await findOneOrder({ order_no: param });
   if (!order && mongoose.Types.ObjectId.isValid(param)) {
-    order = await Order.findOne({ _id: param, ...filter });
+    order = await findOneOrder({ _id: param });
   }
 
   if (!order) {
@@ -2818,6 +2834,15 @@ async function getOrderByOrderNo(req, res) {
     no_of_items: items.length,
     order_items_total,
   };
+
+  if (data.customer_id?.password != null) {
+    const { password: _pw, ...customerSafe } = data.customer_id;
+    data.customer_id = customerSafe;
+  }
+
+  if (data.company_id && typeof data.company_id === "object") {
+    normalizePopulatedCompanyForClient(data.company_id);
+  }
 
   return res.status(200).json({
     success: true,

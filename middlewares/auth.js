@@ -6,7 +6,7 @@ const {
 } = require("../utils/applicationLogs");
 const {
   buildUserCompanyPopulate,
-  COMPANY_DEFAULT_ACCOUNT_PATHS,
+  normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
 const User = require("../models/user");
 
@@ -90,16 +90,7 @@ async function hydrateUserFromToken(token) {
       return tokenUser;
     }
     if (dbUser.company_id && typeof dbUser.company_id === "object") {
-      const company = dbUser.company_id;
-      const companyDefaultAccountFields = [
-        ...COMPANY_DEFAULT_ACCOUNT_PATHS,
-        "warehouse_id",
-      ];
-      companyDefaultAccountFields.forEach((field) => {
-        if (company[field] === undefined) {
-          company[field] = null;
-        }
-      });
+      normalizePopulatedCompanyForClient(dbUser.company_id);
     }
     return {
       ...tokenUser,
@@ -147,6 +138,8 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/blog\/get\/.*/, // /api/blog/get/:id
     // /^\/api\/product\/get\/.*/, // /api/product/get/:id
     /^\/api\/user\/get\/.*/, // /api/user/get/:id
+    /^\/order\/public-get-order-by-order-no\/.*/, // public order lookup (no auth)
+    /^\/api\/order\/public-get-order-by-order-no\/.*/, // public order lookup (no auth)
     "/api/test", // Test route
   ];
 

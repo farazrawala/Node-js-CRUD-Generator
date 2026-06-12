@@ -819,6 +819,71 @@ async function resolveCompanyDefaultReceivableId(user) {
   return toObjectId(row?.default_account_receivable_account);
 }
 
+async function resolveCompanyDefaultDiscountAccountIds(user, companyId) {
+  const coRaw = user?.company_id;
+  let salesDiscountId = null;
+  let purchaseDiscountId = null;
+
+  if (coRaw && typeof coRaw === "object") {
+    salesDiscountId = toObjectId(coRaw.default_sales_discount_account);
+    purchaseDiscountId = toObjectId(coRaw.default_purchase_discount_account);
+  }
+
+  const cid = toObjectId(companyId) || toObjectId(coRaw);
+  if (cid && (!salesDiscountId || !purchaseDiscountId)) {
+    const row = await Company.findById(cid)
+      .select(
+        "default_sales_discount_account default_purchase_discount_account",
+      )
+      .lean();
+    if (!salesDiscountId) {
+      salesDiscountId = toObjectId(row?.default_sales_discount_account);
+    }
+    if (!purchaseDiscountId) {
+      purchaseDiscountId = toObjectId(row?.default_purchase_discount_account);
+    }
+  }
+
+  return {
+    companyId: cid,
+    salesDiscountId,
+    purchaseDiscountId,
+  };
+}
+
+const EMPTY_TRANSACTIONS_SUM = {
+  total_debit: 0,
+  total_credit: 0,
+  line_count: 0,
+  net_debit_minus_credit: 0,
+  credit_minus_debit: 0,
+};
+
+/** Sales discount posts as debit; purchase discount posts as credit. */
+function discountAmountFromGlSums(transactionsSum, role) {
+  if (!transactionsSum) return 0;
+  if (role === "sales_discount") {
+    return transactionsSum.net_debit_minus_credit;
+  }
+  return transactionsSum.credit_minus_debit;
+}
+
+function buildDiscountAccountPayload(
+  accountId,
+  accountMeta,
+  transactionsSum,
+  role,
+) {
+  const sums = transactionsSum ?? { ...EMPTY_TRANSACTIONS_SUM };
+  return {
+    account_id: accountId ? String(accountId) : null,
+    account_name: accountMeta?.name ?? null,
+    account_number: accountMeta?.account_number ?? null,
+    amount: discountAmountFromGlSums(sums, role),
+    transactions_sum: sums,
+  };
+}
+
 /**
  * GET ?account_type=current_asset
  * Optional: limit, skip, search, searchFields (via handleGenericGetAll).
@@ -1019,6 +1084,87 @@ async function getBalanceSheetDifference(req, res) {
   }
 }
 
+/**
+ * GET /api/account/default-discount-sums
+ * Sums GL activity on company default sales_discount and purchase_discount accounts.
+ * Optional query: company_id (must match authenticated tenant if provided).
+ */
+async function getCompanyDefaultDiscountSums(req, res) {
+  try {
+    const resolved = resolveBalanceSheetCompanyId(req);
+    if (resolved.error) {
+      return res.status(resolved.error.status).json(resolved.error.body);
+    }
+
+    const { companyId } = resolved;
+    const { salesDiscountId, purchaseDiscountId } =
+      await resolveCompanyDefaultDiscountAccountIds(req.user, companyId);
+
+    const accountIds = [salesDiscountId, purchaseDiscountId].filter(Boolean);
+    const sumByAccount = await aggregateTransactionSumsByAccountIds(
+      accountIds,
+      companyId,
+    );
+
+    const accountMetaById = new Map();
+    if (accountIds.length) {
+      const accounts = await AccountModel.find({
+        _id: { $in: accountIds },
+        company_id: companyId,
+        deletedAt: null,
+      })
+        .select("name account_number")
+        .lean();
+      for (const acc of accounts) {
+        accountMetaById.set(String(acc._id), acc);
+      }
+    }
+
+    const sales_discount = buildDiscountAccountPayload(
+      salesDiscountId,
+      salesDiscountId ?
+        accountMetaById.get(String(salesDiscountId))
+      : null,
+      salesDiscountId ?
+        sumByAccount.get(String(salesDiscountId))
+      : null,
+      "sales_discount",
+    );
+    const purchase_discount = buildDiscountAccountPayload(
+      purchaseDiscountId,
+      purchaseDiscountId ?
+        accountMetaById.get(String(purchaseDiscountId))
+      : null,
+      purchaseDiscountId ?
+        sumByAccount.get(String(purchaseDiscountId))
+      : null,
+      "purchase_discount",
+    );
+
+    const total_discount_amount = Number(
+      (sales_discount.amount + purchase_discount.amount).toFixed(2),
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      data: {
+        company_id: String(companyId),
+        sales_discount,
+        purchase_discount,
+        total_discount_amount,
+      },
+    });
+  } catch (error) {
+    console.error("❌ getCompanyDefaultDiscountSums:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to compute default discount sums",
+    });
+  }
+}
+
 module.exports = {
   accountCreate,
   performAccountCreate,
@@ -1026,4 +1172,5 @@ module.exports = {
   fetchAccountsByType,
   getBalanceSheet,
   getBalanceSheetDifference,
+  getCompanyDefaultDiscountSums,
 };

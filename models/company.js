@@ -98,6 +98,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Barcode Settings",
     },
+    printer_settings: {
+      type: String,
+      field_name: "Printer Settings",
+    },
 
     default_cash_account: {
       type: mongoose.Schema.Types.ObjectId,

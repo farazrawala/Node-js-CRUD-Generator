@@ -1401,12 +1401,30 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
     if (session) existingQ = existingQ.session(session);
     const existingRecord = await existingQ;
     if (!existingRecord) {
+      let details = `${modelName} with ID ${recordId} not found`;
+      let context = undefined;
+      const tenantCompanyId = coalesceObjectId(filter.company_id);
+      if (tenantCompanyId) {
+        let existsQ = Model.findById(recordId).select("_id company_id deletedAt");
+        if (session) existsQ = existsQ.session(session);
+        const existsAnyTenant = await existsQ.lean();
+        if (existsAnyTenant) {
+          const recordCompanyId = coalesceObjectId(existsAnyTenant.company_id);
+          details = `${modelName} with ID ${recordId} not found for your company (authenticated company_id does not match this record)`;
+          context = {
+            authenticated_company_id: String(tenantCompanyId),
+            record_company_id:
+              recordCompanyId != null ? String(recordCompanyId) : null,
+          };
+        }
+      }
       return {
         success: false,
         status: 404,
         error: "Record not found",
-        details: `${modelName} with ID ${recordId} not found`,
+        details,
         type: "not_found",
+        ...(context ? { context } : {}),
       };
     }
 

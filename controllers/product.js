@@ -7,6 +7,7 @@ const {
   handleGenericFindOne,
   parseSearchFieldsFromQuery,
   coalesceObjectId,
+  activeNotDeletedCriteria,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
@@ -722,23 +723,45 @@ async function productCreateVariation(req, res) {
 }
 
 async function getProductVariationById(req, res) {
-  const { id } = req.params;
+  const parentOid = coalesceObjectId(req.params.id);
+  if (!parentOid) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: "Please provide id in the URL parameters",
+      type: "missing_id",
+    });
+  }
+
+  const tenantCo = coalesceObjectId(req.user?.company_id);
+  const variationFilter = {
+    ...activeNotDeletedCriteria(),
+    ...(tenantCo ? { company_id: tenantCo } : {}),
+  };
+
   const response = await handleGenericGetById(req, "product", {
     excludeFields: [],
+    filter: variationFilter,
     populate: [
       {
         path: "parent_product_id",
         select: "product_name",
       },
     ],
-    sort: { createdAt: -1 }, // Sort by newest first
-    limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
-    skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
   });
+
+  if (!response?.success || !response.data) {
+    return res.status(response?.status || 404).json(response);
+  }
 
   const childproducts = await handleGenericGetAll(req, "product", {
     excludeFields: [],
-    filter: { parent_product_id: id },
+    filter: {
+      ...variationFilter,
+      parent_product_id: parentOid,
+      _id: { $ne: parentOid },
+    },
     populate: [
       {
         path: "parent_product_id",
@@ -749,12 +772,18 @@ async function getProductVariationById(req, res) {
         select: "name",
       },
     ],
+    sort: { createdAt: -1 },
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
   });
-  response.data.childproducts = childproducts.data;
+
   return res.status(200).json({
     success: true,
     message: "Product variation fetched successfully",
-    data: response.data,
+    data: {
+      ...response.data,
+      childproducts: childproducts.data ?? [],
+    },
   });
 }
 
