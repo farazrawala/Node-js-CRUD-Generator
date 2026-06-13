@@ -48,6 +48,9 @@ jspm_packages/
 .env.test
 .env.production
 
+# Deploy secrets (never commit)
+deploy/github_actions_key.pem
+
 # parcel-bundler cache
 .cache
 .parcel-cache
