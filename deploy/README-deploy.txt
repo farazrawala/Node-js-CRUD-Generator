@@ -76,11 +76,17 @@ FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
 
 DEBUG LOGS — download to rectify live issues:
 
-  Log files: logs/app-YYYY-MM-DD.log and logs/error-YYYY-MM-DD.log
-  (also via cPanel File Manager / FTP from public_html/pos_admin/logs/)
+  Easiest (browser, after admin login):
+    https://testv3.websitedemolynk.com/pos_admin/admin/debug/logs/page
 
-  Admin download (login as ADMIN first):
+  Or set in server .env: DEBUG_LOG_KEY=your-secret-key
+    https://testv3.websitedemolynk.com/pos_admin/admin/debug/logs/page?key=your-secret-key
+
+  JSON list:
     GET /pos_admin/admin/debug/logs
-    GET /pos_admin/admin/debug/logs/download?file=app-2026-06-13.log
+    GET /pos_admin/api/debug/logs  (Authorization: Bearer <admin-token>)
 
-  Console output is mirrored into the daily log files automatically.
+  Download:
+    GET /pos_admin/admin/debug/logs/download?file=app-YYYY-MM-DD.log
+
+  Or cPanel File Manager: public_html/pos_admin/logs/

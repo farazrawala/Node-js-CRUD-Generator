@@ -271,11 +271,12 @@ connectMonogodb(getMongoUri()).catch((err) => {
 
 app.use(checkForAuthentication); // <--- This line must be enabled
 
+app.use("/admin/debug", debugLogsRoute);
+app.use("/api/debug", debugLogsRoute);
 app.use("/url", restrictTo(["NORMAL"]), urlRouter);
 app.use("/user", userRoute);
 app.use("/api", checkHeaderAuthentication, apiRoute);
 app.use("/admin", adminRoute);
-app.use("/admin/debug", debugLogsRoute);
 app.use("/", staticRoute);
 
 console.log(

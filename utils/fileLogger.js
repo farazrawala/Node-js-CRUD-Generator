@@ -134,7 +134,7 @@ function resolveSafeLogFile(filename) {
   if (!filename || typeof filename !== "string") return null;
   const base = path.basename(filename.trim());
   if (!base || base !== filename.trim()) return null;
-  if (!/^[a-zA-Z0-9._-]+\.log(\.[0-9]+\.bak)?$/.test(base)) return null;
+  if (!/\.log(\.[0-9]+\.bak)?$/i.test(base)) return null;
   const full = path.join(LOG_DIR, base);
   if (!full.startsWith(LOG_DIR)) return null;
   if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;

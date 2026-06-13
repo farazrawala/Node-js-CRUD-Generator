@@ -153,3 +153,8 @@ flowchart LR
   B --> C[syncProductStockFromMovementLedger per product]
   C --> D[syncHeaderTotals]
   D --> E[optional async alerts]
+
+
+
+errors : 
+GET https://testv3.websitedemolynk.com/pos_admin/admin/debug/logs/download?file=app-2026-06-13.log

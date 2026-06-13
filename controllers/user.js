@@ -23,7 +23,6 @@ const {
 } = require("../utils/userCompanyPopulate");
 const { getCookiePath, isSecureCookie } = require("../utils/basePath");
 const fileLogger = require("../utils/fileLogger");
-const { serializeErrorForLog } = require("../utils/logControllerError");
 const {
   logRollbackFailure,
   serializeErrorForLog,
