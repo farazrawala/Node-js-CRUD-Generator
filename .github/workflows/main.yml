@@ -19,7 +19,7 @@ jobs:
           username: pos@testv3.websitedemolynk.com
           password: kYw8,ae@!1&]}dMR
 
-      - name: Restart app on server
+      - name: Restart app on server1
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 192.249.118.80
