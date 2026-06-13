@@ -1,5 +1,19 @@
 require("dotenv").config();
 
+// Fail fast if node_modules is incomplete (common when FTP deploy skips npm install)
+try {
+  require("iconv-lite").encodingExists("utf8");
+} catch (err) {
+  console.error(
+    "❌ Broken node_modules (iconv-lite encodings missing). On the server run:\n" +
+      "   cd /home/demowebsitv3/public_html/pos_admin\n" +
+      "   rm -rf node_modules\n" +
+      "   npm ci --omit=dev   # or: npm install --production\n" +
+      "   pm2 restart pos-api",
+  );
+  process.exit(1);
+}
+
 const express = require("express");
 const { connectMonogodb, getMongoUri } = require("./connection");
 const path = require("path");
@@ -21,6 +35,7 @@ const {
   withBasePath,
   createStripBasePathMiddleware,
   getCookiePath,
+  isSecureCookie,
 } = require("./utils/basePath");
 
 // Dynamically load all models to ensure they're registered before controllers
@@ -112,9 +127,10 @@ app.use(
     saveUninitialized: false,
     cookie: {
       path: getCookiePath(),
-      secure: process.env.NODE_ENV === "production",
+      secure: process.env.COOKIE_SECURE === "true",
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
+    proxy: true,
   }),
 );
 
@@ -123,9 +139,15 @@ app.use(flash());
 
 // Make flash messages and base path available to all views
 app.use((req, res, next) => {
-  res.locals.success = req.flash("success");
-  res.locals.error = req.flash("error");
-  res.locals.info = req.flash("info");
+  if (req.session) {
+    res.locals.success = req.flash("success");
+    res.locals.error = req.flash("error");
+    res.locals.info = req.flash("info");
+  } else {
+    res.locals.success = [];
+    res.locals.error = [];
+    res.locals.info = [];
+  }
   if (res.locals.basePath === undefined) {
     res.locals.basePath = BASE_PATH;
   }

@@ -21,12 +21,14 @@ const {
   buildUserCompanyPopulate,
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
-const { getCookiePath } = require("../utils/basePath");
+const { getCookiePath, isSecureCookie } = require("../utils/basePath");
 const {
   logRollbackFailure,
   serializeErrorForLog,
 } = require("../utils/logControllerError");
-const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
+const {
+  isMongoTransactionUnsupportedError,
+} = require("../utils/mongoTransactionSupport");
 
 /**
  * Build & post the 2-line user opening journal. Does not touch `user.transaction_number`.
@@ -247,7 +249,10 @@ async function handleUserUpdate(req, res) {
       if (rawPassword != null && String(rawPassword).trim()) {
         const bcrypt = require("bcrypt");
         const salt = await bcrypt.genSalt(10);
-        updateData.password = await bcrypt.hash(String(rawPassword).trim(), salt);
+        updateData.password = await bcrypt.hash(
+          String(rawPassword).trim(),
+          salt,
+        );
       }
       console.log("🔧 Processing user update...", {
         userId: existingUser._id,
@@ -320,7 +325,7 @@ async function handleUserLogin(req, res) {
     // Set cookie for regular user login too
     res.cookie("token", userWithToken.token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: isSecureCookie(req),
       path: getCookiePath(),
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     });
@@ -461,11 +466,7 @@ async function rollbackUserCompanySignup(tracker, req, session = null) {
     );
   }
 
-  await Company.updateOne(
-    { _id: companyId },
-    { $set: softDeleteSet },
-    opts,
-  );
+  await Company.updateOne({ _id: companyId }, { $set: softDeleteSet }, opts);
 
   console.warn(
     `⚠️ user_company signup compensating rollback: company ${companyId}`,
@@ -982,7 +983,7 @@ async function handleUserSignupCompany(req, res) {
     if (userWithToken?.token) {
       res.cookie("token", userWithToken.token, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
+        secure: isSecureCookie(req),
         path: getCookiePath(),
         maxAge: 24 * 60 * 60 * 1000,
       });
@@ -1068,7 +1069,7 @@ async function handleAdminLogin(req, res) {
     // Set cookie
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: isSecureCookie(req),
       path: getCookiePath(),
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     });

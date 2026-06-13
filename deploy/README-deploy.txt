@@ -57,3 +57,19 @@ STEP 4 — Verify:
     → Admin login HTML page
 
 STEP 5 — Keep Node running after reboot (PM2 startup or cPanel app).
+
+FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
+
+  FTP does NOT upload node_modules. npm install must run ON THE SERVER after deploy.
+  If SSH from GitHub Actions fails, run in cPanel Terminal:
+
+    cd /home/demowebsitv3/public_html/pos_admin
+    sh deploy/reinstall-deps.sh
+    pm2 restart pos-api
+
+  Or manually:
+    rm -rf node_modules
+    npm ci --omit=dev
+    pm2 restart pos-api
+
+  cPanel alternative: Setup Node.js App → "Run NPM Install" → restart app.

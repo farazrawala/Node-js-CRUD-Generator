@@ -52,8 +52,17 @@ function createStripBasePathMiddleware() {
 }
 
 function getCookiePath() {
-  const base = getBasePath();
-  return base || "/";
+  // express-session only attaches req.session when the request path starts with
+  // the cookie path. Local dev uses /login/admin; production uses /pos_admin/...
+  // Path "/" works for both.
+  return "/";
+}
+
+/** Secure cookies only on HTTPS (or when COOKIE_SECURE=true). */
+function isSecureCookie(req) {
+  if (process.env.COOKIE_SECURE === "true") return true;
+  if (process.env.COOKIE_SECURE === "false") return false;
+  return Boolean(req?.secure);
 }
 
 module.exports = {
@@ -62,4 +71,5 @@ module.exports = {
   withBasePath,
   createStripBasePathMiddleware,
   getCookiePath,
+  isSecureCookie,
 };
