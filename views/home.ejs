@@ -1,11 +1,16 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <% const bp = (typeof basePath !== 'undefined' && basePath) ? basePath :
+    '/pos_admin'; %>
+    <meta http-equiv="refresh" content="0;url=<%= bp %>/login/admin" />
+    <title>Redirecting…</title>
+    <script>
+      window.location.replace("<%= bp %>/login/admin");
+    </script>
+  </head>
   <body>
-    <h1>Hello World from node.js 3</h1>
-    <% allUrls.forEach(url => { %>
-
-    <li><%= url.shortid %></li>
-
-    <% }) %>
+    <p>Redirecting to <a href="<%= bp %>/login/admin">admin login</a>…</p>
   </body>
 </html>
