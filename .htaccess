@@ -1,0 +1,17 @@
+# Deployed to public_html/pos_admin/.htaccess via FTP
+# Node on 127.0.0.1:8000 (pm2 start index.js --name pos-api)
+
+RewriteEngine On
+RewriteBase /pos_admin/
+
+# Stop Apache from serving index.js as the directory index (shows raw source)
+DirectoryIndex disabled
+Options -Indexes
+
+# Block downloading server source and env
+<FilesMatch "^(index\.js|\.env|package\.json|package-lock\.json)$">
+  Require all denied
+</FilesMatch>
+
+# Proxy to Node — strip /pos_admin prefix (routes are /login/admin, /api/..., not /pos_admin/...)
+RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]

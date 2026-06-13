@@ -1,12 +1,15 @@
-# Copy to: public_html/pos_admin/.htaccess
+# Same as repo root .htaccess — copy here if you deploy without FTP sync.
 # Node on 127.0.0.1:8000 (pm2 or cPanel Node.js App)
 
 RewriteEngine On
 RewriteBase /pos_admin/
 
-# Block downloading server source
-RewriteRule ^index\.js$ - [F,L]
+DirectoryIndex disabled
+Options -Indexes
 
-# IMPORTANT: strip /pos_admin before proxy — Node routes are /login/admin, /api/...
-# (not /pos_admin/login/admin). Works with old and new app code.
+<FilesMatch "^(index\.js|\.env|package\.json|package-lock\.json)$">
+  Require all denied
+</FilesMatch>
+
+# Strip /pos_admin before proxy — Node routes are /login/admin, /api/...
 RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]

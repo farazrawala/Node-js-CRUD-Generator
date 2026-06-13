@@ -111,6 +111,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
+      path: getCookiePath(),
       secure: process.env.NODE_ENV === "production",
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
@@ -120,11 +121,14 @@ app.use(
 // Flash messages middleware
 app.use(flash());
 
-// Make flash messages available to all views
+// Make flash messages and base path available to all views
 app.use((req, res, next) => {
   res.locals.success = req.flash("success");
   res.locals.error = req.flash("error");
   res.locals.info = req.flash("info");
+  if (res.locals.basePath === undefined) {
+    res.locals.basePath = BASE_PATH;
+  }
   next();
 });
 

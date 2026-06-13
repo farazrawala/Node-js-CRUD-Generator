@@ -233,11 +233,11 @@
         </form>
 
         <div class="forgot-password">
-            <a href="/admin/forgot-password">Forgot Password?</a>
+            <a href="<%= typeof basePath !== 'undefined' ? basePath : '' %>/admin/forgot-password">Forgot Password?</a>
         </div>
 
         <div class="back-to-main">
-            <a href="/">
+            <a href="<%= typeof basePath !== 'undefined' ? basePath : '' %>/">
                 ← Back to Main Site
             </a>
         </div>

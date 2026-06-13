@@ -34,8 +34,12 @@ STEP 2 — Start Node (pick one):
 
 STEP 3 — Apache proxy (if not using cPanel Node app):
 
-  Copy deploy/pos_admin.htaccess → public_html/pos_admin/.htaccess
-  (This file STRIPS /pos_admin before proxy — fixes JSON 404 immediately.)
+  .htaccess is in the repo root and deploys via FTP to public_html/pos_admin/.
+  (Strips /pos_admin before proxy; DirectoryIndex disabled so index.js is not served as text.)
+
+  If the site still shows index.js source, on the server run:
+    cd /home/demowebsitv3/public_html/pos_admin
+    cp deploy/pos_admin.htaccess .htaccess   # only if .htaccess missing after deploy
 
   IMPORTANT: After ANY code change, upload files and RESTART Node:
     pm2 restart pos-api
