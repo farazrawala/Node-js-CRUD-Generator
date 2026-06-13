@@ -1,5 +1,8 @@
 require("dotenv").config();
 
+const fileLogger = require("./utils/fileLogger");
+fileLogger.installConsoleCapture();
+
 const { repairIconvLiteEncodings } = require("./utils/repairIconvLite");
 repairIconvLiteEncodings();
 
@@ -25,6 +28,7 @@ const userRoute = require("./routes/user");
 const apiRoute = require("./routes/api");
 const adminRoute = require("./routes/admin");
 const staticRoute = require("./routes/staticRouter");
+const debugLogsRoute = require("./routes/debugLogs");
 const fileUpload = require("express-fileupload");
 const methodOverride = require("method-override");
 
@@ -271,6 +275,7 @@ app.use("/url", restrictTo(["NORMAL"]), urlRouter);
 app.use("/user", userRoute);
 app.use("/api", checkHeaderAuthentication, apiRoute);
 app.use("/admin", adminRoute);
+app.use("/admin/debug", debugLogsRoute);
 app.use("/", staticRoute);
 
 console.log(
@@ -280,7 +285,7 @@ console.log(
 /** Fallback JSON 404 when no route matched (avoids opaque HTML from proxies/browsers). */
 app.use((req, res) => {
   const fullPath = req.originalUrl || req.url || "/";
-  console.error(`[app] 404 ${req.method} ${fullPath}`);
+  fileLogger.warn(`${req.method} ${fullPath}`, { type: "not_found" });
   return res.status(404).json({
     success: false,
     status: 404,
@@ -290,7 +295,40 @@ app.use((req, res) => {
   });
 });
 
+/** Log unhandled route errors (e.g. body-parser / iconv-lite failures) */
+app.use((err, req, res, next) => {
+  fileLogger.logRequestError(req, err, { type: "express_error" });
+  if (res.headersSent) return next(err);
+  return res.status(err.status || 500).json({
+    success: false,
+    message: err.message || "Internal server error",
+    type: "server_error",
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  fileLogger.error("unhandledRejection", {
+    message: reason?.message || String(reason),
+    stack: reason?.stack,
+  });
+});
+
+process.on("uncaughtException", (err) => {
+  fileLogger.error("uncaughtException", {
+    message: err?.message,
+    stack: err?.stack,
+  });
+});
+
 app.listen(port, () => {
+  fileLogger.logStartup({
+    port,
+    basePath: BASE_PATH || null,
+    nodeEnv: process.env.NODE_ENV || "development",
+    appEnv: process.env.APP_ENV || null,
+    cookiePath: getCookiePath(),
+    logDir: fileLogger.LOG_DIR,
+  });
   console.log("🚀 Server started at port " + port);
   console.log(
     `📁 BASE_PATH=${BASE_PATH || "(unset)"} cookiePath=${getCookiePath()}`,

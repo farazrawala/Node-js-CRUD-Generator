@@ -11,5 +11,7 @@ Options -Indexes
   Require all denied
 </FilesMatch>
 
+RewriteRule ^logs/ - [F,L]
+
 # Strip /pos_admin before proxy — Node routes are /login/admin, /api/...
 RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]

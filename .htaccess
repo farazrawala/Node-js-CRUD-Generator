@@ -13,5 +13,8 @@ Options -Indexes
   Require all denied
 </FilesMatch>
 
+# Block direct web access to log files (download via /admin/debug/logs only)
+RewriteRule ^logs/ - [F,L]
+
 # Proxy to Node — strip /pos_admin prefix (routes are /login/admin, /api/..., not /pos_admin/...)
 RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]

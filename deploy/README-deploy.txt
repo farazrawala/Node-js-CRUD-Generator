@@ -73,3 +73,14 @@ FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
     pm2 restart pos-api
 
   cPanel alternative: Setup Node.js App → "Run NPM Install" → restart app.
+
+DEBUG LOGS — download to rectify live issues:
+
+  Log files: logs/app-YYYY-MM-DD.log and logs/error-YYYY-MM-DD.log
+  (also via cPanel File Manager / FTP from public_html/pos_admin/logs/)
+
+  Admin download (login as ADMIN first):
+    GET /pos_admin/admin/debug/logs
+    GET /pos_admin/admin/debug/logs/download?file=app-2026-06-13.log
+
+  Console output is mirrored into the daily log files automatically.

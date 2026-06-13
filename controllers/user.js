@@ -22,6 +22,8 @@ const {
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
 const { getCookiePath, isSecureCookie } = require("../utils/basePath");
+const fileLogger = require("../utils/fileLogger");
+const { serializeErrorForLog } = require("../utils/logControllerError");
 const {
   logRollbackFailure,
   serializeErrorForLog,
@@ -341,6 +343,11 @@ async function handleUserLogin(req, res) {
     return res.status(200).json(responseData);
   } catch (error) {
     console.error("❌ User login error:", error);
+    fileLogger.error("User login failed", {
+      url: req.originalUrl || req.path,
+      email: req.body?.email,
+      detail: serializeErrorForLog(error),
+    });
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -1088,6 +1095,11 @@ async function handleAdminLogin(req, res) {
     });
   } catch (error) {
     console.error("❌ Admin login error:", error);
+    fileLogger.error("Admin login failed", {
+      url: req.originalUrl || req.path,
+      email: req.body?.email,
+      detail: serializeErrorForLog(error),
+    });
     res.status(500).json({
       success: false,
       message: "Internal server error",
