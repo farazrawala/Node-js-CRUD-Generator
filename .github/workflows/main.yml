@@ -27,6 +27,7 @@ jobs:
             deploy/github_actions_key.pem.example
 
       - name: Prepare SSH key
+        id: ssh-key
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
@@ -52,14 +53,19 @@ jobs:
             echo "::error::No SSH key found. Add deploy/github_actions_key.pem.example OR GitHub Secret SSH_PRIVATE_KEY"
             exit 1
           fi
-          chmod 644 key.pem
+          sed -i 's/\r$//' key.pem
+          {
+            echo 'key<<KEYEOF'
+            cat key.pem
+            echo 'KEYEOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Restart app on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 192.249.118.80
           username: root
-          key_path: ${{ github.workspace }}/key.pem
+          key: ${{ steps.ssh-key.outputs.key }}
           port: 22
           timeout: 60s
           command_timeout: 10m
