@@ -72,4 +72,3 @@ jobs:
             echo "::warning::SSH failed (port 22 often blocked from GitHub IPs). Files were uploaded via FTP — restart Node manually on the server: pm2 restart pos-api"
             exit 1
           fi
-
