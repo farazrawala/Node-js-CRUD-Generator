@@ -19,13 +19,23 @@ jobs:
             username: pos@testv3.websitedemolynk.com
             password: kYw8,ae@!1&]}dMR
 
-        - uses: appleboy/ssh-action@v1.0.3
+        - name: Restart app on server
+          uses: appleboy/ssh-action@v1.0.3
           with:
             host: ${{ secrets.SSH_HOST }}
             username: ${{ secrets.SSH_USER }}
             key: ${{ secrets.SSH_PRIVATE_KEY }}
+            port: 22
+            timeout: 60s
+            command_timeout: 10m
+            debug: true
+            script_stop: true
             script: |
-              cd ${{ secrets.SSH_DEPLOY_PATH }}
+              cd /home/demowebsitv3/public_html/pos_admin
+              export PATH="/usr/local/bin:/usr/bin:$PATH"
+              which node || true
+              which npm || true
+              which pm2 || true
               npm install --production
-              pm2 restart pos-api
+              pm2 restart pos-api || pm2 start index.js --name pos-api
 
