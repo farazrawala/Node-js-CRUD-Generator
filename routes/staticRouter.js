@@ -15,17 +15,21 @@ router.get("/health", (req, res) => {
   });
 });
 
-router.get("/", async (req, res) => {
-  const allUrls = URL.find({});
+router.get("/", (req, res) => {
+  return res.redirect(withBasePath("/login/admin"));
+});
+
+router.get("/home", async (req, res) => {
+  const allUrls = await URL.find({});
   return res.render("home", {
-    urls: allUrls,
+    allUrls,
   });
 });
 
 router.get("/admin/url", restrictTo(["ADMIN"]), async (req, res) => {
-  const allUrls = URL.find({});
+  const allUrls = await URL.find({});
   return res.render("home", {
-    urls: allUrls,
+    allUrls,
   });
 });
 
