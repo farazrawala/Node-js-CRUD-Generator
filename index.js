@@ -1,6 +1,9 @@
 require("dotenv").config();
 
-// Fail fast if node_modules is incomplete (common when FTP deploy skips npm install)
+const { repairIconvLiteEncodings } = require("./utils/repairIconvLite");
+repairIconvLiteEncodings();
+
+// Fail fast if node_modules is still incomplete after vendor patch
 try {
   require("iconv-lite").encodingExists("utf8");
 } catch (err) {
