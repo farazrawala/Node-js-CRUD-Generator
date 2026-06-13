@@ -24,26 +24,32 @@ jobs:
             **/.git*/**
             **/node_modules/**
             deploy/github_actions_key.pem
+            deploy/github_actions_key.pem.example
 
       - name: Prepare SSH key
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          KEY_FILE=deploy/github_actions_key.pem
-          if [ -f "$KEY_FILE" ] && grep -q "BEGIN OPENSSH PRIVATE KEY" "$KEY_FILE"; then
-            cp "$KEY_FILE" key.pem
-          elif [ -n "$SSH_KEY" ]; then
-            if echo "$SSH_KEY" | grep -q "BEGIN OPENSSH PRIVATE KEY"; then
-              printf '%s\n' "$SSH_KEY" > key.pem
+          write_key_from_text() {
+            if echo "$1" | grep -q "BEGIN OPENSSH PRIVATE KEY"; then
+              printf '%s\n' "$1" > key.pem
             else
               {
                 echo "-----BEGIN OPENSSH PRIVATE KEY-----"
-                printf '%s\n' "$SSH_KEY"
+                printf '%s\n' "$1"
                 echo "-----END OPENSSH PRIVATE KEY-----"
               } > key.pem
             fi
+          }
+
+          if [ -f deploy/github_actions_key.pem ] && grep -q "BEGIN OPENSSH PRIVATE KEY" deploy/github_actions_key.pem; then
+            cp deploy/github_actions_key.pem key.pem
+          elif [ -f deploy/github_actions_key.pem.example ] && grep -q "BEGIN OPENSSH PRIVATE KEY" deploy/github_actions_key.pem.example; then
+            cp deploy/github_actions_key.pem.example key.pem
+          elif [ -n "$SSH_KEY" ]; then
+            write_key_from_text "$SSH_KEY"
           else
-            echo "::error::Add deploy/github_actions_key.pem locally OR set GitHub Secret SSH_PRIVATE_KEY (copy contents of the .pem file)"
+            echo "::error::No SSH key found. Add deploy/github_actions_key.pem.example OR GitHub Secret SSH_PRIVATE_KEY"
             exit 1
           fi
           chmod 600 key.pem
