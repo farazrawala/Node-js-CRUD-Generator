@@ -26,7 +26,8 @@ jobs:
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 
-      - name: Restart app on server
+      - name: Restart app on server (SSH)
+        continue-on-error: true
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
@@ -58,14 +59,17 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H 192.249.118.80 >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          ssh -i key.pem -o StrictHostKeyChecking=accept-new root@192.249.118.80 <<'ENDSSH'
+          if ssh -i key.pem -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new root@192.249.118.80 <<'ENDSSH'
           set -e
           cd /home/demowebsitv3/public_html/pos_admin
           export PATH="/usr/local/bin:/usr/bin:$PATH"
-          which node || true
-          which npm || true
-          which pm2 || true
           npm install --production
           pm2 restart pos-api || pm2 start index.js --name pos-api
           ENDSSH
+          then
+            echo "App restarted via SSH."
+          else
+            echo "::warning::SSH failed (port 22 often blocked from GitHub IPs). Files were uploaded via FTP — restart Node manually on the server: pm2 restart pos-api"
+            exit 1
+          fi
 
