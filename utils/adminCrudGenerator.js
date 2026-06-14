@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const path = require("path");
 const routeRegistry = require("./routeRegistry");
 const Company = require("../models/company");
+const { coalesceObjectId } = require("./modelHelper");
 
 /**
  * Generic Admin CRUD Generator
@@ -1324,7 +1325,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Automatically set company_id if field exists and user has company_id
       if (req.user && req.user.company_id && Model.schema.paths.company_id) {
-        data.company_id = req.user.company_id;
+        data.company_id = coalesceObjectId(
+          req.user.company_id._id || req.user.company_id,
+        );
       }
 
       // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
@@ -2295,7 +2298,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Automatically set company_id if field exists and user has company_id
       if (req.user && req.user.company_id && Model.schema.paths.company_id) {
-        updateData.company_id = req.user.company_id;
+        updateData.company_id = coalesceObjectId(
+          req.user.company_id._id || req.user.company_id,
+        );
       }
 
       // Apply custom hooks

@@ -13,7 +13,19 @@ jobs:
       - name: Get latest code
         uses: actions/checkout@v4
 
-      - name: Sync file
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install production dependencies (Linux — same as server)
+        run: |
+          npm ci --omit=dev
+          node -e "require('iconv-lite').encodingExists('utf8')"
+          echo "node_modules ready ($(du -sh node_modules | cut -f1))"
+
+      - name: Sync files (includes node_modules — fixes iconv-lite on live)
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
           server: 192.249.118.80
@@ -22,11 +34,10 @@ jobs:
           exclude: |
             **/.git*
             **/.git*/**
-            **/node_modules/**
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 
-      - name: Restart app on server (SSH)
+      - name: Start app on server — npm run dev (SSH)
         continue-on-error: true
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -50,8 +61,8 @@ jobs:
           elif [ -n "$SSH_KEY" ]; then
             write_key_from_text "$SSH_KEY"
           else
-            echo "::error::No SSH key found. Add deploy/github_actions_key.pem.example OR GitHub Secret SSH_PRIVATE_KEY"
-            exit 1
+            echo "::warning::No SSH key — node_modules uploaded via FTP. On server run: cd /home/demowebsitv3/public_html/pos_admin && npm run dev"
+            exit 0
           fi
           sed -i 's/\r$//' key.pem
           chmod 600 key.pem
@@ -63,12 +74,14 @@ jobs:
           set -e
           cd /home/demowebsitv3/public_html/pos_admin
           export PATH="/usr/local/bin:/usr/bin:$PATH"
-          npm install --production
-          pm2 restart pos-api || pm2 start index.js --name pos-api
+          node -e "require('iconv-lite').encodingExists('utf8')"
+          pm2 delete pos-api 2>/dev/null || true
+          pm2 start npm --name pos-api -- run dev
+          pm2 save || true
           ENDSSH
           then
-            echo "App restarted via SSH."
+            echo "App started via pm2 (npm run dev)."
           else
-            echo "::warning::SSH failed (port 22 often blocked from GitHub IPs). Files were uploaded via FTP — restart Node manually on the server: pm2 restart pos-api"
+            echo "::warning::SSH failed — node_modules uploaded via FTP. On the server run: cd /home/demowebsitv3/public_html/pos_admin && npm run dev"
             exit 1
           fi

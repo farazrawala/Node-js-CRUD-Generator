@@ -2371,12 +2371,15 @@ const processAdminCRUD = adminCrudGenerator(
   [
     "integration_id",
     "product_id",
+    "category_id",
     "action",
     "count",
     "page",
     "offset",
     "limit",
     "priority",
+    "hits",
+    "progress",
     "remarks",
     "status",
     "created_by",
@@ -2389,12 +2392,15 @@ const processAdminCRUD = adminCrudGenerator(
     includedFields: [
       "integration_id",
       "product_id",
+      "category_id",
       "action",
       "count",
       "page",
       "offset",
       "limit",
       "priority",
+      "hits",
+      "progress",
       "remarks",
       "status",
       "created_by",
@@ -2406,12 +2412,15 @@ const processAdminCRUD = adminCrudGenerator(
     searchableFields: [
       "integration_id",
       "product_id",
+      "category_id",
       "action",
       "count",
       "page",
       "offset",
       "limit",
       "priority",
+      "hits",
+      "progress",
       "remarks",
       "status",
       "created_by",
@@ -2423,12 +2432,15 @@ const processAdminCRUD = adminCrudGenerator(
     filterableFields: [
       "integration_id",
       "product_id",
+      "category_id",
       "action",
       "count",
       "page",
       "offset",
       "limit",
       "priority",
+      "hits",
+      "progress",
       "remarks",
       "status",
       "created_by",
@@ -2440,12 +2452,15 @@ const processAdminCRUD = adminCrudGenerator(
     sortableFields: [
       "integration_id",
       "product_id",
+      "category_id",
       "action",
       "count",
       "page",
       "offset",
       "limit",
       "priority",
+      "hits",
+      "progress",
       "remarks",
       "status",
       "created_by",
@@ -2457,84 +2472,118 @@ const processAdminCRUD = adminCrudGenerator(
     baseUrl: BASE_URL,
     softDelete: true,
     fieldTypes: {
-      store_type: "select",
-      description: "textarea",
-      image: "file",
+      integration_id: "select",
+      product_id: "select",
+      category_id: "select",
+      action: "select",
       company_id: "select",
       created_by: "select",
       status: "select",
-      company_name: "text", // Display field for company name
+      progress: "select",
+      remarks: "textarea",
+      company_name: "text",
     },
     fieldLabels: {
       company_name: "Company",
+      integration_id: "Integration",
+      product_id: "Product",
+      category_id: "Category",
     },
     fieldOptions: {
-      store_type: [
-        { value: "shopify", label: "Shopify" },
-        { value: "woocommerce", label: "WooCommerce" },
-        { value: "daraz", label: "Daraz" },
+      action: [
+        { value: "fetch_products", label: "Fetch products" },
+        { value: "fetch_category", label: "Fetch categories (store → POS)" },
+        { value: "sync_product", label: "Sync product" },
+        { value: "sync_category", label: "Sync category (POS → store)" },
+        { value: "delete_product", label: "Delete product" },
+        { value: "delete_category", label: "Delete category" },
+      ],
+      progress: [
+        { value: "not_started", label: "Not started" },
+        { value: "started", label: "Started" },
+        { value: "completed", label: "Completed" },
+        { value: "failed", label: "Failed" },
       ],
       status: [
         { value: "active", label: "Active" },
         { value: "inactive", label: "Inactive" },
+        { value: "pending", label: "Pending" },
+        { value: "completed", label: "Completed" },
+        { value: "failed", label: "Failed" },
       ],
     },
 
     middleware: {
       afterQuery: async (records, req) => {
-        // Populate both company_id and created_by
-        const populatedRecords = await Integration.populate(records, [
+        const populatedRecords = await Process.populate(records, [
           { path: "company_id", select: "company_name" },
+          { path: "integration_id", select: "name store_type" },
+          { path: "product_id", select: "product_name sku" },
+          { path: "category_id", select: "name slug" },
           { path: "created_by", select: "name email" },
         ]);
 
-        // Add both User name and Company name fields for display in list view
-        const recordsWithPopulatedFields = populatedRecords.map((record) => {
+        return populatedRecords.map((record) => {
           const recordObj = record.toObject ? record.toObject() : record;
+          const isEditContext = String(req?.originalUrl || req?.path || "").includes(
+            "/edit/",
+          );
 
-          // Handle created_by field
-          if (record.created_by) {
+          if (record.created_by && typeof record.created_by === "object") {
             recordObj.created_by = record.created_by.name || "No User";
-          } else {
-            recordObj.created_by = "No User";
           }
 
-          // Handle company_id field
-          if (record.company_id) {
+          if (record.company_id && typeof record.company_id === "object") {
             recordObj.company_id =
               record.company_id.company_name || "No Company";
-          } else {
-            recordObj.company_id = "No Company";
+          }
+
+          if (
+            record.integration_id &&
+            typeof record.integration_id === "object"
+          ) {
+            recordObj.integration_display =
+              record.integration_id.name || record.integration_id.store_type;
+            recordObj.integration_id =
+              record.integration_id._id?.toString() ||
+              String(record.integration_id);
+          }
+
+          if (record.product_id && typeof record.product_id === "object") {
+            recordObj.product_display =
+              record.product_id.product_name || record.product_id.sku;
+            recordObj.product_id =
+              record.product_id._id?.toString() || String(record.product_id);
+          }
+
+          if (record.category_id && typeof record.category_id === "object") {
+            recordObj.category_display =
+              record.category_id.name || record.category_id.slug;
+            recordObj.category_id =
+              record.category_id._id?.toString() || String(record.category_id);
+          }
+
+          if (!isEditContext) {
+            if (recordObj.integration_display) {
+              recordObj.integration_id = recordObj.integration_display;
+            }
+            if (recordObj.product_display) {
+              recordObj.product_id = recordObj.product_display;
+            }
+            if (recordObj.category_display) {
+              recordObj.category_id = recordObj.category_display;
+            }
           }
 
           return recordObj;
         });
-
-        return recordsWithPopulatedFields;
       },
       beforeCreateForm: async (req, res) => {
-        const companies = await Company.find({
-          status: "active",
-          deletedAt: null,
-        })
-          .select("company_name")
-          .sort({ company_name: 1 });
-        req.fieldConfig.company_id.options = companies.map((company) => ({
-          value: company._id.toString(),
-          label: company.company_name,
-        }));
-        const users = await User.find({ deletedAt: null }, "name email").sort({
-          name: 1,
-        });
-        req.fieldConfig.created_by.options = users.map((user) => ({
-          value: user._id.toString(),
-          label: user.name,
-        }));
-        req.fieldConfig.created_by.placeholder = "Select User";
-        req.fieldConfig.created_by.helpText =
-          "Choose the user who created this integration";
-      },
-      beforeEditForm: async (req, res) => {
+        const companyFilter =
+          req.user?.company_id ?
+            { company_id: req.user.company_id, deletedAt: null }
+          : { deletedAt: null };
+
         const companies = await Company.find({
           status: "active",
           deletedAt: null,
@@ -2546,6 +2595,40 @@ const processAdminCRUD = adminCrudGenerator(
           label: company.company_name,
         }));
 
+        const integrations = await Integration.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("name store_type")
+          .sort({ name: 1 });
+        req.fieldConfig.integration_id.options = integrations.map((row) => ({
+          value: row._id.toString(),
+          label: `${row.name} (${row.store_type})`,
+        }));
+
+        const products = await Product.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("product_name sku")
+          .sort({ product_name: 1 })
+          .limit(500);
+        req.fieldConfig.product_id.options = products.map((row) => ({
+          value: row._id.toString(),
+          label: row.product_name || row.sku || row._id.toString(),
+        }));
+
+        const categories = await Category.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("name slug")
+          .sort({ name: 1 });
+        req.fieldConfig.category_id.options = categories.map((row) => ({
+          value: row._id.toString(),
+          label: row.name,
+        }));
+
         const users = await User.find({ deletedAt: null }, "name email").sort({
           name: 1,
         });
@@ -2553,9 +2636,65 @@ const processAdminCRUD = adminCrudGenerator(
           value: user._id.toString(),
           label: user.name,
         }));
-        req.fieldConfig.created_by.placeholder = "Select User";
-        req.fieldConfig.created_by.helpText =
-          "Choose the user who created this integration";
+      },
+      beforeEditForm: async (req, res) => {
+        const companyFilter =
+          req.user?.company_id ?
+            { company_id: req.user.company_id, deletedAt: null }
+          : { deletedAt: null };
+
+        const companies = await Company.find({
+          status: "active",
+          deletedAt: null,
+        })
+          .select("company_name")
+          .sort({ company_name: 1 });
+        req.fieldConfig.company_id.options = companies.map((company) => ({
+          value: company._id.toString(),
+          label: company.company_name,
+        }));
+
+        const integrations = await Integration.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("name store_type")
+          .sort({ name: 1 });
+        req.fieldConfig.integration_id.options = integrations.map((row) => ({
+          value: row._id.toString(),
+          label: `${row.name} (${row.store_type})`,
+        }));
+
+        const products = await Product.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("product_name sku")
+          .sort({ product_name: 1 })
+          .limit(500);
+        req.fieldConfig.product_id.options = products.map((row) => ({
+          value: row._id.toString(),
+          label: row.product_name || row.sku || row._id.toString(),
+        }));
+
+        const categories = await Category.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("name slug")
+          .sort({ name: 1 });
+        req.fieldConfig.category_id.options = categories.map((row) => ({
+          value: row._id.toString(),
+          label: row.name,
+        }));
+
+        const users = await User.find({ deletedAt: null }, "name email").sort({
+          name: 1,
+        });
+        req.fieldConfig.created_by.options = users.map((user) => ({
+          value: user._id.toString(),
+          label: user.name,
+        }));
       },
     },
   },

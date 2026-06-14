@@ -2,54 +2,75 @@ const mongoose = require("mongoose");
 
 const modelSchema = new mongoose.Schema(
   {
-    
     integration_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "integration",
-        field_name: "Integration",
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "integration",
+      field_name: "Integration",
     },
     product_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "product",
-        field_name: "Product",
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "product",
+      field_name: "Product",
     },
-    action:{
-        type: String,
-        required: true,
-        enum: ["fetch_products", "sync_product", "delete_product","fetch_category","sync_category","delete_category"],
-        field_name: "Action",
+    category_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "category",
+      field_name: "Category",
     },
-    count:{ 
-        type: Number,
-        field_name: "Count",
-        default: 0,
+    action: {
+      type: String,
+      required: true,
+      enum: [
+        "fetch_products",
+        "sync_product",
+        "delete_product",
+        "fetch_category",
+        "sync_category",
+        "delete_category",
+      ],
+      field_name: "Action",
     },
-    page:{
-        type: Number,
-        field_name: "Price",
-        default: 1,
+    count: {
+      type: Number,
+      field_name: "Count",
+      default: 0,
     },
-    offset:{
-        type: Number,
-        default: 1,
-        field_name: "Offset",
+    page: {
+      type: Number,
+      field_name: "Price",
+      default: 1,
     },
-    limit:{
-        type: Number,
-        field_name: "Limit",
-        default: 1,
+    offset: {
+      type: Number,
+      default: 0,
+      field_name: "Offset",
     },
-    priority:{ 
-        type: Number,
-        field_name: "Priority",
-        default: 100,
+    limit: {
+      type: Number,
+      field_name: "Limit",
+      default: 1,
     },
-    remarks:{
-        type: String,
-        field_name: "Remarks",
+    priority: {
+      type: Number,
+      field_name: "Priority",
+      default: 100,
     },
-    
-    
+    remarks: {
+      type: String,
+      field_name: "Remarks",
+    },
+    hits: {
+      type: Number,
+      field_name: "Hits",
+      default: 0,
+    },
+    progress: {
+      type: String,
+      required: true,
+      enum: ["not_started", "started", "completed", "failed"],
+      default: "not_started",
+      field_name: "Progress",
+    },
 
     // default fields
     company_id: {
@@ -58,21 +79,21 @@ const modelSchema = new mongoose.Schema(
       required: true,
       field_name: "Company",
     },
-    created_by:{
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Created By",
     },
-    updated_by:{
+    updated_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Updated By",
     },
-    status: { 
+    status: {
       type: String,
       required: true,
-      enum: ["active", "inactive","completed","failed","pending"], 
-      default: "active"              
+      enum: ["active", "inactive", "completed", "failed", "pending"],
+      default: "active",
     },
     deletedAt: {
       type: Date,
