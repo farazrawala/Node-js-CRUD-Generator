@@ -311,8 +311,11 @@ router.get("/integration/sync-store-category/:id", syncStoreCategory);
 router.get("/integration/sync-store-product/:id", syncStoreProduct);
 router.get("/integration/find-product-relations/:id", syncProductRelations);
 
-// Process routes
+// Process routes (GET or POST — some clients/proxies use POST)
 router.get("/process/execute-process", execute_process);
+router.post("/process/execute-process", execute_process);
+router.get("/process/execute-process/:id", execute_process);
+router.post("/process/execute-process/:id", execute_process);
 
 // Company routes
 router.get("/company/get-my-branches", getMyBranches);

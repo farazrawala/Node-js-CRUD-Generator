@@ -7,7 +7,7 @@ This document describes the **Process queue**: background-style jobs that connec
 ## Overview
 
 1. You **insert a process record** in Admin (or via API) with an **action** (`sync_product`, `sync_category`, `fetch_products`, etc.) and link it to an **integration** (which defines `store_type`: WooCommerce or Shopify).
-2. You call **`GET /api/process/execute-process`** (with auth).
+2. You call **`GET` or `POST` `/api/process/execute-process`** (with auth).
 3. The server loads the **next active process** for your company, reads integration credentials, runs the matching handler, and **updates the process row** (`progress`, `status`, `page`, `hits`, `count`, `remarks`).
 
 Each URL hit processes **one batch** (controlled by `limit`). Call the URL again until `progress` is `completed`.
@@ -227,7 +227,8 @@ Optional query params:
 
 | Param | Effect |
 |--------|--------|
-| `process_id` | Run that specific row only |
+| `process_id` | Run that specific row only (query: `?process_id=<id>`) |
+| *(path)* | `GET /api/process/execute-process/:id` — same as `process_id` |
 | `company_id` | Limit queue to one company (optional) |
 
 Lower `priority` runs first. Each hit runs **one** process (one batch). Call again for the next job.
@@ -259,7 +260,7 @@ Required dropdowns: **Integration**, **Action**, **Status**. For push jobs also 
 
 | Feature | Status |
 |---------|--------|
-| `GET /api/process/execute-process` | Implemented |
+| `GET /api/process/execute-process` | Implemented (GET or POST) |
 | Queue loader (`priority`, `company_id`, `process_id`) | Implemented |
 | `fetch_category` → WooCommerce / Shopify (batch import) | Implemented |
 | `sync_product` → WooCommerce / Shopify | Implemented |
@@ -277,6 +278,7 @@ Required dropdowns: **Integration**, **Action**, **Status**. For push jobs also 
 | Environment | Execute process |
 |-------------|-----------------|
 | Local | `http://localhost:8000/api/process/execute-process` |
+| Local (one job) | `http://localhost:8000/api/process/execute-process/<process_id>` |
 | Production | `https://testv3.websitedemolynk.com/pos_admin/api/process/execute-process` |
 
 ---

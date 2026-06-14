@@ -34,7 +34,9 @@ function buildActiveProcessFilter(req) {
     }
   }
 
-  if (req.query.process_id) {
+  if (req.params?.id) {
+    filter._id = coalesceObjectId(req.params.id);
+  } else if (req.query.process_id) {
     filter._id = coalesceObjectId(req.query.process_id);
   }
 
@@ -46,14 +48,14 @@ async function explainNoActiveProcess(req) {
   const totalActive = await ProcessModel.countDocuments(filter);
 
   const hints = [];
-  if (req.query.process_id) {
+  if (req.params?.id || req.query.process_id) {
     hints.push("Check that process_id exists and status is active.");
   } else if (totalActive === 0) {
     hints.push(
       "Create a process in Admin with status active, or set an existing row back to active.",
     );
   } else {
-    hints.push("Pass ?process_id=<id> to run a specific process row.");
+    hints.push("Pass ?process_id=<id> or GET /process/execute-process/:id to run a specific process row.");
   }
 
   hints.push(
