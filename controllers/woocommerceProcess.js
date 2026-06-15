@@ -1,6 +1,8 @@
 const WooCommerceRestApi = require("@woocommerce/woocommerce-rest-api").default;
 const Category = require("../models/category");
 const Brand = require("../models/brands");
+const Product = require("../models/product");
+const SyncCategory = require("../models/sync_category");
 const {
   categorySlugFromName,
   resolveCompanyId,
@@ -10,11 +12,14 @@ const {
   resolveBatchPagination,
   findExistingCategory,
   findExistingBrand,
+  findExistingProduct,
   sortWooCategoriesForImport,
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
+  finishFetchProductBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
+  failFetchProductBatch,
   markProcessOutcome,
   coalesceObjectId,
 } = require("../utils/processHelpers");
@@ -92,6 +97,263 @@ async function importWooBrandToPos(
   stats.inserted += 1;
   await recordBrandSyncMapping(process, companyId, posId, wooId, stats);
   return posId;
+}
+
+function mapWooProductType(remoteType) {
+  return String(remoteType || "").toLowerCase() === "variable" ?
+      "Variable"
+    : "Single";
+}
+
+function mapWooProductPrice(remote) {
+  const candidates = [
+    remote?.regular_price,
+    remote?.price,
+    remote?.sale_price,
+  ];
+  for (const raw of candidates) {
+    if (raw == null || raw === "") {
+      continue;
+    }
+    const price = Number(raw);
+    if (Number.isFinite(price) && price >= 0) {
+      return price;
+    }
+  }
+  return 0;
+}
+
+async function fetchWooProductById(client, wooId, remoteById) {
+  const id = Number(wooId);
+  if (!id) {
+    return null;
+  }
+
+  if (remoteById?.has(id)) {
+    return remoteById.get(id);
+  }
+
+  const response = await client.get(`products/${id}`);
+  const data = response?.data;
+  if (data?.id != null && remoteById) {
+    remoteById.set(Number(data.id), data);
+  }
+  return data || null;
+}
+
+async function resolveWooProductPrice(client, remote) {
+  let price = mapWooProductPrice(remote);
+  if (price > 0) {
+    return price;
+  }
+
+  const wooId = Number(remote?.id);
+  const isVariable = String(remote?.type || "").toLowerCase() === "variable";
+  if (!isVariable || !wooId) {
+    return price;
+  }
+
+  try {
+    const response = await client.get(`products/${wooId}/variations`, {
+      per_page: 1,
+      orderby: "id",
+      order: "asc",
+    });
+    const variations = Array.isArray(response?.data) ? response.data : [];
+    if (variations[0]) {
+      price = mapWooProductPrice(variations[0]);
+    }
+  } catch (error) {
+    console.warn(
+      `WooCommerce variation price lookup failed for product ${wooId}:`,
+      error?.response?.data || error.message,
+    );
+  }
+
+  return price;
+}
+
+function buildPosFieldsFromWoo(remoteWooProduct, productPrice) {
+  const fields = {
+    product_name: String(remoteWooProduct?.name || "").trim(),
+    product_price: productPrice,
+    product_description:
+      remoteWooProduct?.description ||
+      remoteWooProduct?.short_description ||
+      "",
+    product_type: mapWooProductType(remoteWooProduct?.type),
+  };
+
+  if (
+    remoteWooProduct?.weight != null &&
+    remoteWooProduct.weight !== ""
+  ) {
+    fields.weight = Number(remoteWooProduct.weight);
+  }
+
+  return fields;
+}
+
+/**
+ * Find POS category by WooCommerce name, or insert. Returns POS _id.
+ */
+async function ensurePosCategoryFromWooCategory(
+  categoryRef,
+  { client, companyId, process, remoteCategoryById, categoryCache, stats },
+) {
+  const wooId = Number(categoryRef?.id);
+  let remote = categoryRef;
+
+  if (wooId && categoryCache?.has(wooId)) {
+    return categoryCache.get(wooId);
+  }
+
+  if (
+    wooId &&
+    (!remote?.name || !String(remote.name).trim())
+  ) {
+    remote =
+      (await fetchWooCategoryById(client, wooId, remoteCategoryById)) || remote;
+  }
+
+  const name = String(remote?.name || "").trim();
+  if (!name) {
+    return null;
+  }
+
+  const slug =
+    String(remote?.slug || "").trim() || categorySlugFromName(name);
+  const integrationId = resolveIntegrationId(process);
+
+  if (wooId && integrationId) {
+    const syncRow = await SyncCategory.findOne({
+      integration_id: integrationId,
+      company_id: companyId,
+      refference_id: String(wooId),
+      deletedAt: null,
+    }).lean();
+    if (syncRow?.category_id) {
+      const posId = coalesceObjectId(syncRow.category_id);
+      if (categoryCache && wooId) {
+        categoryCache.set(wooId, posId);
+      }
+      return posId;
+    }
+  }
+
+  const existing = await findExistingCategory(name, slug, companyId);
+  if (existing) {
+    const posId = coalesceObjectId(existing._id);
+    if (wooId) {
+      await recordCategorySyncMapping(process, companyId, posId, wooId, stats);
+      if (categoryCache) {
+        categoryCache.set(wooId, posId);
+      }
+    }
+    stats.categories_found = (stats.categories_found || 0) + 1;
+    return posId;
+  }
+
+  const created = await Category.create({
+    name,
+    slug,
+    description: remote?.description || "",
+    parent_id: null,
+    company_id: companyId,
+    status: "active",
+    isActive: remote?.display !== "hidden",
+    created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+  });
+  const posId = coalesceObjectId(created._id);
+  if (wooId) {
+    await recordCategorySyncMapping(process, companyId, posId, wooId, stats);
+    if (categoryCache) {
+      categoryCache.set(wooId, posId);
+    }
+  }
+  stats.categories_inserted = (stats.categories_inserted || 0) + 1;
+  return posId;
+}
+
+async function resolvePosCategoryIdsFromWooProduct(
+  remoteProduct,
+  categoryCtx,
+) {
+  const remoteCategories = Array.isArray(remoteProduct?.categories) ?
+      remoteProduct.categories
+    : [];
+  const posIds = [];
+  const seen = new Set();
+
+  for (const ref of remoteCategories) {
+    const posId = await ensurePosCategoryFromWooCategory(ref, categoryCtx);
+    if (!posId) {
+      continue;
+    }
+    const key = String(posId);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    posIds.push(posId);
+  }
+
+  return posIds;
+}
+
+async function importWooProductToPos(
+  remoteWooProduct,
+  { companyId, process, stats, productPrice, categoryIds = [] },
+) {
+  const wooId = Number(remoteWooProduct?.id);
+  const name = String(remoteWooProduct?.name || "").trim();
+  if (!name) {
+    return null;
+  }
+
+  const sku =
+    String(remoteWooProduct?.sku || "").trim() ||
+    (wooId ? `wc-${wooId}` : "");
+  const existing = await findExistingProduct(sku, name, companyId);
+  const posFields = buildPosFieldsFromWoo(remoteWooProduct, productPrice);
+  const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
+
+  if (existing) {
+    const posId = coalesceObjectId(existing._id);
+    await Product.updateOne(
+      { _id: posId },
+      {
+        $set: {
+          ...posFields,
+          sku,
+          product_code: sku,
+          category_id: categoryField,
+        },
+      },
+    );
+    stats.updated = (stats.updated || 0) + 1;
+    if (categoryField.length) {
+      stats.products_category_linked = (stats.products_category_linked || 0) + 1;
+    }
+    return posId;
+  }
+
+  const created = await Product.create({
+    ...posFields,
+    sku,
+    product_code: sku,
+    category_id: categoryField,
+    unit: "Piece",
+    company_id: companyId,
+    status: "active",
+    created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+  });
+
+  stats.inserted += 1;
+  if (categoryField.length) {
+    stats.products_category_linked = (stats.products_category_linked || 0) + 1;
+  }
+  return coalesceObjectId(created._id);
 }
 
 async function recordCategorySyncMapping(
@@ -1295,6 +1557,139 @@ async function fetch_brand(req, res, process) {
 }
 
 /**
+ * Import products from WooCommerce into POS (batch). Store → POS.
+ */
+async function fetch_product(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateWooIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildWooCommerceClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const { limit, page } = resolveBatchPagination(process);
+
+  try {
+    const response = await client.get("products", {
+      page,
+      per_page: limit,
+      orderby: "id",
+      order: "asc",
+      status: "publish",
+    });
+    const remoteProducts = Array.isArray(response?.data) ? response.data : [];
+    const remoteById = new Map(
+      remoteProducts.map((product) => [Number(product.id), product]),
+    );
+    const categoryCache = new Map();
+    const remoteCategoryById = new Map();
+    const categoryCtx = {
+      client,
+      companyId,
+      process,
+      remoteCategoryById,
+      categoryCache,
+      stats: null,
+    };
+    const stats = {
+      inserted: 0,
+      updated: 0,
+      skipped: 0,
+      categories_found: 0,
+      categories_inserted: 0,
+      products_category_linked: 0,
+      sync_category_mapped: 0,
+    };
+    categoryCtx.stats = stats;
+
+    for (const remote of remoteProducts) {
+      const remoteDetail =
+        (await fetchWooProductById(client, remote?.id, remoteById)) || remote;
+      const name = String(remoteDetail?.name || "").trim();
+      if (!name) {
+        stats.skipped += 1;
+        continue;
+      }
+
+      try {
+        const productPrice = await resolveWooProductPrice(client, remoteDetail);
+        const categoryIds = await resolvePosCategoryIdsFromWooProduct(
+          remoteDetail,
+          categoryCtx,
+        );
+        await importWooProductToPos(remoteDetail, {
+          companyId,
+          process,
+          stats,
+          productPrice,
+          categoryIds,
+        });
+      } catch (err) {
+        console.error(
+          `Failed to import WooCommerce product ${remoteDetail?.id} (${name}):`,
+          err?.message || err,
+        );
+        stats.skipped += 1;
+      }
+    }
+
+    const {
+      inserted,
+      updated = 0,
+      skipped,
+      categories_found = 0,
+      categories_inserted = 0,
+      products_category_linked = 0,
+    } = stats;
+    const fetched = remoteProducts.length;
+    const isComplete = fetched < limit;
+    const remarks =
+      isComplete ?
+        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
+      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+
+    return finishFetchProductBatch(req, res, process, {
+      fetched,
+      inserted,
+      updated,
+      skipped,
+      categories_found,
+      categories_inserted,
+      products_category_linked,
+      isComplete,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "WooCommerce product fetch failed:",
+      error?.response?.data || error.message,
+    );
+    const errorMessage =
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to fetch products from WooCommerce.";
+    return failFetchProductBatch(
+      process,
+      res,
+      errorMessage,
+      error?.response?.data || error,
+    );
+  }
+}
+
+/**
  * Push one POS brand to WooCommerce.
  */
 async function sync_brand(req, res, process) {
@@ -1417,6 +1812,7 @@ module.exports = {
   syncWooCategoryById,
   fetch_category,
   fetch_brand,
+  fetch_product,
   sync_product,
   sync_category,
   sync_brand,

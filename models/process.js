@@ -27,6 +27,7 @@ const modelSchema = new mongoose.Schema(
       required: true,
       enum: [
         "fetch_products",
+        "fetch_product",
         "sync_product",
         "delete_product",
 

@@ -1,6 +1,7 @@
 const ProcessModel = require("../models/process");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
+const Product = require("../models/product");
 const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
 const { coalesceObjectId } = require("./modelHelper");
@@ -176,6 +177,60 @@ async function findExistingBrand(name, slug, companyId) {
   }
   if (slug) {
     return findExistingBrandBySlug(slug, companyId);
+  }
+  return null;
+}
+
+async function findExistingProductBySku(sku, companyId) {
+  const trimmed = String(sku || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const filter = {
+    deletedAt: null,
+    $or: [
+      { sku: { $regex: new RegExp(`^${escapeRegex(trimmed)}$`, "i") } },
+      { product_code: { $regex: new RegExp(`^${escapeRegex(trimmed)}$`, "i") } },
+    ],
+  };
+
+  const companyCriteria = buildCompanyIdCriteria(companyId);
+  if (companyCriteria) {
+    filter.$and = [companyCriteria];
+  }
+
+  return Product.findOne(filter).lean();
+}
+
+async function findExistingProductByName(name, companyId) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const filter = {
+    deletedAt: null,
+    product_name: { $regex: new RegExp(`^${escapeRegex(trimmed)}$`, "i") },
+  };
+
+  const companyCriteria = buildCompanyIdCriteria(companyId);
+  if (companyCriteria) {
+    filter.$and = [companyCriteria];
+  }
+
+  return Product.findOne(filter).lean();
+}
+
+async function findExistingProduct(sku, name, companyId) {
+  if (sku) {
+    const bySku = await findExistingProductBySku(sku, companyId);
+    if (bySku) {
+      return bySku;
+    }
+  }
+  if (name) {
+    return findExistingProductByName(name, companyId);
   }
   return null;
 }
@@ -483,6 +538,64 @@ async function finishFetchBrandBatch(req, res, process, batchResult) {
 
 const failFetchBrandBatch = failFetchCategoryBatch;
 
+async function finishFetchProductBatch(req, res, process, batchResult) {
+  const { limit, page, hits, count } = resolveBatchPagination(process);
+  const {
+    fetched,
+    inserted,
+    updated = 0,
+    skipped,
+    isComplete,
+    nextOffset,
+    remarks,
+    categories_found = 0,
+    categories_inserted = 0,
+    products_category_linked = 0,
+  } = batchResult;
+
+  const newHits = hits + 1;
+  const newCount = count + inserted + updated + skipped;
+  const update = {
+    hits: newHits,
+    count: newCount,
+    page: isComplete ? page : page + 1,
+    progress: isComplete ? "completed" : "started",
+    status: isComplete ? "completed" : "active",
+    remarks,
+  };
+
+  if (nextOffset !== undefined) {
+    update.offset = nextOffset;
+  }
+
+  await ProcessModel.findByIdAndUpdate(process._id, update);
+
+  return res.status(200).json({
+    success: true,
+    message: remarks,
+    data: {
+      process_id: process._id,
+      page: update.page,
+      hits: newHits,
+      count: newCount,
+      progress: update.progress,
+      status: update.status,
+      batch: {
+        fetched,
+        inserted,
+        updated,
+        skipped,
+        limit,
+        categories_found,
+        categories_inserted,
+        products_category_linked,
+      },
+    },
+  });
+}
+
+const failFetchProductBatch = failFetchCategoryBatch;
+
 async function markProcessOutcome(processId, status, remarks) {
   await ProcessModel.findByIdAndUpdate(processId, { status, remarks });
 }
@@ -501,12 +614,17 @@ module.exports = {
   findExistingBrandByName,
   findExistingBrandBySlug,
   findExistingBrand,
+  findExistingProductBySku,
+  findExistingProductByName,
+  findExistingProduct,
   resolveWooCommerceParentId,
   sortWooCategoriesForImport,
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
+  finishFetchProductBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
+  failFetchProductBatch,
   markProcessOutcome,
   coalesceObjectId,
 };

@@ -2494,7 +2494,8 @@ const processAdminCRUD = adminCrudGenerator(
     },
     fieldOptions: {
       action: [
-        { value: "fetch_products", label: "Fetch products" },
+        { value: "fetch_product", label: "Fetch products (store → POS)" },
+        { value: "fetch_products", label: "Fetch products (legacy alias)" },
         { value: "fetch_category", label: "Fetch categories (store → POS)" },
         { value: "fetch_brand", label: "Fetch brands (store → POS)" },
         { value: "sync_product", label: "Sync product" },

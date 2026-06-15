@@ -65,7 +65,7 @@ async function explainNoActiveProcess(req) {
   }
 
   hints.push(
-    "Use fetch_category / fetch_brand to import from the store; sync_category / sync_brand push one POS row to the store.",
+    "Use fetch_product / fetch_category / fetch_brand to import from the store; sync_* actions push one POS row to the store.",
   );
 
   return {
@@ -171,6 +171,7 @@ async function loadActiveProcess(req) {
 
 const PROCESS_ACTIONS = new Set([
   "fetch_products",
+  "fetch_product",
   "sync_product",
   "delete_product",
   "fetch_category",
@@ -223,6 +224,7 @@ function validateProcessRow(row) {
   if (
     (row.action === "fetch_category" ||
       row.action === "fetch_products" ||
+      row.action === "fetch_product" ||
       row.action === "fetch_brand") &&
     !row.integration_id
   ) {
@@ -402,6 +404,13 @@ async function execute_process(req, res) {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.sync_product,
         shopify: shopifyProcess.sync_product,
+      });
+    }
+    case "fetch_product":
+    case "fetch_products": {
+      return dispatchByStoreType(req, res, process, {
+        woocommerce: woocommerceProcess.fetch_product,
+        shopify: shopifyProcess.fetch_product,
       });
     }
     case "fetch_category": {
