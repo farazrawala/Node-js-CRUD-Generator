@@ -2372,6 +2372,7 @@ const processAdminCRUD = adminCrudGenerator(
     "integration_id",
     "product_id",
     "category_id",
+    "brand_id",
     "action",
     "count",
     "page",
@@ -2475,6 +2476,7 @@ const processAdminCRUD = adminCrudGenerator(
       integration_id: "select",
       product_id: "select",
       category_id: "select",
+      brand_id: "select",
       action: "select",
       company_id: "select",
       created_by: "select",
@@ -2488,15 +2490,19 @@ const processAdminCRUD = adminCrudGenerator(
       integration_id: "Integration",
       product_id: "Product",
       category_id: "Category",
+      brand_id: "Brand",
     },
     fieldOptions: {
       action: [
         { value: "fetch_products", label: "Fetch products" },
         { value: "fetch_category", label: "Fetch categories (store → POS)" },
+        { value: "fetch_brand", label: "Fetch brands (store → POS)" },
         { value: "sync_product", label: "Sync product" },
         { value: "sync_category", label: "Sync category (POS → store)" },
+        { value: "sync_brand", label: "Sync brand (POS → store)" },
         { value: "delete_product", label: "Delete product" },
         { value: "delete_category", label: "Delete category" },
+        { value: "delete_brand", label: "Delete brand" },
       ],
       progress: [
         { value: "not_started", label: "Not started" },
@@ -2520,6 +2526,7 @@ const processAdminCRUD = adminCrudGenerator(
           { path: "integration_id", select: "name store_type" },
           { path: "product_id", select: "product_name sku" },
           { path: "category_id", select: "name slug" },
+          { path: "brand_id", select: "name slug" },
           { path: "created_by", select: "name email" },
         ]);
 
@@ -2563,6 +2570,12 @@ const processAdminCRUD = adminCrudGenerator(
               record.category_id._id?.toString() || String(record.category_id);
           }
 
+          if (record.brand_id && typeof record.brand_id === "object") {
+            recordObj.brand_display = record.brand_id.name || record.brand_id.slug;
+            recordObj.brand_id =
+              record.brand_id._id?.toString() || String(record.brand_id);
+          }
+
           if (!isEditContext) {
             if (recordObj.integration_display) {
               recordObj.integration_id = recordObj.integration_display;
@@ -2572,6 +2585,9 @@ const processAdminCRUD = adminCrudGenerator(
             }
             if (recordObj.category_display) {
               recordObj.category_id = recordObj.category_display;
+            }
+            if (recordObj.brand_display) {
+              recordObj.brand_id = recordObj.brand_display;
             }
           }
 
@@ -2625,6 +2641,17 @@ const processAdminCRUD = adminCrudGenerator(
           .select("name slug")
           .sort({ name: 1 });
         req.fieldConfig.category_id.options = categories.map((row) => ({
+          value: row._id.toString(),
+          label: row.name,
+        }));
+
+        const brands = await Brands.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("name slug")
+          .sort({ name: 1 });
+        req.fieldConfig.brand_id.options = brands.map((row) => ({
           value: row._id.toString(),
           label: row.name,
         }));
@@ -2684,6 +2711,17 @@ const processAdminCRUD = adminCrudGenerator(
           .select("name slug")
           .sort({ name: 1 });
         req.fieldConfig.category_id.options = categories.map((row) => ({
+          value: row._id.toString(),
+          label: row.name,
+        }));
+
+        const brands = await Brands.find({
+          ...companyFilter,
+          status: "active",
+        })
+          .select("name slug")
+          .sort({ name: 1 });
+        req.fieldConfig.brand_id.options = brands.map((row) => ({
           value: row._id.toString(),
           label: row.name,
         }));

@@ -17,6 +17,11 @@ const modelSchema = new mongoose.Schema(
       ref: "category",
       field_name: "Category",
     },
+    brand_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "brands",
+      field_name: "Brand",
+    },
     action: {
       type: String,
       required: true,
@@ -24,9 +29,18 @@ const modelSchema = new mongoose.Schema(
         "fetch_products",
         "sync_product",
         "delete_product",
+
         "fetch_category",
         "sync_category",
         "delete_category",
+
+        "fetch_brand",
+        "sync_brand",
+        "delete_brand",
+
+        "fetch_order",
+        "sync_order",
+        "delete_order",
       ],
       field_name: "Action",
     },

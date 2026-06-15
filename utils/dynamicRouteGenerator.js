@@ -645,14 +645,21 @@ function generateControllerFunctions(modelName) {
 }
 
 /**
- * Build route names for a model (singular + plural alias).
+ * Build route names for a model (model name + plural alias + optional extras).
  * Example: "order" -> ["order", "orders"]
+ * Example: "brands" + routeAliases ["brand"] -> ["brands", "brand"]
  */
-function getModelRouteNames(modelName) {
+function getModelRouteNames(modelName, routeAliases = []) {
   const names = [modelName];
   const pluralName = modelName.endsWith("s") ? modelName : `${modelName}s`;
   if (!names.includes(pluralName)) {
     names.push(pluralName);
+  }
+  for (const alias of routeAliases) {
+    const trimmed = String(alias || "").trim();
+    if (trimmed && !names.includes(trimmed)) {
+      names.push(trimmed);
+    }
   }
   return names;
 }
@@ -665,6 +672,7 @@ function registerModelRoutes(router, modelName, options = {}) {
     enabled = true, // Whether to enable this route
     excludedRoutes = [], // Routes to exclude (e.g., ['delete'])
     customRoutes = [], // Custom additional routes
+    routeAliases = [], // Extra URL prefixes, e.g. brands model → /brand/*
   } = options;
 
   if (!enabled) {
@@ -673,7 +681,7 @@ function registerModelRoutes(router, modelName, options = {}) {
   }
 
   const controller = generateControllerFunctions(modelName);
-  const routeNames = getModelRouteNames(modelName);
+  const routeNames = getModelRouteNames(modelName, routeAliases);
 
   routeNames.forEach((routeName) => {
     // Register standard CRUD routes for singular/plural aliases.

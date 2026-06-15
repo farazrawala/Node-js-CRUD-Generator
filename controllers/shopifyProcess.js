@@ -1,13 +1,20 @@
 const Category = require("../models/category");
+const Brand = require("../models/brands");
 require("@shopify/shopify-api/adapters/node");
 const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
 const {
   categorySlugFromName,
   resolveCompanyId,
+  resolveIntegrationId,
+  upsertSyncCategoryMapping,
+  upsertSyncBrandMapping,
   resolveBatchPagination,
   findExistingCategoryByName,
+  findExistingBrand,
   finishFetchCategoryBatch,
+  finishFetchBrandBatch,
   failFetchCategoryBatch,
+  failFetchBrandBatch,
   markProcessOutcome,
   coalesceObjectId,
 } = require("../utils/processHelpers");
@@ -131,10 +138,17 @@ async function fetch_category(req, res, process) {
       const existing = await findExistingCategoryByName(name, companyId);
       if (existing) {
         skipped += 1;
+        await upsertSyncCategoryMapping({
+          categoryId: existing._id,
+          integrationId: resolveIntegrationId(process),
+          companyId,
+          referenceId: remote.id,
+          createdBy: process.created_by?._id || process.created_by,
+        });
         continue;
       }
 
-      await Category.create({
+      const created = await Category.create({
         name,
         slug: categorySlugFromName(name),
         description: remote.body_html || "",
@@ -144,6 +158,13 @@ async function fetch_category(req, res, process) {
         created_by: coalesceObjectId(
           process.created_by?._id || process.created_by,
         ),
+      });
+      await upsertSyncCategoryMapping({
+        categoryId: created._id,
+        integrationId: resolveIntegrationId(process),
+        companyId,
+        referenceId: remote.id,
+        createdBy: process.created_by?._id || process.created_by,
       });
       inserted += 1;
     }
@@ -354,6 +375,7 @@ async function sync_category(req, res, process) {
       });
     }
 
+    const companyId = resolveCompanyId(process);
     const listResponse = await client.get({
       path: "custom_collections",
       query: { title },
@@ -364,6 +386,14 @@ async function sync_category(req, res, process) {
       : [];
 
     if (existing.length > 0) {
+      await upsertSyncCategoryMapping({
+        categoryId: category._id,
+        integrationId: resolveIntegrationId(process),
+        companyId,
+        referenceId: existing[0].id,
+        createdBy: process.created_by?._id || process.created_by,
+      });
+
       await markProcessOutcome(
         process._id,
         "completed",
@@ -389,6 +419,17 @@ async function sync_category(req, res, process) {
       type: "json",
     });
 
+    const createdCollection =
+      createdResponse?.body?.custom_collection || createdResponse?.body;
+
+    await upsertSyncCategoryMapping({
+      categoryId: category._id,
+      integrationId: resolveIntegrationId(process),
+      companyId,
+      referenceId: createdCollection?.id,
+      createdBy: process.created_by?._id || process.created_by,
+    });
+
     await markProcessOutcome(
       process._id,
       "completed",
@@ -397,7 +438,7 @@ async function sync_category(req, res, process) {
 
     return res.status(201).json({
       success: true,
-      data: createdResponse?.body?.custom_collection,
+      data: createdCollection,
       message: `Category : ${title} synced to Shopify successfully.`,
     });
   } catch (error) {
@@ -426,9 +467,184 @@ async function sync_category(req, res, process) {
   }
 }
 
+/**
+ * Import product vendors from Shopify as POS brands (batch). Store → POS.
+ */
+async function fetch_brand(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildShopifyClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const { limit, offset, page } = resolveBatchPagination(process);
+  const query = { limit, fields: "id,vendor", order: "id asc" };
+  if (offset > 0) {
+    query.since_id = offset;
+  }
+
+  try {
+    const listResponse = await client.get({ path: "products", query });
+    const products =
+      Array.isArray(listResponse?.body?.products) ?
+        listResponse.body.products
+      : [];
+
+    const vendorByKey = new Map();
+    for (const product of products) {
+      const vendor = String(product?.vendor || "").trim();
+      if (vendor) {
+        vendorByKey.set(vendor.toLowerCase(), vendor);
+      }
+    }
+
+    let inserted = 0;
+    let skipped = 0;
+    let sync_brand_mapped = 0;
+
+    for (const name of vendorByKey.values()) {
+      const slug = categorySlugFromName(name);
+      const referenceId = `vendor:${slug}`;
+      const existing = await findExistingBrand(name, slug, companyId);
+
+      if (existing) {
+        skipped += 1;
+        const mapped = await upsertSyncBrandMapping({
+          brandId: existing._id,
+          integrationId: resolveIntegrationId(process),
+          companyId,
+          referenceId,
+          createdBy: process.created_by?._id || process.created_by,
+        });
+        if (mapped) {
+          sync_brand_mapped += 1;
+        }
+        continue;
+      }
+
+      const created = await Brand.create({
+        name,
+        slug,
+        description: name,
+        company_id: companyId,
+        status: "active",
+        created_by: coalesceObjectId(
+          process.created_by?._id || process.created_by,
+        ),
+      });
+      inserted += 1;
+      const mapped = await upsertSyncBrandMapping({
+        brandId: created._id,
+        integrationId: resolveIntegrationId(process),
+        companyId,
+        referenceId,
+        createdBy: process.created_by?._id || process.created_by,
+      });
+      if (mapped) {
+        sync_brand_mapped += 1;
+      }
+    }
+
+    const fetched = products.length;
+    const isComplete = fetched < limit;
+    const lastRemoteId = fetched > 0 ? products[fetched - 1]?.id : offset;
+    const remarks =
+      isComplete ?
+        `Brand import completed: products scanned ${fetched}, vendors inserted ${inserted}, skipped ${skipped}, sync mapped ${sync_brand_mapped}.`
+      : `Batch complete: products scanned ${fetched}, vendors inserted ${inserted}, skipped ${skipped}. Call execute-process again for page ${page + 1}.`;
+
+    return finishFetchBrandBatch(req, res, process, {
+      fetched,
+      inserted,
+      skipped,
+      sync_brand_mapped,
+      isComplete,
+      nextOffset: lastRemoteId || 0,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "Shopify brand fetch failed:",
+      error?.response?.body || error?.response?.data || error?.message || error,
+    );
+    const errorPayload =
+      error?.response?.body ||
+      error?.response?.data ||
+      error?.message ||
+      "Failed to fetch brands from Shopify product vendors.";
+    return failFetchBrandBatch(process, res, errorPayload, errorPayload);
+  }
+}
+
+/**
+ * Save Shopify vendor mapping for a POS brand (vendors are product-level on Shopify).
+ */
+async function sync_brand(req, res, process) {
+  const integration = process?.integration_id;
+  const brand = process?.brand_id;
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!brand) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Brand is required for sync_brand. Set brand_id on the process or pass ?brand_id=<id> on execute-process.",
+    });
+  }
+
+  const name = brand.name?.trim();
+  if (!name) {
+    return res.status(400).json({
+      success: false,
+      message: "Brand name is required.",
+    });
+  }
+
+  const companyId = resolveCompanyId(process);
+  const referenceId = `vendor:${categorySlugFromName(name)}`;
+
+  await upsertSyncBrandMapping({
+    brandId: brand._id,
+    integrationId: resolveIntegrationId(process),
+    companyId,
+    referenceId,
+    createdBy: process.created_by?._id || process.created_by,
+  });
+
+  await markProcessOutcome(
+    process._id,
+    "completed",
+    `Brand vendor mapping saved for Shopify: ${name}.`,
+  );
+
+  return res.status(200).json({
+    success: true,
+    message: `Brand : ${name} mapped for Shopify vendor (use sync_product to push products with this vendor).`,
+    data: { brand_id: brand._id, refference_id: referenceId },
+  });
+}
+
 module.exports = {
   buildShopifyClient,
   fetch_category,
+  fetch_brand,
   sync_product,
   sync_category,
+  sync_brand,
 };

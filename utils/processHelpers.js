@@ -1,5 +1,8 @@
 const ProcessModel = require("../models/process");
 const Category = require("../models/category");
+const Brand = require("../models/brands");
+const SyncCategory = require("../models/sync_category");
+const SyncBrand = require("../models/sync_brand");
 const { coalesceObjectId } = require("./modelHelper");
 
 function escapeRegex(value) {
@@ -16,6 +19,165 @@ function categorySlugFromName(name) {
 
 function resolveCompanyId(process) {
   return coalesceObjectId(process?.company_id?._id || process?.company_id);
+}
+
+function resolveIntegrationId(process) {
+  return coalesceObjectId(
+    process?.integration_id?._id || process?.integration_id,
+  );
+}
+
+/**
+ * Map POS category ↔ store category (website id stored in refference_id).
+ */
+async function upsertSyncCategoryMapping({
+  categoryId,
+  integrationId,
+  companyId,
+  referenceId,
+  createdBy,
+}) {
+  const category_id = coalesceObjectId(categoryId);
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+  const refference_id = String(referenceId ?? "").trim();
+
+  if (!category_id || !integration_id || !company_id || !refference_id) {
+    return null;
+  }
+
+  const actor = coalesceObjectId(createdBy);
+  const filter = {
+    category_id,
+    integration_id,
+    company_id,
+    deletedAt: null,
+  };
+
+  const existing = await SyncCategory.findOne(filter).lean();
+  if (existing) {
+    if (String(existing.refference_id) === refference_id) {
+      return existing;
+    }
+    return SyncCategory.findByIdAndUpdate(
+      existing._id,
+      {
+        refference_id,
+        status: "active",
+        updated_by: actor,
+      },
+      { new: true },
+    ).lean();
+  }
+
+  return SyncCategory.create({
+    category_id,
+    integration_id,
+    company_id,
+    refference_id,
+    status: "active",
+    created_by: actor,
+  });
+}
+
+/** Map POS brand ↔ store brand (website id in refference_id). */
+async function upsertSyncBrandMapping({
+  brandId,
+  integrationId,
+  companyId,
+  referenceId,
+  createdBy,
+}) {
+  const brand_id = coalesceObjectId(brandId);
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+  const refference_id = String(referenceId ?? "").trim();
+
+  if (!brand_id || !integration_id || !company_id || !refference_id) {
+    return null;
+  }
+
+  const actor = coalesceObjectId(createdBy);
+  const filter = {
+    brand_id,
+    integration_id,
+    company_id,
+    deletedAt: null,
+  };
+
+  const existing = await SyncBrand.findOne(filter).lean();
+  if (existing) {
+    if (String(existing.refference_id) === refference_id) {
+      return existing;
+    }
+    return SyncBrand.findByIdAndUpdate(
+      existing._id,
+      {
+        refference_id,
+        status: "active",
+        updated_by: actor,
+      },
+      { new: true },
+    ).lean();
+  }
+
+  return SyncBrand.create({
+    brand_id,
+    integration_id,
+    company_id,
+    refference_id,
+    status: "active",
+    created_by: actor,
+  });
+}
+
+async function findExistingBrandByName(name, companyId) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const filter = {
+    deletedAt: null,
+    name: { $regex: new RegExp(`^${escapeRegex(trimmed)}$`, "i") },
+  };
+
+  const companyCriteria = buildCompanyIdCriteria(companyId);
+  if (companyCriteria) {
+    filter.$and = [companyCriteria];
+  }
+
+  return Brand.findOne(filter).lean();
+}
+
+async function findExistingBrandBySlug(slug, companyId) {
+  const trimmed = String(slug || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const filter = {
+    deletedAt: null,
+    slug: { $regex: new RegExp(`^${escapeRegex(trimmed)}$`, "i") },
+  };
+
+  const companyCriteria = buildCompanyIdCriteria(companyId);
+  if (companyCriteria) {
+    filter.$and = [companyCriteria];
+  }
+
+  return Brand.findOne(filter).lean();
+}
+
+async function findExistingBrand(name, slug, companyId) {
+  const byName = await findExistingBrandByName(name, companyId);
+  if (byName) {
+    return byName;
+  }
+  if (slug) {
+    return findExistingBrandBySlug(slug, companyId);
+  }
+  return null;
 }
 
 function resolveBatchPagination(process) {
@@ -199,6 +361,7 @@ async function finishFetchCategoryBatch(req, res, process, batchResult) {
     parent_linked = 0,
     parent_unresolved = 0,
     parent_linked_categories = [],
+    sync_category_mapped = 0,
   } = batchResult;
 
   const newHits = hits + 1;
@@ -238,6 +401,7 @@ async function finishFetchCategoryBatch(req, res, process, batchResult) {
         parent_linked,
         parent_unresolved,
         parent_linked_categories,
+        sync_category_mapped,
       },
     },
   });
@@ -257,6 +421,68 @@ async function failFetchCategoryBatch(process, res, errorMessage, errorDetail) {
   });
 }
 
+async function finishFetchBrandBatch(req, res, process, batchResult) {
+  const { limit, page, hits, count } = resolveBatchPagination(process);
+  const {
+    fetched,
+    inserted,
+    skipped,
+    isComplete,
+    nextOffset,
+    remarks,
+    parent_found = 0,
+    parent_inserted = 0,
+    parent_linked = 0,
+    parent_unresolved = 0,
+    parent_linked_brands = [],
+    sync_brand_mapped = 0,
+  } = batchResult;
+
+  const newHits = hits + 1;
+  const newCount = count + inserted + skipped;
+  const update = {
+    hits: newHits,
+    count: newCount,
+    page: isComplete ? page : page + 1,
+    progress: isComplete ? "completed" : "started",
+    status: isComplete ? "completed" : "active",
+    remarks,
+  };
+
+  if (nextOffset !== undefined) {
+    update.offset = nextOffset;
+  }
+
+  await ProcessModel.findByIdAndUpdate(process._id, update);
+
+  return res.status(200).json({
+    success: true,
+    message: remarks,
+    data: {
+      process_id: process._id,
+      page: update.page,
+      hits: newHits,
+      count: newCount,
+      progress: update.progress,
+      status: update.status,
+      batch: {
+        fetched,
+        inserted,
+        skipped,
+        limit,
+        parent_found,
+        parent_inserted,
+        parent_linked,
+        parent_unresolved,
+        parent_linked_brands,
+        sync_brand_mapped,
+      },
+    },
+  });
+}
+
+const failFetchBrandBatch = failFetchCategoryBatch;
+
 async function markProcessOutcome(processId, status, remarks) {
   await ProcessModel.findByIdAndUpdate(processId, { status, remarks });
 }
@@ -264,15 +490,23 @@ async function markProcessOutcome(processId, status, remarks) {
 module.exports = {
   categorySlugFromName,
   resolveCompanyId,
+  resolveIntegrationId,
+  upsertSyncCategoryMapping,
+  upsertSyncBrandMapping,
   resolveBatchPagination,
   dispatchByStoreType,
   findExistingCategoryByName,
   findExistingCategoryBySlug,
   findExistingCategory,
+  findExistingBrandByName,
+  findExistingBrandBySlug,
+  findExistingBrand,
   resolveWooCommerceParentId,
   sortWooCategoriesForImport,
   finishFetchCategoryBatch,
+  finishFetchBrandBatch,
   failFetchCategoryBatch,
+  failFetchBrandBatch,
   markProcessOutcome,
   coalesceObjectId,
 };

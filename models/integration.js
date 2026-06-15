@@ -2,28 +2,27 @@ const mongoose = require("mongoose");
 
 const modelSchema = new mongoose.Schema(
   {
-    
     store_type: {
-        type: String,
-        required: true,
-        enum: ["shopify", "woocommerce", "daraz"], 
-        default: "shopify"        
+      type: String,
+      required: true,
+      enum: ["shopify", "woocommerce", "daraz"],
+      default: "shopify",
     },
     name: {
-        type: String,
-        required: true,
+      type: String,
+      required: true,
     },
     address: {
-        type: String,
-        required: true,
+      type: String,
+      required: true,
     },
     city: {
-        type: String,
-        required: true,
+      type: String,
+      required: true,
     },
     state: {
-        type: String,
-        required: true,
+      type: String,
+      required: true,
     },
     email: {
       type: String,
@@ -48,18 +47,16 @@ const modelSchema = new mongoose.Schema(
     token: {
       type: String,
       // required: true,
-    },  
+    },
     description: {
       type: String,
       required: true,
     },
-   
+
     image: {
       type: String,
       field_name: "Blog Image",
     },
-    
-    
 
     // default fields
     company_id: {
@@ -68,21 +65,21 @@ const modelSchema = new mongoose.Schema(
       required: true,
       field_name: "Company",
     },
-    created_by:{
+    created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Created By",
     },
-    updated_by:{
+    updated_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
       field_name: "Updated By",
     },
-    status: { 
+    status: {
       type: String,
       required: true,
-      enum: ["active", "inactive"], 
-      default: "active"              
+      enum: ["active", "inactive"],
+      default: "active",
     },
     deletedAt: {
       type: Date,
@@ -90,7 +87,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Deleted At",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const MODEL = mongoose.model("integration", modelSchema);

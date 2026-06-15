@@ -75,7 +75,7 @@ const {
   syncStoreProduct,
 } = require("../controllers/integration");
 
-const { execute_process } = require("../controllers/process");
+const { execute_process, processBulkCreate } = require("../controllers/process");
 const { logControllerError } = require("../utils/logControllerError");
 
 const {
@@ -312,6 +312,8 @@ router.get("/integration/sync-store-product/:id", syncStoreProduct);
 router.get("/integration/find-product-relations/:id", syncProductRelations);
 
 // Process routes (GET or POST — some clients/proxies use POST)
+router.post("/process/bulk-create", processBulkCreate);
+router.post("/processs/bulk-create", processBulkCreate);
 router.get("/process/execute-process", execute_process);
 router.post("/process/execute-process", execute_process);
 router.get("/process/execute-process/:id", execute_process);
@@ -520,6 +522,7 @@ registerAllModelRoutes(router, {
     brands: {
       enabled: true,
       excludedRoutes: [],
+      routeAliases: ["brand"],
     },
     product_relations: {
       enabled: true,

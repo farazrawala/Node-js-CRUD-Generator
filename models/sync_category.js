@@ -2,43 +2,26 @@ const mongoose = require("mongoose");
 
 const modelSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-    },
-    parent_id: {
+    category_id: {
+      field_name: "Category ID",
       type: mongoose.Schema.Types.ObjectId,
-      ref: "brands",
-      default: null,
-      set: function (value) {
-        // Convert empty strings, 'null', undefined to null
-        if (
-          value === "" ||
-          value === "null" ||
-          value === undefined ||
-          value === null
-        ) {
-          return null;
-        }
-        return value;
-      },
-    },
-    description: {
-      type: String,
+      ref: "category",
       required: true,
     },
-    slug: {
-      type: String,
+    integration_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "integration",
+      field_name: "Integration ID",
+      required: true,
     },
-
-    image: {
+    refference_id: {
       type: String,
-      field_name: "Brand Image",
-    },
-    // default fields
+      field_name: "Refference ID",
+    },    // default fields
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
+      required: true,
       field_name: "Company",
     },
     created_by: {
@@ -66,6 +49,12 @@ const modelSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-const MODEL = mongoose.model("brands", modelSchema);
+modelSchema.index(
+  { company_id: 1, integration_id: 1, category_id: 1 },
+  { unique: true, partialFilterExpression: { deletedAt: null } },
+);
+modelSchema.index({ company_id: 1, integration_id: 1, refference_id: 1 });
 
-module.exports = MODEL;
+const SyncCategory = mongoose.model("sync_category", modelSchema);
+
+module.exports = SyncCategory;
