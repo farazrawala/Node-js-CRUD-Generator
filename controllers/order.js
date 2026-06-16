@@ -478,6 +478,12 @@ async function softDeleteActiveGlByTransactionNumber({
   );
 }
 
+/** GL line description with order number when available. */
+function orderGlDescription(label, orderNo) {
+  const no = String(orderNo ?? "").trim();
+  return no ? `${label} (${no})` : label;
+}
+
 /** Four GL postings for an order — same row order as `order_save` / `afterCreate`. */
 async function rebuildOrderGlTransactions({
   record,
@@ -508,7 +514,7 @@ async function rebuildOrderGlTransactions({
         amount: orderTotal,
         reference_user_id: record?.customer_id,
         transaction_number,
-        description: "Sale Order",
+        description: orderGlDescription("Sale Order", record?.order_no),
         reference_id: {
           module: "order",
           ref_id: record._id,
@@ -521,7 +527,7 @@ async function rebuildOrderGlTransactions({
         amount: record?.shipment,
         reference_user_id: record?.customer_id,
         transaction_number,
-        description: "Sale Order",
+        description: orderGlDescription("Sale Order", record?.order_no),
         reference_id: {
           module: "order",
           ref_id: record._id,
@@ -534,7 +540,7 @@ async function rebuildOrderGlTransactions({
         amount: record?.discount,
         reference_user_id: record?.customer_id,
         transaction_number,
-        description: "Sale Discount",
+        description: orderGlDescription("Sale Discount", record?.order_no),
         reference_id: {
           module: "order",
           ref_id: record._id,
@@ -549,7 +555,7 @@ async function rebuildOrderGlTransactions({
         amount: record?.amount_received,
         reference_user_id: record?.customer_id,
         transaction_number,
-        description: "Mode of Payment",
+        description: orderGlDescription("Mode of Payment", record?.order_no),
         reference_id: {
           module: "order",
           ref_id: record._id,
@@ -2048,7 +2054,7 @@ async function order_save(req, res) {
               amount: orderTotal,
               reference_user_id: record?.customer_id,
               transaction_number,
-              description: "Sale Order",
+              description: orderGlDescription("Sale Order", record?.order_no),
               reference_id: {
                 module: "order",
                 ref_id: record._id,
@@ -2060,7 +2066,7 @@ async function order_save(req, res) {
               amount: record?.shipment,
               reference_user_id: record?.customer_id,
               transaction_number,
-              description: "Sale Order",
+              description: orderGlDescription("Sale Order", record?.order_no),
               reference_id: {
                 module: "order",
                 ref_id: record._id,
@@ -2073,7 +2079,7 @@ async function order_save(req, res) {
               amount: record?.discount,
               reference_user_id: record?.customer_id,
               transaction_number,
-              description: "Sale Discount",
+              description: orderGlDescription("Sale Discount", record?.order_no),
               reference_id: {
                 module: "order",
                 ref_id: record._id,
@@ -2086,7 +2092,7 @@ async function order_save(req, res) {
               amount: orderTotal,
               reference_user_id: record?.customer_id,
               transaction_number,
-              description: "Mode of Payment",
+              description: orderGlDescription("Mode of Payment", record?.order_no),
               reference_id: {
                 module: "order",
                 ref_id: record._id,
