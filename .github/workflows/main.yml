@@ -19,13 +19,13 @@ jobs:
           node-version: "20"
           cache: npm
 
-      - name: Install production dependencies (Linux — same as server)
+      - name: Verify production dependencies install (not uploaded — symlinks break FTP)
         run: |
           npm ci --omit=dev
           node -e "require('iconv-lite').encodingExists('utf8')"
-          echo "node_modules ready ($(du -sh node_modules | cut -f1))"
+          echo "npm ci OK ($(du -sh node_modules | cut -f1))"
 
-      - name: Sync files (includes node_modules — fixes iconv-lite on live)
+      - name: Sync application files (exclude node_modules — install on server via SSH)
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
           server: 192.249.118.80
@@ -34,6 +34,8 @@ jobs:
           exclude: |
             **/.git*
             **/.git*/**
+            **/node_modules/**
+            **/node_modules
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 
@@ -61,7 +63,7 @@ jobs:
           elif [ -n "$SSH_KEY" ]; then
             write_key_from_text "$SSH_KEY"
           else
-            echo "::warning::No SSH key — node_modules uploaded via FTP. On server run: cd /home/demowebsitv3/public_html/pos_admin && npm run dev"
+            echo "::warning::No SSH key — run on server: cd /home/demowebsitv3/public_html/pos_admin && sh deploy/reinstall-deps.sh && pm2 restart pos-api"
             exit 0
           fi
           sed -i 's/\r$//' key.pem
@@ -74,6 +76,11 @@ jobs:
           set -e
           cd /home/demowebsitv3/public_html/pos_admin
           export PATH="/usr/local/bin:/usr/bin:$PATH"
+          if [ -f package-lock.json ]; then
+            npm ci --omit=dev
+          else
+            npm install --omit=dev
+          fi
           node -e "require('iconv-lite').encodingExists('utf8')"
           pm2 delete pos-api 2>/dev/null || true
           pm2 start npm --name pos-api -- run dev
@@ -82,6 +89,6 @@ jobs:
           then
             echo "App started via pm2 (npm run dev)."
           else
-            echo "::warning::SSH failed — node_modules uploaded via FTP. On the server run: cd /home/demowebsitv3/public_html/pos_admin && npm run dev"
+            echo "::warning::SSH failed — run on server: cd /home/demowebsitv3/public_html/pos_admin && sh deploy/reinstall-deps.sh && pm2 restart pos-api"
             exit 1
           fi
