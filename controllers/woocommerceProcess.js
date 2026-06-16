@@ -9,10 +9,14 @@ const {
   resolveIntegrationId,
   upsertSyncCategoryMapping,
   upsertSyncBrandMapping,
+  upsertSyncProductMapping,
+  findPosProductBySyncReference,
   resolveBatchPagination,
   findExistingCategory,
   findExistingBrand,
   findExistingProduct,
+  findExistingProductBySku,
+  findExistingProductByName,
   sortWooCategoriesForImport,
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
@@ -173,6 +177,294 @@ async function resolveWooProductPrice(client, remote) {
   return price;
 }
 
+function formatWooVariationLabel(variation) {
+  const attrs = Array.isArray(variation?.attributes) ? variation.attributes : [];
+  const options = attrs
+    .map((attr) => String(attr?.option || "").trim())
+    .filter(Boolean);
+  if (options.length) {
+    return options.join(" x ");
+  }
+
+  const fallback = String(variation?.name || "").trim();
+  if (!fallback) {
+    return "";
+  }
+  return fallback
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" x ");
+}
+
+function buildWooVariationProductName(parentName, variation) {
+  const label = formatWooVariationLabel(variation);
+  if (!label) {
+    return parentName;
+  }
+  return `${parentName} [${label}]`;
+}
+
+function buildWooVariationSku(parentSku, wooParentId, variationId) {
+  const base =
+    String(parentSku || "").trim() ||
+    (wooParentId ? `wc-${wooParentId}` : "wc-var");
+  return `${base}-var-${variationId}`;
+}
+
+async function fetchAllWooProductVariations(client, wooProductId) {
+  const wooId = Number(wooProductId);
+  if (!wooId) {
+    return [];
+  }
+
+  const all = [];
+  let page = 1;
+  const perPage = 100;
+
+  while (true) {
+    const response = await client.get(`products/${wooId}/variations`, {
+      page,
+      per_page: perPage,
+      orderby: "id",
+      order: "asc",
+    });
+    const batch = Array.isArray(response?.data) ? response.data : [];
+    all.push(...batch);
+    if (batch.length < perPage) {
+      break;
+    }
+    page += 1;
+  }
+
+  return all;
+}
+
+async function recordProductSyncMapping(
+  process,
+  companyId,
+  posProductId,
+  websiteProductId,
+  stats,
+) {
+  try {
+    const row = await upsertSyncProductMapping({
+      productId: posProductId,
+      integrationId: resolveIntegrationId(process),
+      companyId,
+      referenceId: websiteProductId,
+      createdBy: process.created_by?._id || process.created_by,
+    });
+    if (row && stats) {
+      stats.sync_product_mapped = (stats.sync_product_mapped || 0) + 1;
+    }
+    return row;
+  } catch (error) {
+    console.warn(
+      `sync_product mapping failed for product ${websiteProductId}:`,
+      error?.message || error,
+    );
+    return null;
+  }
+}
+
+async function findPosProductForWooImport({
+  process,
+  companyId,
+  wooReferenceId,
+  sku,
+  name,
+}) {
+  const integrationId = resolveIntegrationId(process);
+  if (wooReferenceId && integrationId) {
+    const bySync = await findPosProductBySyncReference(
+      integrationId,
+      companyId,
+      wooReferenceId,
+    );
+    if (bySync) {
+      return bySync;
+    }
+  }
+
+  if (sku) {
+    const bySku = await findExistingProductBySku(sku, companyId);
+    if (bySku) {
+      return bySku;
+    }
+  }
+
+  if (name) {
+    return findExistingProductByName(name, companyId);
+  }
+
+  return null;
+}
+
+async function upsertWooProductRow({
+  remote,
+  name,
+  sku,
+  productType,
+  productPrice,
+  categoryIds,
+  parentProductId,
+  companyId,
+  process,
+  stats,
+  wooReferenceId,
+  isVariation = false,
+}) {
+  const trimmedName = String(name || "").trim();
+  if (!trimmedName) {
+    return null;
+  }
+
+  const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
+  const existing = await findPosProductForWooImport({
+    process,
+    companyId,
+    wooReferenceId,
+    sku,
+    name: trimmedName,
+  });
+
+  const payload = {
+    product_name: trimmedName,
+    product_price: productPrice,
+    product_description:
+      remote?.description ||
+      remote?.short_description ||
+      "",
+    product_type: productType,
+    sku,
+    product_code: sku,
+    category_id: categoryField,
+  };
+
+  if (remote?.weight != null && remote.weight !== "") {
+    payload.weight = Number(remote.weight);
+  }
+
+  if (parentProductId) {
+    payload.parent_product_id = coalesceObjectId(parentProductId);
+  }
+
+  let posId;
+
+  if (existing) {
+    posId = coalesceObjectId(existing._id);
+    await Product.updateOne({ _id: posId }, { $set: payload });
+    if (isVariation) {
+      stats.variations_updated = (stats.variations_updated || 0) + 1;
+    } else {
+      stats.updated = (stats.updated || 0) + 1;
+    }
+  } else {
+    const created = await Product.create({
+      ...payload,
+      unit: "Piece",
+      company_id: companyId,
+      status: "active",
+      created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+    });
+    posId = coalesceObjectId(created._id);
+    if (isVariation) {
+      stats.variations_inserted = (stats.variations_inserted || 0) + 1;
+    } else {
+      stats.inserted += 1;
+    }
+  }
+
+  if (wooReferenceId) {
+    await recordProductSyncMapping(process, companyId, posId, wooReferenceId, stats);
+  }
+
+  if (categoryField.length) {
+    stats.products_category_linked = (stats.products_category_linked || 0) + 1;
+  }
+
+  return posId;
+}
+
+async function importWooVariableProductToPos(
+  remoteWooProduct,
+  { client, companyId, process, stats, productPrice, categoryIds },
+) {
+  const wooParentId = Number(remoteWooProduct?.id);
+  const parentName = String(remoteWooProduct?.name || "").trim();
+  if (!wooParentId || !parentName) {
+    return null;
+  }
+
+  const parentSku =
+    String(remoteWooProduct?.sku || "").trim() || `wc-${wooParentId}`;
+
+  const variations = await fetchAllWooProductVariations(client, wooParentId);
+  stats.variations_fetched = (stats.variations_fetched || 0) + variations.length;
+
+  const variationPrices = variations
+    .map((variation) => mapWooProductPrice(variation))
+    .filter((price) => price > 0);
+  const parentDisplayPrice =
+    variationPrices.length > 0 ?
+      Math.min(...variationPrices)
+    : productPrice;
+
+  const parentPosId = await upsertWooProductRow({
+    remote: remoteWooProduct,
+    name: parentName,
+    sku: parentSku,
+    productType: "Variable",
+    productPrice: parentDisplayPrice,
+    categoryIds,
+    parentProductId: null,
+    companyId,
+    process,
+    stats,
+    wooReferenceId: String(wooParentId),
+    isVariation: false,
+  });
+
+  if (!parentPosId) {
+    return null;
+  }
+
+  for (const variation of variations) {
+    const variationId = Number(variation?.id);
+    if (!variationId) {
+      continue;
+    }
+
+    const variationName = buildWooVariationProductName(parentName, variation);
+    const variationSku = buildWooVariationSku(
+      parentSku,
+      wooParentId,
+      variationId,
+    );
+    const variationPrice = mapWooProductPrice(variation);
+    const resolvedVariationPrice =
+      variationPrice > 0 ? variationPrice : parentDisplayPrice;
+
+    await upsertWooProductRow({
+      remote: variation,
+      name: variationName,
+      sku: variationSku,
+      productType: "Single",
+      productPrice: resolvedVariationPrice,
+      categoryIds,
+      parentProductId: parentPosId,
+      companyId,
+      process,
+      stats,
+      wooReferenceId: `${wooParentId}:${variationId}`,
+      isVariation: true,
+    });
+  }
+
+  return parentPosId;
+}
+
 function buildPosFieldsFromWoo(remoteWooProduct, productPrice) {
   const fields = {
     product_name: String(remoteWooProduct?.name || "").trim(),
@@ -303,7 +595,7 @@ async function resolvePosCategoryIdsFromWooProduct(
 
 async function importWooProductToPos(
   remoteWooProduct,
-  { companyId, process, stats, productPrice, categoryIds = [] },
+  { client, companyId, process, stats, productPrice, categoryIds = [] },
 ) {
   const wooId = Number(remoteWooProduct?.id);
   const name = String(remoteWooProduct?.name || "").trim();
@@ -311,49 +603,37 @@ async function importWooProductToPos(
     return null;
   }
 
+  const isVariable =
+    String(remoteWooProduct?.type || "").toLowerCase() === "variable";
+  if (isVariable && client) {
+    return importWooVariableProductToPos(remoteWooProduct, {
+      client,
+      companyId,
+      process,
+      stats,
+      productPrice,
+      categoryIds,
+    });
+  }
+
   const sku =
     String(remoteWooProduct?.sku || "").trim() ||
     (wooId ? `wc-${wooId}` : "");
-  const existing = await findExistingProduct(sku, name, companyId);
-  const posFields = buildPosFieldsFromWoo(remoteWooProduct, productPrice);
-  const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
 
-  if (existing) {
-    const posId = coalesceObjectId(existing._id);
-    await Product.updateOne(
-      { _id: posId },
-      {
-        $set: {
-          ...posFields,
-          sku,
-          product_code: sku,
-          category_id: categoryField,
-        },
-      },
-    );
-    stats.updated = (stats.updated || 0) + 1;
-    if (categoryField.length) {
-      stats.products_category_linked = (stats.products_category_linked || 0) + 1;
-    }
-    return posId;
-  }
-
-  const created = await Product.create({
-    ...posFields,
+  return upsertWooProductRow({
+    remote: remoteWooProduct,
+    name,
     sku,
-    product_code: sku,
-    category_id: categoryField,
-    unit: "Piece",
-    company_id: companyId,
-    status: "active",
-    created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+    productType: "Single",
+    productPrice,
+    categoryIds,
+    parentProductId: null,
+    companyId,
+    process,
+    stats,
+    wooReferenceId: wooId ? String(wooId) : "",
+    isVariation: false,
   });
-
-  stats.inserted += 1;
-  if (categoryField.length) {
-    stats.products_category_linked = (stats.products_category_linked || 0) + 1;
-  }
-  return coalesceObjectId(created._id);
 }
 
 async function recordCategorySyncMapping(
@@ -1611,6 +1891,10 @@ async function fetch_product(req, res, process) {
       categories_inserted: 0,
       products_category_linked: 0,
       sync_category_mapped: 0,
+      sync_product_mapped: 0,
+      variations_fetched: 0,
+      variations_inserted: 0,
+      variations_updated: 0,
     };
     categoryCtx.stats = stats;
 
@@ -1630,6 +1914,7 @@ async function fetch_product(req, res, process) {
           categoryCtx,
         );
         await importWooProductToPos(remoteDetail, {
+          client,
           companyId,
           process,
           stats,
@@ -1652,13 +1937,16 @@ async function fetch_product(req, res, process) {
       categories_found = 0,
       categories_inserted = 0,
       products_category_linked = 0,
+      variations_fetched = 0,
+      variations_inserted = 0,
+      variations_updated = 0,
     } = stats;
     const fetched = remoteProducts.length;
     const isComplete = fetched < limit;
     const remarks =
       isComplete ?
-        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
-      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, variations fetched ${variations_fetched}, variations inserted ${variations_inserted}, variations updated ${variations_updated}.`
+      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, variations fetched ${variations_fetched}, variations inserted ${variations_inserted}, variations updated ${variations_updated}. Call execute-process again for page ${page + 1}.`;
 
     return finishFetchProductBatch(req, res, process, {
       fetched,
@@ -1668,6 +1956,9 @@ async function fetch_product(req, res, process) {
       categories_found,
       categories_inserted,
       products_category_linked,
+      variations_fetched,
+      variations_inserted,
+      variations_updated,
       isComplete,
       remarks,
     });

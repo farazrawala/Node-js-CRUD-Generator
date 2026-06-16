@@ -3271,7 +3271,7 @@ async function findTotalSalesByOrder(req, res) {
  * |    0 | order, order_item, inventory_movements | read | Pre-txn validation + outbound snapshot |
  * |    1 | order                   | update (soft)      | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | By header `transaction_number` |
- * |    3 | inventory_movements     | update (soft)      | Active rows for this order `reference_id` |
+ * |    3 | inventory_movements     | read               | Snapshot outbound rows (not soft-deleted; reversal `in` inserted in step 5) |
  * |    4 | order_item              | update (soft)      | All active lines for this order |
  * |    5 | warehouse_inventory, inventory_movements, logs | update / insert | Restore qty + `in` reversal per prior `out` |
  * |    6 | logs                    | insert             | `createApplicationLog` — success |
@@ -3351,7 +3351,6 @@ async function order_delete(req, res) {
   const userId = req.user?._id;
   const deleteSnapshot = {
     gl_rows_soft_deleted: 0,
-    movements_soft_deleted: 0,
     items_soft_deleted: 0,
     reversal_movements_inserted: 0,
   };
@@ -3396,7 +3395,7 @@ async function order_delete(req, res) {
       );
     }
 
-    // step 3 — snapshot outbound movements (in txn) then soft-delete movement rows
+    // step 3 — snapshot outbound movements (kept active; reversal `in` rows added in step 5)
     let movQuery = InventoryMovements.find({
       reference_type: "order",
       reference_id: orderId,
@@ -3410,23 +3409,6 @@ async function order_delete(req, res) {
       oldOutMovementsInTxn.length > 0 ?
         oldOutMovementsInTxn
       : oldOutMovementsPreTxn;
-
-    const movementSoftDelete =
-      await InventoryMovements.softDeleteActiveByReference({
-        referenceType: "order",
-        referenceId: orderId,
-        companyId,
-        session: mongoSession,
-        userId,
-      });
-    deleteSnapshot.movements_soft_deleted =
-      movementSoftDelete.modifiedCount || 0;
-    if (deleteSnapshot.movements_soft_deleted > 0) {
-      console.log(
-        "✅ Order inventory movement rows soft-deleted:",
-        deleteSnapshot.movements_soft_deleted,
-      );
-    }
 
     // step 4 — soft-delete order_item rows
     const itemSoftDeleteSet = {
@@ -3494,7 +3476,6 @@ async function order_delete(req, res) {
         softDeletedOrder = null;
         productStockUpdates.length = 0;
         deleteSnapshot.gl_rows_soft_deleted = 0;
-        deleteSnapshot.movements_soft_deleted = 0;
         deleteSnapshot.items_soft_deleted = 0;
         deleteSnapshot.reversal_movements_inserted = 0;
         orderDeleteExecutionMode = "standalone_no_transaction_retry";

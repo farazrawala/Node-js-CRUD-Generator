@@ -18,7 +18,9 @@ const {
   logRollbackFailure,
   serializeErrorForLog,
 } = require("../utils/logControllerError");
-const { isMongoTransactionUnsupportedError } = require("../utils/mongoTransactionSupport");
+const {
+  isMongoTransactionUnsupportedError,
+} = require("../utils/mongoTransactionSupport");
 
 function normalizeWarehouseInventoryInput(reqBody) {
   if (reqBody.warehouse_inventory) {
@@ -404,9 +406,7 @@ async function rollbackProductCreateVariation(tracker, req, session = null) {
 
   const opts = session ? { session } : {};
   const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
-  const companyId = coalesceObjectId(
-    tracker.companyId || req.user?.company_id,
-  );
+  const companyId = coalesceObjectId(tracker.companyId || req.user?.company_id);
   const filter = { _id: { $in: ids }, deletedAt: null };
   if (companyId) filter.company_id = companyId;
 
@@ -441,9 +441,7 @@ async function restoreProductFromSnapshot(productId, snapshot, session = null) {
 /** Restore parent + updated variations; soft-delete newly created variations. */
 async function rollbackProductUpdateVariation(tracker, req, session = null) {
   const opts = session ? { session } : {};
-  const companyId = coalesceObjectId(
-    tracker.companyId || req.user?.company_id,
-  );
+  const companyId = coalesceObjectId(tracker.companyId || req.user?.company_id);
   const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
 
   if (tracker.createdVariationIds?.length) {
@@ -676,7 +674,10 @@ async function productCreateVariation(req, res) {
       try {
         result = await runProductCreateVariationBody(req, session, tracker);
       } catch (stepError) {
-        if (!session && (tracker.parentProductId || tracker.variationProductIds?.length)) {
+        if (
+          !session &&
+          (tracker.parentProductId || tracker.variationProductIds?.length)
+        ) {
           await rollbackProductCreateVariation(tracker, req, null);
         }
         throw stepError;
@@ -1189,7 +1190,10 @@ async function productUpdate(req, res) {
       try {
         response = await runProductUpdateBody(req, session, tracker);
       } catch (stepError) {
-        if (!session && (tracker.productBefore || tracker.stockLogIds?.length)) {
+        if (
+          !session &&
+          (tracker.productBefore || tracker.stockLogIds?.length)
+        ) {
           await rollbackProductUpdate(tracker, req, null);
         }
         throw stepError;
@@ -1198,20 +1202,17 @@ async function productUpdate(req, res) {
   );
 
   if (txnError) {
-    console.error(
-      "❌ productUpdate failed:\n",
-      serializeErrorForLog(txnError),
-    );
+    console.error("❌ productUpdate failed:\n", serializeErrorForLog(txnError));
     await logRollbackFailure(req, txnError, {
       action: "PRODUCT UPDATE ROLLBACK",
       tags: ["product", "update", "error"],
-      fallbackUrl: req.originalUrl || `/api/product/update/${req.params?.id || ""}`,
+      fallbackUrl:
+        req.originalUrl || `/api/product/update/${req.params?.id || ""}`,
       context: productUpdateLogContext(req, {
         update_step: tracker.update_step,
         product_id: tracker.productId,
         stock_log_ids: tracker.stockLogIds,
-        warehouse_change_count:
-          req._warehouseStockChanges?.length ?? 0,
+        warehouse_change_count: req._warehouseStockChanges?.length ?? 0,
         execution_mode:
           isMongoTransactionUnsupportedError(txnError) ?
             "no_mongodb_transaction_compensating_rollback"
@@ -1330,7 +1331,10 @@ async function getProductsByWarehouse(req, res) {
       .lean();
 
     const productIds = rows
-      .map((inventoryRow) => inventoryRow.product_id && inventoryRow.product_id._id)
+      .map(
+        (inventoryRow) =>
+          inventoryRow.product_id && inventoryRow.product_id._id,
+      )
       .filter(Boolean);
 
     let totalsByProduct = new Map();
@@ -1477,7 +1481,8 @@ async function cost_of_goods_available(req, res) {
           .select("product_name sku wholesale_price product_code")
           .lean();
         const wholesaleUnit = Number(productDoc?.wholesale_price);
-        const wholesale_price = Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
+        const wholesale_price =
+          Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
         return res.status(200).json({
           success: true,
           count: 1,
@@ -1524,7 +1529,8 @@ async function cost_of_goods_available(req, res) {
       if (!productDoc) continue;
       const qty = Math.max(0, Number(row.total_qty) || 0);
       const wholesaleUnit = Number(productDoc.wholesale_price);
-      const wholesale_price = Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
+      const wholesale_price =
+        Number.isFinite(wholesaleUnit) ? wholesaleUnit : 0;
       const cost_of_goods_available =
         Math.round(qty * wholesale_price * 100) / 100;
       data.push({
@@ -1647,7 +1653,8 @@ async function productCostUpdate(req, res) {
 
     const rawAddQty = req.query?.qty;
     const rawAddTotal = req.query?.total;
-    const hasAddQty = rawAddQty !== undefined && String(rawAddQty).trim() !== "";
+    const hasAddQty =
+      rawAddQty !== undefined && String(rawAddQty).trim() !== "";
     const hasAddTotal =
       rawAddTotal !== undefined && String(rawAddTotal).trim() !== "";
 
@@ -1704,9 +1711,10 @@ async function productCostUpdate(req, res) {
         blendTotalModeLabel = "line_total";
       }
 
-      const wholesaleBefore = Number.isFinite(Number(product.wholesale_price)) ?
-        Number(product.wholesale_price)
-      : 0;
+      const wholesaleBefore =
+        Number.isFinite(Number(product.wholesale_price)) ?
+          Number(product.wholesale_price)
+        : 0;
       const totalCostAvailable = totalWarehouseQty * wholesaleBefore;
       const combinedExtendedCost = totalCostAvailable + newLotExtendedCost;
       const denominatorQty = totalWarehouseQty + addedQty;
@@ -1757,7 +1765,7 @@ async function productCostUpdate(req, res) {
 async function getAllActiveProductsPOS(req, res) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
   const filter = {
-    status: "active",
+    // status: "active",
     deletedAt: null,
     product_parent_id: null,
     ...(tenantCo ? { company_id: tenantCo } : {}),
@@ -1766,10 +1774,7 @@ async function getAllActiveProductsPOS(req, res) {
   const rawCategory = req.query.category_id ?? req.query.categoryId;
   if (rawCategory != null && String(rawCategory).trim() !== "") {
     const categoryOid = coalesceObjectId(rawCategory);
-    if (
-      !categoryOid ||
-      !mongoose.Types.ObjectId.isValid(String(categoryOid))
-    ) {
+    if (!categoryOid || !mongoose.Types.ObjectId.isValid(String(categoryOid))) {
       return res.status(400).json({
         success: false,
         status: 400,

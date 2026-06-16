@@ -4,6 +4,7 @@ const Brand = require("../models/brands");
 const Product = require("../models/product");
 const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
+const SyncProduct = require("../models/sync_product");
 const { coalesceObjectId } = require("./modelHelper");
 
 function escapeRegex(value) {
@@ -130,6 +131,87 @@ async function upsertSyncBrandMapping({
     status: "active",
     created_by: actor,
   });
+}
+
+/** Map POS product ↔ store product (website id in refference_id). */
+async function upsertSyncProductMapping({
+  productId,
+  integrationId,
+  companyId,
+  referenceId,
+  createdBy,
+}) {
+  const product_id = coalesceObjectId(productId);
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+  const refference_id = String(referenceId ?? "").trim();
+
+  if (!product_id || !integration_id || !company_id || !refference_id) {
+    return null;
+  }
+
+  const actor = coalesceObjectId(createdBy);
+  const filter = {
+    product_id,
+    integration_id,
+    company_id,
+    deletedAt: null,
+  };
+
+  const existing = await SyncProduct.findOne(filter).lean();
+  if (existing) {
+    if (String(existing.refference_id) === refference_id) {
+      return existing;
+    }
+    return SyncProduct.findByIdAndUpdate(
+      existing._id,
+      {
+        refference_id,
+        status: "active",
+        updated_by: actor,
+      },
+      { new: true },
+    ).lean();
+  }
+
+  return SyncProduct.create({
+    product_id,
+    integration_id,
+    company_id,
+    refference_id,
+    status: "active",
+    created_by: actor,
+  });
+}
+
+async function findPosProductBySyncReference(
+  integrationId,
+  companyId,
+  referenceId,
+) {
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+  const refference_id = String(referenceId ?? "").trim();
+
+  if (!integration_id || !company_id || !refference_id) {
+    return null;
+  }
+
+  const row = await SyncProduct.findOne({
+    integration_id,
+    company_id,
+    refference_id,
+    deletedAt: null,
+  }).lean();
+
+  if (!row?.product_id) {
+    return null;
+  }
+
+  return Product.findOne({
+    _id: coalesceObjectId(row.product_id),
+    deletedAt: null,
+  }).lean();
 }
 
 async function findExistingBrandByName(name, companyId) {
@@ -551,6 +633,9 @@ async function finishFetchProductBatch(req, res, process, batchResult) {
     categories_found = 0,
     categories_inserted = 0,
     products_category_linked = 0,
+    variations_fetched = 0,
+    variations_inserted = 0,
+    variations_updated = 0,
   } = batchResult;
 
   const newHits = hits + 1;
@@ -589,6 +674,9 @@ async function finishFetchProductBatch(req, res, process, batchResult) {
         categories_found,
         categories_inserted,
         products_category_linked,
+        variations_fetched,
+        variations_inserted,
+        variations_updated,
       },
     },
   });
@@ -606,6 +694,8 @@ module.exports = {
   resolveIntegrationId,
   upsertSyncCategoryMapping,
   upsertSyncBrandMapping,
+  upsertSyncProductMapping,
+  findPosProductBySyncReference,
   resolveBatchPagination,
   dispatchByStoreType,
   findExistingCategoryByName,
