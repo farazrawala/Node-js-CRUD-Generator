@@ -692,9 +692,106 @@ function findPriorWarehouseForProduct(oldMap, productIdStr) {
   return bestWid;
 }
 
+/** Current order-line outbound qty per product/warehouse (movements used only for warehouse lookup). */
+function buildOrderLineRestoreQtyMap({
+  existingOrderItems,
+  movementWarehouseMap,
+  defaultWarehouseId,
+}) {
+  const restoreMap = new Map();
+
+  for (const item of existingOrderItems || []) {
+    const pid = item.product_id != null ? String(item.product_id).trim() : "";
+    const qty = Number(item.qty);
+    if (
+      !pid ||
+      !mongoose.Types.ObjectId.isValid(pid) ||
+      !Number.isFinite(qty) ||
+      qty <= 0
+    ) {
+      continue;
+    }
+    const wid =
+      findPriorWarehouseForProduct(movementWarehouseMap, pid) ||
+      ((
+        defaultWarehouseId &&
+        mongoose.Types.ObjectId.isValid(String(defaultWarehouseId))
+      ) ?
+        String(defaultWarehouseId).trim()
+      : null);
+    if (!wid) continue;
+    const key = warehouseStockKey(pid, wid);
+    restoreMap.set(key, roundMoney2((restoreMap.get(key) || 0) + qty));
+  }
+
+  if (restoreMap.size === 0) {
+    for (const [key, qty] of movementWarehouseMap.entries()) {
+      restoreMap.set(key, qty);
+    }
+  }
+
+  return restoreMap;
+}
+
+async function insertOrderReferencedInventoryMovement({
+  req,
+  productIdStr,
+  warehouseIdStr,
+  quantity,
+  unitCost,
+  movementType,
+  orderId,
+  companyId,
+  companyIdOid,
+  mongoSession = null,
+  referenceName = "Order",
+}) {
+  const lineQtyNum = Number(quantity);
+  if (!Number.isFinite(lineQtyNum) || lineQtyNum <= 0) {
+    return;
+  }
+
+  const bodyBeforeInventoryMovement = req.body;
+  const hadRouteParamId = Object.prototype.hasOwnProperty.call(req.params, "id");
+  const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+
+  req.body = {
+    product_id: productIdStr,
+    warehouse_id: warehouseIdStr,
+    quantity: lineQtyNum,
+    movement_type: movementType,
+    unit_cost: unitCost,
+    total_cost: Math.round(lineQtyNum * unitCost * 100) / 100,
+    reference_type: "order",
+    reference_id: orderId,
+    reference_name: referenceName,
+    company_id: companyIdOid || companyId,
+    status: "active",
+  };
+
+  try {
+    await insertInventoryMovementRecord(req, mongoSession);
+  } catch (inventoryMovementErr) {
+    if (inventoryMovementErr.clientPayload) {
+      throwOrderCreateFromGenericFailure(
+        inventoryMovementErr.clientPayload,
+        "Inventory movement for order failed",
+      );
+    }
+    throw inventoryMovementErr;
+  } finally {
+    req.body = bodyBeforeInventoryMovement;
+    if (hadRouteParamId) {
+      req.params.id = savedRouteParamId;
+    } else {
+      delete req.params.id;
+    }
+  }
+}
+
 /**
- * Line replace inventory: warehouse delta (old − new qty per product/warehouse), then movement insert only.
- * Example: old 4 → new 2 on same warehouse adds +2 to `warehouse_inventory` (does not re-deduct 2 when 2 on hand).
+ * Line replace inventory: warehouse delta (old − new qty per product/warehouse), then delta movement insert.
+ * Example: old 40 → new 39 adds +1 to warehouse and one `in` movement for 1; original `out` rows stay active.
  */
 async function applyOrderLineReplaceInventory({
   oldOutMovements,
@@ -707,35 +804,12 @@ async function applyOrderLineReplaceInventory({
   mongoSession = null,
   logUrl = "/api/order/order_update",
 }) {
-  const oldMap = buildOutboundQtyMapFromMovements(oldOutMovements);
-
-  // Fallback when movement rows are missing: treat persisted line qty as old outbound on default warehouse.
-  if (oldMap.size === 0 && (existingOrderItems || []).length > 0) {
-    const defaultWarehouseId = resolveDefaultWarehouseId(req);
-    for (const item of existingOrderItems) {
-      const pid = item.product_id != null ? String(item.product_id).trim() : "";
-      const qty = Number(item.qty);
-      if (
-        !pid ||
-        !mongoose.Types.ObjectId.isValid(pid) ||
-        !Number.isFinite(qty) ||
-        qty <= 0
-      ) {
-        continue;
-      }
-      const wid =
-        findPriorWarehouseForProduct(oldMap, pid) ||
-        ((
-          defaultWarehouseId &&
-          mongoose.Types.ObjectId.isValid(defaultWarehouseId)
-        ) ?
-          String(defaultWarehouseId).trim()
-        : null);
-      if (!wid) continue;
-      const key = warehouseStockKey(pid, wid);
-      oldMap.set(key, roundMoney2((oldMap.get(key) || 0) + qty));
-    }
-  }
+  const movementWarehouseMap = buildOutboundQtyMapFromMovements(oldOutMovements);
+  const oldMap = buildOrderLineRestoreQtyMap({
+    existingOrderItems,
+    movementWarehouseMap,
+    defaultWarehouseId: resolveDefaultWarehouseId(req),
+  });
 
   const newMap = new Map();
   const resolvedNewLines = [];
@@ -760,7 +834,7 @@ async function applyOrderLineReplaceInventory({
     }
 
     let warehouseIdStr =
-      findPriorWarehouseForProduct(oldMap, productIdStr) ||
+      findPriorWarehouseForProduct(movementWarehouseMap, productIdStr) ||
       resolveOrderLineWarehouseId(line, req) ||
       null;
 
@@ -802,6 +876,18 @@ async function applyOrderLineReplaceInventory({
 
   const productStockUpdates = [];
   const allKeys = new Set([...oldMap.keys(), ...newMap.keys()]);
+  const priceByProduct = new Map();
+  for (const { productIdStr, unitCost } of resolvedNewLines) {
+    priceByProduct.set(productIdStr, unitCost);
+  }
+  for (const item of existingOrderItems || []) {
+    const pid = item.product_id != null ? String(item.product_id).trim() : "";
+    if (!pid || priceByProduct.has(pid)) continue;
+    const p = Number(item.price);
+    if (Number.isFinite(p) && p >= 0) {
+      priceByProduct.set(pid, p);
+    }
+  }
 
   for (const key of allKeys) {
     const oldQty = oldMap.get(key) || 0;
@@ -869,56 +955,34 @@ async function applyOrderLineReplaceInventory({
       };
       throw mapped;
     }
-  }
 
-  for (const {
-    line,
-    productIdStr,
-    warehouseIdStr,
-    lineQtyNum,
-    unitCost,
-  } of resolvedNewLines) {
-    const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
-    const bodyBeforeInventoryMovement = req.body;
-    const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-      req.params,
-      "id",
-    );
-    const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-    req.body = {
-      product_id: productIdStr,
-      warehouse_id: warehouseIdStr,
-      quantity: lineQtyNum,
-      movement_type: "out",
-      unit_cost: unitCost,
-      total_cost: totalCostMovement,
-      reference_type: "order",
-      reference_id: orderId,
-      reference_name: "Order",
-      company_id: companyIdOid || companyId,
-      status: "active",
-    };
-
-    try {
-      await insertInventoryMovementRecord(req, mongoSession);
-    } catch (inventoryMovementErr) {
-      if (inventoryMovementErr.clientPayload) {
-        throwOrderCreateFromGenericFailure(
-          inventoryMovementErr.clientPayload,
-          "Inventory movement for order failed",
-        );
-      }
-      throw inventoryMovementErr;
-    } finally {
-      req.body = bodyBeforeInventoryMovement;
-      if (hadRouteParamId) {
-        req.params.id = savedRouteParamId;
-      } else {
-        delete req.params.id;
-      }
+    const unitCost = Number(priceByProduct.get(productIdStr));
+    if (!Number.isFinite(unitCost) || unitCost < 0) {
+      throw new Error(
+        `Each order line needs a finite unit price (price) for inventory movement (product ${productIdStr})`,
+      );
     }
 
+    await insertOrderReferencedInventoryMovement({
+      req,
+      productIdStr,
+      warehouseIdStr,
+      quantity: Math.abs(delta),
+      unitCost,
+      movementType: delta > 0 ? "in" : "out",
+      orderId,
+      companyId,
+      companyIdOid,
+      mongoSession,
+      referenceName: delta > 0 ? "Order Update Restore" : "Order",
+    });
+  }
+
+  const productIdsForAlert = new Set();
+  for (const key of allKeys) {
+    productIdsForAlert.add(key.split(":")[0]);
+  }
+  for (const productIdStr of productIdsForAlert) {
     const onHandAfter = await sumWarehouseInventoryQtyForProduct(
       productIdStr,
       companyIdOid || companyId,
@@ -1128,7 +1192,8 @@ async function applyOrderOutboundLines({
 }
 
 /**
- * Delete / void order: restore warehouse qty and insert reversal `in` movements from prior `out` snapshot.
+ * Delete / void order: restore warehouse qty and insert reversal `in` movements from current order lines.
+ * Movements are used only for warehouse lookup; qty comes from `existingOrderItems`, not summed movement rows.
  */
 async function applyOrderDeleteInventoryRestore({
   oldOutMovements,
@@ -1140,34 +1205,12 @@ async function applyOrderDeleteInventoryRestore({
   mongoSession = null,
   logUrl = "/api/order/order_delete",
 }) {
-  const oldMap = buildOutboundQtyMapFromMovements(oldOutMovements);
-
-  if (oldMap.size === 0 && (existingOrderItems || []).length > 0) {
-    const defaultWarehouseId = resolveDefaultWarehouseId(req);
-    for (const item of existingOrderItems) {
-      const pid = item.product_id != null ? String(item.product_id).trim() : "";
-      const qty = Number(item.qty);
-      if (
-        !pid ||
-        !mongoose.Types.ObjectId.isValid(pid) ||
-        !Number.isFinite(qty) ||
-        qty <= 0
-      ) {
-        continue;
-      }
-      const wid =
-        findPriorWarehouseForProduct(oldMap, pid) ||
-        ((
-          defaultWarehouseId &&
-          mongoose.Types.ObjectId.isValid(defaultWarehouseId)
-        ) ?
-          String(defaultWarehouseId).trim()
-        : null);
-      if (!wid) continue;
-      const key = warehouseStockKey(pid, wid);
-      oldMap.set(key, roundMoney2((oldMap.get(key) || 0) + qty));
-    }
-  }
+  const movementWarehouseMap = buildOutboundQtyMapFromMovements(oldOutMovements);
+  const restoreMap = buildOrderLineRestoreQtyMap({
+    existingOrderItems,
+    movementWarehouseMap,
+    defaultWarehouseId: resolveDefaultWarehouseId(req),
+  });
 
   const priceByProduct = new Map();
   for (const item of existingOrderItems || []) {
@@ -1182,7 +1225,7 @@ async function applyOrderDeleteInventoryRestore({
   const productStockUpdates = [];
   let reversalMovementsInserted = 0;
 
-  for (const [key, lineQtyNum] of oldMap.entries()) {
+  for (const [key, lineQtyNum] of restoreMap.entries()) {
     const [productIdStr, warehouseIdStr] = key.split(":");
     const unitCost = Number(priceByProduct.get(productIdStr));
     if (!Number.isFinite(unitCost) || unitCost < 0) {
@@ -1226,47 +1269,20 @@ async function applyOrderDeleteInventoryRestore({
       throw mapped;
     }
 
-    const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
-    const bodyBeforeInventoryMovement = req.body;
-    const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-      req.params,
-      "id",
-    );
-    const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-    req.body = {
-      product_id: productIdStr,
-      warehouse_id: warehouseIdStr,
+    await insertOrderReferencedInventoryMovement({
+      req,
+      productIdStr,
+      warehouseIdStr,
       quantity: lineQtyNum,
-      movement_type: "in",
-      unit_cost: unitCost,
-      total_cost: totalCostMovement,
-      reference_type: "order",
-      reference_id: orderId,
-      reference_name: "Order Delete",
-      company_id: companyIdOid || companyId,
-      status: "active",
-    };
-
-    try {
-      await insertInventoryMovementRecord(req, mongoSession);
-      reversalMovementsInserted += 1;
-    } catch (inventoryMovementErr) {
-      if (inventoryMovementErr.clientPayload) {
-        throwOrderCreateFromGenericFailure(
-          inventoryMovementErr.clientPayload,
-          "Inventory movement reversal for order delete failed",
-        );
-      }
-      throw inventoryMovementErr;
-    } finally {
-      req.body = bodyBeforeInventoryMovement;
-      if (hadRouteParamId) {
-        req.params.id = savedRouteParamId;
-      } else {
-        delete req.params.id;
-      }
-    }
+      unitCost,
+      movementType: "in",
+      orderId,
+      companyId,
+      companyIdOid,
+      mongoSession,
+      referenceName: "Order Delete",
+    });
+    reversalMovementsInserted += 1;
 
     const onHandAfter = await sumWarehouseInventoryQtyForProduct(
       productIdStr,
@@ -2372,11 +2388,11 @@ async function order_save(req, res) {
  * |    3 | In txn — header-only | transaction          | update + insert    | many (4)     | medium | In `afterUpdate`: `softDeleteActiveOrderRelatedRecords` (GL) + `rebuildOrderGlTransactions` |
  * |    4 | In txn — lines    | order_item              | —                  | —            | low    | `buildOrderItemDocuments` |
  * |    5 | In txn — lines    | order_item              | read               | many         | low    | Snapshot existing lines before teardown |
- * |    6 | In txn — lines    | transaction, inventory_movements, order_item | read / delete | many | medium | `teardownOrderForLineReplace` — snapshot movements + `softDeleteActiveOrderRelatedRecords` |
+ * |    6 | In txn — lines    | transaction, order_item | read / delete | many | medium | `teardownOrderForLineReplace` — snapshot movements (kept active), GL soft-delete, line `deleteMany` |
  * |    7 | In txn — lines    | transaction             | insert             | many (4)     | medium | `rebuildOrderGlTransactions` (after teardown) |
  * |    8 | In txn — lines    | order_item              | insert             | many (L)     | medium | `insertMany` |
  * |    9 | In txn — lines    | order                   | update             | one          | low    | `syncHeaderTotalsFromLineItems` |
- * |   10 | In txn — lines    | warehouse_inventory, inventory_movements | read / update / insert | one × L | medium | `applyOrderLineReplaceInventory` — warehouse delta (old − new qty), movement insert |
+ * |   10 | In txn — lines    | warehouse_inventory, inventory_movements | read / update / insert | one × L | medium | `applyOrderLineReplaceInventory` — warehouse delta (old − new qty), delta movement insert (`in`/`out`) |
  * |   11 | In txn — lines    | product, logs           | read               | one × P      | low    | Stock alerts for pro  ducts removed from cart |
  * |   12 | In txn — header-only | order                | update             | one          | low    | `syncHeaderTotalsFromLineItems` only |
  * |   13 | Txn wrap          | —                       | —                  | —            | low    | `withTransaction` or standalone retry |
@@ -2504,7 +2520,7 @@ async function order_update(req, res) {
           new mongoose.Types.ObjectId(String(companyIdForStock))
         : null;
 
-      // step 6 start — teardown: snapshot movements + soft-delete GL, movements, line items
+      // step 6 start — teardown: snapshot movements (kept active), soft-delete GL, remove line items
       const { oldOutMovements } = await teardownOrderForLineReplace({
         orderId,
         transactionNumber: response.data.transaction_number,

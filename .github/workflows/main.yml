@@ -39,7 +39,7 @@ jobs:
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 
-      - name: Start app on server — npm run dev (SSH)
+      - name: Restart app on server — npm ci + pm2 pos_admin (SSH)
         continue-on-error: true
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -63,7 +63,7 @@ jobs:
           elif [ -n "$SSH_KEY" ]; then
             write_key_from_text "$SSH_KEY"
           else
-            echo "::warning::No SSH key — run on server: cd /home/demowebsitv3/public_html/pos_admin && sh deploy/reinstall-deps.sh && pm2 restart pos-api"
+            echo "::warning::No SSH key — run on server: cd /home/demowebsitv3/public_html/pos_admin && npm ci --omit=dev && pm2 restart pos_admin --update-env"
             exit 0
           fi
           sed -i 's/\r$//' key.pem
@@ -74,7 +74,9 @@ jobs:
 
           if ssh -i key.pem -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new root@192.249.118.80 <<'ENDSSH'
           set -e
-          cd /home/demowebsitv3/public_html/pos_admin
+          APP_DIR=/home/demowebsitv3/public_html/pos_admin
+          APP_USER=demowebsitv3
+          cd "$APP_DIR"
           export PATH="/usr/local/bin:/usr/bin:$PATH"
           if [ -f package-lock.json ]; then
             npm ci --omit=dev
@@ -82,13 +84,18 @@ jobs:
             npm install --omit=dev
           fi
           node -e "require('iconv-lite').encodingExists('utf8')"
+          chown -R "${APP_USER}:${APP_USER}" "$APP_DIR"
           pm2 delete pos-api 2>/dev/null || true
-          pm2 start npm --name pos-api -- run dev
+          if pm2 describe pos_admin >/dev/null 2>&1; then
+            pm2 restart pos_admin --update-env
+          else
+            pm2 start index.js --name pos_admin
+          fi
           pm2 save || true
           ENDSSH
           then
-            echo "App started via pm2 (npm run dev)."
+            echo "App restarted via pm2 (pos_admin)."
           else
-            echo "::warning::SSH failed — run on server: cd /home/demowebsitv3/public_html/pos_admin && sh deploy/reinstall-deps.sh && pm2 restart pos-api"
+            echo "::warning::SSH failed — run on server: cd /home/demowebsitv3/public_html/pos_admin && npm ci --omit=dev && pm2 restart pos_admin --update-env"
             exit 1
           fi

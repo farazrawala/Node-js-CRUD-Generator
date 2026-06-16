@@ -20,7 +20,7 @@ STEP 2 — Start Node (pick one):
 
   A) PM2 (recommended):
      npm install -g pm2
-     pm2 start index.js --name pos-api
+     pm2 start index.js --name pos_admin
      pm2 save
      pm2 startup
 
@@ -42,7 +42,7 @@ STEP 3 — Apache proxy (if not using cPanel Node app):
     cp deploy/pos_admin.htaccess .htaccess   # only if .htaccess missing after deploy
 
   IMPORTANT: After ANY code change, upload files and RESTART Node:
-    pm2 restart pos-api
+    pm2 restart pos_admin --update-env
   cPanel often does NOT read .env from disk — add BASE_PATH=/pos_admin in
   cPanel Node.js "Environment variables" anyway. New code also auto-strips
   /pos_admin from proxied URLs even if BASE_PATH is missing.
@@ -65,12 +65,12 @@ FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
 
     cd /home/demowebsitv3/public_html/pos_admin
     sh deploy/reinstall-deps.sh
-    pm2 restart pos-api
+    pm2 restart pos_admin --update-env
 
   Or manually:
     rm -rf node_modules
     npm ci --omit=dev
-    pm2 restart pos-api
+    pm2 restart pos_admin --update-env
 
   cPanel alternative: Setup Node.js App → "Run NPM Install" → restart app.
 

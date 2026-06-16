@@ -9,4 +9,4 @@ if [ -f package-lock.json ]; then
 else
   npm install --production
 fi
-echo "Done. Restart Node: pm2 restart pos-api"
+echo "Done. Restart Node: pm2 restart pos_admin --update-env"
