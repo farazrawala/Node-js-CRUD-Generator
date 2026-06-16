@@ -596,7 +596,8 @@ async function rebuildOrderGlTransactions({
 
 /**
  * Soft-delete / remove prior order-linked rows in one call.
- * Header-only update: `{ gl: true }`. Line replace: `{ gl: true, inventoryMovements: true, lineItems: true }`.
+ * Header-only update: `{ gl: true }`. Line replace: `{ gl: true, lineItems: true }`.
+ * `inventory_movements` are never soft-deleted; use reversal inserts on delete/update instead.
  */
 async function softDeleteActiveOrderRelatedRecords({
   orderId,
@@ -606,15 +607,10 @@ async function softDeleteActiveOrderRelatedRecords({
   userId = null,
   options = {},
 } = {}) {
-  const {
-    gl = false,
-    inventoryMovements: deleteMovements = false,
-    lineItems: deleteLineItems = false,
-  } = options;
+  const { gl = false, lineItems: deleteLineItems = false } = options;
 
   const result = {
     transactions: { modifiedCount: 0, matchedCount: 0 },
-    inventoryMovements: { modifiedCount: 0, matchedCount: 0 },
     lineItems: { deletedCount: 0 },
   };
 
@@ -629,23 +625,6 @@ async function softDeleteActiveOrderRelatedRecords({
       console.log(
         "✅ Transaction rows soft-deleted:",
         result.transactions.modifiedCount,
-      );
-    }
-  }
-
-  if (deleteMovements) {
-    result.inventoryMovements =
-      await InventoryMovements.softDeleteActiveByReference({
-        referenceType: "order",
-        referenceId: orderId,
-        companyId,
-        session: mongoSession,
-        userId,
-      });
-    if (result.inventoryMovements.modifiedCount > 0) {
-      console.log(
-        "✅ Order inventory movement rows soft-deleted:",
-        result.inventoryMovements.modifiedCount,
       );
     }
   }
@@ -967,7 +946,8 @@ async function applyOrderLineReplaceInventory({
 }
 
 /**
- * Line replace teardown: snapshot prior `out` movements, then `softDeleteActiveOrderRelatedRecords`.
+ * Line replace teardown: snapshot prior `out` movements, soft-delete GL + remove line items.
+ * Original `inventory_movements` rows stay active.
  */
 async function teardownOrderForLineReplace({
   orderId,
@@ -991,24 +971,21 @@ async function teardownOrderForLineReplace({
   if (mongoSession) movQuery = movQuery.session(mongoSession);
   const oldOutMovements = await movQuery.lean();
 
-  const { transactions, inventoryMovements, lineItems } =
-    await softDeleteActiveOrderRelatedRecords({
-      orderId,
-      transactionNumber,
-      companyId,
-      mongoSession,
-      userId,
-      options: {
-        gl: true,
-        inventoryMovements: true,
-        lineItems: true,
-      },
-    });
+  const { transactions, lineItems } = await softDeleteActiveOrderRelatedRecords({
+    orderId,
+    transactionNumber,
+    companyId,
+    mongoSession,
+    userId,
+    options: {
+      gl: true,
+      lineItems: true,
+    },
+  });
 
   return {
     oldOutMovements,
     transactions,
-    inventoryMovements,
     lineItems,
   };
 }
@@ -3277,7 +3254,7 @@ async function findTotalSalesByOrder(req, res) {
  * |    0 | order, order_item, inventory_movements | read | Pre-txn validation + outbound snapshot |
  * |    1 | order                   | update (soft)      | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | By header `transaction_number` |
- * |    3 | inventory_movements     | read               | Snapshot outbound rows (not soft-deleted; reversal `in` inserted in step 5) |
+ * |    3 | inventory_movements     | read (pre-txn)     | Outbound snapshot only — rows stay active; reversal `in` inserted in step 5 |
  * |    4 | order_item              | update (soft)      | All active lines for this order |
  * |    5 | warehouse_inventory, inventory_movements, logs | update / insert | Restore qty + `in` reversal per prior `out` |
  * |    6 | logs                    | insert             | `createApplicationLog` — success |
@@ -3401,20 +3378,8 @@ async function order_delete(req, res) {
       );
     }
 
-    // step 3 — snapshot outbound movements (kept active; reversal `in` rows added in step 5)
-    let movQuery = InventoryMovements.find({
-      reference_type: "order",
-      reference_id: orderId,
-      movement_type: "out",
-      status: "active",
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-    }).select("product_id warehouse_id quantity");
-    if (mongoSession) movQuery = movQuery.session(mongoSession);
-    const oldOutMovementsInTxn = await movQuery.lean();
-    const oldOutMovements =
-      oldOutMovementsInTxn.length > 0 ?
-        oldOutMovementsInTxn
-      : oldOutMovementsPreTxn;
+    // step 3 — pre-txn outbound snapshot for warehouse lookup (movements are never soft-deleted)
+    const oldOutMovements = oldOutMovementsPreTxn;
 
     // step 4 — soft-delete order_item rows
     const itemSoftDeleteSet = {
