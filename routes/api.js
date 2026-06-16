@@ -1,5 +1,22 @@
 const express = require("express");
 const router = express.Router();
+const { getHealthPayload } = require("../utils/buildInfo");
+const { getBasePath } = require("../utils/basePath");
+
+/** Public deploy / runtime check (same payload as GET /health). */
+router.get("/health", (req, res) => {
+  res.status(200).json(getHealthPayload(getBasePath() || null));
+});
+
+/** Public version stamp — compare gitCommitShort with local `git rev-parse --short HEAD`. */
+router.get("/version", (req, res) => {
+  const payload = getHealthPayload(getBasePath() || null);
+  res.status(200).json({
+    success: true,
+    ...payload,
+    data: payload.version,
+  });
+});
 
 // Dynamic route generator
 const { registerAllModelRoutes } = require("../utils/dynamicRouteGenerator");

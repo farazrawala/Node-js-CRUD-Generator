@@ -25,6 +25,32 @@ jobs:
           node -e "require('iconv-lite').encodingExists('utf8')"
           echo "npm ci OK ($(du -sh node_modules | cut -f1))"
 
+      - name: Bump deploy version (MAJOR.MINOR.<run#> on every push)
+        id: bump_version
+        run: |
+          DEPLOY_VERSION="$(node deploy/bump-deploy-version.js)"
+          echo "deployVersion=${DEPLOY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Deploy version: ${DEPLOY_VERSION}"
+
+      - name: Write deploy build-info (version stamp for /health and /api/version)
+        run: |
+          SHORT="${GITHUB_SHA:0:7}"
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > deploy/build-info.json <<EOF
+          {
+            "deployVersion": "${{ steps.bump_version.outputs.deployVersion }}",
+            "deployNumber": ${GITHUB_RUN_NUMBER},
+            "gitCommit": "${GITHUB_SHA}",
+            "gitCommitShort": "${SHORT}",
+            "gitBranch": "${GITHUB_REF_NAME}",
+            "deployedAt": "${DEPLOYED_AT}",
+            "buildLabel": "v${{ steps.bump_version.outputs.deployVersion }}-${SHORT}",
+            "workflowRunId": "${GITHUB_RUN_ID}"
+          }
+          EOF
+          echo "Build stamp:"
+          cat deploy/build-info.json
+
       - name: Sync application files (exclude node_modules — install on server via SSH)
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
@@ -85,6 +111,10 @@ jobs:
           fi
           node -e "require('iconv-lite').encodingExists('utf8')"
           chown -R "${APP_USER}:${APP_USER}" "$APP_DIR"
+          if [ -f deploy/build-info.json ]; then
+            echo "=== Live build stamp (deploy/build-info.json) ==="
+            cat deploy/build-info.json
+          fi
           pm2 delete pos-api 2>/dev/null || true
           if pm2 describe pos_admin >/dev/null 2>&1; then
             pm2 restart pos_admin --update-env

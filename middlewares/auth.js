@@ -151,6 +151,9 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/order\/public-get-order-by-order-no\/.*/, // public order lookup (no auth)
     "/api/test", // Test route
     "/health",
+    "/version",
+    "/api/health",
+    "/api/version",
   ];
 
   const pathCandidates = [

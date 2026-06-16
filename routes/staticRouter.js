@@ -3,15 +3,20 @@ const router = express.Router();
 const URL = require("../models/url");
 const { restrictTo } = require("../middlewares/auth");
 const { withBasePath, getBasePath } = require("../utils/basePath");
+const { getHealthPayload } = require("../utils/buildInfo");
 
-/** Public — verify Node is running (not Apache static index.js). */
+/** Public — verify Node is running + which deploy/build is loaded. */
 router.get("/health", (req, res) => {
+  res.status(200).json(getHealthPayload(getBasePath() || null));
+});
+
+/** Alias for Postman clients that prefer /version. */
+router.get("/version", (req, res) => {
+  const payload = getHealthPayload(getBasePath() || null);
   res.status(200).json({
-    ok: true,
-    service: "pos-api",
-    basePath: getBasePath() || null,
-    nodeEnv: process.env.NODE_ENV || "development",
-    time: new Date().toISOString(),
+    success: true,
+    ...payload,
+    data: payload.version,
   });
 });
 

@@ -1,0 +1,10 @@
+{
+  "deployVersion": "1.0.0",
+  "deployNumber": 0,
+  "gitCommit": "local-dev-full-sha-or-run-git-rev-parse",
+  "gitCommitShort": "local",
+  "gitBranch": "main",
+  "deployedAt": "2026-01-01T00:00:00Z",
+  "buildLabel": "v1.0.0-local",
+  "workflowRunId": null
+}

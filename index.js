@@ -44,6 +44,7 @@ const {
   getCookiePath,
   isSecureCookie,
 } = require("./utils/basePath");
+const { getDeployVersionPayload } = require("./utils/buildInfo");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
@@ -322,6 +323,7 @@ process.on("uncaughtException", (err) => {
 });
 
 app.listen(port, () => {
+  const version = getDeployVersionPayload();
   fileLogger.logStartup({
     port,
     basePath: BASE_PATH || null,
@@ -329,9 +331,14 @@ app.listen(port, () => {
     appEnv: process.env.APP_ENV || null,
     cookiePath: getCookiePath(),
     logDir: fileLogger.LOG_DIR,
+    gitCommitShort: version.gitCommitShort,
+    buildLabel: version.buildLabel,
   });
   console.log("🚀 Server started at port " + port);
   console.log(
     `📁 BASE_PATH=${BASE_PATH || "(unset)"} cookiePath=${getCookiePath()}`,
+  );
+  console.log(
+    `🏷️  Deploy v${version.deployVersion} (commit ${version.gitCommitShort}, run #${version.deployNumber ?? "local"}) — GET ${withBasePath("/api/version")}`,
   );
 });

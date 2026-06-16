@@ -49,9 +49,19 @@ STEP 3 — Apache proxy (if not using cPanel Node app):
 
 STEP 4 — Verify:
 
+  https://testv3.websitedemolynk.com/pos_admin/api/version
+    → version.deployVersion increases on every push to main (e.g. 1.0.42, 1.0.43)
+    → version.deployNumber = GitHub Actions run number
+    → version.gitCommitShort = git commit on that deploy
+    → version.processUptimeSec low after pm2 restart
+
+  Compare live deployVersion to GitHub Actions run # for that deploy.
+  Local dev stays package.json 1.0.0 unless you set deploy/build-info.json manually.
+
   https://testv3.websitedemolynk.com/pos_admin/health
-    → MUST return JSON: {"ok":true,"service":"pos-api",...}
-    → If you see index.js source or HTML 404, Node/proxy is still wrong.
+    → Same build info (alias)
+
+  version.inventoryPolicy should be "order_movements_no_soft_delete_v2" on current builds.
 
   https://testv3.websitedemolynk.com/pos_admin/login/admin
     → Admin login HTML page
