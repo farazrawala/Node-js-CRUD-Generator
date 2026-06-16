@@ -158,3 +158,10 @@ flowchart LR
 
 errors : 
 GET https://testv3.websitedemolynk.com/pos_admin/admin/debug/logs/download?file=app-2026-06-13.log
+
+
+
+GET https://testv3.websitedemolynk.com/pos_admin/api/version
+GET https://testv3.websitedemolynk.com/pos_admin/api/health
+GET https://testv3.websitedemolynk.com/pos_admin/health
+GET https://testv3.websitedemolynk.com/pos_admin/version

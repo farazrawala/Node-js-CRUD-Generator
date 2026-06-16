@@ -44,7 +44,7 @@ const {
   getCookiePath,
   isSecureCookie,
 } = require("./utils/basePath");
-const { getDeployVersionPayload } = require("./utils/buildInfo");
+const { getDeployVersionPayload, getHealthPayload } = require("./utils/buildInfo");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
@@ -268,6 +268,19 @@ app.use((req, res, next) => {
 connectMonogodb(getMongoUri()).catch((err) => {
   console.error("❌ Failed to connect to MongoDB:", err.message);
   process.exit(1);
+});
+
+/** Public deploy check — registered before /api auth middleware. */
+app.get("/api/version", (req, res) => {
+  const payload = getHealthPayload(BASE_PATH || null);
+  res.status(200).json({
+    success: true,
+    ...payload,
+    data: payload.version,
+  });
+});
+app.get("/api/health", (req, res) => {
+  res.status(200).json(getHealthPayload(BASE_PATH || null));
 });
 
 app.use(checkForAuthentication); // <--- This line must be enabled
