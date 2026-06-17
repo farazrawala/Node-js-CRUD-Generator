@@ -86,7 +86,8 @@ FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
 
 AUTO RESTART AFTER GIT PUSH (recommended):
   See deploy/SETUP-GITHUB-SSH.md
-  Add GitHub secret SSH_PRIVATE_KEY → every push runs deploy/restart-pos-admin.sh via SSH.
+  GitHub Actions FTP uploads deploy/.restart-requested; root cron runs watch-restart-trigger.sh (~1 min).
+  Optional SSH_PRIVATE_KEY secret for instant restart if port 22 is open to GitHub Actions.
 
   Manual restart (root SSH only — demowebsitv3 cannot restart root's pm2):
     cd /home/demowebsitv3/public_html/pos_admin

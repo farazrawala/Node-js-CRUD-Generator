@@ -1,52 +1,81 @@
-# One-time setup: auto `pm2 restart pos_admin` after every push
+# Auto `pm2 restart pos_admin` after every push
 
-Without SSH, GitHub Actions only **uploads files** (FTP). Node keeps running **old code** until you restart PM2.
+FTP upload alone does **not** reload Node. Something on the server must run `deploy/restart-pos-admin.sh` after each deploy.
 
-## 1. On the server (as root)
+## Recommended: FTP trigger + root cron (InMotion / cPanel)
+
+GitHub Actions runners often **cannot reach port 22** on shared hosting (`Connection timed out`). FTP still works.
+
+### 1. On the server (as root, one time)
 
 ```bash
-# Ensure root can SSH in with a key (not password)
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-
-# Generate a deploy key (press Enter for no passphrase)
-ssh-keygen -t ed25519 -f /root/.ssh/github_deploy -N ""
-
-# Allow the key to log in as root
-cat /root/.ssh/github_deploy.pub >> /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-
-# Show private key — copy ALL lines including BEGIN/END
-cat /root/.ssh/github_deploy
+chmod +x /home/demowebsitv3/public_html/pos_admin/deploy/watch-restart-trigger.sh
+crontab -e
 ```
 
-## 2. In GitHub repo
+Add:
 
-1. **Settings** → **Secrets and variables** → **Actions**
-2. Either:
-   - **Repository secrets** → **New repository secret**, name `SSH_PRIVATE_KEY`, **or**
-   - **Environments** → create/select environment `SSH_PRIVATE_KEY` → add secret `SSH_PRIVATE_KEY`
-3. Value: paste the full private key from step 1
+```cron
+*/1 * * * * sh /home/demowebsitv3/public_html/pos_admin/deploy/watch-restart-trigger.sh >> /var/log/pos_admin_deploy.log 2>&1
+```
 
-The workflow uses `environment: SSH_PRIVATE_KEY`, so an environment secret with that name works. A repository secret named `SSH_PRIVATE_KEY` also works (GitHub exposes it to the job).
+Every push uploads `deploy/.restart-requested` via FTP. Within ~1 minute cron runs `restart-pos-admin.sh` (`npm ci` + `pm2 restart pos_admin`).
 
-## 3. Push to `main`
+### 2. Push to `main`
 
-The workflow will:
+No GitHub SSH secret required for this path.
 
-1. FTP upload files
-2. SSH as `root@192.249.118.80`
-3. Run `deploy/restart-pos-admin.sh` → `npm ci` + `pm2 restart pos_admin`
-
-## 4. Verify
+### 3. Verify
 
 ```bash
 curl -s https://testv3.websitedemolynk.com/pos_admin/api/version
 ```
 
-Check `version.processUptimeSec` is low (seconds) right after deploy.
+After deploy, `version.processUptimeSec` should drop within about a minute.
 
-## Manual restart (if SSH secret missing)
+---
+
+## Optional: instant restart via SSH
+
+Only works if **root SSH on port 22 is open to GitHub Actions** (often blocked on shared hosting).
+
+### 1. On the server (as root)
+
+```bash
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+ssh-keygen -t ed25519 -f /root/.ssh/github_deploy -N ""
+cat /root/.ssh/github_deploy.pub >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+cat /root/.ssh/github_deploy
+```
+
+### 2. In GitHub repo
+
+**Settings** → **Secrets and variables** → **Actions** → environment or repository secret:
+
+- Name: `SSH_PRIVATE_KEY`
+- Value: full private key from above
+
+Optional variables (same environment or repository **Variables**):
+
+| Name | Default | Purpose |
+|------|---------|---------|
+| `SSH_HOST` | `192.249.118.80` | SSH hostname or IP |
+| `SSH_PORT` | `22` | SSH port |
+| `SSH_USER` | `root` | SSH user |
+
+The workflow uses `environment: SSH_PRIVATE_KEY` when that environment exists.
+
+### 3. Workflow behavior
+
+1. FTP upload (always)
+2. Try SSH restart (instant if port 22 reachable)
+3. If SSH fails, cron trigger still restarts within ~1 minute
+
+---
+
+## Manual restart
 
 ```bash
 # As root only (demowebsitv3 PM2 cannot see root's pos_admin)

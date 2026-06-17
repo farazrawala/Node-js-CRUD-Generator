@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
 
       - name: Verify production dependencies install (not uploaded — symlinks break FTP)
@@ -53,6 +53,16 @@ jobs:
           echo "Build stamp:"
           cat deploy/build-info.json
 
+      - name: Write restart trigger for server cron (FTP upload)
+        run: |
+          {
+            echo "run=${GITHUB_RUN_NUMBER}"
+            echo "commit=${GITHUB_SHA}"
+            echo "deployedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > deploy/.restart-requested
+          echo "Restart trigger:"
+          cat deploy/.restart-requested
+
       - name: Sync application files (exclude node_modules — install on server via SSH)
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
@@ -69,6 +79,7 @@ jobs:
 
       - name: Prepare SSH key for server restart
         id: ssh_key
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
@@ -88,26 +99,44 @@ jobs:
 
           if [ -f deploy/github_actions_key.pem ] && grep -q "BEGIN.*PRIVATE KEY" deploy/github_actions_key.pem; then
             cp deploy/github_actions_key.pem key.pem
-            echo "has_key=true" >> "$GITHUB_OUTPUT"
           elif [ -n "$SSH_KEY" ]; then
             write_key_from_text "$SSH_KEY"
-            echo "has_key=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_key=false" >> "$GITHUB_OUTPUT"
-            echo "::error::SSH_PRIVATE_KEY secret is not set. FTP upload succeeded but PM2 will NOT restart automatically."
-            echo "See deploy/SETUP-GITHUB-SSH.md — one-time setup, then every push restarts pos_admin."
-            exit 1
+            exit 0
           fi
           sed -i 's/\r$//' key.pem
           chmod 600 key.pem
+          echo "has_key=true" >> "$GITHUB_OUTPUT"
 
       - name: Restart pos_admin on server (SSH)
+        id: ssh_restart
+        if: steps.ssh_key.outputs.has_key == 'true'
+        continue-on-error: true
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST || '192.249.118.80' }}
+          SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || 'root' }}
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H 192.249.118.80 >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          ssh -i key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            root@192.249.118.80 \
+          ssh -i key.pem -p "$SSH_PORT" -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new \
+            "${SSH_USER}@${SSH_HOST}" \
             'bash /home/demowebsitv3/public_html/pos_admin/deploy/restart-pos-admin.sh'
 
-          echo "✅ pos_admin restarted on live server."
+          echo "✅ pos_admin restarted via SSH."
+
+      - name: Post-deploy restart status
+        if: always()
+        run: |
+          if [ "${{ steps.ssh_restart.outcome }}" = "success" ]; then
+            echo "Restart: SSH succeeded (immediate)."
+          elif [ "${{ steps.ssh_restart.outcome }}" = "failure" ]; then
+            echo "::warning::SSH restart failed (port 22 often blocked from GitHub Actions on shared hosting)."
+            echo "FTP uploaded deploy/.restart-requested — root cron should restart pos_admin within ~1 minute."
+            echo "One-time setup: deploy/SETUP-GITHUB-SSH.md (cron section)."
+          else
+            echo "Restart: FTP trigger uploaded; waiting for server cron (see deploy/SETUP-GITHUB-SSH.md)."
+          fi
+          echo "Deploy files synced successfully."

@@ -51,6 +51,7 @@ jspm_packages/
 # Deploy secrets (never commit)
 deploy/github_actions_key.pem
 deploy/build-info.json
+deploy/.restart-requested
 
 # parcel-bundler cache
 .cache
