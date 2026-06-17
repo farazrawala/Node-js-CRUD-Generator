@@ -23,9 +23,12 @@ cat /root/.ssh/github_deploy
 ## 2. In GitHub repo
 
 1. **Settings** → **Secrets and variables** → **Actions**
-2. **New repository secret**
-3. Name: `SSH_PRIVATE_KEY`
-4. Value: paste the full private key from step 1
+2. Either:
+   - **Repository secrets** → **New repository secret**, name `SSH_PRIVATE_KEY`, **or**
+   - **Environments** → create/select environment `SSH_PRIVATE_KEY` → add secret `SSH_PRIVATE_KEY`
+3. Value: paste the full private key from step 1
+
+The workflow uses `environment: SSH_PRIVATE_KEY`, so an environment secret with that name works. A repository secret named `SSH_PRIVATE_KEY` also works (GitHub exposes it to the job).
 
 ## 3. Push to `main`
 

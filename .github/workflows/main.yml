@@ -9,6 +9,7 @@ on:
 jobs:
   web-deploy:
     runs-on: ubuntu-latest
+    environment: SSH_PRIVATE_KEY
     name: deploy
     steps:
       - name: Get latest code
