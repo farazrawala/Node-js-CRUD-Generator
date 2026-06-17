@@ -80,6 +80,12 @@ const PURCHASE_RETURN_GL_LINE_META = [
   },
 ];
 
+/** Inventory movement `reference_name` with PR number when available (e.g. `Purchase Return (PR-0042)`). */
+function purchaseReturnReferenceName(label, purchaseReturnNo) {
+  const no = String(purchaseReturnNo ?? "").trim();
+  return no ? `${label} (${no})` : label;
+}
+
 /** Legacy tenants: resolve GL ids by signup COA name when `company.default_*` was never set. */
 const PR_GL_ACCOUNT_NAME_FALLBACKS = {
   default_purchase_account: /^purchase$/i,
@@ -1033,6 +1039,7 @@ async function applyPurchaseReturnDeleteInventoryRestore({
   oldOutMovements,
   existingReturnItems,
   purchaseReturnId,
+  purchaseReturnNo = null,
   companyId,
   req,
   mongoSession = null,
@@ -1136,6 +1143,7 @@ async function applyPurchaseReturnDeleteInventoryRestore({
       unitCost,
       referenceId: purchaseReturnId,
       referenceName: "Purchase Return Delete",
+      referenceNo: purchaseReturnNo,
       companyId,
       mongoSession,
       movementType: "in",
@@ -1191,6 +1199,7 @@ async function insertPurchaseReturnOutboundMovement(
     unitCost,
     referenceId,
     referenceName,
+    referenceNo = null,
     companyId,
     mongoSession,
     movementType = "out",
@@ -1214,7 +1223,7 @@ async function insertPurchaseReturnOutboundMovement(
     total_cost: totalCostMovement,
     reference_type: "purchase_return",
     reference_id: referenceId,
-    reference_name: referenceName,
+    reference_name: purchaseReturnReferenceName(referenceName, referenceNo),
     company_id: companyId,
     status: "active",
   };
@@ -1239,6 +1248,7 @@ async function applyPurchaseReturnOutboundForLine({
   line,
   referenceId,
   referenceName = "Purchase Return",
+  referenceNo = null,
   companyId,
   req,
   mongoSession = null,
@@ -1300,6 +1310,7 @@ async function applyPurchaseReturnOutboundForLine({
       unitCost,
       referenceId,
       referenceName,
+      referenceNo,
       companyId,
       mongoSession,
     });
@@ -1969,6 +1980,7 @@ async function purchaseReturnCreate(req, res) {
             line,
             referenceId: newPurchaseReturnId,
             referenceName: "Purchase Return",
+            referenceNo: purchaseReturnCreateResult.data?.purchase_return_no,
             companyId,
             req,
             mongoSession,
@@ -2477,6 +2489,7 @@ async function purchase_return_update(req, res) {
             line,
             referenceId: prId,
             referenceName: "Purchase Return",
+            referenceNo: response.data?.purchase_return_no,
             companyId: companyIdForMovement,
             req,
             mongoSession,
@@ -2890,6 +2903,7 @@ async function purchase_return_delete(req, res) {
         oldOutMovements: oldOutMovementsPreTxn,
         existingReturnItems: existingPrItems,
         purchaseReturnId: prId,
+        purchaseReturnNo: existingPr.purchase_return_no,
         companyId,
         req,
         mongoSession,

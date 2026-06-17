@@ -81,6 +81,12 @@ function purchaseOrderGlLineFixHint(meta) {
   return parts.length ? `Set ${parts.join(" or ")}.` : "Configure GL accounts.";
 }
 
+/** Inventory movement `reference_name` with PO number when available (e.g. `Purchase Order (PO-0042)`). */
+function purchaseOrderReferenceName(label, purchaseOrderNo) {
+  const no = String(purchaseOrderNo ?? "").trim();
+  return no ? `${label} (${no})` : label;
+}
+
 /**
  * Augment bulk-create `failed` entries with line label, normalized missing list, and fix hints.
  * Keeps original keys (`index`, `missing`, …) for backward compatibility.
@@ -1650,7 +1656,10 @@ async function purchaseOrderCreate(req, res) {
             total_cost: totalCostMovement,
             reference_type: "purchase_order",
             reference_id: newPurchaseOrderId,
-            reference_name: "Purchase Order",
+            reference_name: purchaseOrderReferenceName(
+              "Purchase Order",
+              purchaseOrderCreateResult.data?.purchase_order_no,
+            ),
             company_id: companyId,
             status: "active",
           };
@@ -2096,7 +2105,10 @@ async function purchase_order_update(req, res) {
             total_cost: totalCostMovement,
             reference_type: "purchase_order",
             reference_id: poId,
-            reference_name: "Purchase Order",
+            reference_name: purchaseOrderReferenceName(
+              "Purchase Order",
+              response.data?.purchase_order_no,
+            ),
             company_id: companyId,
             status: "active",
           };
@@ -2517,7 +2529,10 @@ async function purchase_order_delete(req, res) {
           total_cost: totalCostMovement,
           reference_type: "purchase_order",
           reference_id: poId,
-          reference_name: "Purchase Order Delete",
+          reference_name: purchaseOrderReferenceName(
+            "Purchase Order Delete",
+            existingPo.purchase_order_no,
+          ),
           company_id: companyId,
           status: "active",
         };

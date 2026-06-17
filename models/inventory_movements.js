@@ -54,7 +54,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Reference Table ID", // : purchase_order_item_id, order_item_id, adjustment_id, manual_id
     },
     reference_name: {
-      type: String, //reference name : purchase order, order, adjustment, manual
+      type: String, // e.g. Purchase Order (PO-0042), Purchase Return (PR-0042), Sales Return (SR-0042), Order (ORD-0042)
       required: true,
       field_name: "Reference Name",
     },

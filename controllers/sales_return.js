@@ -81,6 +81,12 @@ const SALES_RETURN_GL_LINE_META = [
   },
 ];
 
+/** Inventory movement `reference_name` with SR number when available (e.g. `Sales Return (SR-0042)`). */
+function salesReturnReferenceName(label, salesReturnNo) {
+  const no = String(salesReturnNo ?? "").trim();
+  return no ? `${label} (${no})` : label;
+}
+
 /** Legacy tenants: resolve GL ids by signup COA name when `company.default_*` was never set. */
 const SR_GL_ACCOUNT_NAME_FALLBACKS = {
   default_sales_account: /^sales$/i,
@@ -1172,6 +1178,7 @@ async function applySalesReturnDeleteInventoryRestore({
   oldInMovements,
   existingReturnItems,
   salesReturnId,
+  salesReturnNo = null,
   companyId,
   req,
   mongoSession = null,
@@ -1275,6 +1282,7 @@ async function applySalesReturnDeleteInventoryRestore({
       unitCost,
       referenceId: salesReturnId,
       referenceName: "Sales Return Delete",
+      referenceNo: salesReturnNo,
       companyId,
       mongoSession,
       movementType: "out",
@@ -1330,6 +1338,7 @@ async function insertSalesReturnInventoryMovement(
     unitCost,
     referenceId,
     referenceName,
+    referenceNo = null,
     companyId,
     mongoSession,
     movementType = "in",
@@ -1353,7 +1362,7 @@ async function insertSalesReturnInventoryMovement(
     total_cost: totalCostMovement,
     reference_type: "sales_return",
     reference_id: referenceId,
-    reference_name: referenceName,
+    reference_name: salesReturnReferenceName(referenceName, referenceNo),
     company_id: companyId,
     status: "active",
   };
@@ -1377,6 +1386,7 @@ async function applySalesReturnInboundForLine({
   line,
   referenceId,
   referenceName = "Sales Return",
+  referenceNo = null,
   companyId,
   req,
   mongoSession = null,
@@ -1434,6 +1444,7 @@ async function applySalesReturnInboundForLine({
     unitCost,
     referenceId,
     referenceName,
+    referenceNo,
     companyId,
     mongoSession,
     movementType: "in",
@@ -2109,6 +2120,7 @@ async function salesReturnCreate(req, res) {
             line,
             referenceId: newSalesReturnId,
             referenceName: "Sales Return",
+            referenceNo: salesReturnCreateResult.data?.sales_return_no,
             companyId,
             req,
             mongoSession,
@@ -2610,6 +2622,7 @@ async function sales_return_update(req, res) {
             line,
             referenceId: prId,
             referenceName: "Sales Return",
+            referenceNo: response.data?.sales_return_no,
             companyId: companyIdForMovement,
             req,
             mongoSession,
@@ -3031,6 +3044,7 @@ async function sales_return_delete(req, res) {
         oldInMovements,
         existingReturnItems: existingSrItems,
         salesReturnId: srId,
+        salesReturnNo: existingSr.sales_return_no,
         companyId,
         req,
         mongoSession,
