@@ -79,7 +79,6 @@ jobs:
 
       - name: Prepare SSH key for server restart
         id: ssh_key
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
