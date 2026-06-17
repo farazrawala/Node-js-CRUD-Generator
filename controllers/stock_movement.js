@@ -12,6 +12,7 @@ const {
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const { logWarehouseInventoryChange } = require("../utils/warehouseInventoryLogs");
 
 function toObjectId(id) {
   if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
@@ -90,6 +91,8 @@ async function applyWarehouseInventoryDelta({
   user,
   companyId: companyIdOverride = null,
   session = null,
+  req = null,
+  logContext = null,
 }) {
   const companyId = companyIdOverride || user?.company_id || null;
   if (!companyId) {
@@ -136,12 +139,32 @@ async function applyWarehouseInventoryDelta({
     throw new Error("Insufficient inventory quantity");
   }
 
+  const previousQty = Number(inventory.quantity || 0);
   inventory.quantity = nextQty;
   if (user?._id) {
     inventory.updated_by = user._id;
   }
 
   await inventory.save(session ? { session } : {});
+
+  const signedDelta = Number(quantityDelta || 0);
+  if (Number.isFinite(signedDelta) && signedDelta !== 0) {
+    await logWarehouseInventoryChange(
+      req,
+      {
+        product_id: String(productId),
+        warehouse_id: String(warehouseId),
+        previous_quantity: previousQty,
+        quantity: nextQty,
+        qty_delta: signedDelta,
+        warehouse_inventory_id: inventory._id,
+      },
+      companyId,
+      logContext,
+      session,
+    );
+  }
+
   return inventory;
 }
 
@@ -155,7 +178,7 @@ async function applyWarehouseInventoryDelta({
  * When `session` is set, writes use that session (caller must run inside session.withTransaction).
  * @returns {Promise<{ success: boolean, status?: number, data?: object, message?: string }>}
  */
-async function createStockMovementRecord({ body, user, session: outerSession }) {
+async function createStockMovementRecord({ body, user, session: outerSession, req = null }) {
   const productId = toObjectId(body.product_id || body.productId);
   const warehouseId = toObjectId(body.warehouse_id || body.warehouseId);
   const quantity = Number(body.quantity);
@@ -292,6 +315,11 @@ async function createStockMovementRecord({ body, user, session: outerSession }) 
       user,
       companyId: resolvedCompanyId,
       session,
+      req,
+      logContext: {
+        reference_type: type === "sale" ? "sales" : type,
+        reference_id: orderItemId || referenceId || adjustmentIdFinal,
+      },
     });
     return created;
   };
@@ -468,6 +496,7 @@ async function createStockMovement(req, res) {
     const result = await createStockMovementRecord({
       body: req.body || {},
       user: req.user,
+      req,
     });
 
     if (!result.success) {
@@ -570,6 +599,16 @@ async function updateStockMovement(req, res) {
           user: req.user,
           companyId: invCompanyId,
           session,
+          req,
+          logContext: {
+            reference_type:
+              movement.type === "sale" ? "sales" : movement.type || "stock_movement",
+            reference_id:
+              movement.order_item_id ||
+              movement.reference_id ||
+              movement.adjustment_id ||
+              movement._id,
+          },
         });
 
         await applyWarehouseInventoryDelta({
@@ -579,6 +618,18 @@ async function updateStockMovement(req, res) {
           user: req.user,
           companyId: invCompanyId,
           session,
+          req,
+          logContext: {
+            reference_type:
+              (req.body.type || movement.type) === "sale" ?
+                "sales"
+              : req.body.type || movement.type || "stock_movement",
+            reference_id:
+              movement.order_item_id ||
+              movement.reference_id ||
+              movement.adjustment_id ||
+              movement._id,
+          },
         });
 
         movement.product_id = newProductId;
@@ -686,6 +737,16 @@ async function deleteStockMovement(req, res) {
           user: req.user,
           companyId: invCompanyId,
           session,
+          req,
+          logContext: {
+            reference_type:
+              movement.type === "sale" ? "sales" : movement.type || "stock_movement",
+            reference_id:
+              movement.order_item_id ||
+              movement.reference_id ||
+              movement.adjustment_id ||
+              movement._id,
+          },
         });
 
         movement.deletedAt = new Date();

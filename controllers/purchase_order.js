@@ -1180,7 +1180,14 @@ async function applyWarehouseInventoryForPoLines({
   mongoSession,
   req,
   reverseLines: previousPoLinesBeforeReplace = [],
+  purchaseOrderId = null,
+  purchaseOrderNo = null,
 }) {
+  const logContext = {
+    reference_type: "purchase",
+    reference_id: purchaseOrderId,
+    reference_no: purchaseOrderNo,
+  };
   const stockChangeAuditLog =
     await WarehouseInventory.applyStockChangesFromLines({
       inboundLines: poLinePayloads,
@@ -1189,6 +1196,8 @@ async function applyWarehouseInventoryForPoLines({
       companyId: tenantCompanyId,
       session: mongoSession,
       userId: req.user?._id,
+      req,
+      logContext,
     });
 
   return { productStockUpdates: stockChangeAuditLog };
@@ -1707,6 +1716,8 @@ async function purchaseOrderCreate(req, res) {
         companyId,
         mongoSession,
         req,
+        purchaseOrderId: purchaseOrderCreateResult.data?._id,
+        purchaseOrderNo: purchaseOrderCreateResult.data?.purchase_order_no,
       });
       productStockUpdates.push(...stockReconcile.productStockUpdates);
       // step 3–4 end
@@ -2143,6 +2154,12 @@ async function purchase_order_update(req, res) {
         companyId,
         session: mongoSession,
         userId: req.user?._id,
+        req,
+        logContext: {
+          reference_type: "purchase",
+          reference_id: response.data?._id,
+          reference_no: response.data?.purchase_order_no,
+        },
       });
       const wholesaleReverseRows = await applyWholesalePriceRemoveForPoLines({
         lines: existingPoItems,
@@ -2171,6 +2188,8 @@ async function purchase_order_update(req, res) {
         mongoSession,
         req,
         reverseLines: [],
+        purchaseOrderId: response.data?._id,
+        purchaseOrderNo: response.data?.purchase_order_no,
       });
       productStockUpdates.push(...stockReconcile.productStockUpdates);
       // step 13 end
@@ -2579,6 +2598,12 @@ async function purchase_order_delete(req, res) {
           companyId,
           session: mongoSession,
           userId,
+          req,
+          logContext: {
+            reference_type: "purchase",
+            reference_id: existingPo._id,
+            reference_no: existingPo.purchase_order_no,
+          },
         });
       for (const row of stockReconcile || []) {
         productStockUpdates.push({ ...row, source: "warehouse_inventory" });

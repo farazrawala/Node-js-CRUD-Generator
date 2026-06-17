@@ -1045,6 +1045,11 @@ async function applyPurchaseReturnDeleteInventoryRestore({
   mongoSession = null,
   logUrl = "/api/purchase_return/purchase_return_delete",
 }) {
+  const inventoryLogContext = {
+    reference_type: "purchase_return",
+    reference_id: purchaseReturnId,
+    reference_no: purchaseReturnNo,
+  };
   const oldMap = buildOutboundQtyMapFromMovements(oldOutMovements);
 
   if (oldMap.size === 0 && (existingReturnItems || []).length > 0) {
@@ -1109,6 +1114,8 @@ async function applyPurchaseReturnDeleteInventoryRestore({
         qtyDelta: lineQtyNum,
         userId: req.user?._id,
         session: mongoSession,
+        req,
+        logContext: inventoryLogContext,
       });
       if (whChange) {
         productStockUpdates.push({
@@ -1253,6 +1260,11 @@ async function applyPurchaseReturnOutboundForLine({
   req,
   mongoSession = null,
 }) {
+  const inventoryLogContext = {
+    reference_type: "purchase_return",
+    reference_id: referenceId,
+    reference_no: referenceNo,
+  };
   const productIdStr = String(line.product_id ?? "").trim();
   const lineQtyNum = Number(line.qty);
   const unitCost = Number(line.price);
@@ -1291,6 +1303,8 @@ async function applyPurchaseReturnOutboundForLine({
         preferredWarehouseId,
         userId: req.user?._id,
         session: mongoSession,
+        req,
+        logContext: inventoryLogContext,
       }));
   } catch (err) {
     if (err.clientPayload) {

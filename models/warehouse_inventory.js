@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { logWarehouseInventoryChange } = require("../utils/warehouseInventoryLogs");
 
 function toObjectId(value) {
   if (value == null || value === "") return null;
@@ -125,6 +126,8 @@ modelSchema.statics.applyQuantityDelta = async function ({
   lastLineItemId = null,
   userId = null,
   session = null,
+  req = null,
+  logContext = null,
 } = {}) {
   const delta = roundQty(qtyDelta);
   if (!Number.isFinite(delta) || delta === 0) return null;
@@ -154,7 +157,7 @@ modelSchema.statics.applyQuantityDelta = async function ({
     }
     if (userId) row.updated_by = userId;
     await row.save(session ? { session } : {});
-    return {
+    const change = {
       product_id: String(filter.product_id),
       warehouse_id: String(filter.warehouse_id),
       previous_quantity: previousQty,
@@ -162,6 +165,8 @@ modelSchema.statics.applyQuantityDelta = async function ({
       qty_delta: delta,
       warehouse_inventory_id: row._id,
     };
+    await logWarehouseInventoryChange(req, change, filter.company_id, logContext, session);
+    return change;
   }
 
   if (delta < 0) {
@@ -186,7 +191,7 @@ modelSchema.statics.applyQuantityDelta = async function ({
     row = await this.create(doc);
   }
 
-  return {
+  const change = {
     product_id: String(filter.product_id),
     warehouse_id: String(filter.warehouse_id),
     previous_quantity: 0,
@@ -194,6 +199,8 @@ modelSchema.statics.applyQuantityDelta = async function ({
     qty_delta: delta,
     warehouse_inventory_id: row._id,
   };
+  await logWarehouseInventoryChange(req, change, filter.company_id, logContext, session);
+  return change;
 };
 
 /**
@@ -296,6 +303,8 @@ modelSchema.statics.applySplitWarehouseOutbound = async function ({
   preferredWarehouseId = null,
   userId = null,
   session = null,
+  req = null,
+  logContext = null,
 } = {}) {
   const allocations = await this.planOutboundAllocation({
     productId,
@@ -314,6 +323,8 @@ modelSchema.statics.applySplitWarehouseOutbound = async function ({
       qtyDelta: -alloc.quantity,
       userId,
       session,
+      req,
+      logContext,
     });
     if (change) {
       stockChanges.push({ ...change, source: "warehouse_inventory" });
@@ -352,6 +363,8 @@ modelSchema.statics.applyStockChangesFromLines = async function ({
   session = null,
   userId = null,
   auditSource = "warehouse_inventory",
+  req = null,
+  logContext = null,
 } = {}) {
   const stockChangeAuditLog = [];
 
@@ -367,6 +380,8 @@ modelSchema.statics.applyStockChangesFromLines = async function ({
       preferredWarehouseId: warehouseIdToReverse,
       userId,
       session,
+      req,
+      logContext,
     });
     for (const row of reverseChanges.stockChanges || []) {
       stockChangeAuditLog.push({ ...row, source: auditSource });
@@ -394,6 +409,8 @@ modelSchema.statics.applyStockChangesFromLines = async function ({
       lastLineItemId: savedLineRow?._id,
       userId,
       session,
+      req,
+      logContext,
     });
 
     if (warehouseInventoryChange) {

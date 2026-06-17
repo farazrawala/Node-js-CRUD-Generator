@@ -599,6 +599,12 @@ async function postAdjustmentInventoryMovement(
       qtyDelta,
       userId: pickObjectId(adjustmentReq.user?._id),
       session,
+      req: adjustmentReq,
+      logContext: {
+        reference_type: "adjustment",
+        reference_id: record._id,
+        reference_no: record.adjustment_no || record.transaction_number || null,
+      },
     });
 
     await runInventoryMovementTxnBody(adjustmentReq, session);
@@ -612,6 +618,13 @@ async function postAdjustmentInventoryMovement(
           qtyDelta: -whChange.qty_delta,
           userId: pickObjectId(adjustmentReq.user?._id),
           session,
+          req: adjustmentReq,
+          logContext: {
+            reference_type: "adjustment",
+            reference_id: record._id,
+            reference_no:
+              record.adjustment_no || record.transaction_number || null,
+          },
         });
       } catch (revertErr) {
         console.error(

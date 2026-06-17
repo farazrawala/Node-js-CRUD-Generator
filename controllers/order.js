@@ -484,6 +484,14 @@ function orderGlDescription(label, orderNo) {
   return no ? `${label} (${no})` : label;
 }
 
+function salesWarehouseInventoryLogContext(orderId, orderNo) {
+  return {
+    reference_type: "sales",
+    reference_id: orderId,
+    reference_no: orderNo,
+  };
+}
+
 /** Four GL postings for an order — same row order as `order_save` / `afterCreate`. */
 async function rebuildOrderGlTransactions({
   record,
@@ -806,6 +814,7 @@ async function applyOrderLineReplaceInventory({
   mongoSession = null,
   logUrl = "/api/order/order_update",
 }) {
+  const inventoryLogContext = salesWarehouseInventoryLogContext(orderId, orderNo);
   const movementWarehouseMap = buildOutboundQtyMapFromMovements(oldOutMovements);
   const oldMap = buildOrderLineRestoreQtyMap({
     existingOrderItems,
@@ -908,6 +917,8 @@ async function applyOrderLineReplaceInventory({
             preferredWarehouseId: warehouseIdStr,
             userId: req.user?._id,
             session: mongoSession,
+            req,
+            logContext: inventoryLogContext,
           });
         for (const whChange of stockChanges) {
           productStockUpdates.push({
@@ -926,6 +937,8 @@ async function applyOrderLineReplaceInventory({
           qtyDelta: delta,
           userId: req.user?._id,
           session: mongoSession,
+          req,
+          logContext: inventoryLogContext,
         });
         if (whChange) {
           productStockUpdates.push({
@@ -1070,6 +1083,7 @@ async function applyOrderOutboundLines({
   mongoSession = null,
   logUrl = "/api/order/order_save",
 }) {
+  const inventoryLogContext = salesWarehouseInventoryLogContext(orderId, orderNo);
   const productStockUpdates = [];
 
   for (const line of lines) {
@@ -1110,6 +1124,8 @@ async function applyOrderOutboundLines({
             : null,
           userId: req.user?._id,
           session: mongoSession,
+          req,
+          logContext: inventoryLogContext,
         }));
     } catch (warehouseResolveErr) {
       if (warehouseResolveErr.clientPayload) {
@@ -1210,6 +1226,7 @@ async function applyOrderDeleteInventoryRestore({
   mongoSession = null,
   logUrl = "/api/order/order_delete",
 }) {
+  const inventoryLogContext = salesWarehouseInventoryLogContext(orderId, orderNo);
   const movementWarehouseMap = buildOutboundQtyMapFromMovements(oldOutMovements);
   const restoreMap = buildOrderLineRestoreQtyMap({
     existingOrderItems,
@@ -1247,6 +1264,8 @@ async function applyOrderDeleteInventoryRestore({
         qtyDelta: lineQtyNum,
         userId: req.user?._id,
         session: mongoSession,
+        req,
+        logContext: inventoryLogContext,
       });
       if (whChange) {
         productStockUpdates.push({
