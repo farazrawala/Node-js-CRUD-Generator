@@ -149,6 +149,7 @@ const {
   getBalanceSheetDifference,
   getCompanyDefaultDiscountSums,
 } = require("../controllers/account");
+const { getIncomeStatement } = require("../controllers/reports");
 
 const {
   amountTransferCreate,
@@ -386,6 +387,9 @@ router.get("/account/fetch-account-by-type", fetchAccountsByType);
 router.get("/account/balance-sheet", getBalanceSheet);
 router.get("/account/balance-sheet-difference", getBalanceSheetDifference);
 router.get("/account/default-discount-sums", getCompanyDefaultDiscountSums);
+
+// Reports
+router.get("/reports/income-statement", getIncomeStatement);
 
 // Adjustment routes
 router.post("/adjustment/save", adjustmentCreate);
