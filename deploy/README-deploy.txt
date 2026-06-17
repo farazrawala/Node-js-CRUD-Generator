@@ -84,6 +84,14 @@ FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
 
   cPanel alternative: Setup Node.js App → "Run NPM Install" → restart app.
 
+AUTO RESTART AFTER GIT PUSH (recommended):
+  See deploy/SETUP-GITHUB-SSH.md
+  Add GitHub secret SSH_PRIVATE_KEY → every push runs deploy/restart-pos-admin.sh via SSH.
+
+  Manual restart (root SSH only — demowebsitv3 cannot restart root's pm2):
+    cd /home/demowebsitv3/public_html/pos_admin
+    sh deploy/restart-pos-admin.sh
+
 DEBUG LOGS — download to rectify live issues:
 
   Easiest (browser, after admin login):

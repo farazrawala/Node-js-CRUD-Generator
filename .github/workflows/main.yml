@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   web-deploy:
@@ -65,13 +66,15 @@ jobs:
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 
-      - name: Restart app on server — npm ci + pm2 pos_admin (SSH)
-        continue-on-error: true
+      - name: Prepare SSH key for server restart
+        id: ssh_key
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           write_key_from_text() {
             if echo "$1" | grep -q "BEGIN OPENSSH PRIVATE KEY"; then
+              printf '%s\n' "$1" > key.pem
+            elif echo "$1" | grep -q "BEGIN RSA PRIVATE KEY"; then
               printf '%s\n' "$1" > key.pem
             else
               {
@@ -82,50 +85,28 @@ jobs:
             fi
           }
 
-          if [ -f deploy/github_actions_key.pem ] && grep -q "BEGIN OPENSSH PRIVATE KEY" deploy/github_actions_key.pem; then
+          if [ -f deploy/github_actions_key.pem ] && grep -q "BEGIN.*PRIVATE KEY" deploy/github_actions_key.pem; then
             cp deploy/github_actions_key.pem key.pem
-          elif [ -f deploy/github_actions_key.pem.example ] && grep -q "BEGIN OPENSSH PRIVATE KEY" deploy/github_actions_key.pem.example; then
-            cp deploy/github_actions_key.pem.example key.pem
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
           elif [ -n "$SSH_KEY" ]; then
             write_key_from_text "$SSH_KEY"
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::No SSH key — run on server: cd /home/demowebsitv3/public_html/pos_admin && npm ci --omit=dev && pm2 restart pos_admin --update-env"
-            exit 0
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::error::SSH_PRIVATE_KEY secret is not set. FTP upload succeeded but PM2 will NOT restart automatically."
+            echo "See deploy/SETUP-GITHUB-SSH.md — one-time setup, then every push restarts pos_admin."
+            exit 1
           fi
           sed -i 's/\r$//' key.pem
           chmod 600 key.pem
 
+      - name: Restart pos_admin on server (SSH)
+        run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H 192.249.118.80 >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          if ssh -i key.pem -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new root@192.249.118.80 <<'ENDSSH'
-          set -e
-          APP_DIR=/home/demowebsitv3/public_html/pos_admin
-          APP_USER=demowebsitv3
-          cd "$APP_DIR"
-          export PATH="/usr/local/bin:/usr/bin:$PATH"
-          if [ -f package-lock.json ]; then
-            npm ci --omit=dev
-          else
-            npm install --omit=dev
-          fi
-          node -e "require('iconv-lite').encodingExists('utf8')"
-          chown -R "${APP_USER}:${APP_USER}" "$APP_DIR"
-          if [ -f deploy/build-info.json ]; then
-            echo "=== Live build stamp (deploy/build-info.json) ==="
-            cat deploy/build-info.json
-          fi
-          pm2 delete pos-api 2>/dev/null || true
-          if pm2 describe pos_admin >/dev/null 2>&1; then
-            pm2 restart pos_admin --update-env
-          else
-            pm2 start index.js --name pos_admin
-          fi
-          pm2 save || true
-          ENDSSH
-          then
-            echo "App restarted via pm2 (pos_admin)."
-          else
-            echo "::warning::SSH failed — run on server: cd /home/demowebsitv3/public_html/pos_admin && npm ci --omit=dev && pm2 restart pos_admin --update-env"
-            exit 1
-          fi
+          ssh -i key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+            root@192.249.118.80 \
+            'bash /home/demowebsitv3/public_html/pos_admin/deploy/restart-pos-admin.sh'
+
+          echo "✅ pos_admin restarted on live server."
