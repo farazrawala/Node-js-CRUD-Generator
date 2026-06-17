@@ -32,6 +32,7 @@ const {
 const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
+  runWithOptionalMongoTransaction,
 } = require("../utils/mongoTransactionSupport");
 const {
   applyWholesalePriceRemoveForPoLines,
@@ -1952,7 +1953,6 @@ async function salesReturnCreate(req, res) {
     const transaction_number = generateTransactionNumber();
     req.body.transaction_number = transaction_number;
 
-    let mongooseClientSession = null;
     let salesReturnCreateResult = null;
     const persistedLineItems = [];
     const productStockUpdates = [];
@@ -1995,6 +1995,7 @@ async function salesReturnCreate(req, res) {
       };
       salesReturnCreateResult = await handleGenericCreate(req, "sales_return", {
         ...modelHelperOptions(mongoSession),
+        skipFailureLog: Boolean(mongoSession),
         afterCreate: async (record, orderReq, sess) => {
           closeStep1();
           // step 1 end
@@ -2217,55 +2218,24 @@ async function salesReturnCreate(req, res) {
         endTxnWrap(extra);
       }
     };
-    // Prefer a single multi-document transaction when the deployment supports it (replica set / Atlas).
     try {
-      mongooseClientSession = await mongoose.startSession();
-      await mongooseClientSession.withTransaction(async () => {
-        await runSalesReturnCreateBody(mongooseClientSession);
-      });
-      finishTxnWrap({ mode: "mongodb_transaction" });
-    } catch (mongoTransactionError) {
-      // Standalone mongod cannot start transactions; same work without session (see utils/mongoTransactionSupport).
-      if (isMongoTransactionUnsupportedError(mongoTransactionError)) {
-        finishTxnWrap({ mode: "txn_unavailable_retry" });
-        if (mongooseClientSession) {
-          try {
-            mongooseClientSession.endSession();
-          } catch (_) {
-            /* ignore */
-          }
-          mongooseClientSession = null;
-        }
-        console.warn(
-          "[sales_return] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
-        );
-        try {
-          persistedLineItems.length = 0;
-          productStockUpdates.length = 0;
-          wholesaleUpdates.length = 0;
-          salesReturnCreateResult = null;
-          srStepTimer.resetSteps();
-          const endTxnRetry = srStepTimer.start(
-            "txn",
-            "pipeline retry (no Mongo transaction)",
-          );
-          await runSalesReturnCreateBody(null);
-          endTxnRetry({ mode: "standalone_no_transaction" });
-        } catch (nonSessionRetryError) {
-          createPipelineError = nonSessionRetryError;
-        }
-      } else {
-        finishTxnWrap({ mode: "mongodb_transaction_failed" });
-        createPipelineError = mongoTransactionError;
-      }
-    } finally {
-      if (mongooseClientSession) {
-        try {
-          mongooseClientSession.endSession();
-        } catch (_) {
-          /* ignore */
-        }
-      }
+      const txnMode = await runWithOptionalMongoTransaction(
+        runSalesReturnCreateBody,
+        {
+          logLabel: "sales_return_create",
+          onBeforeRetry: async () => {
+            persistedLineItems.length = 0;
+            productStockUpdates.length = 0;
+            wholesaleUpdates.length = 0;
+            salesReturnCreateResult = null;
+            srStepTimer.resetSteps();
+          },
+        },
+      );
+      finishTxnWrap({ mode: txnMode });
+    } catch (pipelineError) {
+      finishTxnWrap({ mode: "mongodb_transaction_failed" });
+      createPipelineError = pipelineError;
     }
     // txn end
 
