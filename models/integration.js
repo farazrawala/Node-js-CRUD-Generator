@@ -39,10 +39,12 @@ const modelSchema = new mongoose.Schema(
     key: {
       type: String,
       required: true,
+      field_name: "Key/client_id",
     },
     secret: {
       type: String,
       required: true,
+      field_name: "Secret/client_secret",
     },
     token: {
       type: String,

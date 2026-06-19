@@ -1018,9 +1018,7 @@ function applyFrozenCostAndProfitToSrLineDocs(docs, costByProduct) {
       );
     }
     doc.cost_price_at_return = roundSrMoney2(cost);
-    doc.profit = roundSrMoney2(
-      (cost - Number(doc.price)) * Number(doc.qty),
-    );
+    doc.profit = roundSrMoney2((cost - Number(doc.price)) * Number(doc.qty));
   }
 }
 

@@ -1,7 +1,10 @@
+const mongoose = require("mongoose");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
+const Company = require("../models/company");
 const Product = require("../models/product");
 const SyncCategory = require("../models/sync_category");
+const WarehouseInventory = require("../models/warehouse_inventory");
 require("@shopify/shopify-api/adapters/node");
 const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
 const {
@@ -66,7 +69,7 @@ function buildShopifyClient(integration) {
     apiKey,
     apiSecretKey: apiSecret,
     adminApiAccessToken: accessToken,
-    scopes: ["read_products", "write_products"],
+    scopes: ["read_products", "write_products", "read_inventory"],
     hostName: shopDomain,
     apiVersion: ApiVersion.October24,
     isCustomStoreApp: true,
@@ -104,6 +107,126 @@ function mapShopifyVariantPrice(variant) {
   }
   const price = Number(variant.price);
   return Number.isFinite(price) && price >= 0 ? price : 0;
+}
+
+function roundImportQty(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function mapShopifyVariantInventoryQuantity(variant) {
+  if (!variant) {
+    return 0;
+  }
+  const raw = variant.inventory_quantity;
+  if (raw == null || raw === "") {
+    return 0;
+  }
+  const qty = Number(raw);
+  return Number.isFinite(qty) ? Math.max(0, roundImportQty(qty)) : 0;
+}
+
+/** Prefer summed `inventory_levels.available`; fall back to variant `inventory_quantity`. */
+async function resolveShopifyVariantStockQuantity(variant, client) {
+  if (!variant) {
+    return 0;
+  }
+  if (
+    variant.inventory_management != null &&
+    variant.inventory_management !== "shopify"
+  ) {
+    return 0;
+  }
+
+  const itemId = variant.inventory_item_id;
+  if (client && itemId) {
+    try {
+      const response = await client.get({
+        path: "inventory_levels",
+        query: { inventory_item_ids: String(itemId), limit: 250 },
+      });
+      const levels =
+        Array.isArray(response?.body?.inventory_levels) ?
+          response.body.inventory_levels
+        : [];
+      if (levels.length > 0) {
+        const total = levels.reduce(
+          (sum, row) => sum + (Number(row.available) || 0),
+          0,
+        );
+        return Math.max(0, roundImportQty(total));
+      }
+    } catch (error) {
+      console.warn(
+        `Shopify inventory_levels lookup failed for item ${itemId}:`,
+        error?.response?.body || error?.message || error,
+      );
+    }
+  }
+
+  return mapShopifyVariantInventoryQuantity(variant);
+}
+
+async function resolveCompanyDefaultWarehouseId(companyId) {
+  const cid = coalesceObjectId(companyId);
+  if (!cid) {
+    return null;
+  }
+  const company = await Company.findOne({
+    _id: cid,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("warehouse_id")
+    .lean();
+  const wid = company?.warehouse_id;
+  if (wid != null && mongoose.Types.ObjectId.isValid(String(wid))) {
+    return coalesceObjectId(wid);
+  }
+  return null;
+}
+
+/** Set POS warehouse qty to match Shopify (absolute sync, not delta-only on create). */
+async function syncShopifyProductWarehouseStock({
+  productId,
+  companyId,
+  warehouseId,
+  targetQty,
+  userId = null,
+}) {
+  const target = Math.max(0, roundImportQty(targetQty));
+  const filter = WarehouseInventory.activeRowFilter(
+    productId,
+    warehouseId,
+    companyId,
+  );
+  if (!filter) {
+    return { synced: false, reason: "invalid_ids" };
+  }
+
+  const row = await WarehouseInventory.findOne(filter).select("quantity").lean();
+  const current = row ? Number(row.quantity) || 0 : 0;
+  const delta = roundImportQty(target - current);
+  if (delta === 0) {
+    return { synced: true, unchanged: true, quantity: current };
+  }
+
+  await WarehouseInventory.applyQuantityDelta({
+    productId,
+    warehouseId,
+    companyId,
+    qtyDelta: delta,
+    userId,
+    logContext: {
+      reference_type: "shopify_import",
+      reference_id: String(productId),
+    },
+  });
+  return {
+    synced: true,
+    unchanged: false,
+    quantity: target,
+    previous: current,
+  };
 }
 
 function buildPosFieldsFromShopify(remoteProduct, variant, productPrice) {
@@ -272,7 +395,15 @@ async function resolvePosCategoryIdsFromShopifyProduct(
 
 async function importShopifyProductToPos(
   remoteProduct,
-  { companyId, process, stats, productPrice, categoryIds = [] },
+  {
+    companyId,
+    process,
+    stats,
+    productPrice,
+    categoryIds = [],
+    warehouseId = null,
+    client = null,
+  },
 ) {
   const shopifyId = Number(remoteProduct?.id);
   const name = String(remoteProduct?.title || "").trim();
@@ -280,9 +411,8 @@ async function importShopifyProductToPos(
     return null;
   }
 
-  const variant = Array.isArray(remoteProduct?.variants) ?
-      remoteProduct.variants[0]
-    : null;
+  const variant =
+    Array.isArray(remoteProduct?.variants) ? remoteProduct.variants[0] : null;
   const sku =
     String(variant?.sku || "").trim() ||
     (shopifyId ? `shopify-${shopifyId}` : "");
@@ -294,8 +424,9 @@ async function importShopifyProductToPos(
   const posFields = buildPosFieldsFromShopify(remoteProduct, variant, price);
   const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
 
+  let posId;
   if (existing) {
-    const posId = coalesceObjectId(existing._id);
+    posId = coalesceObjectId(existing._id);
     await Product.updateOne(
       { _id: posId },
       {
@@ -308,28 +439,43 @@ async function importShopifyProductToPos(
       },
     );
     stats.updated = (stats.updated || 0) + 1;
-    if (categoryField.length) {
-      stats.products_category_linked = (stats.products_category_linked || 0) + 1;
-    }
-    return posId;
+  } else {
+    const created = await Product.create({
+      ...posFields,
+      sku,
+      product_code: sku,
+      category_id: categoryField,
+      unit: "Piece",
+      company_id: companyId,
+      status: "active",
+      created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+    });
+    posId = coalesceObjectId(created._id);
+    stats.inserted += 1;
   }
 
-  const created = await Product.create({
-    ...posFields,
-    sku,
-    product_code: sku,
-    category_id: categoryField,
-    unit: "Piece",
-    company_id: companyId,
-    status: "active",
-    created_by: coalesceObjectId(process.created_by?._id || process.created_by),
-  });
-
-  stats.inserted += 1;
   if (categoryField.length) {
     stats.products_category_linked = (stats.products_category_linked || 0) + 1;
   }
-  return coalesceObjectId(created._id);
+
+  if (warehouseId && variant && posId) {
+    const stockQty = await resolveShopifyVariantStockQuantity(variant, client);
+    const stockResult = await syncShopifyProductWarehouseStock({
+      productId: posId,
+      companyId,
+      warehouseId,
+      targetQty: stockQty,
+      userId: coalesceObjectId(process.created_by?._id || process.created_by),
+    });
+    if (stockResult.synced) {
+      stats.stock_synced = (stats.stock_synced || 0) + 1;
+      if (!stockResult.unchanged) {
+        stats.stock_updated = (stats.stock_updated || 0) + 1;
+      }
+    }
+  }
+
+  return posId;
 }
 
 /**
@@ -861,7 +1007,6 @@ async function fetch_product(req, res, process) {
   const { limit, offset, page } = resolveBatchPagination(process);
   const query = {
     limit,
-    fields: "id,title,body_html,product_type,variants",
     order: "id asc",
   };
   if (offset > 0) {
@@ -869,6 +1014,13 @@ async function fetch_product(req, res, process) {
   }
 
   try {
+    const warehouseId = await resolveCompanyDefaultWarehouseId(companyId);
+    if (!warehouseId) {
+      console.warn(
+        "[shopify fetch_product] company has no default warehouse_id; products will import without stock.",
+      );
+    }
+
     const listResponse = await client.get({ path: "products", query });
     const remoteProducts =
       Array.isArray(listResponse?.body?.products) ?
@@ -878,6 +1030,8 @@ async function fetch_product(req, res, process) {
       inserted: 0,
       updated: 0,
       skipped: 0,
+      stock_synced: 0,
+      stock_updated: 0,
       categories_found: 0,
       categories_inserted: 0,
       products_category_linked: 0,
@@ -905,6 +1059,8 @@ async function fetch_product(req, res, process) {
           stats,
           productPrice,
           categoryIds,
+          warehouseId,
+          client,
         });
       } catch (err) {
         console.error(
@@ -919,6 +1075,8 @@ async function fetch_product(req, res, process) {
       inserted,
       updated = 0,
       skipped,
+      stock_synced = 0,
+      stock_updated = 0,
       categories_found = 0,
       categories_inserted = 0,
       products_category_linked = 0,
@@ -926,16 +1084,21 @@ async function fetch_product(req, res, process) {
     const fetched = remoteProducts.length;
     const isComplete = fetched < limit;
     const lastRemoteId = fetched > 0 ? remoteProducts[fetched - 1]?.id : offset;
+    const stockSummary = warehouseId ?
+        `, stock synced ${stock_synced} (${stock_updated} qty changed)`
+      : ", stock skipped (no default warehouse on company)";
     const remarks =
       isComplete ?
-        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
-      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
+      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
 
     return finishFetchProductBatch(req, res, process, {
       fetched,
       inserted,
       updated,
       skipped,
+      stock_synced,
+      stock_updated,
       categories_found,
       categories_inserted,
       products_category_linked,
