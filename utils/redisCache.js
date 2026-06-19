@@ -45,6 +45,9 @@ const LIST_CACHE_QUERY_BLOCKLIST = new Set([
 /** Never read/write list cache for these modules (`get-all-active` / `get-all`). */
 const LIST_CACHE_BYPASS_MODULES = new Set(["user", "logs"]);
 
+/** List endpoints that share the same invalidation on create/update/delete. */
+const LIST_CACHE_ACTIONS = ["get-all-active", "get-all"];
+
 function isListCacheBypassed(module) {
   return LIST_CACHE_BYPASS_MODULES.has(String(module || "").trim());
 }
@@ -420,6 +423,15 @@ async function invalidateListCacheForReq(
   return 0;
 }
 
+/** Invalidate every list-cache action for a module (get-all-active + get-all). */
+async function invalidateModuleListCachesForReq(req, module) {
+  let deleted = 0;
+  for (const action of LIST_CACHE_ACTIONS) {
+    deleted += await invalidateListCacheForReq(req, module, action);
+  }
+  return deleted;
+}
+
 /**
  * Drop every list-cache key for a tenant: `{companyId}:*` (all modules/actions/query variants).
  */
@@ -625,7 +637,7 @@ async function listAllListCacheForReq(req, options = {}) {
 }
 
 /**
- * Generic read-through cache for GET list / get-all-active handlers.
+ * Generic read-through cache for GET list / get-all / get-all-active handlers.
  * @param {import('express').Request} req
  * @param {import('express').Response} res
  * @param {{ module: string, action?: string, ttl?: number, fetch: () => Promise<object> }} options
@@ -738,8 +750,10 @@ module.exports = {
   resolveListCacheFromReq,
   normalizeCompanyIdForCache,
   resolveCompanyIdFromReq,
+  LIST_CACHE_ACTIONS,
   invalidateListCache,
   invalidateListCacheForReq,
+  invalidateModuleListCachesForReq,
   invalidateAllListCacheForCompany,
   invalidateAllListCacheForReq,
   listAllListCacheForCompany,

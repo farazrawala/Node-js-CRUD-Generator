@@ -13,20 +13,17 @@ const {
 
 const {
   runCachedListHandler,
-  invalidateListCacheForReq,
+  invalidateModuleListCachesForReq,
 } = require("../utils/redisCache");
 
 const WAREHOUSE_LIST_CACHE_MODULE = "warehouse";
 const WAREHOUSE_LIST_CACHE_ACTION = "get-all-active";
+const WAREHOUSE_GET_ALL_CACHE_ACTION = "get-all";
 
 async function warehouseCreate(req, res) {
   const response = await handleGenericCreate(req, "warehouse", {
     afterCreate: async (record, req) => {
-      await invalidateListCacheForReq(
-        req,
-        WAREHOUSE_LIST_CACHE_MODULE,
-        WAREHOUSE_LIST_CACHE_ACTION,
-      );
+      await invalidateModuleListCachesForReq(req, WAREHOUSE_LIST_CACHE_MODULE);
 
       console.log("✅ Record created successfully:", record);
     },
@@ -60,11 +57,7 @@ async function warehouseUpdate(req, res) {
     },
 
     afterUpdate: async (record, req, existingUser) => {
-      await invalidateListCacheForReq(
-        req,
-        WAREHOUSE_LIST_CACHE_MODULE,
-        WAREHOUSE_LIST_CACHE_ACTION,
-      );
+      await invalidateModuleListCachesForReq(req, WAREHOUSE_LIST_CACHE_MODULE);
 
       console.log("✅ Record updated successfully:", record);
     },
@@ -88,20 +81,18 @@ async function getAllwarehouse(req, res) {
     filter.company_id = tenantCo;
   }
 
-  const response = await handleGenericGetAll(req, "warehouse", {
-    filter,
-    excludeFields: [], // Don't exclude any fields
-
-    // populate: ["user_id"],
-
-    sort: { createdAt: -1 }, // Sort by newest first
-
-    limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
-
-    skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
+  return runCachedListHandler(req, res, {
+    module: WAREHOUSE_LIST_CACHE_MODULE,
+    action: WAREHOUSE_GET_ALL_CACHE_ACTION,
+    fetch: () =>
+      handleGenericGetAll(req, "warehouse", {
+        filter,
+        excludeFields: [],
+        sort: { createdAt: -1 },
+        limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+        skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
+      }),
   });
-
-  return res.status(response.status).json(response);
 }
 
 /**
@@ -144,11 +135,7 @@ async function warehousedelete(req, res) {
 
   const response = await handleGenericUpdate(req, "warehouse", {
     afterUpdate: async (record, req, existingRecord) => {
-      await invalidateListCacheForReq(
-        req,
-        WAREHOUSE_LIST_CACHE_MODULE,
-        WAREHOUSE_LIST_CACHE_ACTION,
-      );
+      await invalidateModuleListCachesForReq(req, WAREHOUSE_LIST_CACHE_MODULE);
     },
   });
 

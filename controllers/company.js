@@ -10,7 +10,7 @@ const {
 } = require("../utils/modelHelper");
 const {
   invalidateAllListCacheForReq,
-  invalidateListCacheForReq,
+  invalidateModuleListCachesForReq,
   listAllListCacheForReq,
   resolveCompanyIdFromReq,
 } = require("../utils/redisCache");
@@ -234,7 +234,7 @@ async function companyCreate(req, res) {
     });
   }
 
-  await invalidateListCacheForReq(req, "company", "get-all-active");
+  await invalidateModuleListCachesForReq(req, "company");
 
   return res.status(response?.status || 201).json(response);
 }

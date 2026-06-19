@@ -12,10 +12,9 @@ const {
 const InventoryMovements = require("../models/inventory_movements");
 const Product = require("../models/product");
 const Warehouse = require("../models/warehouse");
-const { invalidateListCacheForReq } = require("../utils/redisCache");
+const { invalidateModuleListCachesForReq } = require("../utils/redisCache");
 
 const INVENTORY_MOVEMENTS_LIST_CACHE_MODULE = "inventory_movements";
-const INVENTORY_MOVEMENTS_LIST_CACHE_ACTION = "get-all-active";
 
 function toFiniteNumber(value) {
   const parsed = Number(value);
@@ -1428,10 +1427,9 @@ async function stockTransfer(req, res) {
     });
 
     // Clear cached list endpoints (e.g. GET /inventory_movements/get-all-active)
-    await invalidateListCacheForReq(
+    await invalidateModuleListCachesForReq(
       req,
       INVENTORY_MOVEMENTS_LIST_CACHE_MODULE,
-      INVENTORY_MOVEMENTS_LIST_CACHE_ACTION,
     );
 
     return res.status(201).json({

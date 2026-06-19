@@ -23,7 +23,7 @@ const {
 } = require("./modelHelper");
 const {
   runCachedListHandler,
-  invalidateListCacheForReq,
+  invalidateModuleListCachesForReq,
 } = require("./redisCache");
 const { applyLogsTagQueryFilter } = require("./logsListFilter");
 
@@ -354,7 +354,7 @@ function generateControllerFunctions(modelName) {
             return out;
           });
           if (response?.success) {
-            await invalidateListCacheForReq(req, modelName, "get-all-active");
+            await invalidateModuleListCachesForReq(req, modelName);
           }
           return res.status(response.status).json(response);
         }
@@ -363,7 +363,7 @@ function generateControllerFunctions(modelName) {
           afterCreate,
         });
         if (response?.success) {
-          await invalidateListCacheForReq(req, modelName, "get-all-active");
+          await invalidateModuleListCachesForReq(req, modelName);
         }
         return res.status(response.status).json(response);
       } catch (err) {
@@ -475,7 +475,7 @@ function generateControllerFunctions(modelName) {
             return out;
           });
           if (response?.success) {
-            await invalidateListCacheForReq(req, modelName, "get-all-active");
+            await invalidateModuleListCachesForReq(req, modelName);
           }
           return res.status(response.status).json(response);
         }
@@ -486,7 +486,7 @@ function generateControllerFunctions(modelName) {
           updateOptions,
         );
         if (response?.success) {
-          await invalidateListCacheForReq(req, modelName, "get-all-active");
+          await invalidateModuleListCachesForReq(req, modelName);
         }
         return res.status(response.status).json(response);
       } catch (err) {
@@ -517,46 +517,45 @@ function generateControllerFunctions(modelName) {
 
     // Get all
     getAll: async (req, res) => {
-      let filter = { deletedAt: null };
+      return runCachedListHandler(req, res, {
+        module: modelName,
+        action: "get-all",
+        fetch: async () => {
+          let filter = { deletedAt: null };
 
-      const tenantCo = tenantCompanyIdFromUser(req.user);
-      if (tenantCo) {
-        applyTenantFilterForModel(filter, modelName, tenantCo);
-        console.log(`🔍 Filtering ${modelName} getAll by tenant:`, tenantCo);
-      }
-      filter = applyQueryFilters(filter, req.query, modelName);
-      const roleFilter = applyUserRoleQueryFilter(filter, req.query, modelName);
-      if (roleFilter.error) {
-        return res.status(roleFilter.error.status).json(roleFilter.error);
-      }
-      filter = roleFilter.filter;
-      filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
-      if (modelName === "logs") {
-        filter = applyLogsTagQueryFilter(filter, req.query);
-      }
-      const sort = buildSortFromQuery(req.query, { createdAt: -1 });
+          const tenantCo = tenantCompanyIdFromUser(req.user);
+          if (tenantCo) {
+            applyTenantFilterForModel(filter, modelName, tenantCo);
+            console.log(`🔍 Filtering ${modelName} getAll by tenant:`, tenantCo);
+          }
+          filter = applyQueryFilters(filter, req.query, modelName);
+          const roleFilter = applyUserRoleQueryFilter(
+            filter,
+            req.query,
+            modelName,
+          );
+          if (roleFilter.error) {
+            return roleFilter.error;
+          }
+          filter = roleFilter.filter;
+          filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+          if (modelName === "logs") {
+            filter = applyLogsTagQueryFilter(filter, req.query);
+          }
+          const sort = buildSortFromQuery(req.query, { createdAt: -1 });
 
-      // console.log("filter", filter);
-      // console.log("req.query.limit", req.query.limit);
-      // console.log("req.query.skip", req.query.skip);
-      // console.log("req.query.sort", req.query.sort);
-      // console.log("req.query.populate", req.query.populate);
-      // console.log("req.query.select", req.query.select);
-      // console.log("req.query.populate", req.query.populate);
-      // console.log("req.query.populate", req.query.populate);
-      // exit();
-
-      const response = await handleGenericGetAll(req, modelName, {
-        excludeFields: ["password"], // Don't exclude any fields except password
-        sort,
-        limit: req.query.limit ? parseInt(req.query.limit) : null,
-        skip: req.query.skip ? parseInt(req.query.skip) : 0,
-        filter: filter,
-        search: req.query.search,
-        searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
-        populate: buildPopulateFromQuery(req.query, modelName),
+          return handleGenericGetAll(req, modelName, {
+            excludeFields: ["password"], // Don't exclude any fields except password
+            sort,
+            limit: req.query.limit ? parseInt(req.query.limit) : null,
+            skip: req.query.skip ? parseInt(req.query.skip) : 0,
+            filter: filter,
+            search: req.query.search,
+            searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+            populate: buildPopulateFromQuery(req.query, modelName),
+          });
+        },
       });
-      return res.status(response.status).json(response);
     },
 
     // Get all active (if status field exists)
@@ -636,7 +635,7 @@ function generateControllerFunctions(modelName) {
         filter,
         afterSoftDelete: async () => {
           console.log(`✅ ${modelName} soft deleted successfully.`);
-          await invalidateListCacheForReq(req, modelName, "get-all-active");
+          await invalidateModuleListCachesForReq(req, modelName);
         },
       });
       return res.status(response.status).json(response);
