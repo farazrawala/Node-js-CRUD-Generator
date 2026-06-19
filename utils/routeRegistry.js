@@ -102,6 +102,7 @@ class RouteRegistry {
         enabled: true,
         customTabs: [],
       },
+
       account: {
         name: "Accounts",
         icon: "fas fa-file-invoice-dollar",
@@ -319,7 +320,7 @@ class RouteRegistry {
     }
 
     const existingIndex = route.customTabs.findIndex(
-      (tab) => tab.path === tabConfig.path
+      (tab) => tab.path === tabConfig.path,
     );
     if (existingIndex >= 0) {
       route.customTabs[existingIndex] = {
@@ -331,7 +332,7 @@ class RouteRegistry {
     }
 
     console.log(
-      `📝 Added custom tab "${tabConfig.name}" to route "${routeKey}"`
+      `📝 Added custom tab "${tabConfig.name}" to route "${routeKey}"`,
     );
     return route;
   }
@@ -346,7 +347,7 @@ class RouteRegistry {
       route.customTabs = route.customTabs.filter((tab) => tab.path !== tabPath);
       if (route.customTabs.length !== originalLength) {
         console.log(
-          `📝 Removed custom tab "${tabPath}" from route "${routeKey}"`
+          `📝 Removed custom tab "${tabPath}" from route "${routeKey}"`,
         );
       }
       return route;
@@ -370,7 +371,7 @@ class RouteRegistry {
     if (route && route.subMenus) {
       route.subMenus = route.subMenus.filter((sub) => sub.name !== subMenuName);
       console.log(
-        `📝 Removed sub-menu "${subMenuName}" from route "${routeKey}"`
+        `📝 Removed sub-menu "${subMenuName}" from route "${routeKey}"`,
       );
       return route;
     }
@@ -383,7 +384,7 @@ class RouteRegistry {
   getRoutesWithSubMenus() {
     return Array.from(this.routes.values())
       .filter(
-        (route) => route.enabled && route.subMenus && route.subMenus.length > 0
+        (route) => route.enabled && route.subMenus && route.subMenus.length > 0,
       )
       .sort((a, b) => a.order - b.order);
   }
@@ -394,7 +395,7 @@ class RouteRegistry {
   getStats() {
     const routes = Array.from(this.routes.values());
     const routesWithSubMenus = routes.filter(
-      (r) => r.subMenus && r.subMenus.length > 0
+      (r) => r.subMenus && r.subMenus.length > 0,
     );
     const totalSubMenus = routes.reduce((total, route) => {
       return total + (route.subMenus ? route.subMenus.length : 0);
