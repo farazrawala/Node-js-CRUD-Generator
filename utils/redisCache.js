@@ -23,11 +23,13 @@ function resolveListCacheTtlSeconds(ttlSeconds) {
 }
 
 function memoryTtlSecondsRemaining(key) {
-  const entry = memoryCache.get(key);
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) return null;
+  const entry = memoryCache.get(cacheKey);
   if (!entry) return null;
   const remaining = Math.floor((entry.expiresAt - Date.now()) / 1000);
   if (remaining <= 0) {
-    memoryCache.delete(key);
+    memoryCache.delete(cacheKey);
     return null;
   }
   return remaining;
@@ -74,7 +76,9 @@ function isListCacheStorageEnabled() {
 }
 
 function memoryGet(key) {
-  const entry = memoryCache.get(key);
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) return null;
+  const entry = memoryCache.get(cacheKey);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
     memoryCache.delete(key);
@@ -85,14 +89,18 @@ function memoryGet(key) {
 
 function memorySet(key, value, ttlSeconds) {
   const sec = resolveListCacheTtlSeconds(ttlSeconds);
-  memoryCache.set(key, {
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) return;
+  memoryCache.set(cacheKey, {
     value,
     expiresAt: Date.now() + sec * 1000,
   });
 }
 
 function memoryDel(key) {
-  memoryCache.delete(key);
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) return;
+  memoryCache.delete(cacheKey);
 }
 
 function isRedisConfigured() {
@@ -171,20 +179,24 @@ async function getRedisClient() {
 }
 
 async function getCache(key) {
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) {
+    return { data: null, backend: null, ttlSecondsRemaining: null };
+  }
   let ttlSecondsRemaining = null;
 
   try {
     const redis = await getRedisClient();
     if (redis) {
-      const raw = await redis.get(key);
+      const raw = await redis.get(cacheKey);
       if (raw) {
         const data = JSON.parse(raw);
         try {
-          const ttl = await redis.ttl(key);
+          const ttl = await redis.ttl(cacheKey);
           if (ttl > 0) {
             ttlSecondsRemaining = ttl;
             if (isMemoryFallbackEnabled()) {
-              memorySet(key, data, ttl);
+              memorySet(cacheKey, data, ttl);
             }
           }
         } catch {
@@ -198,13 +210,13 @@ async function getCache(key) {
   }
 
   if (isMemoryFallbackEnabled()) {
-    const hit = memoryGet(key);
+    const hit = memoryGet(cacheKey);
     if (hit) {
-      ttlSecondsRemaining = memoryTtlSecondsRemaining(key);
+      ttlSecondsRemaining = memoryTtlSecondsRemaining(cacheKey);
       try {
         const redis = await getRedisClient();
         if (redis && ttlSecondsRemaining > 0) {
-          await redis.set(key, JSON.stringify(hit), {
+          await redis.set(cacheKey, JSON.stringify(hit), {
             EX: ttlSecondsRemaining,
           });
         }
@@ -219,30 +231,36 @@ async function getCache(key) {
 }
 
 async function setCache(key, value, ttlSeconds = DEFAULT_LIST_CACHE_TTL_SEC) {
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) {
+    return { stored: false, backend: null, ttlSeconds: 0 };
+  }
   const ex = resolveListCacheTtlSeconds(ttlSeconds);
   let backend = null;
   try {
     const redis = await getRedisClient();
     if (redis) {
-      await redis.set(key, JSON.stringify(value), { EX: ex });
+      await redis.set(cacheKey, JSON.stringify(value), { EX: ex });
       backend = "redis";
     }
   } catch (err) {
     markRedisUnavailable(err);
   }
   if (isMemoryFallbackEnabled()) {
-    memorySet(key, value, ex);
+    memorySet(cacheKey, value, ex);
     return { stored: true, backend: backend || "memory", ttlSeconds: ex };
   }
   return { stored: backend === "redis", backend, ttlSeconds: ex };
 }
 
 async function deleteCache(key) {
-  memoryDel(key);
+  const cacheKey = normalizeCacheKey(key);
+  if (!cacheKey) return false;
+  memoryDel(cacheKey);
   try {
     const redis = await getRedisClient();
     if (!redis) return false;
-    await redis.del(key);
+    await redis.del(cacheKey);
     return true;
   } catch (err) {
     markRedisUnavailable(err);
@@ -327,12 +345,38 @@ function resolveCompanyIdFromReq(req) {
   return normalizeCompanyIdForCache(req.user?.company_id);
 }
 
-/** Redis SCAN may yield Buffer keys; always coerce before string methods. */
+/**
+ * Redis SCAN may yield Buffer keys; always coerce before string methods.
+ * Never call `.startsWith` on a raw scan chunk — node-redis v5 `scanIterator`
+ * yields `reply.keys` arrays per cursor page, not individual keys.
+ */
 function normalizeCacheKey(key) {
   if (key == null) return "";
   if (typeof key === "string") return key;
+  if (typeof key === "number" || typeof key === "boolean" || typeof key === "bigint") {
+    return String(key);
+  }
   if (Buffer.isBuffer(key)) return key.toString("utf8");
+  if (Array.isArray(key)) return "";
+  if (typeof key === "object" && typeof key.toString === "function") {
+    const s = key.toString();
+    if (s && s !== "[object Object]") return s;
+  }
   return String(key);
+}
+
+/** node-redis v5 `scanIterator` yields string[] batches — flatten to single keys. */
+async function* flattenScanIterator(iterator) {
+  for await (const chunk of iterator) {
+    if (chunk == null) continue;
+    if (Array.isArray(chunk)) {
+      for (const key of chunk) {
+        if (key != null) yield key;
+      }
+      continue;
+    }
+    yield chunk;
+  }
 }
 
 function keyBelongsToCompany(key, companyIdHex) {
@@ -399,14 +443,17 @@ async function deleteCacheByPattern(matchPattern) {
     const redis = await getRedisClient();
     if (!redis) return deleted;
 
-    const iterator = redis.scanIterator({
-      MATCH: matchPattern,
-      COUNT: 100,
-    });
+    const iterator = flattenScanIterator(
+      redis.scanIterator({
+        MATCH: matchPattern,
+        COUNT: 100,
+      }),
+    );
     for await (const rawKey of iterator) {
       const keyStr = normalizeCacheKey(rawKey);
+      if (!keyStr) continue;
       memoryDel(keyStr);
-      deleted += await redis.del(rawKey);
+      deleted += await redis.del(keyStr);
     }
     return deleted;
   } catch (err) {
@@ -548,15 +595,18 @@ async function listAllListCacheForCompany(companyId, options = {}) {
     const redis = await getRedisClient();
     redisConnected = Boolean(redis?.isOpen);
     if (redis) {
-      const iterator = redis.scanIterator({
-        MATCH: pattern,
-        COUNT: 100,
-      });
+      const iterator = flattenScanIterator(
+        redis.scanIterator({
+          MATCH: pattern,
+          COUNT: 100,
+        }),
+      );
       for await (const rawKey of iterator) {
         const keyStr = normalizeCacheKey(rawKey);
+        if (!keyStr) continue;
         let ttl = -2;
         try {
-          ttl = await redis.ttl(rawKey);
+          ttl = await redis.ttl(keyStr);
         } catch {
           /* ignore */
         }
@@ -620,7 +670,9 @@ async function listAllListCacheForCompany(companyId, options = {}) {
     entries.push(row);
   }
 
-  entries.sort((a, b) => a.key.localeCompare(b.key));
+  entries.sort((a, b) =>
+    String(a.key || "").localeCompare(String(b.key || "")),
+  );
 
   const memory_count = entries.filter((e) =>
     e.backends?.includes("memory"),

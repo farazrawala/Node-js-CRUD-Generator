@@ -450,11 +450,11 @@ async function listAllCache(req, res) {
       ...data,
     });
   } catch (error) {
-    console.error("❌ listAllCache:", error);
+    console.error("❌ listAllCache:", error?.message || error, error?.stack || "");
     return res.status(500).json({
       success: false,
       status: 500,
-      error: error.message || "Failed to list cache",
+      error: error?.message || "Failed to list cache",
     });
   }
 }
