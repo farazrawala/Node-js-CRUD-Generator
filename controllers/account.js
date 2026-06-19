@@ -23,6 +23,7 @@ const {
 const {
   computeBalanceSheetDifference,
   computeBalanceSheetReport,
+  computeProfitVsGlGapBreakdown,
 } = require("../utils/balanceSheetReconcile");
 
 const ACCOUNT_TRANSACTION_ERROR_LOG = {
@@ -1014,16 +1015,81 @@ function resolveBalanceSheetCompanyId(req) {
 
 /**
  * GET /api/account/balance-sheet
- * Optional query: company_id (must match authenticated tenant if provided).
- * Returns all balance-sheet sections and totals for UI display.
+ *
+ * Optional query: `company_id` (must match authenticated tenant if provided).
+ *
+ * Returns a single JSON payload for balance-sheet UI: assets, liabilities, equity
+ * sections, inventory lines, line-profit reconciliation, and out-of-balance checks.
+ * All amounts are **lifetime / as-of now** (no `startDate` / `endDate` on this route).
+ *
+ * Implementation: `utils/balanceSheetReconcile.js` → `computeBalanceSheetReport()`.
+ *
+ * ---
+ * How amounts are calculated
+ * ---
+ *
+ * **GL account balances** — every active `account` for the tenant; sum all active
+ * `transactions` rows per `account_id` (debit/credit), then map to a signed balance
+ * via `signedBalanceForAccountType()`:
+ *
+ * | Account type | Signed balance |
+ * |--------------|----------------|
+ * | `current_asset`, `fixed_asset` | `total_debit − total_credit` |
+ * | `current_liability`, `long_term_liability` | `total_credit − total_debit` |
+ * | `revenue`, `equity` | `total_credit − total_debit` |
+ * | `operating_expense`, `other_expense`, `cost_of_goods_sold_account`, `other` | `−(total_debit − total_credit)` |
+ *
+ * **Inventory (assets)** — separate from GL purchase account; operational WAC:
+ *   per product: `warehouse_inventory.quantity` (summed) × `product.wholesale_price`
+ *   (weighted average cost updated on PO inbound / line replace).
+ *   Does **not** read `inventory_movements` ledger on this path.
+ *
+ * **Line profit (diagnostics)** — lifetime sums on denormalized line fields:
+ *   `order_item.profit` + `sales_return_item.profit`
+ *   (order profit = subtotal − cost_price_at_sale×qty; SR profit = (cost_at_return − price)×qty).
+ *
+ * **GL-bridged equity (diagnostics)** — `revenue GL balance − implied COGS sold`, where
+ *   implied COGS = purchase GL net debit − inventory asset total.
+ *
+ * **Equation check:**
+ *   `total_assets − (total_liabilities + equity)` → `summary.out_of_balance_*`
+ *   Non-zero difference often means stale `wholesale_price`, line subtotal ≠ qty×price,
+ *   or inventory qty × avg ≠ AP/GL totals (see docs/income-statement-and-profit-calculations.md).
+ *
+ * ---
+ * Steps inside `computeBalanceSheetReport` (see balanceSheetReconcile.js)
+ * ---
+ *
+ * 1. **Base sheet** (`computeBalanceSheetDifference`)
+ *    1a. Load all active accounts for `company_id`.
+ *    1b. Aggregate lifetime debit/credit per account (`aggregateTransactionSumsByAccountIds`).
+ *    1c. Partition into current/fixed assets, liabilities, equity section; sum each bucket.
+ *    1d. Value inventory: warehouse qty × `wholesale_price` per SKU (`computeInventoryValuation`).
+ *    1e. `total_assets` = current assets + inventory + fixed assets.
+ *    1f. `total_liabilities_equity` = current + long-term liabilities + equity-section GL.
+ *    1g. `difference` = assets − (liabilities + equity); attach PO subtotal mismatch hints.
+ *
+ * 2. **Line profits** — `aggregateLineProfitSums`: SUM(`order_item.profit`),
+ *    SUM(`sales_return_item.profit`).
+ *
+ * 3. **GL bridge** — `computeGlBridgedEquity`: revenue − (purchase GL debit − inventory).
+ *
+ * 4. **UI payload** — map base + profits + bridge into `assets`, `liabilities_and_equity`,
+ *    `owners_equity`, `summary` (out-of-balance line-profit vs GL-bridged methods).
+ *
+ * **Note:** The ai-pos balance sheet screen also calls separate APIs
+ * (`fetch-account-by-type`, `order/profit-by-order-item`, etc.) for Owner's equity lines;
+ * this endpoint is the consolidated server-side report when used directly.
  */
 async function getBalanceSheet(req, res) {
   try {
+    // Step 1 — Resolve tenant: `company_id` from query or authenticated user.
     const resolved = resolveBalanceSheetCompanyId(req);
     if (resolved.error) {
       return res.status(resolved.error.status).json(resolved.error.body);
     }
 
+    // Steps 2–4 — Build full report (GL buckets, inventory WAC, line profits, equation check).
     const report = await computeBalanceSheetReport(resolved.companyId);
     if (!report.ok) {
       return res.status(report.status || 400).json({
@@ -1033,6 +1099,7 @@ async function getBalanceSheet(req, res) {
       });
     }
 
+    // Step 5 — Return structured balance sheet for UI (`data.assets`, `data.liabilities_and_equity`, …).
     return res.status(200).json({
       success: true,
       status: 200,
@@ -1080,6 +1147,47 @@ async function getBalanceSheetDifference(req, res) {
       success: false,
       status: 500,
       error: error.message || "Failed to compute balance sheet difference",
+    });
+  }
+}
+
+/**
+ * GET /api/account/profit-vs-gl-gap-breakdown
+ * Optional query: company_id (must match authenticated tenant if provided).
+ *
+ * Lists each step used to compute `profit_vs_gl_gap` from the balance sheet:
+ *   gl_bridged_equity − line_profit_total
+ *
+ * Use when `summary.profit_vs_gl_gap` on GET /account/balance-sheet is non-zero
+ * (e.g. 1740.48) to see revenue GL, purchase GL, inventory, line profits, and hints.
+ */
+async function getProfitVsGlGapBreakdown(req, res) {
+  try {
+    const resolved = resolveBalanceSheetCompanyId(req);
+    if (resolved.error) {
+      return res.status(resolved.error.status).json(resolved.error.body);
+    }
+
+    const breakdown = await computeProfitVsGlGapBreakdown(resolved.companyId);
+    if (!breakdown.ok) {
+      return res.status(breakdown.status || 400).json({
+        success: false,
+        status: breakdown.status || 400,
+        error: breakdown.error,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      data: breakdown,
+    });
+  } catch (error) {
+    console.error("❌ getProfitVsGlGapBreakdown:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to build profit vs GL gap breakdown",
     });
   }
 }
@@ -1172,5 +1280,6 @@ module.exports = {
   fetchAccountsByType,
   getBalanceSheet,
   getBalanceSheetDifference,
+  getProfitVsGlGapBreakdown,
   getCompanyDefaultDiscountSums,
 };

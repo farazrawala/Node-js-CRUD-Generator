@@ -147,6 +147,7 @@ const {
   fetchAccountsByType,
   getBalanceSheet,
   getBalanceSheetDifference,
+  getProfitVsGlGapBreakdown,
   getCompanyDefaultDiscountSums,
 } = require("../controllers/account");
 const { getIncomeStatement } = require("../controllers/reports");
@@ -386,6 +387,7 @@ router.patch("/account/custom-update/:id", accountUpdate);
 router.get("/account/fetch-account-by-type", fetchAccountsByType);
 router.get("/account/balance-sheet", getBalanceSheet);
 router.get("/account/balance-sheet-difference", getBalanceSheetDifference);
+router.get("/account/profit-vs-gl-gap-breakdown", getProfitVsGlGapBreakdown);
 router.get("/account/default-discount-sums", getCompanyDefaultDiscountSums);
 
 // Reports

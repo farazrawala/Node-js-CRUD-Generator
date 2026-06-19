@@ -235,20 +235,36 @@ async function aggregateLineProfitSums(companyId) {
   };
 }
 
+function mapAccountGlRow(acc, sumByAccount) {
+  const sums = sumByAccount.get(String(acc._id)) || null;
+  return {
+    account_id: acc._id,
+    name: acc.name,
+    account_type: acc.account_type,
+    signed_balance: signedBalanceForAccountType(acc.account_type, sums),
+    transactions_sum: sums,
+  };
+}
+
 function computeGlBridgedEquity(accounts, sumByAccount, inventoryValue) {
   let salesRevenueBalance = 0;
   let purchaseAccountNetDebit = 0;
+  const revenue_accounts = [];
+  const purchase_cogs_accounts = [];
 
   for (const acc of accounts) {
     const sums = sumByAccount.get(String(acc._id));
     if (acc.account_type === "revenue") {
-      salesRevenueBalance = roundMoney2(
-        salesRevenueBalance + signedBalanceForAccountType("revenue", sums),
-      );
+      const signed = signedBalanceForAccountType("revenue", sums);
+      salesRevenueBalance = roundMoney2(salesRevenueBalance + signed);
+      revenue_accounts.push(mapAccountGlRow(acc, sumByAccount));
     } else if (acc.account_type === "cost_of_goods_sold_account") {
-      purchaseAccountNetDebit = roundMoney2(
-        purchaseAccountNetDebit + (sums?.net_debit_minus_credit || 0),
-      );
+      const netDebit = roundMoney2(sums?.net_debit_minus_credit || 0);
+      purchaseAccountNetDebit = roundMoney2(purchaseAccountNetDebit + netDebit);
+      purchase_cogs_accounts.push({
+        ...mapAccountGlRow(acc, sumByAccount),
+        net_debit_minus_credit: netDebit,
+      });
     }
   }
 
@@ -264,6 +280,9 @@ function computeGlBridgedEquity(accounts, sumByAccount, inventoryValue) {
     purchase_account_net_debit: purchaseAccountNetDebit,
     implied_cogs_sold: impliedCogsSold,
     gl_bridged_equity: glBridgedEquity,
+    revenue_accounts,
+    purchase_cogs_accounts,
+    inventory_value_used: roundMoney2(inventoryValue),
   };
 }
 
@@ -610,8 +629,187 @@ async function computeBalanceSheetReport(companyId) {
   };
 }
 
+/**
+ * Step-by-step breakdown of `profit_vs_gl_gap` for diagnostics / support UI.
+ *
+ * `profit_vs_gl_gap = gl_bridged_equity − line_profit_total`
+ *
+ * @param {import("mongoose").Types.ObjectId|string} companyId
+ * @returns {Promise<object>}
+ */
+async function computeProfitVsGlGapBreakdown(companyId) {
+  const cid = coalesceObjectId(companyId);
+  if (!cid || !mongoose.Types.ObjectId.isValid(String(cid))) {
+    return { ok: false, status: 400, error: "Valid company_id is required" };
+  }
+
+  const [lineProfits, inventory, accounts] = await Promise.all([
+    aggregateLineProfitSums(cid),
+    computeInventoryValuation(cid),
+    Account.find(activeAccountFilter(cid))
+      .select("_id name account_type")
+      .sort({ account_type: 1, name: 1 })
+      .lean(),
+  ]);
+
+  const sumByAccount = await aggregateTransactionSumsByAccountIds(
+    accounts.map((a) => a._id),
+    cid,
+  );
+  const glBridge = computeGlBridgedEquity(
+    accounts,
+    sumByAccount,
+    inventory.total,
+  );
+
+  const profitVsGlGap = roundMoney2(
+    glBridge.gl_bridged_equity - lineProfits.line_profit_total,
+  );
+  const aligned = Math.abs(profitVsGlGap) < 0.02;
+
+  const steps = [
+    {
+      step: 1,
+      key: "line_profit_orders",
+      label: "Sum order line profit",
+      source: "order_item.profit (subtotal − cost_price_at_sale × qty)",
+      amount: lineProfits.profit_from_orders,
+      line_count: lineProfits.order_line_count,
+    },
+    {
+      step: 2,
+      key: "line_profit_sales_returns",
+      label: "Sum sales return line profit",
+      source:
+        "sales_return_item.profit ((cost_price_at_return − price) × qty)",
+      amount: lineProfits.profit_from_sales_returns,
+      line_count: lineProfits.sales_return_line_count,
+    },
+    {
+      step: 3,
+      key: "line_profit_total",
+      label: "Line profit total (method A)",
+      formula: "profit_from_orders + profit_from_sales_returns",
+      amount: lineProfits.line_profit_total,
+    },
+    {
+      step: 4,
+      key: "gl_revenue",
+      label: "Sales revenue (GL)",
+      source: "SUM signed balance on revenue accounts (credit − debit)",
+      amount: glBridge.sales_revenue_gl_balance,
+      accounts: glBridge.revenue_accounts,
+    },
+    {
+      step: 5,
+      key: "gl_purchase_net_debit",
+      label: "Purchase / COGS GL net debit",
+      source:
+        "SUM net_debit_minus_credit on cost_of_goods_sold_account accounts",
+      amount: glBridge.purchase_account_net_debit,
+      accounts: glBridge.purchase_cogs_accounts,
+    },
+    {
+      step: 6,
+      key: "inventory_asset",
+      label: "Inventory asset (balance sheet)",
+      source: "SUM warehouse_inventory.qty × product.wholesale_price",
+      amount: glBridge.inventory_value_used,
+      line_count: inventory.lines.length,
+      lines: inventory.lines,
+    },
+    {
+      step: 7,
+      key: "implied_cogs_sold",
+      label: "Implied COGS sold (GL bridge)",
+      formula: "purchase_account_net_debit − inventory_value",
+      amount: glBridge.implied_cogs_sold,
+      inputs: {
+        purchase_account_net_debit: glBridge.purchase_account_net_debit,
+        inventory_value: glBridge.inventory_value_used,
+      },
+    },
+    {
+      step: 8,
+      key: "gl_bridged_equity",
+      label: "GL bridged equity (method B)",
+      formula: "sales_revenue_gl_balance − implied_cogs_sold",
+      amount: glBridge.gl_bridged_equity,
+      inputs: {
+        sales_revenue_gl_balance: glBridge.sales_revenue_gl_balance,
+        implied_cogs_sold: glBridge.implied_cogs_sold,
+      },
+    },
+    {
+      step: 9,
+      key: "profit_vs_gl_gap",
+      label: "Profit vs GL gap",
+      formula: "gl_bridged_equity − line_profit_total",
+      amount: profitVsGlGap,
+      inputs: {
+        gl_bridged_equity: glBridge.gl_bridged_equity,
+        line_profit_total: lineProfits.line_profit_total,
+      },
+      aligned,
+    },
+  ];
+
+  const hints = [];
+  if (aligned) {
+    hints.push("Line profit total matches GL-bridged equity within 0.02.");
+  } else {
+    if (profitVsGlGap > 0) {
+      hints.push(
+        "GL-bridged equity is higher than line profit: revenue/COGS bridge implies more gross profit than order lines recorded.",
+      );
+    } else {
+      hints.push(
+        "Line profit is higher than GL-bridged equity: order lines show more profit than the revenue − implied COGS bridge.",
+      );
+    }
+    hints.push(
+      "Common causes: stale product.wholesale_price vs cost at sale, inventory qty×avg ≠ purchase GL, discounts/expenses in GL only, PO line subtotal ≠ qty×price.",
+    );
+    const invVsPurchase = roundMoney2(
+      inventory.total - glBridge.purchase_account_net_debit,
+    );
+    if (Math.abs(invVsPurchase) > 0.02) {
+      hints.push(
+        `Inventory asset (${inventory.total}) vs purchase GL net debit (${glBridge.purchase_account_net_debit}) differs by ${invVsPurchase} — affects implied_cogs_sold.`,
+      );
+    }
+  }
+
+  return {
+    ok: true,
+    company_id: cid,
+    as_of: new Date().toISOString(),
+    profit_vs_gl_gap: profitVsGlGap,
+    profit_reconciliation_aligned: aligned,
+    formula: {
+      expression: "gl_bridged_equity - line_profit_total",
+      gl_bridged_equity: glBridge.gl_bridged_equity,
+      line_profit_total: lineProfits.line_profit_total,
+      result: profitVsGlGap,
+    },
+    line_profit_method: {
+      ...lineProfits,
+      description:
+        "Lifetime sum of denormalized profit on active order_item and sales_return_item rows.",
+    },
+    gl_bridged_method: {
+      ...glBridge,
+      description:
+        "Revenue GL balance minus (purchase COGS GL net debit − inventory asset at wholesale_price).",
+    },
+    steps,
+    hints,
+  };
+}
+
 module.exports = {
   computeBalanceSheetDifference,
   computeBalanceSheetReport,
+  computeProfitVsGlGapBreakdown,
   roundMoney2,
 };
