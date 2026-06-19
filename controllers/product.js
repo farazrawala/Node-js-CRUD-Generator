@@ -21,6 +21,56 @@ const {
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  runCachedListHandler,
+  invalidateModuleListCachesForReq,
+} = require("../utils/redisCache");
+
+const PRODUCT_LIST_CACHE_MODULE = "product";
+
+const PRODUCT_LIST_POPULATE = [
+  {
+    path: "parent_product_id",
+    select: "product_name",
+  },
+  {
+    path: "category_id",
+    select: "name",
+  },
+];
+
+function buildParentProductListFilter(req, { status } = {}) {
+  const tenantCo = coalesceObjectId(req.user?.company_id);
+  const filter = {
+    deletedAt: null,
+    $or: [
+      { parent_product_id: { $exists: false } },
+      { parent_product_id: null },
+    ],
+    ...(tenantCo ? { company_id: tenantCo } : {}),
+  };
+  if (status) {
+    filter.status = status;
+  }
+  return filter;
+}
+
+function fetchParentProductList(req, filter) {
+  return handleGenericGetAll(req, "product", {
+    excludeFields: [],
+    populate: PRODUCT_LIST_POPULATE,
+    sort: { createdAt: -1 },
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
+    filter,
+    search: req.query.search,
+    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+  });
+}
+
+async function invalidateProductListCache(req) {
+  await invalidateModuleListCachesForReq(req, PRODUCT_LIST_CACHE_MODULE);
+}
 
 function normalizeWarehouseInventoryInput(reqBody) {
   if (reqBody.warehouse_inventory) {
@@ -720,6 +770,7 @@ async function productCreateVariation(req, res) {
     });
   }
 
+  await invalidateProductListCache(req);
   return res.status(result?.status || 201).json(result);
 }
 
@@ -1084,6 +1135,7 @@ async function productUpdateVariation(req, res) {
     });
   }
 
+  await invalidateProductListCache(req);
   return res.status(result?.status || 200).json(result.payload);
 }
 
@@ -1106,6 +1158,9 @@ async function productCreate(req, res) {
       console.log("✅ Product created successfully:", record);
     },
   });
+  if (response?.success) {
+    await invalidateProductListCache(req);
+  }
   return res.status(response.status).json(response);
 }
 
@@ -1234,6 +1289,7 @@ async function productUpdate(req, res) {
     });
   }
 
+  await invalidateProductListCache(req);
   return res.status(response?.status || 200).json(response);
 }
 
@@ -1245,61 +1301,24 @@ async function productById(req, res) {
 }
 
 async function getAllProducts(req, res) {
-  const response = await handleGenericGetAll(req, "product", {
-    excludeFields: [], // Don't exclude any fields
-    populate: [
-      {
-        path: "parent_product_id",
-        select: "product_name",
-      },
-      {
-        path: "category_id",
-        select: "name",
-      },
-    ],
-    sort: { createdAt: -1 }, // Sort by newest first
-    limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
-    skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
-    filter: {
-      $or: [
-        { parent_product_id: { $exists: false } },
-        { parent_product_id: null },
-      ],
-    },
-    search: req.query.search,
-    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+  return runCachedListHandler(req, res, {
+    module: PRODUCT_LIST_CACHE_MODULE,
+    action: "get-all",
+    fetch: () =>
+      fetchParentProductList(req, buildParentProductListFilter(req)),
   });
-  return res.status(response.status).json(response);
 }
 
 async function getAllActiveProducts(req, res) {
-  const response = await handleGenericGetAll(req, "product", {
-    excludeFields: [], // Don't exclude any fields
-    populate: [
-      {
-        path: "parent_product_id",
-        select: "product_name",
-      },
-      {
-        path: "category_id",
-        select: "name",
-      },
-    ],
-    sort: { createdAt: -1 }, // Sort by newest first
-    limit: req.query.limit ? parseInt(req.query.limit) : null, // Support limit from query params
-    skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
-    filter: {
-      status: "active",
-      deletedAt: null,
-      $or: [
-        { parent_product_id: { $exists: false } },
-        { parent_product_id: null },
-      ],
-    },
-    search: req.query.search,
-    searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+  return runCachedListHandler(req, res, {
+    module: PRODUCT_LIST_CACHE_MODULE,
+    action: "get-all-active",
+    fetch: () =>
+      fetchParentProductList(
+        req,
+        buildParentProductListFilter(req, { status: "active" }),
+      ),
   });
-  return res.status(response.status).json(response);
 }
 
 /**
@@ -1407,6 +1426,7 @@ async function productDelete(req, res) {
     filter: filter,
     afterUpdate: async (record, req, existingRecord) => {
       console.log(`✅ Product soft deleted successfully.`);
+      await invalidateProductListCache(req);
     },
   });
   return res.status(response.status).json(response);

@@ -322,10 +322,21 @@ function resolveCompanyIdFromReq(req) {
   return normalizeCompanyIdForCache(req.user?.company_id);
 }
 
+/** Redis SCAN may yield Buffer keys; always coerce before string methods. */
+function normalizeCacheKey(key) {
+  if (key == null) return "";
+  if (typeof key === "string") return key;
+  if (Buffer.isBuffer(key)) return key.toString("utf8");
+  return String(key);
+}
+
 function keyBelongsToCompany(key, companyIdHex) {
-  if (!companyIdHex || !key) return false;
-  if (key === companyIdHex || key.startsWith(`${companyIdHex}:`)) return true;
-  const first = key.split(":")[0];
+  const keyStr = normalizeCacheKey(key);
+  if (!companyIdHex || !keyStr) return false;
+  if (keyStr === companyIdHex || keyStr.startsWith(`${companyIdHex}:`)) {
+    return true;
+  }
+  const first = keyStr.split(":")[0];
   return (
     first.length === 24 &&
     /^[a-fA-F0-9]{24}$/.test(first) &&
@@ -368,10 +379,11 @@ async function deleteCacheByPattern(matchPattern) {
   let deleted = 0;
 
   for (const key of [...memoryCache.keys()]) {
+    const keyStr = normalizeCacheKey(key);
     const matches =
       companyPrefix ?
-        keyBelongsToCompany(key, companyPrefix)
-      : key === prefix || key.startsWith(`${prefix}:`);
+        keyBelongsToCompany(keyStr, companyPrefix)
+      : keyStr === prefix || keyStr.startsWith(`${prefix}:`);
     if (matches) {
       memoryDel(key);
       deleted += 1;
@@ -386,9 +398,10 @@ async function deleteCacheByPattern(matchPattern) {
       MATCH: matchPattern,
       COUNT: 100,
     });
-    for await (const key of iterator) {
-      memoryDel(key);
-      deleted += await redis.del(key);
+    for await (const rawKey of iterator) {
+      const keyStr = normalizeCacheKey(rawKey);
+      memoryDel(keyStr);
+      deleted += await redis.del(rawKey);
     }
     return deleted;
   } catch (err) {
@@ -457,10 +470,12 @@ async function invalidateAllListCacheForReq(req) {
 
 /** Parse `{companyId}:{module}:{action}[:q:{hash}]` list-cache keys. */
 function parseListCacheKey(key, companyId) {
+  const keyStr = normalizeCacheKey(key);
   const prefix = `${String(companyId)}:`;
-  if (!key.startsWith(prefix))
+  if (!keyStr.startsWith(prefix)) {
     return { module: null, action: null, query_fingerprint: null };
-  const rest = key.slice(prefix.length);
+  }
+  const rest = keyStr.slice(prefix.length);
   const parts = rest.split(":");
   const module = parts[0] || null;
   const action = parts[1] || null;
@@ -508,11 +523,12 @@ async function listAllListCacheForCompany(companyId, options = {}) {
   const memoryByKey = new Map();
 
   for (const [key, entry] of memoryCache.entries()) {
-    if (!keyBelongsToCompany(key, companyIdStr)) continue;
+    const keyStr = normalizeCacheKey(key);
+    if (!keyBelongsToCompany(keyStr, companyIdStr)) continue;
     const expired = now > entry.expiresAt;
     const memoryTtl =
       expired ? 0 : Math.max(0, Math.floor((entry.expiresAt - now) / 1000));
-    memoryByKey.set(key, {
+    memoryByKey.set(keyStr, {
       entry,
       expired,
       memoryTtl,
@@ -530,14 +546,15 @@ async function listAllListCacheForCompany(companyId, options = {}) {
         MATCH: pattern,
         COUNT: 100,
       });
-      for await (const key of iterator) {
+      for await (const rawKey of iterator) {
+        const keyStr = normalizeCacheKey(rawKey);
         let ttl = -2;
         try {
-          ttl = await redis.ttl(key);
+          ttl = await redis.ttl(rawKey);
         } catch {
           /* ignore */
         }
-        redisTtlByKey.set(key, ttl);
+        redisTtlByKey.set(keyStr, ttl);
       }
     }
   } catch (err) {
@@ -545,7 +562,8 @@ async function listAllListCacheForCompany(companyId, options = {}) {
   }
 
   const allKeys = new Set([...memoryByKey.keys(), ...redisTtlByKey.keys()]);
-  for (const key of allKeys) {
+  for (const rawKey of allKeys) {
+    const key = normalizeCacheKey(rawKey);
     const mem = memoryByKey.get(key);
     const redisTtl = redisTtlByKey.has(key) ? redisTtlByKey.get(key) : null;
     const memoryTtl = mem?.memoryTtl ?? null;
@@ -748,6 +766,7 @@ module.exports = {
   buildListCacheKey,
   buildListCachePrefix,
   resolveListCacheFromReq,
+  normalizeCacheKey,
   normalizeCompanyIdForCache,
   resolveCompanyIdFromReq,
   LIST_CACHE_ACTIONS,
