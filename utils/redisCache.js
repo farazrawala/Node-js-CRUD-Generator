@@ -68,6 +68,11 @@ function isMemoryFallbackEnabled() {
   return v !== "false" && v !== "0" && v !== "no";
 }
 
+/** True when list responses can be stored (Redis and/or in-process memory). */
+function isListCacheStorageEnabled() {
+  return isRedisConfigured() || isMemoryFallbackEnabled();
+}
+
 function memoryGet(key) {
   const entry = memoryCache.get(key);
   if (!entry) return null;
@@ -511,6 +516,7 @@ async function listAllListCacheForCompany(companyId, options = {}) {
       redis_count: 0,
       redis_enabled: isRedisConfigured(),
       redis_connected: false,
+      list_cache_storage_enabled: isListCacheStorageEnabled(),
       entries: [],
     };
   }
@@ -629,6 +635,7 @@ async function listAllListCacheForCompany(companyId, options = {}) {
     redis_count,
     redis_enabled: isRedisConfigured(),
     redis_connected: redisConnected,
+    list_cache_storage_enabled: isListCacheStorageEnabled(),
     entries,
   };
 }
@@ -644,6 +651,7 @@ async function listAllListCacheForReq(req, options = {}) {
       redis_count: 0,
       redis_enabled: isRedisConfigured(),
       redis_connected: false,
+      list_cache_storage_enabled: isListCacheStorageEnabled(),
       entries: [],
     };
   }
@@ -717,18 +725,36 @@ async function runCachedListHandler(req, res, options) {
       ttl,
     );
     const redisUp = await isRedisConnected();
+    const storageEnabled = isListCacheStorageEnabled();
+    let cacheNote;
+    if (!stored && !storageEnabled) {
+      cacheNote =
+        "List cache storage is disabled (REDIS_ENABLED=false and REDIS_MEMORY_FALLBACK=false).";
+    } else if (!stored && !redisUp && isMemoryFallbackEnabled()) {
+      cacheNote =
+        "Redis is not running on REDIS_URL; using in-memory cache for this process.";
+    } else if (!stored && !redisUp) {
+      cacheNote =
+        "Redis is not connected and REDIS_MEMORY_FALLBACK is disabled.";
+    }
     cacheMeta = {
       cacheKey,
       fromCache: false,
       cached: stored,
+      listCacheStorageEnabled: storageEnabled,
       cacheBackend: backend,
       cacheTtlSeconds: ttlSeconds,
       redisConnected: redisUp,
       ...(Object.keys(cacheQuery).length > 0 ? { cacheQuery } : {}),
-      ...(!redisUp && {
-        cacheNote:
-          "Redis is not running on REDIS_URL; using in-memory cache for this process.",
-      }),
+      ...(cacheNote ? { cacheNote } : {}),
+    };
+  } else if (!cacheKey && response?.success) {
+    cacheMeta = {
+      fromCache: false,
+      cached: false,
+      listCacheStorageEnabled: isListCacheStorageEnabled(),
+      cacheNote:
+        "No cache key (authenticate with a user that has company_id).",
     };
   }
 
@@ -746,6 +772,10 @@ if (!Number.isFinite(DEFAULT_LIST_CACHE_TTL_SEC) || DEFAULT_LIST_CACHE_TTL_SEC <
 if (isMemoryFallbackEnabled() && !isRedisConfigured()) {
   console.warn(
     `[redis] REDIS_ENABLED=false — list cache is in-process memory only (TTL ${resolveListCacheTtlSeconds()}s). Cache is cleared on server restart and when create/update/delete invalidates the module.`,
+  );
+} else if (!isListCacheStorageEnabled()) {
+  console.warn(
+    "[redis] List cache storage is OFF (REDIS_ENABLED=false and REDIS_MEMORY_FALLBACK=false). get-all / get-all-active responses are not stored.",
   );
 } else {
   console.log(
@@ -778,6 +808,7 @@ module.exports = {
   listAllListCacheForCompany,
   listAllListCacheForReq,
   runCachedListHandler,
+  isListCacheStorageEnabled,
   isListCacheBypassed,
   LIST_CACHE_BYPASS_MODULES,
   isRedisConfigured,

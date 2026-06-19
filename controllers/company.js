@@ -432,13 +432,21 @@ async function listAllCache(req, res) {
       description: { entry_count: data.count },
     });
 
+    let message;
+    if (data.count > 0) {
+      message = `Found ${data.count} cached list entry(ies) for this company`;
+    } else if (data.list_cache_storage_enabled === false) {
+      message =
+        "List cache storage is disabled on the API (REDIS_ENABLED=false and REDIS_MEMORY_FALLBACK=false). Visit categories after enabling cache in .env.";
+    } else {
+      message =
+        "No cached list entries found for this company. Load a list page (e.g. categories) while logged in, then refresh.";
+    }
+
     return res.status(200).json({
       success: true,
       status: 200,
-      message:
-        data.count > 0 ?
-          `Found ${data.count} cached list entry(ies) for this company`
-        : "No cached list entries found for this company",
+      message,
       ...data,
     });
   } catch (error) {
