@@ -8,6 +8,23 @@ const Category = require("../models/category");
 const Brand = require("../models/brands");
 const woocommerceProcess = require("./woocommerceProcess");
 const shopifyProcess = require("./shopifyProcess");
+const {
+  isQueueEnabled,
+  enqueueProcess,
+  releaseProcessFromQueue,
+  peekNextProcessJob,
+} = require("../utils/processQueue");
+const { normalizeCompanyId } = require("../utils/redisQueue");
+const {
+  buildProcessSourceRows,
+  normalizeProcessQueueBody,
+  PROCESS_QUEUE_FORM_FIELDS,
+} = require("../utils/processQueueForm");
+const {
+  isFetchProductAction,
+  createFetchProductQueueJob,
+} = require("../utils/fetchProductQueue");
+const { createMockExpressResponse } = require("../utils/mockExpressResponse");
 
 /**
  * Process queue orchestrator.
@@ -135,8 +152,28 @@ async function hydrateProcessBrand(process, req) {
   return null;
 }
 
-async function loadActiveProcess(req) {
+async function loadActiveProcess(req, queueRetry = 0) {
   const { filter } = buildActiveProcessFilter(req);
+  const hasExplicitProcessId = Boolean(req.params?.id || req.query.process_id);
+  let queuedJobCompanyId = null;
+
+  if (isQueueEnabled() && !hasExplicitProcessId) {
+    const scopedCompanyId =
+      req.query.company_id ?
+        normalizeCompanyId(req.query.company_id)
+      : null;
+    const nextJob = await peekNextProcessJob(scopedCompanyId);
+    if (nextJob?.jobId) {
+      queuedJobCompanyId = nextJob.companyId || scopedCompanyId;
+      filter._id = coalesceObjectId(nextJob.jobId);
+      if (nextJob.companyId && !scopedCompanyId) {
+        const companyCriteria = buildCompanyIdCriteria(nextJob.companyId);
+        if (companyCriteria) {
+          filter.$and.push(companyCriteria);
+        }
+      }
+    }
+  }
 
   const processDoc = await ProcessModel.findOne(filter)
     .sort({ priority: 1, createdAt: 1 })
@@ -149,7 +186,21 @@ async function loadActiveProcess(req) {
     ]);
 
   if (!processDoc) {
+    if (isQueueEnabled() && filter._id) {
+      await releaseProcessFromQueue(queuedJobCompanyId, filter._id);
+    }
     return null;
+  }
+
+  if (
+    isQueueEnabled() &&
+    !hasExplicitProcessId &&
+    queueRetry < 5 &&
+    (processDoc.status !== "active" ||
+      ["completed", "failed"].includes(processDoc.progress))
+  ) {
+    await releaseProcessFromQueue(processDoc);
+    return loadActiveProcess(req, queueRetry + 1);
   }
 
   const rawCategoryId = processDoc.category_id;
@@ -244,25 +295,19 @@ function validateProcessRow(row) {
 
 /**
  * POST /api/process/bulk-create
+ * POST /api/process/queue-create
  *
- * Option A — shared fields + many category ids (sync_category bulk):
- * {
- *   "integration_id": "...",
- *   "action": "sync_category",
- *   "category_ids": ["69150...", "69151..."]
- * }
+ * Accepts JSON, application/x-www-form-urlencoded, or multipart FormData.
  *
- * Option B — explicit rows:
- * {
- *   "items": [
- *     { "integration_id": "...", "category_id": "...", "action": "sync_category" }
- *   ]
- * }
+ * Single job (FormData):
+ *   integration_id, action, status=active, priority, limit, category_id|product_id|brand_id
+ *
+ * Bulk by ids (FormData):
+ *   integration_id, action=sync_category, category_ids=id1,id2,id3
  */
-async function processBulkCreate(req, res) {
-  const companyId = coalesceObjectId(
-    req.body?.company_id || req.user?.company_id,
-  );
+async function createProcessQueueRecords(req, res) {
+  const body = normalizeProcessQueueBody(req.body);
+  const companyId = coalesceObjectId(body.company_id || req.user?.company_id);
   const createdBy = coalesceObjectId(req.user?._id);
 
   if (!companyId) {
@@ -272,70 +317,14 @@ async function processBulkCreate(req, res) {
     });
   }
 
-  let sourceRows = [];
-
-  if (Array.isArray(req.body?.category_ids) && req.body.category_ids.length) {
-    const action = String(req.body.action || "sync_category").trim();
-    const template = {
-      integration_id: req.body.integration_id,
-      product_id: req.body.product_id,
-      action,
-      status: req.body.status,
-      progress: req.body.progress,
-      priority: req.body.priority,
-      limit: req.body.limit,
-      page: req.body.page,
-      remarks: req.body.remarks,
-    };
-    sourceRows = req.body.category_ids.map((categoryId) => ({
-      ...template,
-      category_id: categoryId,
-    }));
-  } else if (Array.isArray(req.body?.brand_ids) && req.body.brand_ids.length) {
-    const action = String(req.body.action || "sync_brand").trim();
-    const template = {
-      integration_id: req.body.integration_id,
-      action,
-      status: req.body.status,
-      progress: req.body.progress,
-      priority: req.body.priority,
-      limit: req.body.limit,
-      page: req.body.page,
-      remarks: req.body.remarks,
-    };
-    sourceRows = req.body.brand_ids.map((brandId) => ({
-      ...template,
-      brand_id: brandId,
-    }));
-  } else if (
-    Array.isArray(req.body?.product_ids) &&
-    req.body.product_ids.length
-  ) {
-    const action = String(req.body.action || "sync_product").trim();
-    const template = {
-      integration_id: req.body.integration_id,
-      action,
-      status: req.body.status,
-      progress: req.body.progress,
-      priority: req.body.priority,
-      limit: req.body.limit,
-      page: req.body.page,
-      remarks: req.body.remarks,
-    };
-    sourceRows = req.body.product_ids.map((productId) => ({
-      ...template,
-      product_id: productId,
-    }));
-  } else {
-    const items = req.body?.items;
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Send a non-empty `items` array, or `category_ids` / `brand_ids` / `product_ids` with shared fields.",
-      });
-    }
-    sourceRows = items;
+  const sourceRows = buildProcessSourceRows(body);
+  if (!sourceRows.length) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Provide action plus category_id/product_id/brand_id, category_ids/brand_ids/product_ids, or items.",
+      form_fields: PROCESS_QUEUE_FORM_FIELDS,
+    });
   }
 
   const created = [];
@@ -353,7 +342,35 @@ async function processBulkCreate(req, res) {
     }
 
     try {
+      if (isFetchProductAction(normalized.action)) {
+        const result = await createFetchProductQueueJob({
+          req,
+          integrationId: normalized.integration_id,
+          companyId,
+          createdBy,
+          options: {
+            priority: normalized.priority,
+            limit: normalized.limit,
+            page: normalized.page,
+            offset: normalized.offset,
+            remarks: normalized.remarks,
+            force:
+              body.force === true ||
+              body.force === "1" ||
+              body.force === 1,
+          },
+        });
+        created.push({
+          ...result.process.toObject(),
+          queue_auto: true,
+          queue_created: result.created,
+          queue_reused: result.reused,
+        });
+        continue;
+      }
+
       const doc = await ProcessModel.create(normalized);
+      await enqueueProcess(doc);
       created.push(doc);
     } catch (err) {
       failed.push({
@@ -369,13 +386,18 @@ async function processBulkCreate(req, res) {
       success: false,
       message: "No process records were created.",
       failed,
+      form_fields: PROCESS_QUEUE_FORM_FIELDS,
     });
   }
 
+  const fetchProductQueued = created.some((row) => row.queue_auto);
   const statusCode = failed.length > 0 ? 207 : 201;
   return res.status(statusCode).json({
     success: true,
-    message: `Created ${created.length} process record(s).`,
+    message:
+      fetchProductQueued ?
+        `Fetch product queue ready (${created.length} job(s)). Call execute-process to run.`
+      : `Created ${created.length} process queue record(s).`,
     data: {
       created,
       summary: {
@@ -384,6 +406,111 @@ async function processBulkCreate(req, res) {
         failed: failed.length,
       },
       failed,
+      queue_key: `${String(companyId).toLowerCase()}:process`,
+      execute_process_url: "/api/process/execute-process",
+    },
+  });
+}
+
+async function processBulkCreate(req, res) {
+  return createProcessQueueRecords(req, res);
+}
+
+async function processQueueCreate(req, res) {
+  return createProcessQueueRecords(req, res);
+}
+
+/**
+ * POST/GET /api/process/fetch-product-queue
+ * FormData/JSON: integration_id, limit, priority, page, force
+ */
+async function processFetchProductQueue(req, res) {
+  try {
+    const body = normalizeProcessQueueBody(req.body);
+    const integrationId =
+      body.integration_id || req.params?.integration_id || req.params?.id;
+    const companyId = coalesceObjectId(body.company_id || req.user?.company_id);
+
+    if (!integrationId) {
+      return res.status(400).json({
+        success: false,
+        message: "integration_id is required.",
+      });
+    }
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request body).",
+      });
+    }
+
+    const result = await createFetchProductQueueJob({
+      req,
+      integrationId,
+      companyId,
+      options: {
+        priority: body.priority,
+        limit: body.limit,
+        page: body.page,
+        offset: body.offset,
+        remarks: body.remarks,
+        force: body.force === true || body.force === "1" || body.force === 1,
+      },
+    });
+
+    return res.status(result.created ? 201 : 200).json({
+      success: true,
+      message:
+        result.created ?
+          "fetch_product queue created automatically."
+        : "Existing fetch_product queue job reused and refreshed.",
+      data: {
+        process: result.process,
+        queue_key: result.queue_key,
+        queue: result.queue,
+        created: result.created,
+        reused: result.reused,
+        execute_process_url: "/api/process/execute-process",
+      },
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      message: err.message || "Failed to create fetch_product queue",
+    });
+  }
+}
+
+function processQueueFormSchema(req, res) {
+  return res.status(200).json({
+    success: true,
+    endpoint: "POST /api/process/queue-create",
+    content_types: [
+      "application/json",
+      "application/x-www-form-urlencoded",
+      "multipart/form-data",
+    ],
+    form_fields: PROCESS_QUEUE_FORM_FIELDS,
+    examples: {
+      fetch_category_formdata: {
+        integration_id: "6789abcdef012345678901234",
+        action: "fetch_category",
+        status: "active",
+        priority: 100,
+        limit: 5,
+        page: 1,
+      },
+      sync_category_single: {
+        integration_id: "6789abcdef012345678901234",
+        action: "sync_category",
+        category_id: "69150abcdef012345678901234",
+        priority: 50,
+      },
+      sync_category_bulk: {
+        integration_id: "6789abcdef012345678901234",
+        action: "sync_category",
+        category_ids: "69150...,69151...,69152...",
+      },
     },
   });
 }
@@ -399,6 +526,10 @@ async function execute_process(req, res) {
     });
   }
 
+  return runProcessAction(req, res, process);
+}
+
+async function runProcessAction(req, res, process) {
   switch (process.action) {
     case "sync_product": {
       return dispatchByStoreType(req, res, process, {
@@ -447,7 +578,53 @@ async function execute_process(req, res) {
   }
 }
 
+async function runProcessExecution(req) {
+  const res = createMockExpressResponse();
+  await execute_process(req, res);
+  return res.getResult();
+}
+
+async function runQueueWorker(req, res) {
+  const { drainProcessQueue, getWorkerStatus } = require("../utils/processQueueWorker");
+  const status = getWorkerStatus();
+
+  if (status.draining) {
+    return res.status(409).json({
+      success: false,
+      message: "Queue worker is already running.",
+      data: status,
+    });
+  }
+
+  const result = await drainProcessQueue({
+    companyId: req.query.company_id,
+    processId: req.params.id || req.query.process_id,
+    maxBatches: req.query.max_batches,
+    user: req.user,
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: `Queue worker finished (${result.batches_run || 0} batch(es) run).`,
+    data: result,
+  });
+}
+
+function getQueueWorkerStatus(req, res) {
+  const { getWorkerStatus } = require("../utils/processQueueWorker");
+  return res.status(200).json({
+    success: true,
+    data: getWorkerStatus(),
+  });
+}
+
 module.exports = {
   execute_process,
+  runProcessExecution,
+  runQueueWorker,
+  getQueueWorkerStatus,
   processBulkCreate,
+  processQueueCreate,
+  processFetchProductQueue,
+  processQueueFormSchema,
 };

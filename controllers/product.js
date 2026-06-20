@@ -25,6 +25,10 @@ const {
   runCachedListHandler,
   invalidateModuleListCachesForReq,
 } = require("../utils/redisCache");
+const {
+  importProductsFromText,
+  PRODUCT_IMPORT_COLUMNS,
+} = require("../utils/productCsvImport");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -1164,6 +1168,132 @@ async function productCreate(req, res) {
   return res.status(response.status).json(response);
 }
 
+function readImportFileBuffer(req) {
+  const file =
+    req.files?.file ||
+    req.files?.products ||
+    req.files?.csv ||
+    req.files?.import;
+  if (!file?.data) return null;
+  return file.data;
+}
+
+/**
+ * GET /api/product/import-form — column reference for CSV/TSV import.
+ */
+function productImportFormSchema(req, res) {
+  return res.status(200).json({
+    success: true,
+    endpoint: "POST /api/product/import",
+    content_types: [
+      "multipart/form-data (field: file)",
+      "application/json ({ items: [...] })",
+      "text/plain body",
+    ],
+    columns: PRODUCT_IMPORT_COLUMNS,
+    example_row: {
+      category: "OIL",
+      product_name: "IKHLAS OIL",
+      price: 460,
+    },
+    sample_file: "pos_product.csv.xls (tab-separated: category, product_name, price)",
+  });
+}
+
+/**
+ * POST /api/product/import
+ * Import products from CSV/TSV upload or JSON rows.
+ * Categories are created automatically when they do not exist.
+ *
+ * multipart field: `file` (`.csv`, `.tsv`, `.xls` text tab file)
+ * Query/body: update_existing=true|false, dry_run=true
+ */
+async function productImportFromFile(req, res) {
+  try {
+    const companyId = coalesceObjectId(
+      req.body?.company_id || req.user?.company_id,
+    );
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request body).",
+      });
+    }
+
+    const updateExisting =
+      String(req.query?.update_existing ?? req.body?.update_existing ?? "true")
+        .trim()
+        .toLowerCase() !== "false";
+    const dryRun =
+      String(req.query?.dry_run ?? req.body?.dry_run ?? "false")
+        .trim()
+        .toLowerCase() === "true";
+
+    let text = null;
+
+    const fileBuffer = readImportFileBuffer(req);
+    if (fileBuffer) {
+      text = fileBuffer.toString("utf8");
+    } else if (typeof req.body?.csv === "string" && req.body.csv.trim()) {
+      text = req.body.csv;
+    } else if (typeof req.body?.text === "string" && req.body.text.trim()) {
+      text = req.body.text;
+    } else if (Array.isArray(req.body?.items) && req.body.items.length) {
+      const header = "category\tproduct_name\tprice\n";
+      const lines = req.body.items.map((row) =>
+        [
+          String(row.category || "").trim(),
+          String(row.product_name || row.name || "").trim(),
+          String(row.price ?? row.product_price ?? 0).trim(),
+        ].join("\t"),
+      );
+      text = header + lines.join("\n");
+    }
+
+    if (!text) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Upload a CSV/TSV file (form field `file`) or send `items` / `csv` / `text` in the body.",
+        columns: PRODUCT_IMPORT_COLUMNS,
+      });
+    }
+
+    const result = await importProductsFromText(text, {
+      companyId,
+      createdBy: req.user?._id,
+      options: { updateExisting, dryRun },
+    });
+
+    if (!dryRun) {
+      await invalidateProductListCache(req);
+    }
+
+    const statusCode =
+      !dryRun && result.summary?.failed > 0 && result.summary?.created === 0 ?
+        400
+      : !dryRun && result.summary?.failed > 0 ?
+        207
+      : 200;
+
+    return res.status(statusCode).json({
+      success: result.summary?.failed === 0 || dryRun,
+      message:
+        dryRun ?
+          `Dry run: ${result.parsed.row_count} row(s) ready to import.`
+        : `Import complete — created ${result.summary.created}, updated ${result.summary.updated}, skipped ${result.summary.skipped}, failed ${result.summary.failed}. Categories created: ${result.summary.categories_created}.`,
+      data: result,
+    });
+  } catch (error) {
+    console.error("❌ productImportFromFile:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Product import failed",
+      details: error.details || undefined,
+    });
+  }
+}
+
 async function performProductUpdate(req, options = {}) {
   const session = options.session || null;
   const strictSideEffects = Boolean(session || options.strictSideEffects);
@@ -1784,12 +1914,22 @@ async function productCostUpdate(req, res) {
 
 async function getAllActiveProductsPOS(req, res) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
+  const searchTerm =
+    req.query.search != null ? String(req.query.search).trim() : "";
+
   const filter = {
-    // status: "active",
     deletedAt: null,
-    product_parent_id: null,
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
+
+  // Catalog grid: parent/single rows only. Search/scan: include variations (barcode often on child SKU).
+  if (!searchTerm) {
+    filter.$or = [
+      { $expr: { $eq: ["$_id", "$parent_product_id"] } },
+      { parent_product_id: null },
+      { parent_product_id: { $exists: false } },
+    ];
+  }
 
   const rawCategory = req.query.category_id ?? req.query.categoryId;
   if (rawCategory != null && String(rawCategory).trim() !== "") {
@@ -1853,6 +1993,8 @@ async function updateStockByWarehouse(req, res) {
 
 module.exports = {
   productCreate,
+  productImportFromFile,
+  productImportFormSchema,
   productUpdate,
   productById,
   getAllProducts,

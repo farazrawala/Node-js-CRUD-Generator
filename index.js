@@ -354,4 +354,7 @@ app.listen(port, () => {
   console.log(
     `🏷️  Deploy v${version.deployVersion} (commit ${version.gitCommitShort}, run #${version.deployNumber ?? "local"}) — GET ${withBasePath("/api/version")}`,
   );
+
+  const { startProcessQueueWorker } = require("./utils/processQueueWorker");
+  startProcessQueueWorker();
 });

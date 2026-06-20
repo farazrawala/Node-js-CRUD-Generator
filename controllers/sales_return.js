@@ -29,6 +29,7 @@ const {
   insertInventoryMovementRecord,
   syncProductStockFromMovementLedger,
 } = require("./inventory_movements");
+const { sumHeaderTotalAmount } = require("../utils/reportHeaderTotals");
 const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
@@ -3420,6 +3421,13 @@ async function findProfitBySalesReturnItem(req, res) {
   }
 }
 
+/** GET sum of `total_amount` from `sales_return` for income statement / reporting. */
+async function findSalesReturnSales(req, res) {
+  return sumHeaderTotalAmount(req, res, SalesReturn, {
+    statusQueryField: "return_status",
+  });
+}
+
 module.exports = {
   salesReturnCreate,
   sales_return_update,
@@ -3427,6 +3435,7 @@ module.exports = {
   getSalesReturnByReturnItem,
   getSalesReturnByReturnNo,
   findProfitBySalesReturnItem,
+  findSalesReturnSales,
   // purchase_orderUpdate,
   // purchase_orderById,
   // getAllpurchase_order,

@@ -44,6 +44,8 @@ const {
 const { assetsSave, assetsUpdate } = require("../controllers/assets");
 const {
   productCreate,
+  productImportFromFile,
+  productImportFormSchema,
   productUpdate,
   productById,
   getAllProducts,
@@ -90,9 +92,18 @@ const {
   // syncStoreBrand,
   syncProductRelations,
   syncStoreProduct,
+  queueStoreProductFetch,
 } = require("../controllers/integration");
 
-const { execute_process, processBulkCreate } = require("../controllers/process");
+const {
+  execute_process,
+  processBulkCreate,
+  processQueueCreate,
+  processFetchProductQueue,
+  processQueueFormSchema,
+  runQueueWorker,
+  getQueueWorkerStatus,
+} = require("../controllers/process");
 const { logControllerError } = require("../utils/logControllerError");
 
 const {
@@ -114,6 +125,7 @@ const {
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
+  findPurchaseOrderPurchases,
 } = require("../controllers/purchase_order");
 const {
   purchaseReturnCreate,
@@ -121,6 +133,7 @@ const {
   purchase_return_delete,
   getPurchaseReturnByReturnItem,
   getPurchaseReturnByReturnNo,
+  findPurchaseReturnPurchases,
 } = require("../controllers/purchase_return");
 const {
   salesReturnCreate,
@@ -129,12 +142,17 @@ const {
   getSalesReturnByReturnItem,
   getSalesReturnByReturnNo,
   findProfitBySalesReturnItem,
+  findSalesReturnSales,
 } = require("../controllers/sales_return");
 const {
   companyCreate,
   getMyBranches,
   removeCache,
   listAllCache,
+  listAllQueues,
+  getQueueStatus,
+  enqueueQueueJob,
+  clearCompanyQueue,
 } = require("../controllers/company");
 const {
   transactionBulkCreate,
@@ -150,7 +168,10 @@ const {
   getProfitVsGlGapBreakdown,
   getCompanyDefaultDiscountSums,
 } = require("../controllers/account");
-const { getIncomeStatement } = require("../controllers/reports");
+const {
+  getIncomeStatement,
+  getIncomeStatementDetail,
+} = require("../controllers/reports");
 
 const {
   amountTransferCreate,
@@ -304,6 +325,9 @@ router.post("/inventory_movements/save", inventoryMovementsCreate);
 router.post("/inventory_movements/stock-transfer", stockTransfer);
 
 // Product routes - Custom CRUD + warehouse inventory management
+router.get("/product/import-form", productImportFormSchema);
+router.post("/product/import", productImportFromFile);
+
 router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
 router.patch("/product/update-cost/:id", productCostUpdate);
@@ -328,20 +352,40 @@ router.get("/integration/check-active/:id", checkIntegrationActive);
 router.get("/integration/sync-store-category/:id", syncStoreCategory);
 // router.get("/integration/sync-store-brand/:id", syncStoreBrand);
 router.get("/integration/sync-store-product/:id", syncStoreProduct);
+router.post("/integration/sync-store-product/:id", syncStoreProduct);
+router.get("/integration/sync-store-product/:id/queue", queueStoreProductFetch);
+router.post(
+  "/integration/sync-store-product/:id/queue",
+  queueStoreProductFetch,
+);
 router.get("/integration/find-product-relations/:id", syncProductRelations);
 
 // Process routes (GET or POST — some clients/proxies use POST)
+router.get("/process/queue-form", processQueueFormSchema);
+router.post("/process/queue-create", processQueueCreate);
+router.post("/process/fetch-product-queue", processFetchProductQueue);
+router.get("/process/fetch-product-queue", processFetchProductQueue);
 router.post("/process/bulk-create", processBulkCreate);
 router.post("/processs/bulk-create", processBulkCreate);
 router.get("/process/execute-process", execute_process);
 router.post("/process/execute-process", execute_process);
 router.get("/process/execute-process/:id", execute_process);
 router.post("/process/execute-process/:id", execute_process);
+router.post("/process/run-queue-worker", runQueueWorker);
+router.get("/process/run-queue-worker", runQueueWorker);
+router.post("/process/run-queue-worker/:id", runQueueWorker);
+router.get("/process/run-queue-worker/:id", runQueueWorker);
+router.get("/process/queue-worker-status", getQueueWorkerStatus);
 
 // Company routes
 router.get("/company/get-my-branches", getMyBranches);
 
 router.get("/company/list-cache", listAllCache);
+
+router.get("/company/queue", listAllQueues);
+router.get("/company/queue/:module", getQueueStatus);
+router.post("/company/queue/:module/enqueue", enqueueQueueJob);
+router.delete("/company/queue/:module", clearCompanyQueue);
 
 router.get("/company/remove-cache", removeCache);
 router.delete("/company/remove-cache", removeCache);
@@ -392,6 +436,7 @@ router.get("/account/default-discount-sums", getCompanyDefaultDiscountSums);
 
 // Reports
 router.get("/reports/income-statement", getIncomeStatement);
+router.get("/reports/income-statement-detail", getIncomeStatementDetail);
 
 // Adjustment routes
 router.post("/adjustment/save", adjustmentCreate);
@@ -413,6 +458,9 @@ router.get(
 );
 router.get("/order/sales", findSales);
 router.get("/order/sales-day-wise", findSalesDayWise);
+router.get("/sales_return/sales", findSalesReturnSales);
+router.get("/purchase_order/purchases", findPurchaseOrderPurchases);
+router.get("/purchase_return/purchases", findPurchaseReturnPurchases);
 router.get("/order/total-sales-current-month", findTotalSalesByOrder);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
 router.get("/order/public-get-order-by-order-no/:id", getOrderByOrderNo);

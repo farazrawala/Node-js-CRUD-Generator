@@ -24,6 +24,7 @@ const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
 const { createApplicationLog } = require("../utils/applicationLogs");
+const { sumHeaderTotalAmount } = require("../utils/reportHeaderTotals");
 
 /**
  * Purchase order HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -2812,12 +2813,20 @@ async function purchase_order_delete(req, res) {
   }
 }
 
+/** GET sum of `total_amount` from `purchase_order` for income statement / reporting. */
+async function findPurchaseOrderPurchases(req, res) {
+  return sumHeaderTotalAmount(req, res, PurchaseOrder, {
+    statusQueryField: "order_status",
+  });
+}
+
 module.exports = {
   purchaseOrderCreate,
   purchase_order_update,
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
+  findPurchaseOrderPurchases,
   applyWholesalePriceRemoveForPoLines,
   applyWholesalePriceWeightedAverageForPoLines,
   // purchase_orderUpdate,

@@ -15,6 +15,7 @@ const {
 } = require("./transaction");
 const { logRollbackFailure } = require("../utils/logControllerError");
 const { createApplicationLog } = require("../utils/applicationLogs");
+const { sumHeaderTotalAmount } = require("../utils/reportHeaderTotals");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   handleGenericCreate,
@@ -3122,12 +3123,20 @@ async function purchase_return_delete(req, res) {
   }
 }
 
+/** GET sum of `total_amount` from `purchase_return` for income statement / reporting. */
+async function findPurchaseReturnPurchases(req, res) {
+  return sumHeaderTotalAmount(req, res, PurchaseReturn, {
+    statusQueryField: "return_status",
+  });
+}
+
 module.exports = {
   purchaseReturnCreate,
   purchase_return_update,
   purchase_return_delete,
   getPurchaseReturnByReturnItem,
   getPurchaseReturnByReturnNo,
+  findPurchaseReturnPurchases,
   // purchase_orderUpdate,
   // purchase_orderById,
   // getAllpurchase_order,

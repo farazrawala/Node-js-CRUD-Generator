@@ -119,6 +119,13 @@ const modelSchema = new mongoose.Schema(
   { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
+modelSchema.post("save", function onProcessSaved(doc) {
+  const { syncProcessQueueOnSave } = require("../utils/processQueue");
+  syncProcessQueueOnSave(doc).catch((err) => {
+    console.warn("[process-queue] sync on save:", err?.message || err);
+  });
+});
+
 const MODEL = mongoose.model("process", modelSchema);
 
 module.exports = MODEL;

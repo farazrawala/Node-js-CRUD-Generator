@@ -1829,9 +1829,11 @@ async function findSales(req, res) {
       match.order_status = String(rawOrderStatus).trim();
     }
 
-    const hasFrom =
-      req.query?.from != null && String(req.query.from).trim() !== "";
-    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+    const rawFrom =
+      req.query?.from ?? req.query?.startDate ?? req.query?.start_date;
+    const rawTo = req.query?.to ?? req.query?.endDate ?? req.query?.end_date;
+    const hasFrom = rawFrom != null && String(rawFrom).trim() !== "";
+    const hasTo = rawTo != null && String(rawTo).trim() !== "";
 
     if (!hasFrom && !hasTo) {
       const toDate = new Date();
@@ -1841,7 +1843,7 @@ async function findSales(req, res) {
     } else {
       match.createdAt = {};
       if (hasFrom) {
-        const fromDate = new Date(String(req.query.from).trim());
+        const fromDate = new Date(String(rawFrom).trim());
         if (Number.isNaN(fromDate.getTime())) {
           return res.status(400).json({
             success: false,
@@ -1852,7 +1854,7 @@ async function findSales(req, res) {
         match.createdAt.$gte = fromDate;
       }
       if (hasTo) {
-        const toDate = new Date(String(req.query.to).trim());
+        const toDate = new Date(String(rawTo).trim());
         if (Number.isNaN(toDate.getTime())) {
           return res.status(400).json({
             success: false,

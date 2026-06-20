@@ -866,6 +866,97 @@ function buildVariantDescription(baseDescription, attributes = []) {
     ///////////////Sync  Brand///////////////
 
   ///////////////Sync  Products///////////////
+  function wantsProductFetchQueue(req) {
+    const q = req.query || {};
+    const b = req.body || {};
+    if (
+      q.queue === "0" ||
+      q.queue === "false" ||
+      q.auto_queue === "0" ||
+      b.queue === "0" ||
+      b.queue === false
+    ) {
+      return false;
+    }
+    if (
+      q.queue === "1" ||
+      q.queue === "true" ||
+      q.auto_queue === "1" ||
+      q.auto_queue === "true" ||
+      b.queue === "1" ||
+      b.queue === true ||
+      b.auto_queue === "1" ||
+      b.auto_queue === true
+    ) {
+      return true;
+    }
+    return (
+      String(process.env.FETCH_PRODUCT_AUTO_QUEUE || "")
+        .trim()
+        .toLowerCase() === "true"
+    );
+  }
+
+  async function queueStoreProductFetch(req, res, integrationArg) {
+    const { createFetchProductQueueJob } = require("../utils/fetchProductQueue");
+    const body = req.body || {};
+    const q = req.query || {};
+
+    let integration = integrationArg;
+    if (!integration) {
+      const integrationResponse = await handleGenericGetById(req, "integration", {
+        excludeFields: [],
+      });
+      if (!integrationResponse?.data) {
+        return res.status(integrationResponse?.status || 404).json({
+          success: false,
+          message: integrationResponse?.error || "Integration not found",
+        });
+      }
+      integration = integrationResponse.data;
+    }
+
+    try {
+      const result = await createFetchProductQueueJob({
+        req,
+        integration,
+        options: {
+          priority: q.priority ?? body.priority,
+          limit: q.limit ?? body.limit,
+          page: q.page ?? body.page,
+          offset: q.offset ?? body.offset,
+          remarks: body.remarks || q.remarks || "Queued from integration sync-store-product",
+          force:
+            q.force === "1" ||
+            q.force === "true" ||
+            body.force === "1" ||
+            body.force === true,
+        },
+      });
+
+      return res.status(result.created ? 201 : 200).json({
+        success: true,
+        message:
+          result.created ?
+            "Product fetch queue created. Call execute-process to import."
+          : "Existing fetch_product queue job reused.",
+        data: {
+          process: result.process,
+          queue_key: result.queue_key,
+          queue: result.queue,
+          created: result.created,
+          reused: result.reused,
+          execute_process_url: "/api/process/execute-process",
+        },
+      });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({
+        success: false,
+        message: err.message || "Failed to queue fetch_product job",
+      });
+    }
+  }
+
   async function syncStoreProduct(req, res) {
     const integrationResponse = await handleGenericGetById(
       req,
@@ -874,6 +965,17 @@ function buildVariantDescription(baseDescription, attributes = []) {
         excludeFields: [],
       }
     );
+    if (!integrationResponse?.data) {
+      return res.status(integrationResponse?.status || 404).json({
+        success: false,
+        message: integrationResponse?.error || "Integration not found",
+      });
+    }
+
+    if (wantsProductFetchQueue(req)) {
+      return queueStoreProductFetch(req, res, integrationResponse.data);
+    }
+
     if (integrationResponse.data.store_type === "shopify") {
       return syncShopifyProduct(req, res, integrationResponse.data);
     } else if (integrationResponse.data.store_type === "woocommerce") {
@@ -2024,6 +2126,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
     syncStoreCategory,
     // syncStoreBrand,
     syncProductRelations,
-    syncStoreProduct
+    syncStoreProduct,
+    queueStoreProductFetch,
   };
   

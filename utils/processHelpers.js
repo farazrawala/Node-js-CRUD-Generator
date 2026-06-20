@@ -6,6 +6,7 @@ const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
 const SyncProduct = require("../models/sync_product");
 const { coalesceObjectId } = require("./modelHelper");
+const { releaseProcessFromQueue } = require("./processQueue");
 
 function escapeRegex(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -517,6 +518,9 @@ async function finishFetchCategoryBatch(req, res, process, batchResult) {
   }
 
   await ProcessModel.findByIdAndUpdate(process._id, update);
+  if (isComplete) {
+    await releaseProcessFromQueue(process);
+  }
 
   return res.status(200).json({
     success: true,
@@ -550,6 +554,7 @@ async function failFetchCategoryBatch(process, res, errorMessage, errorDetail) {
     status: "failed",
     remarks: errorMessage,
   });
+  await releaseProcessFromQueue(process);
 
   return res.status(500).json({
     success: false,
@@ -591,6 +596,9 @@ async function finishFetchBrandBatch(req, res, process, batchResult) {
   }
 
   await ProcessModel.findByIdAndUpdate(process._id, update);
+  if (isComplete) {
+    await releaseProcessFromQueue(process);
+  }
 
   return res.status(200).json({
     success: true,
@@ -654,6 +662,9 @@ async function finishFetchProductBatch(req, res, process, batchResult) {
   }
 
   await ProcessModel.findByIdAndUpdate(process._id, update);
+  if (isComplete) {
+    await releaseProcessFromQueue(process);
+  }
 
   return res.status(200).json({
     success: true,
@@ -685,7 +696,18 @@ async function finishFetchProductBatch(req, res, process, batchResult) {
 const failFetchProductBatch = failFetchCategoryBatch;
 
 async function markProcessOutcome(processId, status, remarks) {
-  await ProcessModel.findByIdAndUpdate(processId, { status, remarks });
+  const doc = await ProcessModel.findByIdAndUpdate(
+    processId,
+    { status, remarks },
+    { new: true },
+  ).lean();
+  if (
+    doc &&
+    (["completed", "failed", "inactive"].includes(status) ||
+      ["completed", "failed"].includes(doc.progress))
+  ) {
+    await releaseProcessFromQueue(doc);
+  }
 }
 
 module.exports = {

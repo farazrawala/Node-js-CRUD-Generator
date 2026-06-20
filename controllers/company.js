@@ -14,6 +14,15 @@ const {
   listAllListCacheForReq,
   resolveCompanyIdFromReq,
 } = require("../utils/redisCache");
+const {
+  listCompanyQueues,
+  peekJobs,
+  getQueueLength,
+  clearQueue,
+  enqueueJob,
+  normalizeModule,
+  isQueueEnabled,
+} = require("../utils/redisQueue");
 const { logListAccess } = require("../utils/applicationLogs");
 const {
   logRollbackFailure,
@@ -459,9 +468,174 @@ async function listAllCache(req, res) {
   }
 }
 
+/**
+ * GET `/api/company/queue` — list Redis queues for the authenticated company.
+ * Each queue is keyed `{companyId}:{module}` (Redis ZSET: `{companyId}:{module}:queue`).
+ */
+async function listAllQueues(req, res) {
+  try {
+    const companyId = resolveCompanyIdFromReq(req);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message:
+          "company_id is required (authenticate with a user linked to a company)",
+      });
+    }
+
+    const data = await listCompanyQueues(companyId);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message:
+        data.count > 0 ?
+          `Found ${data.count} queue(s) for this company`
+        : "No queued jobs for this company.",
+      ...data,
+    });
+  } catch (error) {
+    console.error("❌ listAllQueues:", error?.message || error, error?.stack || "");
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error?.message || "Failed to list queues",
+    });
+  }
+}
+
+/**
+ * GET `/api/company/queue/:module` — peek a tenant module queue.
+ */
+async function getQueueStatus(req, res) {
+  try {
+    const companyId = resolveCompanyIdFromReq(req);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
+      });
+    }
+
+    const module = normalizeModule(req.params.module);
+    const length = await getQueueLength(companyId, module);
+    const pending = await peekJobs(companyId, module, 20);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: companyId,
+      module,
+      queue_key: `${companyId}:${module}`,
+      length,
+      pending,
+      queue_enabled: isQueueEnabled(),
+    });
+  } catch (error) {
+    console.error("❌ getQueueStatus:", error?.message || error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error?.message || "Failed to read queue",
+    });
+  }
+}
+
+/**
+ * POST `/api/company/queue/:module/enqueue` — enqueue a generic job id.
+ * Body: `{ "job_id": "...", "priority": 100 }`
+ */
+async function enqueueQueueJob(req, res) {
+  try {
+    const companyId = resolveCompanyIdFromReq(req);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
+      });
+    }
+
+    const module = normalizeModule(req.params.module);
+    const jobId = req.body?.job_id || req.body?.jobId || req.body?.id;
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "job_id is required in request body",
+      });
+    }
+
+    const result = await enqueueJob(companyId, module, jobId, {
+      priority: req.body?.priority,
+      enqueuedAt: req.body?.enqueued_at || Date.now(),
+    });
+
+    return res.status(result.queued ? 201 : 503).json({
+      success: result.queued,
+      status: result.queued ? 201 : 503,
+      message: result.queued ? "Job queued" : "Queue storage unavailable",
+      company_id: companyId,
+      module,
+      queue_key: `${companyId}:${module}`,
+      job_id: String(jobId),
+      ...result,
+    });
+  } catch (error) {
+    console.error("❌ enqueueQueueJob:", error?.message || error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error?.message || "Failed to enqueue job",
+    });
+  }
+}
+
+/**
+ * DELETE `/api/company/queue/:module` — clear all jobs in a tenant module queue.
+ */
+async function clearCompanyQueue(req, res) {
+  try {
+    const companyId = resolveCompanyIdFromReq(req);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
+      });
+    }
+
+    const module = normalizeModule(req.params.module);
+    const removed = await clearQueue(companyId, module);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: `Cleared ${removed} job(s) from ${companyId}:${module}`,
+      company_id: companyId,
+      module,
+      queue_key: `${companyId}:${module}`,
+      removed,
+    });
+  } catch (error) {
+    console.error("❌ clearCompanyQueue:", error?.message || error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error?.message || "Failed to clear queue",
+    });
+  }
+}
+
 module.exports = {
   companyCreate,
   getMyBranches,
   removeCache,
   listAllCache,
+  listAllQueues,
+  getQueueStatus,
+  enqueueQueueJob,
+  clearCompanyQueue,
 };

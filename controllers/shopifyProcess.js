@@ -18,6 +18,10 @@ const {
   findExistingCategory,
   findExistingBrand,
   findExistingProduct,
+  findExistingProductBySku,
+  findExistingProductByName,
+  findPosProductBySyncReference,
+  upsertSyncProductMapping,
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
   finishFetchProductBatch,
@@ -101,6 +105,133 @@ function mapShopifyProductType(productType) {
     : "Single";
 }
 
+function isShopifyVariableProduct(remoteProduct) {
+  const variants =
+    Array.isArray(remoteProduct?.variants) ? remoteProduct.variants : [];
+  if (variants.length > 1) {
+    return true;
+  }
+  const options =
+    Array.isArray(remoteProduct?.options) ? remoteProduct.options : [];
+  return options.some((opt) => {
+    const values = Array.isArray(opt?.values) ? opt.values : [];
+    return values.filter(Boolean).length > 1;
+  });
+}
+
+function formatShopifyVariantLabel(variant) {
+  const parts = [variant?.option1, variant?.option2, variant?.option3]
+    .map((value) => String(value || "").trim())
+    .filter(
+      (value) => value && value.toLowerCase() !== "default title",
+    );
+  return parts.join(" / ");
+}
+
+function buildShopifyVariationProductName(parentName, variant) {
+  const label = formatShopifyVariantLabel(variant);
+  if (!label) {
+    return parentName;
+  }
+  return `${parentName} [${label}]`;
+}
+
+function buildShopifyVariationSku(parentSku, shopifyProductId, variantId) {
+  const base =
+    String(parentSku || "").trim() ||
+    (shopifyProductId ? `shopify-${shopifyProductId}` : "shopify-var");
+  return `${base}-var-${variantId}`;
+}
+
+async function recordShopifyProductSyncMapping(
+  process,
+  companyId,
+  posProductId,
+  websiteProductId,
+  stats,
+) {
+  try {
+    const row = await upsertSyncProductMapping({
+      productId: posProductId,
+      integrationId: resolveIntegrationId(process),
+      companyId,
+      referenceId: websiteProductId,
+      createdBy: process.created_by?._id || process.created_by,
+    });
+    if (row && stats) {
+      stats.sync_product_mapped = (stats.sync_product_mapped || 0) + 1;
+    }
+    return row;
+  } catch (error) {
+    console.warn(
+      `sync_product mapping failed for Shopify product ${websiteProductId}:`,
+      error?.message || error,
+    );
+    return null;
+  }
+}
+
+async function findPosProductForShopifyImport({
+  process,
+  companyId,
+  shopifyReferenceId,
+  sku,
+  name,
+}) {
+  const integrationId = resolveIntegrationId(process);
+  if (shopifyReferenceId && integrationId) {
+    const bySync = await findPosProductBySyncReference(
+      integrationId,
+      companyId,
+      shopifyReferenceId,
+    );
+    if (bySync) {
+      return bySync;
+    }
+  }
+
+  if (sku) {
+    const bySku = await findExistingProductBySku(sku, companyId);
+    if (bySku) {
+      return bySku;
+    }
+  }
+
+  if (name) {
+    return findExistingProductByName(name, companyId);
+  }
+
+  return null;
+}
+
+async function syncShopifyVariantWarehouseStock({
+  warehouseId,
+  companyId,
+  process,
+  posId,
+  variant,
+  client,
+  stats,
+}) {
+  if (!warehouseId || !variant || !posId) {
+    return;
+  }
+  const stockQty = await resolveShopifyVariantStockQuantity(variant, client);
+  const stockResult = await syncShopifyProductWarehouseStock({
+    productId: posId,
+    companyId,
+    warehouseId,
+    targetQty: stockQty,
+    userId: coalesceObjectId(process.created_by?._id || process.created_by),
+  });
+  if (stockResult.synced) {
+    stats.stock_synced = (stats.stock_synced || 0) + 1;
+    if (!stockResult.unchanged) {
+      stats.stock_updated = (stats.stock_updated || 0) + 1;
+    }
+  }
+}
+
 function mapShopifyVariantPrice(variant) {
   if (variant?.price == null || variant.price === "") {
     return 0;
@@ -125,6 +256,15 @@ function mapShopifyVariantInventoryQuantity(variant) {
   return Number.isFinite(qty) ? Math.max(0, roundImportQty(qty)) : 0;
 }
 
+/** When Shopify token lacks read_inventory, skip inventory_levels for the rest of the process. */
+let shopifyInventoryLevelsUnavailable = false;
+
+function isShopifyInventoryScopeError(error) {
+  const body = error?.response?.body;
+  const text = JSON.stringify(body || error?.message || error || "").toLowerCase();
+  return text.includes("read_inventory") || text.includes("inventory scope");
+}
+
 /** Prefer summed `inventory_levels.available`; fall back to variant `inventory_quantity`. */
 async function resolveShopifyVariantStockQuantity(variant, client) {
   if (!variant) {
@@ -138,7 +278,7 @@ async function resolveShopifyVariantStockQuantity(variant, client) {
   }
 
   const itemId = variant.inventory_item_id;
-  if (client && itemId) {
+  if (client && itemId && !shopifyInventoryLevelsUnavailable) {
     try {
       const response = await client.get({
         path: "inventory_levels",
@@ -156,10 +296,17 @@ async function resolveShopifyVariantStockQuantity(variant, client) {
         return Math.max(0, roundImportQty(total));
       }
     } catch (error) {
-      console.warn(
-        `Shopify inventory_levels lookup failed for item ${itemId}:`,
-        error?.response?.body || error?.message || error,
-      );
+      if (isShopifyInventoryScopeError(error)) {
+        shopifyInventoryLevelsUnavailable = true;
+        console.warn(
+          "[shopify fetch_product] read_inventory scope missing — using variant inventory_quantity for stock.",
+        );
+      } else {
+        console.warn(
+          `Shopify inventory_levels lookup failed for item ${itemId}:`,
+          error?.response?.body || error?.message || error,
+        );
+      }
     }
   }
 
@@ -229,12 +376,17 @@ async function syncShopifyProductWarehouseStock({
   };
 }
 
-function buildPosFieldsFromShopify(remoteProduct, variant, productPrice) {
+function buildPosFieldsFromShopify(
+  remoteProduct,
+  variant,
+  productPrice,
+  productTypeOverride,
+) {
   const fields = {
     product_name: String(remoteProduct?.title || "").trim(),
     product_price: productPrice,
     product_description: remoteProduct?.body_html || "",
-    product_type: mapShopifyProductType(remoteProduct?.product_type),
+    product_type: productTypeOverride || mapShopifyProductType(remoteProduct?.product_type),
   };
 
   if (variant?.weight != null && variant.weight !== "") {
@@ -393,6 +545,192 @@ async function resolvePosCategoryIdsFromShopifyProduct(
   return posIds;
 }
 
+async function upsertShopifyProductRow({
+  remoteProduct,
+  variant,
+  name,
+  sku,
+  productType,
+  productPrice,
+  categoryIds,
+  parentProductId,
+  companyId,
+  process,
+  stats,
+  shopifyReferenceId,
+  isVariation = false,
+  warehouseId = null,
+  client = null,
+}) {
+  const trimmedName = String(name || "").trim();
+  if (!trimmedName) {
+    return null;
+  }
+
+  const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
+  const existing = await findPosProductForShopifyImport({
+    process,
+    companyId,
+    shopifyReferenceId,
+    sku,
+    name: trimmedName,
+  });
+
+  const payload = {
+    ...buildPosFieldsFromShopify(remoteProduct, variant, productPrice, productType),
+    product_name: trimmedName,
+    sku,
+    product_code: sku,
+    category_id: categoryField,
+  };
+
+  if (parentProductId) {
+    payload.parent_product_id = coalesceObjectId(parentProductId);
+  }
+
+  let posId;
+
+  if (existing) {
+    posId = coalesceObjectId(existing._id);
+    await Product.updateOne({ _id: posId }, { $set: payload });
+    if (isVariation) {
+      stats.variations_updated = (stats.variations_updated || 0) + 1;
+    } else {
+      stats.updated = (stats.updated || 0) + 1;
+    }
+  } else {
+    const created = await Product.create({
+      ...payload,
+      unit: "Piece",
+      company_id: companyId,
+      status: "active",
+      created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+    });
+    posId = coalesceObjectId(created._id);
+    if (isVariation) {
+      stats.variations_inserted = (stats.variations_inserted || 0) + 1;
+    } else {
+      stats.inserted += 1;
+    }
+  }
+
+  if (shopifyReferenceId) {
+    await recordShopifyProductSyncMapping(
+      process,
+      companyId,
+      posId,
+      shopifyReferenceId,
+      stats,
+    );
+  }
+
+  if (categoryField.length) {
+    stats.products_category_linked = (stats.products_category_linked || 0) + 1;
+  }
+
+  await syncShopifyVariantWarehouseStock({
+    warehouseId,
+    companyId,
+    process,
+    posId,
+    variant,
+    client,
+    stats,
+  });
+
+  return posId;
+}
+
+async function importShopifyVariableProductToPos(
+  remoteProduct,
+  {
+    companyId,
+    process,
+    stats,
+    productPrice,
+    categoryIds = [],
+    warehouseId = null,
+    client = null,
+  },
+) {
+  const shopifyProductId = Number(remoteProduct?.id);
+  const parentName = String(remoteProduct?.title || "").trim();
+  if (!shopifyProductId || !parentName) {
+    return null;
+  }
+
+  const variants =
+    Array.isArray(remoteProduct?.variants) ? remoteProduct.variants : [];
+  stats.variations_fetched = (stats.variations_fetched || 0) + variants.length;
+
+  const parentSku = `shopify-${shopifyProductId}`;
+
+  const variantPrices = variants
+    .map((row) => mapShopifyVariantPrice(row))
+    .filter((price) => price > 0);
+  const parentDisplayPrice =
+    variantPrices.length > 0 ?
+      Math.min(...variantPrices)
+    : productPrice;
+
+  const parentPosId = await upsertShopifyProductRow({
+    remoteProduct,
+    variant: null,
+    name: parentName,
+    sku: parentSku,
+    productType: "Variable",
+    productPrice: parentDisplayPrice,
+    categoryIds,
+    parentProductId: null,
+    companyId,
+    process,
+    stats,
+    shopifyReferenceId: String(shopifyProductId),
+    isVariation: false,
+    warehouseId: null,
+    client,
+  });
+
+  if (!parentPosId) {
+    return null;
+  }
+
+  for (const variant of variants) {
+    const variantId = Number(variant?.id);
+    if (!variantId) {
+      continue;
+    }
+
+    const variationName = buildShopifyVariationProductName(parentName, variant);
+    const variationSku =
+      String(variant?.sku || "").trim() ||
+      buildShopifyVariationSku(parentSku, shopifyProductId, variantId);
+    const variationPrice = mapShopifyVariantPrice(variant);
+    const resolvedVariationPrice =
+      variationPrice > 0 ? variationPrice : parentDisplayPrice;
+
+    await upsertShopifyProductRow({
+      remoteProduct,
+      variant,
+      name: variationName,
+      sku: variationSku,
+      productType: "Single",
+      productPrice: resolvedVariationPrice,
+      categoryIds,
+      parentProductId: parentPosId,
+      companyId,
+      process,
+      stats,
+      shopifyReferenceId: `${shopifyProductId}:${variantId}`,
+      isVariation: true,
+      warehouseId,
+      client,
+    });
+  }
+
+  return parentPosId;
+}
+
 async function importShopifyProductToPos(
   remoteProduct,
   {
@@ -411,6 +749,18 @@ async function importShopifyProductToPos(
     return null;
   }
 
+  if (isShopifyVariableProduct(remoteProduct)) {
+    return importShopifyVariableProductToPos(remoteProduct, {
+      companyId,
+      process,
+      stats,
+      productPrice,
+      categoryIds,
+      warehouseId,
+      client,
+    });
+  }
+
   const variant =
     Array.isArray(remoteProduct?.variants) ? remoteProduct.variants[0] : null;
   const sku =
@@ -420,62 +770,24 @@ async function importShopifyProductToPos(
     productPrice !== undefined ?
       productPrice
     : mapShopifyVariantPrice(variant);
-  const existing = await findExistingProduct(sku, name, companyId);
-  const posFields = buildPosFieldsFromShopify(remoteProduct, variant, price);
-  const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
 
-  let posId;
-  if (existing) {
-    posId = coalesceObjectId(existing._id);
-    await Product.updateOne(
-      { _id: posId },
-      {
-        $set: {
-          ...posFields,
-          sku,
-          product_code: sku,
-          category_id: categoryField,
-        },
-      },
-    );
-    stats.updated = (stats.updated || 0) + 1;
-  } else {
-    const created = await Product.create({
-      ...posFields,
-      sku,
-      product_code: sku,
-      category_id: categoryField,
-      unit: "Piece",
-      company_id: companyId,
-      status: "active",
-      created_by: coalesceObjectId(process.created_by?._id || process.created_by),
-    });
-    posId = coalesceObjectId(created._id);
-    stats.inserted += 1;
-  }
-
-  if (categoryField.length) {
-    stats.products_category_linked = (stats.products_category_linked || 0) + 1;
-  }
-
-  if (warehouseId && variant && posId) {
-    const stockQty = await resolveShopifyVariantStockQuantity(variant, client);
-    const stockResult = await syncShopifyProductWarehouseStock({
-      productId: posId,
-      companyId,
-      warehouseId,
-      targetQty: stockQty,
-      userId: coalesceObjectId(process.created_by?._id || process.created_by),
-    });
-    if (stockResult.synced) {
-      stats.stock_synced = (stats.stock_synced || 0) + 1;
-      if (!stockResult.unchanged) {
-        stats.stock_updated = (stats.stock_updated || 0) + 1;
-      }
-    }
-  }
-
-  return posId;
+  return upsertShopifyProductRow({
+    remoteProduct,
+    variant,
+    name,
+    sku,
+    productType: "Single",
+    productPrice: price,
+    categoryIds,
+    parentProductId: null,
+    companyId,
+    process,
+    stats,
+    shopifyReferenceId: shopifyId ? String(shopifyId) : "",
+    isVariation: false,
+    warehouseId,
+    client,
+  });
 }
 
 /**
@@ -1035,6 +1347,10 @@ async function fetch_product(req, res, process) {
       categories_found: 0,
       categories_inserted: 0,
       products_category_linked: 0,
+      sync_product_mapped: 0,
+      variations_fetched: 0,
+      variations_inserted: 0,
+      variations_updated: 0,
     };
     const categoryCtx = { companyId, process, stats };
 
@@ -1080,6 +1396,9 @@ async function fetch_product(req, res, process) {
       categories_found = 0,
       categories_inserted = 0,
       products_category_linked = 0,
+      variations_fetched = 0,
+      variations_inserted = 0,
+      variations_updated = 0,
     } = stats;
     const fetched = remoteProducts.length;
     const isComplete = fetched < limit;
@@ -1087,21 +1406,26 @@ async function fetch_product(req, res, process) {
     const stockSummary = warehouseId ?
         `, stock synced ${stock_synced} (${stock_updated} qty changed)`
       : ", stock skipped (no default warehouse on company)";
+    const variationSummary =
+      variations_fetched > 0 ?
+        `, variations fetched ${variations_fetched}, inserted ${variations_inserted}, updated ${variations_updated}`
+      : "";
     const remarks =
       isComplete ?
-        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
-      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
+      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
 
     return finishFetchProductBatch(req, res, process, {
       fetched,
       inserted,
       updated,
       skipped,
-      stock_synced,
-      stock_updated,
       categories_found,
       categories_inserted,
       products_category_linked,
+      variations_fetched,
+      variations_inserted,
+      variations_updated,
       isComplete,
       nextOffset: lastRemoteId || 0,
       remarks,

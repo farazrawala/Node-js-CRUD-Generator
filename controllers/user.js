@@ -237,9 +237,44 @@ async function handleUserSignup(req, res) {
   }
 }
 
+function userRolesList(user) {
+  if (!user?.role) return [];
+  return Array.isArray(user.role) ? user.role : [user.role];
+}
+
+function permissionFlagTruthy(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function userCanManageOtherUsers(user) {
+  if (!user) return false;
+  const roles = userRolesList(user);
+  if (roles.some((r) => String(r).toUpperCase() === "ADMIN")) return true;
+  const perms = user.permissions;
+  if (!perms) return false;
+  const usersPerm =
+    perms instanceof Map ? perms.get("users") : perms.users;
+  if (!usersPerm) return false;
+  if (usersPerm instanceof Map) {
+    return permissionFlagTruthy(usersPerm.get("edit"));
+  }
+  return permissionFlagTruthy(usersPerm.edit);
+}
+
+function resolveUserUpdateTargetId(req) {
+  const loginUserId = req.user?._id
+    ? String(coalesceObjectId(req.user._id))
+    : "";
+  const urlId = req.params.id ? String(req.params.id) : "";
+  if (!loginUserId) return urlId;
+  if (!urlId || urlId === loginUserId) return loginUserId;
+  if (userCanManageOtherUsers(req.user)) return urlId;
+  return loginUserId;
+}
+
 async function handleUserUpdate(req, res) {
   if (req.user?._id) {
-    req.params.id = String(coalesceObjectId(req.user._id));
+    req.params.id = resolveUserUpdateTargetId(req);
   }
 
   const response = await handleGenericUpdate(req, "user", {

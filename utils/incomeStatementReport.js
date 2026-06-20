@@ -318,4 +318,7 @@ function resolveIncomeStatementDateRange(query = {}) {
 module.exports = {
   computeIncomeStatementReport,
   resolveIncomeStatementDateRange,
+  aggregatePeriodSumsByAccountIds,
+  periodAmountForAccountType,
+  formatLocalDateKey,
 };

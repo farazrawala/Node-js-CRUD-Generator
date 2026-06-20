@@ -80,6 +80,49 @@ function applyTenantFilterForModel(filter, modelName, tenantCo) {
   return filter;
 }
 
+function userRolesList(user) {
+  if (!user?.role) return [];
+  return Array.isArray(user.role) ? user.role : [user.role];
+}
+
+function permissionFlagTruthy(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+/** ADMIN role or `users.edit` permission may PATCH another user's id from the URL. */
+function userCanManageOtherUsers(user) {
+  if (!user) return false;
+  const roles = userRolesList(user);
+  if (roles.some((r) => String(r).toUpperCase() === "ADMIN")) return true;
+
+  const perms = user.permissions;
+  if (!perms) return false;
+
+  const usersPerm =
+    perms instanceof Map ? perms.get("users") : perms.users;
+  if (!usersPerm) return false;
+  if (usersPerm instanceof Map) {
+    return permissionFlagTruthy(usersPerm.get("edit"));
+  }
+  return permissionFlagTruthy(usersPerm.edit);
+}
+
+/**
+ * Self-service profile edits always target the logged-in user.
+ * Admins / users with `users.edit` keep the URL `:id` (POS user management).
+ */
+function resolveUserUpdateTargetId(req) {
+  const loginUserId = req.user?._id
+    ? String(coalesceObjectId(req.user._id))
+    : "";
+  const urlId = req.params.id ? String(req.params.id) : "";
+
+  if (!loginUserId) return urlId;
+  if (!urlId || urlId === loginUserId) return loginUserId;
+  if (userCanManageOtherUsers(req.user)) return urlId;
+  return loginUserId;
+}
+
 /** `amount_gt=0` → `{ amount: { $gt: 0 } }` (see getAll / get-all-active query strings). */
 const QUERY_RANGE_FIELD_RE = /^([a-zA-Z][a-zA-Z0-9_]*)_(gt|gte|lt|lte)$/;
 
@@ -379,15 +422,14 @@ function generateControllerFunctions(modelName) {
     update: async (req, res) => {
       const filter = {};
 
-      // Profile edit: always update the authenticated user, not an arbitrary URL id.
       if (modelName === "user" && req.user?._id) {
-        const loginUserId = String(coalesceObjectId(req.user._id));
-        if (req.params.id !== loginUserId) {
+        const resolvedId = resolveUserUpdateTargetId(req);
+        if (String(req.params.id) !== resolvedId) {
           console.log(
-            `🔁 user update: using logged-in _id ${loginUserId} (URL had ${req.params.id})`,
+            `🔁 user update: target _id ${resolvedId} (URL had ${req.params.id})`,
           );
         }
-        req.params.id = loginUserId;
+        req.params.id = resolvedId;
       }
 
       const tenantCo = tenantCompanyIdFromUser(req.user);
