@@ -1623,6 +1623,7 @@ const productAdminCRUD = adminCrudGenerator(
       ],
       unit: [
         { value: "Piece", label: "Piece" },
+        { value: "Kg", label: "Kg" },
         { value: "Ltr", label: "Ltr" },
         { value: "Box", label: "Box" },
         { value: "Meter", label: "Meter" },

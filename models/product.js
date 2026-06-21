@@ -33,6 +33,7 @@ const modelSchema = new mongoose.Schema(
       field_type: "select",
       enum: [
         "Piece",
+        "Kg",
         "Ltr",
         "Box",
         "Meter",
