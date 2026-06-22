@@ -1195,8 +1195,20 @@ function productImportFormSchema(req, res) {
       category: "OIL",
       product_name: "IKHLAS OIL",
       price: 460,
+      wholesale_price: 441.67,
+      qty: 85,
     },
-    sample_file: "pos_product.csv.xls (tab-separated: category, product_name, price)",
+    options: {
+      update_existing: "true|false — update price/category if product exists (default true)",
+      dry_run: "true|false — parse only (default false)",
+      add_stock_via_purchase:
+        "true|false — after import, create one PO for rows with qty > 0 (default true)",
+      default_qty: "Qty when CSV has no qty column (default 0)",
+      warehouse_id: "Warehouse for stock (default: company default warehouse)",
+      vendor_id: "Optional vendor user id on the purchase order",
+    },
+    sample_file:
+      "Final_pos_6.255.csv (comma-separated: category, product_name, price, wholesale_price, qty)",
   });
 }
 
@@ -1206,7 +1218,7 @@ function productImportFormSchema(req, res) {
  * Categories are created automatically when they do not exist.
  *
  * multipart field: `file` (`.csv`, `.tsv`, `.xls` text tab file)
- * Query/body: update_existing=true|false, dry_run=true
+ * Query/body: update_existing, dry_run, add_stock_via_purchase, default_qty, warehouse_id, vendor_id
  */
 async function productImportFromFile(req, res) {
   try {
@@ -1228,6 +1240,23 @@ async function productImportFromFile(req, res) {
       String(req.query?.dry_run ?? req.body?.dry_run ?? "false")
         .trim()
         .toLowerCase() === "true";
+    const addStockViaPurchase =
+      String(
+        req.query?.add_stock_via_purchase ??
+          req.body?.add_stock_via_purchase ??
+          "true",
+      )
+        .trim()
+        .toLowerCase() !== "false";
+    const defaultQtyRaw =
+      req.query?.default_qty ?? req.body?.default_qty ?? 0;
+    const defaultQty = Math.max(0, Number(defaultQtyRaw) || 0);
+    const warehouseId = coalesceObjectId(
+      req.body?.warehouse_id || req.query?.warehouse_id,
+    );
+    const vendorId = coalesceObjectId(
+      req.body?.vendor_id || req.query?.vendor_id,
+    );
 
     let text = null;
 
@@ -1239,13 +1268,17 @@ async function productImportFromFile(req, res) {
     } else if (typeof req.body?.text === "string" && req.body.text.trim()) {
       text = req.body.text;
     } else if (Array.isArray(req.body?.items) && req.body.items.length) {
-      const header = "category\tproduct_name\tprice\n";
+      const header = "category,product_name,price,wholesale_price,qty\n";
       const lines = req.body.items.map((row) =>
         [
           String(row.category || "").trim(),
           String(row.product_name || row.name || "").trim(),
           String(row.price ?? row.product_price ?? 0).trim(),
-        ].join("\t"),
+          String(
+            row.wholesale_price ?? row.wholesale ?? row.cost ?? row.price ?? 0,
+          ).trim(),
+          String(row.qty ?? row.quantity ?? defaultQty).trim(),
+        ].join(","),
       );
       text = header + lines.join("\n");
     }
@@ -1262,7 +1295,16 @@ async function productImportFromFile(req, res) {
     const result = await importProductsFromText(text, {
       companyId,
       createdBy: req.user?._id,
-      options: { updateExisting, dryRun },
+      req,
+      options: {
+        updateExisting,
+        dryRun,
+        addStockViaPurchase,
+        defaultQty,
+        warehouseId,
+        vendorId,
+        purchaseDescription: req.body?.purchase_description,
+      },
     });
 
     if (!dryRun) {
@@ -1276,12 +1318,22 @@ async function productImportFromFile(req, res) {
         207
       : 200;
 
+    const poInfo = result.purchase_order;
+    const poMsg =
+      poInfo?.success ?
+        ` PO ${poInfo.purchase_order_no || ""} created (${poInfo.line_count} lines).`
+      : poInfo?.skipped ?
+        ""
+      : poInfo ?
+        ` Stock PO failed: ${poInfo.message || "unknown"}.`
+      : "";
+
     return res.status(statusCode).json({
       success: result.summary?.failed === 0 || dryRun,
       message:
         dryRun ?
           `Dry run: ${result.parsed.row_count} row(s) ready to import.`
-        : `Import complete — created ${result.summary.created}, updated ${result.summary.updated}, skipped ${result.summary.skipped}, failed ${result.summary.failed}. Categories created: ${result.summary.categories_created}.`,
+        : `Import complete — created ${result.summary.created}, updated ${result.summary.updated}, skipped ${result.summary.skipped}, failed ${result.summary.failed}. Categories created: ${result.summary.categories_created}.${poMsg}`,
       data: result,
     });
   } catch (error) {

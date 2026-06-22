@@ -7,11 +7,20 @@ const {
   findExistingCategoryByName,
   findExistingProduct,
 } = require("./processHelpers");
+const { createPurchaseOrderForImportStock } = require("./productImportPurchase");
 
 const PRODUCT_IMPORT_COLUMNS = {
   category: ["category", "cat", "category_name"],
   product_name: ["product_name", "product name", "name", "product", "title"],
-  price: ["price", "product_price", "sale_price", "amount", "mrp"],
+  price: ["price", "product_price", "sale_price", "amount", "mrp", "retail_price"],
+  wholesale_price: [
+    "wholesale_price",
+    "wholesale",
+    "cost",
+    "unit_cost",
+    "purchase_price",
+  ],
+  qty: ["qty", "quantity", "stock", "opening_stock", "opening_qty"],
   sku: ["sku", "product_code", "code", "barcode"],
   unit: ["unit"],
   product_type: ["product_type", "type"],
@@ -87,7 +96,26 @@ function parsePrice(value) {
   return Number.isFinite(num) && num >= 0 ? num : 0;
 }
 
-function parseProductImportText(text) {
+function parseQty(value, fallback = 0) {
+  if (value == null || value === "") {
+    const fb = Number(fallback);
+    return Number.isFinite(fb) && fb >= 0 ? fb : 0;
+  }
+  const cleaned = String(value).replace(/[,]/g, "").trim();
+  const num = Number(cleaned);
+  return Number.isFinite(num) && num >= 0 ? num : 0;
+}
+
+/** Sale price from CSV `price`; purchase/PO cost from `wholesale_price` when present. */
+function resolveImportWholesalePrice(row) {
+  const wholesale = parsePrice(row.wholesale_price);
+  if (wholesale > 0) return wholesale;
+  const legacyCost = parsePrice(row.cost);
+  if (legacyCost > 0) return legacyCost;
+  return parsePrice(row.price);
+}
+
+function parseProductImportText(text, { defaultQty = 0 } = {}) {
   const lines = String(text || "")
     .replace(/^\uFEFF/, "")
     .split(/\r?\n/)
@@ -117,8 +145,10 @@ function parseProductImportText(text) {
     const row = {
       line: hasHeader ? i + 2 : i + 1,
       category: String(read("category", 0)).trim(),
-      product_name: String(read("product_name", hasHeader ? 1 : 1)).trim(),
-      price: parsePrice(read("price", hasHeader ? 2 : 2)),
+      product_name: String(read("product_name", 1)).trim(),
+      price: parsePrice(read("price", 2)),
+      wholesale_price: parsePrice(read("wholesale_price", 3)),
+      qty: parseQty(read("qty", 4), defaultQty),
       sku: String(read("sku")).trim(),
       unit: String(read("unit")).trim() || "Piece",
       product_type: String(read("product_type")).trim() || "Single",
@@ -177,12 +207,13 @@ async function upsertImportProduct(row, { companyId, createdBy, categoryId, opti
   const sku = buildImportSku(row.product_name, row.line, row.sku);
   const existing = await findExistingProduct(sku, row.product_name, companyId);
   const categoryField = categoryId ? [categoryId] : [];
+  const wholesalePrice = resolveImportWholesalePrice(row);
 
   const payload = {
     product_name: row.product_name,
     product_price: row.price,
     price_before_tax: row.price,
-    wholesale_price: row.price,
+    wholesale_price: wholesalePrice,
     product_type: row.product_type === "Variable" ? "Variable" : "Single",
     unit: row.unit || "Piece",
     sku,
@@ -225,9 +256,10 @@ async function upsertImportProduct(row, { companyId, createdBy, categoryId, opti
 
 /**
  * Import products from CSV/TSV text (e.g. pos_product.csv.xls).
- * Creates categories when missing.
+ * Creates categories when missing. Does not write warehouse stock directly.
+ * When enabled, opens one purchase order afterward for all qty > 0 rows.
  */
-async function importProductsFromText(text, { companyId, createdBy, options = {} }) {
+async function importProductsFromText(text, { companyId, createdBy, req, options = {} }) {
   const cid = coalesceObjectId(companyId);
   const actor = coalesceObjectId(createdBy);
 
@@ -237,10 +269,12 @@ async function importProductsFromText(text, { companyId, createdBy, options = {}
     throw err;
   }
 
-  const parsed = parseProductImportText(text);
+  const parsed = parseProductImportText(text, {
+    defaultQty: options.defaultQty ?? 0,
+  });
   if (!parsed.rows.length) {
     const err = new Error(
-      "No product rows found. Expected columns: category, product_name, price.",
+      "No product rows found. Expected columns: category, product_name, price, wholesale_price, qty.",
     );
     err.statusCode = 400;
     err.details = { columns: PRODUCT_IMPORT_COLUMNS };
@@ -266,6 +300,9 @@ async function importProductsFromText(text, { companyId, createdBy, options = {}
   const importOptions = {
     updateExisting: options.updateExisting !== false,
   };
+
+  const addStockViaPurchase = options.addStockViaPurchase !== false;
+  const stockLines = [];
 
   if (options.dryRun) {
     return {
@@ -305,7 +342,17 @@ async function importProductsFromText(text, { companyId, createdBy, options = {}
           product_name: result.product.product_name,
           category: row.category,
           price: row.price,
+          wholesale_price: resolveImportWholesalePrice(row),
+          qty: row.qty,
         });
+        if (row.qty > 0) {
+          stockLines.push({
+            product_id: result.product._id,
+            product_name: result.product.product_name,
+            qty: row.qty,
+            price: resolveImportWholesalePrice(row),
+          });
+        }
       } else if (result.action === "updated") {
         stats.updated += 1;
         updated.push({
@@ -314,7 +361,17 @@ async function importProductsFromText(text, { companyId, createdBy, options = {}
           product_name: result.product.product_name,
           category: row.category,
           price: row.price,
+          wholesale_price: resolveImportWholesalePrice(row),
+          qty: row.qty,
         });
+        if (row.qty > 0) {
+          stockLines.push({
+            product_id: result.product._id,
+            product_name: result.product.product_name,
+            qty: row.qty,
+            price: resolveImportWholesalePrice(row),
+          });
+        }
       } else {
         stats.skipped += 1;
         skipped.push({
@@ -333,6 +390,32 @@ async function importProductsFromText(text, { companyId, createdBy, options = {}
     }
   }
 
+  let purchaseOrder = null;
+  if (addStockViaPurchase && stockLines.length && req) {
+    try {
+      purchaseOrder = await createPurchaseOrderForImportStock({
+        req,
+        companyId: cid,
+        lines: stockLines,
+        warehouseId: options.warehouseId,
+        vendorId: options.vendorId,
+        description: options.purchaseDescription,
+      });
+    } catch (poErr) {
+      purchaseOrder = {
+        success: false,
+        message: poErr?.message || String(poErr),
+      };
+      stats.purchase_order_failed = 1;
+    }
+  } else if (addStockViaPurchase && stockLines.length && !req) {
+    purchaseOrder = {
+      skipped: true,
+      reason: "missing_req",
+      message: "Stock purchase requires request context.",
+    };
+  }
+
   return {
     company_id: String(cid),
     summary: stats,
@@ -340,6 +423,7 @@ async function importProductsFromText(text, { companyId, createdBy, options = {}
     updated,
     skipped,
     failed,
+    purchase_order: purchaseOrder,
     columns: PRODUCT_IMPORT_COLUMNS,
   };
 }

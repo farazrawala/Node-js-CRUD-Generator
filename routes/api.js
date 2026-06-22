@@ -121,6 +121,8 @@ const {
 
 const {
   purchaseOrderCreate,
+  purchaseOrderImportFromFile,
+  purchaseOrderImportFormSchema,
   purchase_order_update,
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
@@ -247,6 +249,8 @@ router.get("/user/total-users", countTotalUsers);
 
 router.get("/alerts/check-product-alert/:product_id/:qty", checkProductAlert);
 
+router.get("/purchase_order/import-form", purchaseOrderImportFormSchema);
+router.post("/purchase_order/import", purchaseOrderImportFromFile);
 router.post("/purchase_order/purchase_order_create", purchaseOrderCreate);
 router.patch(
   "/purchase_order/purchase_order_update/:id",

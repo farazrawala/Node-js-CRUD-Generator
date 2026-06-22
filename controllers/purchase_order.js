@@ -25,6 +25,10 @@ const {
 } = require("../utils/mongoTransactionSupport");
 const { createApplicationLog } = require("../utils/applicationLogs");
 const { sumHeaderTotalAmount } = require("../utils/reportHeaderTotals");
+const {
+  importPurchaseOrderFromText,
+  PO_IMPORT_COLUMNS,
+} = require("../utils/purchaseOrderCsvImport");
 
 /**
  * Purchase order HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -614,18 +618,29 @@ function resolvePoPaymentMethodAccount(body, user) {
   const b = body || {};
   if (!user?.company_id) return;
   const company = user.company_id;
-  const raw = b.payment_method_accounts_id;
-  if (
-    raw != null &&
-    raw !== "" &&
-    mongoose.Types.ObjectId.isValid(String(raw).trim())
-  ) {
+  const existing = coalesceObjectId(b.payment_method_accounts_id);
+  if (existing) {
+    b.payment_method_accounts_id = existing;
     return;
   }
-  const def = company.default_cash_account;
-  if (def != null && mongoose.Types.ObjectId.isValid(String(def))) {
+  const def = coalesceObjectId(company.default_cash_account);
+  if (def) {
     b.payment_method_accounts_id = def;
   }
+}
+
+function companyPoGlAccount(user, field) {
+  return coalesceObjectId(user?.company_id?.[field]);
+}
+
+/** Unpaid balance posted to A/P (lines total − discount + shipment − amount_paid). */
+function resolvePoRemainingAmount(body) {
+  const b = body || {};
+  const lines = Number(b.lines_subtotal) || 0;
+  const discount = Number(b.discount) || 0;
+  const shipment = Number(b.shipment) || 0;
+  const paid = Number(b.amount_paid) || 0;
+  return Math.round(Math.max(0, lines - discount + shipment - paid) * 100) / 100;
 }
 
 function collectLineItems(body) {
@@ -1425,6 +1440,7 @@ async function purchaseOrderCreate(req, res) {
     // Same line objects as insertMany — header totals on step 1 insert (no post-line sync on create).
     req.body.lines_subtotal =
       purchaseOrderLinesSubtotalSum(lineItemsFromClient);
+    req.body.remaining_amount = resolvePoRemainingAmount(req.body);
 
     const transaction_number = generateTransactionNumber();
     req.body.transaction_number = transaction_number;
@@ -1474,7 +1490,10 @@ async function purchaseOrderCreate(req, res) {
               [
                 // [0]–[4] must stay aligned with PURCHASE_ORDER_GL_LINE_META for error messages.
                 {
-                  account_id: orderReq.user.company_id.default_purchase_account,
+                  account_id: companyPoGlAccount(
+                    orderReq.user,
+                    "default_purchase_account",
+                  ),
                   type: "debit",
                   amount: record?.lines_subtotal ?? 0,
                   reference_user_id: record?.vendor_id,
@@ -1487,7 +1506,10 @@ async function purchaseOrderCreate(req, res) {
                 },
 
                 {
-                  account_id: orderReq.user.company_id.default_shipping_account,
+                  account_id: companyPoGlAccount(
+                    orderReq.user,
+                    "default_shipping_account",
+                  ),
                   type: "debit",
                   amount: record?.shipment ?? 0,
                   reference_user_id: record?.vendor_id,
@@ -1499,8 +1521,10 @@ async function purchaseOrderCreate(req, res) {
                   },
                 },
                 {
-                  account_id:
-                    orderReq.user.company_id.default_purchase_discount_account,
+                  account_id: companyPoGlAccount(
+                    orderReq.user,
+                    "default_purchase_discount_account",
+                  ),
                   type: "credit",
                   amount: record?.discount ?? 0,
                   reference_user_id: record?.vendor_id,
@@ -1508,7 +1532,7 @@ async function purchaseOrderCreate(req, res) {
                   description: "Purchase Discount",
                 },
                 {
-                  account_id: record?.payment_method_accounts_id,
+                  account_id: coalesceObjectId(record?.payment_method_accounts_id),
                   type: "credit",
                   amount: record?.amount_paid ?? 0,
                   reference_user_id: record?.vendor_id,
@@ -1520,10 +1544,18 @@ async function purchaseOrderCreate(req, res) {
                   },
                 },
                 {
-                  account_id:
-                    orderReq.user.company_id.default_account_payable_account,
+                  account_id: companyPoGlAccount(
+                    orderReq.user,
+                    "default_account_payable_account",
+                  ),
                   type: "credit",
-                  amount: req.body?.remaining_amount || 0,
+                  amount:
+                    resolvePoRemainingAmount({
+                      lines_subtotal: record?.lines_subtotal,
+                      discount: record?.discount,
+                      shipment: record?.shipment,
+                      amount_paid: record?.amount_paid,
+                    }) || req.body?.remaining_amount || 0,
                   reference_user_id: record?.vendor_id,
                   transaction_number,
                   description: "A/c Payable",
@@ -1651,10 +1683,9 @@ async function purchaseOrderCreate(req, res) {
           // (e.g. `req.get("Content-Type")`, `req.get("host")` for URLs). Use the live `req` and
           // restore `body` / `params.id` afterward; the helper temporarily overwrites `req.params.id`.
           const bodyBeforeInventoryMovement = req.body;
-          const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-            req.params,
-            "id",
-          );
+          const hadRouteParamId =
+            req.params &&
+            Object.prototype.hasOwnProperty.call(req.params, "id");
           const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
 
           req.body = {
@@ -1734,6 +1765,20 @@ async function purchaseOrderCreate(req, res) {
         endTxnWrap(extra);
       }
     };
+    // Large CSV imports (300+ lines) exceed practical Mongo transaction limits — run without session.
+    const BULK_PO_LINE_THRESHOLD = 50;
+    const preferNoTxn =
+      req.bulkPoImport === true ||
+      lineItemsFromClient.length > BULK_PO_LINE_THRESHOLD;
+
+    if (preferNoTxn) {
+      finishTxnWrap({ mode: "bulk_import_no_transaction" });
+      try {
+        await runPurchaseOrderCreateBody(null);
+      } catch (bulkPipelineError) {
+        createPipelineError = bulkPipelineError;
+      }
+    } else {
     // Prefer a single multi-document transaction when the deployment supports it (replica set / Atlas).
     try {
       mongooseClientSession = await mongoose.startSession();
@@ -1783,6 +1828,7 @@ async function purchaseOrderCreate(req, res) {
           /* ignore */
         }
       }
+    }
     }
     // txn end
 
@@ -2102,10 +2148,9 @@ async function purchase_order_update(req, res) {
             Math.round(lineQtyNum * unitCost * 100) / 100;
 
           const bodyBeforeInventoryMovement = req.body;
-          const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-            req.params,
-            "id",
-          );
+          const hadRouteParamId =
+            req.params &&
+            Object.prototype.hasOwnProperty.call(req.params, "id");
           const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
 
           req.body = {
@@ -2534,10 +2579,9 @@ async function purchase_order_delete(req, res) {
         const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
 
         const bodyBeforeInventoryMovement = req.body;
-        const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-          req.params,
-          "id",
-        );
+        const hadRouteParamId =
+          req.params &&
+          Object.prototype.hasOwnProperty.call(req.params, "id");
         const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
 
         req.body = {
@@ -2820,8 +2864,181 @@ async function findPurchaseOrderPurchases(req, res) {
   });
 }
 
+function readPoImportFileBuffer(req) {
+  const file =
+    req.files?.file ||
+    req.files?.csv ||
+    req.files?.import ||
+    req.files?.purchase_order;
+  if (!file?.data) return null;
+  return file.data;
+}
+
+/**
+ * GET /api/purchase_order/import-form — CSV format for PO stock import.
+ */
+function purchaseOrderImportFormSchema(req, res) {
+  return res.status(200).json({
+    success: true,
+    endpoint: "POST /api/purchase_order/import",
+    content_types: [
+      "multipart/form-data (field: file)",
+      "application/json ({ items: [...] })",
+      "text/plain body",
+    ],
+    columns: PO_IMPORT_COLUMNS,
+    example_row: {
+      product_name: "IKHLAS OIL",
+      wholesale_price: 441.67,
+      qty: 85,
+    },
+    notes: [
+      "Products must already exist (matched by product_name or sku).",
+      "Rows with qty = 0 are skipped.",
+      "One purchase order is created for all qty > 0 rows.",
+      "Stock is added via inventory_movements (not direct warehouse writes).",
+    ],
+    options: {
+      dry_run: "true|false — parse only (default false)",
+      update_product_prices:
+        "true|false — update product price/wholesale_price from CSV (default true)",
+      default_qty: "Qty when CSV has no qty column (default 0)",
+      warehouse_id: "Warehouse for stock (default: company default warehouse)",
+      vendor_id: "Optional vendor user id on the purchase order",
+    },
+    sample_file:
+      "Final_pos_6.255.csv (category, product_name, price, wholesale_price, qty)",
+  });
+}
+
+/**
+ * POST /api/purchase_order/import
+ * Import stock via one purchase order from CSV (wholesale_price + qty).
+ */
+async function purchaseOrderImportFromFile(req, res) {
+  try {
+    const companyId = coalesceObjectId(
+      req.body?.company_id || req.user?.company_id,
+    );
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request body).",
+      });
+    }
+
+    const dryRun =
+      String(req.query?.dry_run ?? req.body?.dry_run ?? "false")
+        .trim()
+        .toLowerCase() === "true";
+    const updateProductPrices =
+      String(
+        req.query?.update_product_prices ??
+          req.body?.update_product_prices ??
+          "true",
+      )
+        .trim()
+        .toLowerCase() !== "false";
+    const defaultQtyRaw =
+      req.query?.default_qty ?? req.body?.default_qty ?? 0;
+    const defaultQty = Math.max(0, Number(defaultQtyRaw) || 0);
+    const warehouseId = coalesceObjectId(
+      req.body?.warehouse_id || req.query?.warehouse_id,
+    );
+    const vendorId = coalesceObjectId(
+      req.body?.vendor_id || req.query?.vendor_id,
+    );
+
+    let text = null;
+    const fileBuffer = readPoImportFileBuffer(req);
+    if (fileBuffer) {
+      text = fileBuffer.toString("utf8");
+    } else if (typeof req.body?.csv === "string" && req.body.csv.trim()) {
+      text = req.body.csv;
+    } else if (typeof req.body?.text === "string" && req.body.text.trim()) {
+      text = req.body.text;
+    } else if (Array.isArray(req.body?.items) && req.body.items.length) {
+      const header = "product_name,wholesale_price,qty\n";
+      const lines = req.body.items.map((row) =>
+        [
+          String(row.product_name || row.name || "").trim(),
+          String(
+            row.wholesale_price ?? row.wholesale ?? row.cost ?? 0,
+          ).trim(),
+          String(row.qty ?? row.quantity ?? defaultQty).trim(),
+        ].join(","),
+      );
+      text = header + lines.join("\n");
+    }
+
+    if (!text) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Upload a CSV file (form field `file`) or send `items` / `csv` / `text` in the body.",
+        columns: PO_IMPORT_COLUMNS,
+      });
+    }
+
+    const result = await importPurchaseOrderFromText(text, {
+      companyId,
+      req,
+      options: {
+        dryRun,
+        updateProductPrices,
+        defaultQty,
+        warehouseId,
+        vendorId,
+        purchaseDescription: req.body?.purchase_description,
+      },
+    });
+
+    const po = result.purchase_order;
+    const poSuccess = po?.success === true;
+    const poSkipped = po?.skipped === true;
+    const hasFailures =
+      result.summary?.product_not_found > 0 || result.summary?.failed > 0;
+
+    let statusCode = 200;
+    if (!dryRun && !poSuccess && !poSkipped) {
+      statusCode = 400;
+    } else if (!dryRun && hasFailures && !poSuccess) {
+      statusCode = 400;
+    } else if (!dryRun && hasFailures) {
+      statusCode = 207;
+    }
+
+    const poMsg =
+      poSuccess ?
+        ` PO ${po.purchase_order_no || ""} created (${po.line_count} lines).`
+      : poSkipped ?
+        ` ${po.message || ""}`
+      : po ?
+        ` PO failed: ${po.message || "unknown"}.`
+      : "";
+
+    return res.status(statusCode).json({
+      success: dryRun || poSuccess || (poSkipped && result.summary?.po_lines === 0),
+      message:
+        dryRun ?
+          `Dry run: ${result.parsed.row_count} row(s) parsed.`
+        : `PO import — ${result.summary.po_lines} line(s), ${result.summary.skipped_zero_qty} zero-qty skipped, ${result.summary.product_not_found} product(s) not found.${poMsg}`,
+      data: result,
+    });
+  } catch (error) {
+    console.error("❌ purchaseOrderImportFromFile:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Purchase order import failed",
+      details: error.details || undefined,
+    });
+  }
+}
+
 module.exports = {
   purchaseOrderCreate,
+  purchaseOrderImportFromFile,
+  purchaseOrderImportFormSchema,
   purchase_order_update,
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
