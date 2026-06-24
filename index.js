@@ -44,6 +44,10 @@ const {
   getCookiePath,
   isSecureCookie,
 } = require("./utils/basePath");
+const {
+  createServePublicUploadsMiddleware,
+  isPublicUploadRequest,
+} = require("./utils/servePublicUploads");
 const { getDeployVersionPayload, getHealthPayload } = require("./utils/buildInfo");
 
 // Dynamically load all models to ensure they're registered before controllers
@@ -126,9 +130,14 @@ app.use(createStripBasePathMiddleware());
 
 // Serve static files from uploads directory (public — no auth)
 const uploadsStaticRoot = path.join(__dirname, "uploads");
-app.use("/uploads", express.static(uploadsStaticRoot));
-// Legacy URLs built with BASE_URL ending in /api pointed here — keep working
-app.use("/api/uploads", express.static(uploadsStaticRoot));
+const servePublicUploads = createServePublicUploadsMiddleware(uploadsStaticRoot);
+const uploadsStatic = express.static(uploadsStaticRoot, {
+  fallthrough: false,
+  maxAge: "7d",
+});
+app.use(servePublicUploads);
+app.use("/uploads", uploadsStatic);
+app.use("/api/uploads", uploadsStatic);
 
 // Session middleware (must come before flash)
 app.use(
@@ -300,8 +309,21 @@ console.log(
   `📁 Public base path: ${BASE_PATH || "(auto /pos_admin if proxied)"}`,
 );
 
+// Last-chance public uploads (must run before JSON 404 fallback)
+app.use(servePublicUploads);
+app.use("/uploads", uploadsStatic);
+app.use("/api/uploads", uploadsStatic);
+
 /** Fallback JSON 404 when no route matched (avoids opaque HTML from proxies/browsers). */
 app.use((req, res) => {
+  if (isPublicUploadRequest(req)) {
+    return servePublicUploads(req, res, () => {
+      if (!res.headersSent) {
+        return res.status(404).type("text/plain").send("Not found");
+      }
+    });
+  }
+
   const fullPath = req.originalUrl || req.url || "/";
   fileLogger.warn(`${req.method} ${fullPath}`, { type: "not_found" });
   return res.status(404).json({

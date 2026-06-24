@@ -10,6 +10,7 @@ const {
 } = require("../utils/userCompanyPopulate");
 const User = require("../models/user");
 const { getBasePath, withBasePath } = require("../utils/basePath");
+const { isPublicUploadRequest } = require("../utils/servePublicUploads");
 
 function stripBasePath(path) {
   const base = getBasePath();
@@ -126,6 +127,10 @@ async function checkForAuthentication(req, res, next) {
 }
 
 async function checkHeaderAuthentication(req, res, next) {
+  if (isPublicUploadRequest(req)) {
+    return next();
+  }
+
   console.log(`🔐 checkHeaderAuthentication called for:`, req.path);
   const authorizationHeaderValue = req.headers["authorization"];
   req.user = null;
@@ -154,6 +159,8 @@ async function checkHeaderAuthentication(req, res, next) {
     "/version",
     "/api/health",
     "/api/version",
+    /^\/uploads\/.*/,
+    /^\/api\/uploads\/.*/,
   ];
 
   const pathCandidates = [

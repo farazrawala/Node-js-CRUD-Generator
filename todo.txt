@@ -165,3 +165,7 @@ GET https://testv3.websitedemolynk.com/pos_admin/api/version
 GET https://testv3.websitedemolynk.com/pos_admin/api/health
 GET https://testv3.websitedemolynk.com/pos_admin/health
 GET https://testv3.websitedemolynk.com/pos_admin/version
+
+
+cd /home/demowebsitv3/public_html/pos_admin
+pm2 restart pos_admin --update-env

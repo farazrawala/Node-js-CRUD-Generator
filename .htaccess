@@ -16,5 +16,12 @@ Options -Indexes
 # Block direct web access to log files (download via /admin/debug/logs only)
 RewriteRule ^logs/ - [F,L]
 
+# Serve existing upload files from disk (skip Node — no auth, correct MIME)
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^uploads/ - [L]
+
+# Legacy image URLs used /api/uploads/... — rewrite to /uploads/...
+RewriteRule ^api/uploads/(.+)$ uploads/$1 [L]
+
 # Proxy to Node — strip /pos_admin prefix (routes are /login/admin, /api/..., not /pos_admin/...)
 RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]
