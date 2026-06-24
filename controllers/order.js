@@ -2906,6 +2906,30 @@ function lastMonthDateRange(refDate = new Date()) {
   return calendarMonthDateRange(prev.getFullYear(), prev.getMonth());
 }
 
+/** Inclusive rolling window: today plus the previous 29 calendar days (30 days total). */
+function last30DaysDateRange(refDate = new Date()) {
+  const d = refDate instanceof Date ? refDate : new Date(refDate);
+  const toDate = new Date(
+    d.getFullYear(),
+    d.getMonth(),
+    d.getDate(),
+    23,
+    59,
+    59,
+    999,
+  );
+  const fromDate = new Date(
+    d.getFullYear(),
+    d.getMonth(),
+    d.getDate() - 29,
+    0,
+    0,
+    0,
+    0,
+  );
+  return { fromDate, toDate };
+}
+
 const ORDER_SALES_SUMMARY_GROUP = [
   {
     $group: {
@@ -3028,6 +3052,18 @@ function resolveOrderSalesDateRange(req) {
       periodLabel: "last_month",
     };
   }
+  if (
+    period === "last_30_days" ||
+    period === "last30days" ||
+    period === "30_days"
+  ) {
+    const r = last30DaysDateRange();
+    return {
+      fromDate: r.fromDate,
+      toDate: r.toDate,
+      periodLabel: "last_30_days",
+    };
+  }
   const r = currentMonthDateRange();
   return {
     fromDate: r.fromDate,
@@ -3080,7 +3116,7 @@ function buildDayWiseSalesSeries(fromDate, toDate, aggregatedRows) {
 
 /**
  * GET daily sales totals for charts (`total_amount` + `order_count` per calendar day).
- * Query: optional `from` / `to`, or `period=current_month` (default) | `last_month`, optional `order_status`.
+ * Query: optional `from` / `to`, or `period=current_month` (default) | `last_month` | `last_30_days`, optional `order_status`.
  * Response `days` includes every day in range (zero-filled) for graph axes.
  */
 async function findSalesDayWise(req, res) {
@@ -3181,6 +3217,14 @@ async function findSalesDayWise(req, res) {
       error: error.message || "Internal server error",
     });
   }
+}
+
+/** GET last 30 calendar days of sales, one row per day (alias for `period=last_30_days`). */
+async function findSalesLast30Days(req, res) {
+  if (req.query?.period == null || String(req.query.period).trim() === "") {
+    req.query.period = "last_30_days";
+  }
+  return findSalesDayWise(req, res);
 }
 
 /**
@@ -3627,4 +3671,5 @@ module.exports = {
   findSales,
   findTotalSalesByOrder,
   findSalesDayWise,
+  findSalesLast30Days,
 };

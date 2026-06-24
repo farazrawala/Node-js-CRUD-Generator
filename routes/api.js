@@ -85,6 +85,7 @@ const {
   findSales,
   findTotalSalesByOrder,
   findSalesDayWise,
+  findSalesLast30Days,
   invoiceUpdate,
 } = require("../controllers/order");
 const { costOfGoodsSoldByOrderItem } = require("../controllers/order_item");
@@ -467,6 +468,8 @@ router.get(
 );
 router.get("/order/sales", findSales);
 router.get("/order/sales-day-wise", findSalesDayWise);
+router.get("/order/sales-last-30-days", findSalesLast30Days);
+router.get("/orders/sales-last-30-days", findSalesLast30Days);
 router.get("/sales_return/sales", findSalesReturnSales);
 router.get("/purchase_order/purchases", findPurchaseOrderPurchases);
 router.get("/purchase_return/purchases", findPurchaseReturnPurchases);
