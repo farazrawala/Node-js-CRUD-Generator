@@ -21,6 +21,7 @@ try {
 }
 
 const express = require("express");
+const fs = require("fs");
 const { connectMonogodb, getMongoUri } = require("./connection");
 const path = require("path");
 const urlRouter = require("./routes/url");
@@ -130,12 +131,35 @@ app.use(createStripBasePathMiddleware());
 
 // Serve static files from uploads directory (public — no auth)
 const uploadsStaticRoot = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsStaticRoot)) {
+  fs.mkdirSync(uploadsStaticRoot, { recursive: true });
+  console.log(`📁 Created uploads directory: ${uploadsStaticRoot}`);
+}
 const servePublicUploads = createServePublicUploadsMiddleware(uploadsStaticRoot);
 const uploadsStatic = express.static(uploadsStaticRoot, {
   fallthrough: false,
   maxAge: "7d",
 });
-app.use(servePublicUploads);
+
+function handlePublicUploadRequest(req, res, next) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return next();
+  }
+  const urlPath = String(req.url || req.path || "").split("?")[0];
+  if (
+    !urlPath.startsWith("/uploads/") &&
+    !urlPath.startsWith("/api/uploads/")
+  ) {
+    return next();
+  }
+  return servePublicUploads(req, res, () => {
+    if (!res.headersSent) {
+      return res.status(404).type("text/plain").send("Not found");
+    }
+  });
+}
+
+app.use(handlePublicUploadRequest);
 app.use("/uploads", uploadsStatic);
 app.use("/api/uploads", uploadsStatic);
 
@@ -310,14 +334,21 @@ console.log(
 );
 
 // Last-chance public uploads (must run before JSON 404 fallback)
-app.use(servePublicUploads);
+app.use(handlePublicUploadRequest);
 app.use("/uploads", uploadsStatic);
 app.use("/api/uploads", uploadsStatic);
 
 /** Fallback JSON 404 when no route matched (avoids opaque HTML from proxies/browsers). */
 app.use((req, res) => {
-  if (isPublicUploadRequest(req)) {
-    return servePublicUploads(req, res, () => {
+  const urlPath = String(req.url || req.path || req.originalUrl || "").split(
+    "?",
+  )[0];
+  if (
+    urlPath.startsWith("/uploads/") ||
+    urlPath.startsWith("/api/uploads/") ||
+    isPublicUploadRequest(req)
+  ) {
+    return handlePublicUploadRequest(req, res, () => {
       if (!res.headersSent) {
         return res.status(404).type("text/plain").send("Not found");
       }

@@ -108,7 +108,11 @@ function createServePublicUploadsMiddleware(uploadsRoot) {
 }
 
 function isPublicUploadRequest(req) {
-  return resolveUploadRelativePathFromRequest(req) != null;
+  if (resolveUploadRelativePathFromRequest(req) != null) {
+    return true;
+  }
+  const raw = String(req.url || req.originalUrl || req.path || "");
+  return /\/uploads\//.test(raw) || /\/api\/uploads\//.test(raw);
 }
 
 module.exports = {

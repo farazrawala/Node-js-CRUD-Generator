@@ -63,6 +63,12 @@ STEP 4 — Verify:
 
   version.inventoryPolicy should be "order_movements_no_soft_delete_v2" on current builds.
 
+  UPLOADS (company logos, product images):
+    Stored on disk under public_html/pos_admin/uploads/ — NOT in git.
+    GitHub FTP deploy excludes uploads/ so deploys do NOT delete live files.
+    If images 404 after deploy, re-upload once (old deploys may have wiped uploads/).
+    Public URL: https://yourdomain.com/pos_admin/uploads/company/{id}/filename.jpg
+
   https://testv3.websitedemolynk.com/pos_admin/login/admin
     → Admin login HTML page
 

@@ -74,6 +74,10 @@ jobs:
             **/.git*/**
             **/node_modules/**
             **/node_modules
+            **/uploads/**
+            **/uploads
+            **/logs/**
+            **/logs
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 

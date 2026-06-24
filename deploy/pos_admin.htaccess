@@ -1,4 +1,4 @@
-# Same as repo root .htaccess — copy here if you deploy without FTP sync.
+# Same as repo root .htaccess — synced on deploy via FTP to public_html/pos_admin/.htaccess
 # Node on 127.0.0.1:8000 (pm2 or cPanel Node.js App)
 
 RewriteEngine On
@@ -13,5 +13,8 @@ Options -Indexes
 
 RewriteRule ^logs/ - [F,L]
 
-# Strip /pos_admin before proxy — Node routes are /login/admin, /api/...
+# Uploads: serve from disk — NEVER proxy to Node
+RewriteRule ^api/uploads/(.+)$ uploads/$1 [L]
+RewriteRule ^uploads/ - [L]
+
 RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]
