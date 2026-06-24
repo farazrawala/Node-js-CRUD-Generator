@@ -88,6 +88,9 @@ const {
   findSalesLast30Days,
   findTopSellingProducts,
   findPeakSalesHours,
+  findSalesByCategory,
+  findAverageOrderValue,
+  findDailyOrders,
   invoiceUpdate,
 } = require("../controllers/order");
 const { costOfGoodsSoldByOrderItem } = require("../controllers/order_item");
@@ -479,6 +482,12 @@ router.get("/orders/top-selling-products", findTopSellingProducts);
 router.get("/product/top-selling", findTopSellingProducts);
 router.get("/order/peak-sales-hours", findPeakSalesHours);
 router.get("/orders/peak-sales-hours", findPeakSalesHours);
+router.get("/order/sales-by-category", findSalesByCategory);
+router.get("/orders/sales-by-category", findSalesByCategory);
+router.get("/order/average-order-value", findAverageOrderValue);
+router.get("/orders/average-order-value", findAverageOrderValue);
+router.get("/order/daily-orders", findDailyOrders);
+router.get("/orders/daily-orders", findDailyOrders);
 router.get("/sales_return/sales", findSalesReturnSales);
 router.get("/purchase_order/purchases", findPurchaseOrderPurchases);
 router.get("/purchase_return/purchases", findPurchaseReturnPurchases);

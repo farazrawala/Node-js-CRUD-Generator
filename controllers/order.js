@@ -3101,6 +3101,10 @@ function buildDayWiseSalesSeries(fromDate, toDate, aggregatedRows) {
       date: key,
       total_amount: Math.round(dayTotal * 100) / 100,
       order_count: dayCount,
+      average_order_value:
+        dayCount > 0 ?
+          Math.round((dayTotal / dayCount) * 100) / 100
+        : 0,
     });
     cur.setDate(cur.getDate() + 1);
   }
@@ -3110,6 +3114,10 @@ function buildDayWiseSalesSeries(fromDate, toDate, aggregatedRows) {
     summary: {
       total_amount: Math.round(total_amount * 100) / 100,
       order_count,
+      average_order_value:
+        order_count > 0 ?
+          Math.round((total_amount / order_count) * 100) / 100
+        : 0,
     },
   };
 }
@@ -3680,6 +3688,374 @@ async function findPeakSalesHours(req, res) {
   }
 }
 
+function resolveOrderReportCompany(req) {
+  const rawCompany = req.user?.company_id;
+  const companyId =
+    rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+      rawCompany._id
+    : rawCompany;
+  if (!companyId) {
+    return {
+      ok: false,
+      response: {
+        status: 400,
+        body: {
+          success: false,
+          status: 400,
+          error: "company_id is required",
+          message: "Authentication with company context is required",
+        },
+      },
+    };
+  }
+
+  const companyObjectId = coalesceObjectId(companyId);
+  if (
+    !companyObjectId ||
+    !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+  ) {
+    return {
+      ok: false,
+      response: {
+        status: 400,
+        body: {
+          success: false,
+          status: 400,
+          error: "company_id is required",
+          message: "Invalid company context",
+        },
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    cid: new mongoose.Types.ObjectId(String(companyObjectId)),
+    companyId: String(companyObjectId),
+  };
+}
+
+function applyOrderStatusToMatch(match, req) {
+  const rawOrderStatus = req.query?.order_status;
+  if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
+    match.order_status = String(rawOrderStatus).trim();
+  }
+  return match;
+}
+
+/**
+ * GET sales grouped by product category (from order line items).
+ * Query: `period`, `from` / `to`, optional `order_status`, `limit` (default 100, max 500).
+ */
+async function findSalesByCategory(req, res) {
+  try {
+    const companyResolved = resolveOrderReportCompany(req);
+    if (!companyResolved.ok) {
+      return res
+        .status(companyResolved.response.status)
+        .json(companyResolved.response.body);
+    }
+
+    const rangeResolved = resolveTopSellingDateRange(req);
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const { cid, companyId } = companyResolved;
+    const limitRaw = parseInt(req.query?.limit, 10);
+    const limit = limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+
+    const itemMatch = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
+
+    const rows = await OrderItem.aggregate([
+      { $match: itemMatch },
+      {
+        $lookup: {
+          from: "products",
+          localField: "product_id",
+          foreignField: "_id",
+          pipeline: [
+            {
+              $match: {
+                company_id: cid,
+                status: "active",
+                deletedAt: null,
+              },
+            },
+            { $project: { category_id: 1 } },
+          ],
+          as: "product",
+        },
+      },
+      { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
+      {
+        $unwind: {
+          path: "$product.category_id",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $group: {
+          _id: "$product.category_id",
+          total_revenue: { $sum: { $ifNull: ["$subtotal", 0] } },
+          total_qty: { $sum: { $ifNull: ["$qty", 0] } },
+          line_count: { $sum: 1 },
+        },
+      },
+      {
+        $lookup: {
+          from: "categories",
+          localField: "_id",
+          foreignField: "_id",
+          pipeline: [
+            {
+              $match: {
+                company_id: cid,
+                deletedAt: null,
+              },
+            },
+            { $project: { name: 1, slug: 1 } },
+          ],
+          as: "category",
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          category_id: "$_id",
+          category_name: {
+            $ifNull: [{ $arrayElemAt: ["$category.name", 0] }, "Uncategorized"],
+          },
+          category_slug: { $arrayElemAt: ["$category.slug", 0] },
+          total_revenue: { $round: ["$total_revenue", 2] },
+          total_qty: 1,
+          line_count: 1,
+        },
+      },
+      { $sort: { total_revenue: -1 } },
+      { $limit: limit },
+    ]);
+
+    const summary = rows.reduce(
+      (acc, row) => {
+        acc.total_revenue += Number(row.total_revenue) || 0;
+        acc.total_qty += Number(row.total_qty) || 0;
+        acc.line_count += Number(row.line_count) || 0;
+        return acc;
+      },
+      { total_revenue: 0, total_qty: 0, line_count: 0, category_count: rows.length },
+    );
+    summary.total_revenue = Math.round(summary.total_revenue * 100) / 100;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: companyId,
+      period: {
+        label: periodLabel,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+      summary,
+      data: rows,
+    });
+  } catch (error) {
+    console.error("findSalesByCategory:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
+/**
+ * GET average order value (AOV) for the selected period.
+ * Query: `period`, `from` / `to`, optional `order_status`.
+ */
+async function findAverageOrderValue(req, res) {
+  try {
+    const companyResolved = resolveOrderReportCompany(req);
+    if (!companyResolved.ok) {
+      return res
+        .status(companyResolved.response.status)
+        .json(companyResolved.response.body);
+    }
+
+    const rangeResolved = resolveTopSellingDateRange(req);
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const { cid, companyId } = companyResolved;
+    const match = applyOrderStatusToMatch(
+      {
+        company_id: cid,
+        status: "active",
+        deletedAt: null,
+        createdAt: { $gte: fromDate, $lte: toDate },
+      },
+      req,
+    );
+
+    const rows = await Order.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+          order_count: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          total_amount: { $round: ["$total_amount", 2] },
+          order_count: 1,
+          average_order_value: {
+            $round: [
+              {
+                $cond: [
+                  { $gt: ["$order_count", 0] },
+                  { $divide: ["$total_amount", "$order_count"] },
+                  0,
+                ],
+              },
+              2,
+            ],
+          },
+        },
+      },
+    ]);
+
+    const summary = rows[0] || {
+      total_amount: 0,
+      order_count: 0,
+      average_order_value: 0,
+    };
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: companyId,
+      period: {
+        label: periodLabel,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+      data: summary,
+    });
+  } catch (error) {
+    console.error("findAverageOrderValue:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
+/**
+ * GET daily order counts for charts (defaults to last 30 days).
+ * Query: `period`, `from` / `to`, optional `order_status`.
+ */
+async function findDailyOrders(req, res) {
+  try {
+    const companyResolved = resolveOrderReportCompany(req);
+    if (!companyResolved.ok) {
+      return res
+        .status(companyResolved.response.status)
+        .json(companyResolved.response.body);
+    }
+
+    const hasPeriod =
+      req.query?.period != null && String(req.query.period).trim() !== "";
+    const hasFrom = req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+    if (!hasPeriod && !hasFrom && !hasTo) {
+      req.query.period = "last_30_days";
+    }
+
+    const rangeResolved = resolveTopSellingDateRange(req);
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const { cid, companyId } = companyResolved;
+    const match = applyOrderStatusToMatch(
+      {
+        company_id: cid,
+        status: "active",
+        deletedAt: null,
+        createdAt: { $gte: fromDate, $lte: toDate },
+      },
+      req,
+    );
+
+    const aggregatedRows = await Order.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+          },
+          total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+          order_count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id",
+          total_amount: { $round: ["$total_amount", 2] },
+          order_count: 1,
+        },
+      },
+    ]);
+
+    const { days, summary } = buildDayWiseSalesSeries(
+      fromDate,
+      toDate,
+      aggregatedRows,
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: companyId,
+      period: {
+        label: periodLabel,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+      summary,
+      days,
+    });
+  } catch (error) {
+    console.error("findDailyOrders:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 /**
  * GET total sales (`SUM(order.total_amount)`) for the authenticated company:
  * **current calendar month** and **previous calendar month** (server local time).
@@ -4127,4 +4503,7 @@ module.exports = {
   findSalesLast30Days,
   findTopSellingProducts,
   findPeakSalesHours,
+  findSalesByCategory,
+  findAverageOrderValue,
+  findDailyOrders,
 };
