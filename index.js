@@ -21,7 +21,6 @@ try {
 }
 
 const express = require("express");
-const fs = require("fs");
 const { connectMonogodb, getMongoUri } = require("./connection");
 const path = require("path");
 const urlRouter = require("./routes/url");
