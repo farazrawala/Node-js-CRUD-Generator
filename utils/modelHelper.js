@@ -1,6 +1,10 @@
 const path = require("path");
 const fs = require("fs");
 const { getUserToken } = require("../service/auth");
+const {
+  getPublicAssetBaseUrl,
+  normalizePublicUploadUrl,
+} = require("./basePath");
 /**
  * Generate URL-friendly slug from text
  * @param {string} text - The text to convert to slug
@@ -280,9 +284,20 @@ const transformImageUrls = (data, Model, req = null) => {
     return data;
   }
 
-  const baseUrl = getBaseUrl(req);
+  const assetBaseUrl = getPublicAssetBaseUrl(req);
   const schema = Model.schema;
   const transformedData = { ...data };
+
+  const toPublicImageUrl = (imgPath) => {
+    if (typeof imgPath !== "string" || imgPath.trim() === "") {
+      return imgPath;
+    }
+    if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) {
+      return normalizePublicUploadUrl(imgPath);
+    }
+    const normalizedPath = imgPath.startsWith("/") ? imgPath : `/${imgPath}`;
+    return `${assetBaseUrl}${normalizedPath}`;
+  };
 
   // Find all fields with field_type: "image"
   Object.keys(schema.paths).forEach((fieldName) => {
@@ -296,34 +311,13 @@ const transformImageUrls = (data, Model, req = null) => {
       if (imageValue) {
         // Handle array of images (e.g., multi_images)
         if (Array.isArray(imageValue)) {
-          transformedData[fieldName] = imageValue.map((imgPath) => {
-            if (typeof imgPath === "string" && imgPath.trim() !== "") {
-              // Only transform if it's not already a full URL
-              if (
-                !imgPath.startsWith("http://") &&
-                !imgPath.startsWith("https://")
-              ) {
-                // Ensure the path starts with / if it doesn't
-                const normalizedPath =
-                  imgPath.startsWith("/") ? imgPath : `/${imgPath}`;
-                return `${baseUrl}${normalizedPath}`;
-              }
-            }
-            return imgPath;
-          });
+          transformedData[fieldName] = imageValue.map((imgPath) =>
+            toPublicImageUrl(imgPath),
+          );
         }
         // Handle single image string
         else if (typeof imageValue === "string" && imageValue.trim() !== "") {
-          // Only transform if it's not already a full URL
-          if (
-            !imageValue.startsWith("http://") &&
-            !imageValue.startsWith("https://")
-          ) {
-            // Ensure the path starts with / if it doesn't
-            const normalizedPath =
-              imageValue.startsWith("/") ? imageValue : `/${imageValue}`;
-            transformedData[fieldName] = `${baseUrl}${normalizedPath}`;
-          }
+          transformedData[fieldName] = toPublicImageUrl(imageValue);
         }
       }
     }

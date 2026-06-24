@@ -30,6 +30,11 @@ const {
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  userHasRole,
+  syncDefaultVendorFlag,
+  findDefaultVendor,
+} = require("../utils/userDefaultVendor");
 
 /**
  * Build & post the 2-line user opening journal. Does not touch `user.transaction_number`.
@@ -306,6 +311,99 @@ async function handleUserUpdate(req, res) {
   });
 
   return res.status(response.status).json(response);
+}
+
+function tenantCompanyIdFromUser(user) {
+  if (!user?.company_id) return null;
+  return coalesceObjectId(user.company_id);
+}
+
+async function loadUserForDefaultVendorAction(req, res) {
+  const urlId = req.params.id ? String(req.params.id) : "";
+  if (!urlId) {
+    res.status(400).json({ success: false, message: "User id is required." });
+    return null;
+  }
+
+  const loginUserId = req.user?._id
+    ? String(coalesceObjectId(req.user._id))
+    : "";
+  if (urlId !== loginUserId && !userCanManageOtherUsers(req.user)) {
+    res.status(403).json({
+      success: false,
+      message: "You do not have permission to change this user.",
+    });
+    return null;
+  }
+
+  const filter = { _id: urlId, deletedAt: null };
+  const tenantCo = tenantCompanyIdFromUser(req.user);
+  if (tenantCo) {
+    filter.company_id = tenantCo;
+  }
+
+  const user = await User.findOne(filter);
+  if (!user) {
+    res.status(404).json({ success: false, message: "User not found." });
+    return null;
+  }
+
+  return user;
+}
+
+async function makeDefaultVendor(req, res) {
+  try {
+    const user = await loadUserForDefaultVendorAction(req, res);
+    if (!user) return;
+
+    if (!userHasRole(user, "VENDOR")) {
+      return res.status(400).json({
+        success: false,
+        message: "Only users with the VENDOR role can be default vendor.",
+      });
+    }
+
+    user.mark_as_default_vendor = true;
+    await user.save();
+    await syncDefaultVendorFlag(user);
+
+    const data = await User.findById(user._id).select("-password").lean();
+    return res.status(200).json({
+      success: true,
+      message: "Default vendor updated.",
+      data,
+    });
+  } catch (err) {
+    console.error("makeDefaultVendor error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to set default vendor.",
+    });
+  }
+}
+
+async function getDefaultVendor(req, res) {
+  try {
+    const tenantCo = tenantCompanyIdFromUser(req.user);
+    if (!tenantCo) {
+      return res.status(400).json({
+        success: false,
+        message: "Company context is required.",
+      });
+    }
+
+    const data = await findDefaultVendor(tenantCo);
+    return res.status(200).json({
+      success: true,
+      data: data ? (data.toObject ? data.toObject() : data) : null,
+    });
+  } catch (err) {
+    console.error("getDefaultVendor error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to fetch default vendor.",
+    });
+  }
 }
 
 async function handleUserLogin(req, res) {
@@ -1201,6 +1299,8 @@ module.exports = {
   findActiveUserByRole,
   countTotalCustomers,
   countTotalUsers,
+  makeDefaultVendor,
+  getDefaultVendor,
   postTransactionsForUserInitialBalance,
   reconcileUserInitialBalanceOnUpdate,
 };

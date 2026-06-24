@@ -65,6 +65,45 @@ function isSecureCookie(req) {
   return Boolean(req?.secure);
 }
 
+/**
+ * Base URL for public static assets (uploads). BASE_URL often ends with /api for API calls;
+ * uploads are served at /uploads, not /api/uploads.
+ */
+function getPublicAssetBaseUrl(req = null) {
+  if (process.env.ASSET_BASE_URL) {
+    return String(process.env.ASSET_BASE_URL).replace(/\/$/, "");
+  }
+
+  if (process.env.BASE_URL) {
+    return String(process.env.BASE_URL)
+      .replace(/\/api\/?$/i, "")
+      .replace(/\/$/, "");
+  }
+
+  if (req) {
+    const protocol = req.protocol || "http";
+    const host =
+      typeof req.get === "function"
+        ? req.get("host") || ""
+        : String(
+            (req.headers && (req.headers.host || req.headers.Host)) || "",
+          ).trim();
+    const safeHost = host || "localhost:8000";
+    const bp = getBasePath();
+    return `${protocol}://${safeHost}${bp}`.replace(/\/$/, "");
+  }
+
+  const bp = getBasePath();
+  return `http://localhost:8000${bp}`.replace(/\/$/, "");
+}
+
+/** Fix legacy full URLs that incorrectly include /api/uploads/. */
+function normalizePublicUploadUrl(url) {
+  if (!url || typeof url !== "string") return url;
+  if (!url.startsWith("http://") && !url.startsWith("https://")) return url;
+  return url.replace(/\/api\/uploads\//i, "/uploads/");
+}
+
 module.exports = {
   normalizeBasePath,
   getBasePath,
@@ -72,4 +111,6 @@ module.exports = {
   createStripBasePathMiddleware,
   getCookiePath,
   isSecureCookie,
+  getPublicAssetBaseUrl,
+  normalizePublicUploadUrl,
 };

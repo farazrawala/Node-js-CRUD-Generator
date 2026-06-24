@@ -39,6 +39,8 @@ const {
   handleUserSignupCompany,
   countTotalCustomers,
   countTotalUsers,
+  makeDefaultVendor,
+  getDefaultVendor,
 } = require("../controllers/user");
 
 const { assetsSave, assetsUpdate } = require("../controllers/assets");
@@ -243,6 +245,9 @@ router.post("/user/user_company", handleUserSignupCompany);
 router.post("/user/login", handleUserLogin);
 router.get("/user/total-customers", countTotalCustomers);
 router.get("/user/total-users", countTotalUsers);
+router.get("/user/default-vendor", getDefaultVendor);
+router.patch("/user/:id/make-default-vendor", makeDefaultVendor);
+router.patch("/users/:id/make-default-vendor", makeDefaultVendor);
 // router.get("/user/get-all", getAllUser);
 // router.get("/user/get/:id", userById);
 // router.post("/user/get-one", findUserByEmail);

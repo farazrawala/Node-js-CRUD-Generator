@@ -124,8 +124,11 @@ app.set("views", path.resolve("./views"));
 // Proxy sends /pos_admin/... — strip prefix before route matching
 app.use(createStripBasePathMiddleware());
 
-// Serve static files from uploads directory
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+// Serve static files from uploads directory (public — no auth)
+const uploadsStaticRoot = path.join(__dirname, "uploads");
+app.use("/uploads", express.static(uploadsStaticRoot));
+// Legacy URLs built with BASE_URL ending in /api pointed here — keep working
+app.use("/api/uploads", express.static(uploadsStaticRoot));
 
 // Session middleware (must come before flash)
 app.use(

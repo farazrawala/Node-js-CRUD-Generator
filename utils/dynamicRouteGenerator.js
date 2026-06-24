@@ -370,16 +370,37 @@ function generateControllerFunctions(modelName) {
             );
             throw glErr;
           }
+          try {
+            const { syncDefaultVendorFlag } = require("./userDefaultVendor");
+            await syncDefaultVendorFlag(record, session);
+          } catch (syncErr) {
+            console.error(
+              "⚠️ syncDefaultVendorFlag after user create:",
+              syncErr.message,
+            );
+            throw syncErr;
+          }
         }
 
         console.log(`✅ ${modelName} created successfully:`, record._id);
       };
+
+      const beforeCreate =
+        modelName === "user"
+          ? async (modelData) => {
+              const { validateDefaultVendorFlag } = require(
+                "./userDefaultVendor",
+              );
+              return validateDefaultVendorFlag(modelData, modelData);
+            }
+          : null;
 
       try {
         if (modelName === "user") {
           const response = await withTxnFallback(async (session) => {
             const out = await handleGenericCreate(req, modelName, {
               ...(session ? { session } : {}),
+              beforeCreate,
               afterCreate,
             });
             if (!out.success) {
@@ -461,6 +482,14 @@ function generateControllerFunctions(modelName) {
               salt,
             );
           }
+          const { validateDefaultVendorFlag } = require("./userDefaultVendor");
+          const flagError = validateDefaultVendorFlag(
+            updateData,
+            existingRecord,
+          );
+          if (flagError) {
+            throw new Error(flagError.message);
+          }
         }
         if (priorBeforeUpdate) {
           await priorBeforeUpdate(updateData, req, existingRecord);
@@ -488,6 +517,16 @@ function generateControllerFunctions(modelName) {
           } catch (e) {
             console.error("⚠️ reconcileUserInitialBalanceOnUpdate:", e.message);
             throw e;
+          }
+          try {
+            const { syncDefaultVendorFlag } = require("./userDefaultVendor");
+            await syncDefaultVendorFlag(updatedRecord, session);
+          } catch (syncErr) {
+            console.error(
+              "⚠️ syncDefaultVendorFlag after user update:",
+              syncErr.message,
+            );
+            throw syncErr;
           }
         }
         if (priorAfterUpdate) {

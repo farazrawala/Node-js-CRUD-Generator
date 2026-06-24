@@ -3,6 +3,10 @@ const path = require("path");
 const routeRegistry = require("./routeRegistry");
 const Company = require("../models/company");
 const { coalesceObjectId } = require("./modelHelper");
+const {
+  getPublicAssetBaseUrl,
+  normalizePublicUploadUrl,
+} = require("./basePath");
 
 /**
  * Generic Admin CRUD Generator
@@ -2687,18 +2691,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
   function buildAssetUrl(assetPath) {
     if (!assetPath) return "";
 
-    // If it's already a full URL, return as is
+    const assetBaseUrl = getPublicAssetBaseUrl();
+
+    // If it's already a full URL, fix legacy /api/uploads/ prefix
     if (assetPath.startsWith("http://") || assetPath.startsWith("https://")) {
-      return assetPath;
+      return normalizePublicUploadUrl(assetPath);
     }
 
     // If it starts with /, it's a relative path from root
     if (assetPath.startsWith("/")) {
-      return getBaseUrl() + assetPath;
+      return assetBaseUrl + assetPath;
     }
 
     // Otherwise, treat as relative path
-    return getBaseUrl() + "/" + assetPath;
+    return assetBaseUrl + "/" + assetPath;
   }
 
   /**

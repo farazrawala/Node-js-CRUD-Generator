@@ -129,6 +129,11 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    mark_as_default_vendor: {
+      type: Boolean,
+      default: false,
+      field_name: "Make default vendor",
+    },
     role: {
       type: [String],
       required: true,

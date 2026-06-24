@@ -25,6 +25,10 @@ const Attribute = require("../models/attribute");
 const Logs = require("../models/logs");
 // Import CRUD generators
 const adminCrudGenerator = require("../utils/adminCrudGenerator");
+const {
+  validateDefaultVendorFlag,
+  syncDefaultVendorFlag,
+} = require("../utils/userDefaultVendor");
 
 /**
  * Auto-generate Admin CRUD with UI Forms for User model
@@ -39,6 +43,7 @@ const userAdminCRUD = adminCrudGenerator(
     "phone",
     "password",
     "role",
+    "mark_as_default_vendor",
     "permissions",
     "profile_image",
     "company_id",
@@ -51,6 +56,7 @@ const userAdminCRUD = adminCrudGenerator(
       "email",
       "phone",
       "role",
+      "mark_as_default_vendor",
       "profile_image",
       "company_id",
       "createdAt",
@@ -93,6 +99,7 @@ const userAdminCRUD = adminCrudGenerator(
     // Custom field types
     fieldTypes: {
       role: "multiselect",
+      mark_as_default_vendor: "checkbox",
       profile_image: "file",
       company_id: "select",
       password: "password",
@@ -132,6 +139,7 @@ const userAdminCRUD = adminCrudGenerator(
       password: "Password",
       company_id: "Company",
       permissions: "Permissions",
+      mark_as_default_vendor: "Make default vendor",
     },
 
     middleware: {
@@ -236,16 +244,32 @@ const userAdminCRUD = adminCrudGenerator(
         ) {
           data.permissions = data.permissions.toObject();
         }
+        const flagError = validateDefaultVendorFlag(data, data);
+        if (flagError) {
+          throw new Error(flagError.message);
+        }
         return data;
       },
-      beforeUpdate: async (data) => {
+      beforeUpdate: async (data, req, record) => {
         if (
           data.permissions &&
           typeof data.permissions.toObject === "function"
         ) {
           data.permissions = data.permissions.toObject();
         }
+        const flagError = validateDefaultVendorFlag(data, record);
+        if (flagError) {
+          throw new Error(flagError.message);
+        }
         return data;
+      },
+    },
+    hooks: {
+      afterInsert: async (record) => {
+        await syncDefaultVendorFlag(record);
+      },
+      afterUpdate: async (updatedRecord) => {
+        await syncDefaultVendorFlag(updatedRecord);
       },
     },
   },
