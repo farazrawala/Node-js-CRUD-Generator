@@ -73,7 +73,12 @@ const {
   updateWholeSalePrice,
 } = require("../controllers/inventory_movements");
 
-const { expenseCreate, expenseUpdate } = require("../controllers/expense");
+const {
+  expenseCreate,
+  expenseUpdate,
+  findExpenseSummary,
+  findExpenseByAccount,
+} = require("../controllers/expense");
 
 const {
   order_save,
@@ -91,8 +96,13 @@ const {
   findSalesByCategory,
   findAverageOrderValue,
   findDailyOrders,
+  findAccountsReceivableSummary,
   invoiceUpdate,
 } = require("../controllers/order");
+const {
+  getReceivablesSummary,
+  getReceivablesAging,
+} = require("../controllers/ledger");
 const { costOfGoodsSoldByOrderItem } = require("../controllers/order_item");
 const {
   checkIntegrationActive,
@@ -181,6 +191,7 @@ const {
 const {
   getIncomeStatement,
   getIncomeStatementDetail,
+  getExpenseVsRevenue,
 } = require("../controllers/reports");
 
 const {
@@ -331,6 +342,8 @@ router.get(
 // Expense routes
 router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
+router.get("/expense/summary", findExpenseSummary);
+router.get("/expense/by-account", findExpenseByAccount);
 
 // Amount transfer routes
 // Inventory movements routes
@@ -454,6 +467,7 @@ router.get("/account/default-discount-sums", getCompanyDefaultDiscountSums);
 // Reports
 router.get("/reports/income-statement", getIncomeStatement);
 router.get("/reports/income-statement-detail", getIncomeStatementDetail);
+router.get("/reports/expense-vs-revenue", getExpenseVsRevenue);
 
 // Adjustment routes
 router.post("/adjustment/save", adjustmentCreate);
@@ -488,6 +502,10 @@ router.get("/order/average-order-value", findAverageOrderValue);
 router.get("/orders/average-order-value", findAverageOrderValue);
 router.get("/order/daily-orders", findDailyOrders);
 router.get("/orders/daily-orders", findDailyOrders);
+router.get("/order/accounts-receivable-summary", findAccountsReceivableSummary);
+router.get("/orders/accounts-receivable-summary", findAccountsReceivableSummary);
+router.get("/ledger/receivables-summary", getReceivablesSummary);
+router.get("/ledger/receivables-aging", getReceivablesAging);
 router.get("/sales_return/sales", findSalesReturnSales);
 router.get("/purchase_order/purchases", findPurchaseOrderPurchases);
 router.get("/purchase_return/purchases", findPurchaseReturnPurchases);

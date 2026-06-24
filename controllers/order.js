@@ -30,6 +30,15 @@ const { evaluateProductStockAlert } = require("./alerts");
 const {
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
+const {
+  resolveReportPeriodRange,
+  periodResponse: reportPeriodResponse,
+} = require("../utils/reportPeriodRange");
+const {
+  requireArAccount,
+  aggregateArGlBalance,
+  aggregateArPeriodMovement,
+} = require("../utils/receivablesReport");
 
 const ORDER_TRANSACTION_ERROR_LOG = {
   action: "POST ORDER TRANSACTION ERROR",
@@ -4057,6 +4066,81 @@ async function findDailyOrders(req, res) {
 }
 
 /**
+ * GET accounts receivable summary for a period (GL on default A/R account).
+ * Query: `period`, `from` / `to` (default period: current_month).
+ */
+async function findAccountsReceivableSummary(req, res) {
+  try {
+    const companyResolved = resolveOrderReportCompany(req);
+    if (!companyResolved.ok) {
+      return res
+        .status(companyResolved.response.status)
+        .json(companyResolved.response.body);
+    }
+
+    const arResolved = await requireArAccount(companyResolved);
+    if (!arResolved.ok) {
+      return res.status(arResolved.response.status).json(arResolved.response.body);
+    }
+
+    const hasPeriod =
+      req.query?.period != null && String(req.query.period).trim() !== "";
+    const hasFrom = req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+    if (!hasPeriod && !hasFrom && !hasTo) {
+      req.query.period = "current_month";
+    }
+
+    const rangeResolved = resolveReportPeriodRange(req.query, {
+      defaultPeriod: "current_month",
+    });
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const { cid, companyId } = companyResolved;
+    const { arAccountId } = arResolved;
+
+    const [opening, closing, movement] = await Promise.all([
+      aggregateArGlBalance(cid, arAccountId, fromDate),
+      aggregateArGlBalance(cid, arAccountId),
+      aggregateArPeriodMovement(cid, arAccountId, fromDate, toDate),
+    ]);
+
+    const computedClosing = roundMoney2(
+      opening.balance + movement.new_charges - movement.collections,
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: companyId,
+      account_receivable_account_id: String(arAccountId),
+      period: reportPeriodResponse(periodLabel, fromDate, toDate),
+      summary: {
+        opening_balance: opening.balance,
+        new_charges: movement.new_charges,
+        collections: movement.collections,
+        net_change: movement.net_change,
+        closing_balance: closing.balance,
+        computed_closing_balance: computedClosing,
+        transaction_count: movement.transaction_count,
+      },
+    });
+  } catch (error) {
+    console.error("findAccountsReceivableSummary:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
+/**
  * GET total sales (`SUM(order.total_amount)`) for the authenticated company:
  * **current calendar month** and **previous calendar month** (server local time).
  * Same tenant + status filters as `findSales`; optional `?order_status=`.
@@ -4506,4 +4590,5 @@ module.exports = {
   findSalesByCategory,
   findAverageOrderValue,
   findDailyOrders,
+  findAccountsReceivableSummary,
 };
