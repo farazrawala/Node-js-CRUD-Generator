@@ -142,6 +142,110 @@ function periodResponse(label, fromDate, toDate) {
   };
 }
 
+function formatLocalDateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function startOfLocalDay(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function roundMoney2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+/** Monday-based week start for a local calendar date. */
+function weekStartMonday(d) {
+  const cur = startOfLocalDay(d);
+  const day = cur.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  cur.setDate(cur.getDate() + diff);
+  return cur;
+}
+
+/**
+ * Zero-fill daily chart series from aggregation rows `{ date, total_amount, document_count }`.
+ */
+function buildDayWiseDocumentSeries(fromDate, toDate, aggregatedRows) {
+  const byDate = new Map(
+    (aggregatedRows || []).map((row) => [
+      String(row.date),
+      {
+        total_amount: Number(row.total_amount) || 0,
+        document_count: Number(row.document_count) || 0,
+      },
+    ]),
+  );
+
+  const days = [];
+  const cur = startOfLocalDay(fromDate);
+  const end = startOfLocalDay(toDate);
+  let total_amount = 0;
+  let document_count = 0;
+
+  while (cur <= end) {
+    const key = formatLocalDateKey(cur);
+    const row = byDate.get(key);
+    const dayTotal = row?.total_amount ?? 0;
+    const dayCount = row?.document_count ?? 0;
+    total_amount += dayTotal;
+    document_count += dayCount;
+    days.push({
+      date: key,
+      total_amount: roundMoney2(dayTotal),
+      document_count: dayCount,
+      average_amount:
+        dayCount > 0 ? roundMoney2(dayTotal / dayCount) : 0,
+    });
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return {
+    days,
+    summary: {
+      total_amount: roundMoney2(total_amount),
+      document_count,
+      average_amount:
+        document_count > 0 ?
+          roundMoney2(total_amount / document_count)
+        : 0,
+    },
+  };
+}
+
+/** Roll daily purchase/sales points into Monday-start weeks. */
+function rollupDailyToWeeklySeries(dailyRows) {
+  const byWeek = new Map();
+
+  for (const row of dailyRows || []) {
+    const d = new Date(`${row.date}T00:00:00`);
+    const weekStart = formatLocalDateKey(weekStartMonday(d));
+    const existing = byWeek.get(weekStart) || {
+      week_start: weekStart,
+      total_amount: 0,
+      document_count: 0,
+    };
+    existing.total_amount += Number(row.total_amount) || 0;
+    existing.document_count += Number(row.document_count) || 0;
+    byWeek.set(weekStart, existing);
+  }
+
+  return [...byWeek.values()]
+    .sort((a, b) => a.week_start.localeCompare(b.week_start))
+    .map((row) => ({
+      week_start: row.week_start,
+      total_amount: roundMoney2(row.total_amount),
+      document_count: row.document_count,
+      average_amount:
+        row.document_count > 0 ?
+          roundMoney2(row.total_amount / row.document_count)
+        : 0,
+    }));
+}
+
 module.exports = {
   calendarMonthDateRange,
   currentMonthDateRange,
@@ -149,4 +253,9 @@ module.exports = {
   last30DaysDateRange,
   resolveReportPeriodRange,
   periodResponse,
+  formatLocalDateKey,
+  startOfLocalDay,
+  roundMoney2,
+  buildDayWiseDocumentSeries,
+  rollupDailyToWeeklySeries,
 };

@@ -1,6 +1,9 @@
 const mongoose = require("mongoose");
 const PurchaseOrder = require("../models/purchase_order");
 const PurchaseOrderItem = require("../models/purchase_order_item");
+const PurchaseReturn = require("../models/purchase_return");
+const Order = require("../models/order");
+const User = require("../models/user");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const Product = require("../models/product");
 
@@ -25,6 +28,14 @@ const {
 } = require("../utils/mongoTransactionSupport");
 const { createApplicationLog } = require("../utils/applicationLogs");
 const { sumHeaderTotalAmount } = require("../utils/reportHeaderTotals");
+const {
+  resolveReportPeriodRange,
+  periodResponse,
+  buildDayWiseDocumentSeries,
+  rollupDailyToWeeklySeries,
+  roundMoney2,
+} = require("../utils/reportPeriodRange");
+const { resolveTenantCompany } = require("../utils/receivablesReport");
 const {
   importPurchaseOrderFromText,
   PO_IMPORT_COLUMNS,
@@ -2864,6 +2875,260 @@ async function findPurchaseOrderPurchases(req, res) {
   });
 }
 
+const PO_DAILY_GROUP = [
+  {
+    $group: {
+      _id: {
+        $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+      },
+      total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+      document_count: { $sum: 1 },
+    },
+  },
+  { $sort: { _id: 1 } },
+  {
+    $project: {
+      _id: 0,
+      date: "$_id",
+      total_amount: { $round: ["$total_amount", 2] },
+      document_count: 1,
+    },
+  },
+];
+
+const PO_HEADER_SUMMARY_GROUP = [
+  {
+    $group: {
+      _id: null,
+      total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+      document_count: { $sum: 1 },
+    },
+  },
+  {
+    $project: {
+      _id: 0,
+      total_amount: { $round: ["$total_amount", 2] },
+      document_count: 1,
+    },
+  },
+];
+
+function headerSummaryFromRows(rows) {
+  const row = rows?.[0];
+  return {
+    total_amount: row?.total_amount ?? 0,
+    document_count: row?.document_count ?? 0,
+  };
+}
+
+/**
+ * GET purchase dashboard summary: totals, purchases vs sales, daily/weekly trend, top vendors.
+ * Query: `period`, `from` / `to` (default current_month), optional `order_status`, `return_status`,
+ * `vendor_limit` (default 10, max 50), `include_sales` (default true).
+ */
+async function findPurchaseOrderPurchasesSummary(req, res) {
+  try {
+    const companyResolved = resolveTenantCompany(req);
+    if (!companyResolved.ok) {
+      return res
+        .status(companyResolved.response.status)
+        .json(companyResolved.response.body);
+    }
+
+    const hasPeriod =
+      req.query?.period != null && String(req.query.period).trim() !== "";
+    const hasFrom = req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+    if (!hasPeriod && !hasFrom && !hasTo) {
+      req.query.period = "current_month";
+    }
+
+    const rangeResolved = resolveReportPeriodRange(req.query, {
+      defaultPeriod: "current_month",
+    });
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const { cid, companyId } = companyResolved;
+
+    const poMatch = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
+    const rawPoStatus = req.query?.order_status;
+    if (rawPoStatus != null && String(rawPoStatus).trim() !== "") {
+      poMatch.order_status = String(rawPoStatus).trim();
+    }
+
+    const prMatch = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
+    const rawReturnStatus = req.query?.return_status;
+    if (rawReturnStatus != null && String(rawReturnStatus).trim() !== "") {
+      prMatch.return_status = String(rawReturnStatus).trim();
+    }
+
+    const includeSales =
+      req.query?.include_sales == null ||
+      !["0", "false", "no"].includes(
+        String(req.query.include_sales).trim().toLowerCase(),
+      );
+
+    const vendorLimitRaw = parseInt(req.query?.vendor_limit, 10);
+    const vendorLimit =
+      vendorLimitRaw > 0 ? Math.min(vendorLimitRaw, 50) : 10;
+
+    const salesMatch = includeSales ?
+      {
+        company_id: cid,
+        status: "active",
+        deletedAt: null,
+        createdAt: { $gte: fromDate, $lte: toDate },
+      }
+    : null;
+    if (salesMatch) {
+      const rawOrderStatus = req.query?.order_status;
+      if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
+        salesMatch.order_status = String(rawOrderStatus).trim();
+      }
+    }
+
+    const [
+      poSummaryRows,
+      prSummaryRows,
+      dailyRows,
+      topVendorRows,
+      salesSummaryRows,
+    ] = await Promise.all([
+      PurchaseOrder.aggregate([{ $match: poMatch }, ...PO_HEADER_SUMMARY_GROUP]),
+      PurchaseReturn.aggregate([{ $match: prMatch }, ...PO_HEADER_SUMMARY_GROUP]),
+      PurchaseOrder.aggregate([{ $match: poMatch }, ...PO_DAILY_GROUP]),
+      PurchaseOrder.aggregate([
+        { $match: poMatch },
+        {
+          $group: {
+            _id: "$vendor_id",
+            total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+            purchase_order_count: { $sum: 1 },
+          },
+        },
+        { $sort: { total_amount: -1 } },
+        { $limit: vendorLimit },
+        {
+          $project: {
+            _id: 0,
+            vendor_id: "$_id",
+            total_amount: { $round: ["$total_amount", 2] },
+            purchase_order_count: 1,
+          },
+        },
+      ]),
+      includeSales ?
+        Order.aggregate([{ $match: salesMatch }, ...PO_HEADER_SUMMARY_GROUP])
+      : Promise.resolve([]),
+    ]);
+
+    const purchases = headerSummaryFromRows(poSummaryRows);
+    const purchaseReturns = headerSummaryFromRows(prSummaryRows);
+    const sales = includeSales ? headerSummaryFromRows(salesSummaryRows) : null;
+
+    const netPurchases = roundMoney2(
+      purchases.total_amount - purchaseReturns.total_amount,
+    );
+    const averagePurchaseOrderValue =
+      purchases.document_count > 0 ?
+        roundMoney2(purchases.total_amount / purchases.document_count)
+      : 0;
+
+    const { days, summary: dailySummary } = buildDayWiseDocumentSeries(
+      fromDate,
+      toDate,
+      dailyRows,
+    );
+    const weeks = rollupDailyToWeeklySeries(days);
+
+    const vendorIds = topVendorRows
+      .map((r) => r.vendor_id)
+      .filter((id) => id != null);
+    const vendors =
+      vendorIds.length ?
+        await User.find({ _id: { $in: vendorIds } })
+          .select("name email phone role")
+          .lean()
+      : [];
+    const vendorById = new Map(vendors.map((v) => [String(v._id), v]));
+
+    const top_vendors = topVendorRows.map((row) => {
+      const vendor = row.vendor_id ? vendorById.get(String(row.vendor_id)) : null;
+      return {
+        vendor_id: row.vendor_id,
+        vendor_name: vendor?.name ?? "Unassigned vendor",
+        vendor_email: vendor?.email ?? null,
+        vendor_phone: vendor?.phone ?? null,
+        total_amount: row.total_amount,
+        purchase_order_count: row.purchase_order_count,
+      };
+    });
+
+    const purchasesVsSales =
+      includeSales && sales ?
+        {
+          purchases: purchases.total_amount,
+          purchase_returns: purchaseReturns.total_amount,
+          net_purchases: netPurchases,
+          sales: sales.total_amount,
+          difference: roundMoney2(sales.total_amount - netPurchases),
+          purchases_percent_of_sales:
+            sales.total_amount > 0 ?
+              roundMoney2((netPurchases / sales.total_amount) * 100)
+            : 0,
+        }
+      : null;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: companyId,
+      period: periodResponse(periodLabel, fromDate, toDate),
+      summary: {
+        total_purchases: purchases.total_amount,
+        purchase_order_count: purchases.document_count,
+        total_purchase_returns: purchaseReturns.total_amount,
+        purchase_return_count: purchaseReturns.document_count,
+        net_purchases: netPurchases,
+        average_purchase_order_value: averagePurchaseOrderValue,
+        ...(includeSales && sales ?
+          {
+            total_sales: sales.total_amount,
+            order_count: sales.document_count,
+          }
+        : {}),
+        purchases_vs_sales: purchasesVsSales,
+      },
+      days,
+      weeks,
+      daily_summary: dailySummary,
+      top_vendors,
+    });
+  } catch (error) {
+    console.error("findPurchaseOrderPurchasesSummary:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 function readPoImportFileBuffer(req) {
   const file =
     req.files?.file ||
@@ -3044,6 +3309,7 @@ module.exports = {
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
   findPurchaseOrderPurchases,
+  findPurchaseOrderPurchasesSummary,
   applyWholesalePriceRemoveForPoLines,
   applyWholesalePriceWeightedAverageForPoLines,
   // purchase_orderUpdate,

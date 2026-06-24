@@ -146,6 +146,7 @@ const {
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
   findPurchaseOrderPurchases,
+  findPurchaseOrderPurchasesSummary,
 } = require("../controllers/purchase_order");
 const {
   purchaseReturnCreate,
@@ -508,6 +509,7 @@ router.get("/ledger/receivables-summary", getReceivablesSummary);
 router.get("/ledger/receivables-aging", getReceivablesAging);
 router.get("/sales_return/sales", findSalesReturnSales);
 router.get("/purchase_order/purchases", findPurchaseOrderPurchases);
+router.get("/purchase_order/purchases-summary", findPurchaseOrderPurchasesSummary);
 router.get("/purchase_return/purchases", findPurchaseReturnPurchases);
 router.get("/order/total-sales-current-month", findTotalSalesByOrder);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);
