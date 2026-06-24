@@ -3227,6 +3227,459 @@ async function findSalesLast30Days(req, res) {
   return findSalesDayWise(req, res);
 }
 
+const TOP_SELLING_DEFAULT_LIMIT = 10;
+const TOP_SELLING_MAX_LIMIT = 50;
+const TOP_SELLING_DEFAULT_RANGE_DAYS = 90;
+
+function resolveTopSellingDateRange(req) {
+  const hasFrom =
+    req.query?.from != null && String(req.query.from).trim() !== "";
+  const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
+
+  if (hasFrom || hasTo) {
+    const fromDate = hasFrom ? new Date(String(req.query.from).trim()) : null;
+    const toDate = hasTo ? new Date(String(req.query.to).trim()) : new Date();
+    if (hasFrom && Number.isNaN(fromDate.getTime())) {
+      return {
+        error: {
+          status: 400,
+          body: { success: false, status: 400, error: "Invalid from date" },
+        },
+      };
+    }
+    if (hasTo && Number.isNaN(toDate.getTime())) {
+      return {
+        error: {
+          status: 400,
+          body: { success: false, status: 400, error: "Invalid to date" },
+        },
+      };
+    }
+    if (hasFrom && hasTo && fromDate > toDate) {
+      return {
+        error: {
+          status: 400,
+          body: {
+            success: false,
+            status: 400,
+            error: "Invalid date range",
+            message: "`from` must be on or before `to`",
+          },
+        },
+      };
+    }
+    if (!hasFrom) {
+      const start = new Date(toDate);
+      start.setDate(start.getDate() - TOP_SELLING_DEFAULT_RANGE_DAYS);
+      return {
+        fromDate: start,
+        toDate,
+        periodLabel: "custom",
+      };
+    }
+    return {
+      fromDate,
+      toDate: hasTo ? toDate : new Date(),
+      periodLabel: "custom",
+    };
+  }
+
+  const period = String(req.query?.period || "").trim().toLowerCase();
+  if (
+    period === "last_30_days" ||
+    period === "last30days" ||
+    period === "30_days"
+  ) {
+    const r = last30DaysDateRange();
+    return {
+      fromDate: r.fromDate,
+      toDate: r.toDate,
+      periodLabel: "last_30_days",
+    };
+  }
+  if (period === "last_month") {
+    const r = lastMonthDateRange();
+    return {
+      fromDate: r.fromDate,
+      toDate: r.toDate,
+      periodLabel: "last_month",
+    };
+  }
+  if (period === "current_month") {
+    const r = currentMonthDateRange();
+    return {
+      fromDate: r.fromDate,
+      toDate: r.toDate,
+      periodLabel: "current_month",
+    };
+  }
+
+  const toDate = new Date();
+  const fromDate = new Date(toDate);
+  fromDate.setDate(fromDate.getDate() - TOP_SELLING_DEFAULT_RANGE_DAYS);
+  return { fromDate, toDate, periodLabel: "last_90_days" };
+}
+
+/**
+ * GET top-selling products for the authenticated company (from `order_item` lines).
+ * Query: `limit` (default 10, max 50), `skip`, `sort_by=qty|revenue|profit` (default qty),
+ * optional `from` / `to`, or `period=last_30_days|current_month|last_month`.
+ */
+async function findTopSellingProducts(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const rangeResolved = resolveTopSellingDateRange(req);
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const skip = Math.max(0, parseInt(req.query?.skip, 10) || 0);
+    const limitRaw = parseInt(req.query?.limit, 10);
+    const limit =
+      limitRaw > 0 ?
+        Math.min(limitRaw, TOP_SELLING_MAX_LIMIT)
+      : TOP_SELLING_DEFAULT_LIMIT;
+
+    const sortBy = String(req.query?.sort_by || "qty").trim().toLowerCase();
+    const sortField =
+      sortBy === "revenue" ? "total_revenue"
+      : sortBy === "profit" ? "total_profit"
+      : "total_qty";
+
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
+
+    const [countRows, rows] = await Promise.all([
+      OrderItem.aggregate([
+        { $match: match },
+        { $group: { _id: "$product_id" } },
+        { $count: "total" },
+      ]),
+      OrderItem.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: "$product_id",
+            product_name: { $first: "$name" },
+            total_qty: { $sum: { $ifNull: ["$qty", 0] } },
+            total_revenue: { $sum: { $ifNull: ["$subtotal", 0] } },
+            total_profit: { $sum: { $ifNull: ["$profit", 0] } },
+            line_count: { $sum: 1 },
+          },
+        },
+        { $sort: { [sortField]: -1, product_name: 1 } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $lookup: {
+            from: "products",
+            localField: "_id",
+            foreignField: "_id",
+            pipeline: [
+              {
+                $match: {
+                  company_id: cid,
+                  status: "active",
+                  deletedAt: null,
+                },
+              },
+              {
+                $project: {
+                  product_name: 1,
+                  product_code: 1,
+                  sku: 1,
+                  barcode: 1,
+                  product_image: 1,
+                  product_price: 1,
+                },
+              },
+            ],
+            as: "product",
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            product_id: "$_id",
+            product_name: {
+              $ifNull: [
+                { $arrayElemAt: ["$product.product_name", 0] },
+                "$product_name",
+              ],
+            },
+            product_code: { $arrayElemAt: ["$product.product_code", 0] },
+            sku: { $arrayElemAt: ["$product.sku", 0] },
+            barcode: { $arrayElemAt: ["$product.barcode", 0] },
+            product_image: { $arrayElemAt: ["$product.product_image", 0] },
+            product_price: { $arrayElemAt: ["$product.product_price", 0] },
+            total_qty: 1,
+            total_revenue: { $round: ["$total_revenue", 2] },
+            total_profit: { $round: ["$total_profit", 2] },
+            line_count: 1,
+          },
+        },
+      ]),
+    ]);
+
+    const total = countRows[0]?.total ?? 0;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      period: {
+        label: periodLabel,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+      sort_by: sortField === "total_revenue" ? "revenue"
+      : sortField === "total_profit" ? "profit"
+      : "qty",
+      total,
+      skip,
+      limit,
+      count: rows.length,
+      data: rows,
+    });
+  } catch (error) {
+    console.error("findTopSellingProducts:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
+function formatHourLabel(hour) {
+  const h = Number(hour);
+  if (!Number.isFinite(h) || h < 0 || h > 23) {
+    return String(hour);
+  }
+  const period = h < 12 ? "AM" : "PM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h).padStart(2, "0")}:00 · ${h12} ${period}`;
+}
+
+/** Merge hourly aggregation into 24 buckets (zero-filled) and compute peak hour. */
+function buildPeakSalesHoursSeries(aggregatedRows, peakBy = "total_amount") {
+  const byHour = new Map(
+    (aggregatedRows || []).map((row) => [
+      Number(row.hour),
+      {
+        total_amount: Number(row.total_amount) || 0,
+        order_count: Number(row.order_count) || 0,
+      },
+    ]),
+  );
+
+  const hours = [];
+  let peakHour = 0;
+  let peakValue = -1;
+  let total_amount = 0;
+  let order_count = 0;
+
+  for (let h = 0; h < 24; h++) {
+    const row = byHour.get(h);
+    const hourTotal = row?.total_amount ?? 0;
+    const hourCount = row?.order_count ?? 0;
+    total_amount += hourTotal;
+    order_count += hourCount;
+    const metric = peakBy === "order_count" ? hourCount : hourTotal;
+    if (metric > peakValue) {
+      peakValue = metric;
+      peakHour = h;
+    }
+    hours.push({
+      hour: h,
+      hour_label: formatHourLabel(h),
+      total_amount: Math.round(hourTotal * 100) / 100,
+      order_count: hourCount,
+    });
+  }
+
+  const peakRow = hours[peakHour];
+  return {
+    hours,
+    summary: {
+      total_amount: Math.round(total_amount * 100) / 100,
+      order_count,
+      peak_hour: peakHour,
+      peak_hour_label: peakRow?.hour_label ?? formatHourLabel(peakHour),
+      peak_total_amount: peakRow?.total_amount ?? 0,
+      peak_order_count: peakRow?.order_count ?? 0,
+      peak_by: peakBy === "order_count" ? "order_count" : "total_amount",
+    },
+  };
+}
+
+function resolveSalesTimezone(req) {
+  const raw =
+    req.query?.timezone ?? process.env.SALES_TIMEZONE ?? "Asia/Karachi";
+  return String(raw || "UTC").trim() || "UTC";
+}
+
+/**
+ * GET peak sales hours for charts — orders grouped by hour of day (0–23).
+ * Query: `period`, `from` / `to`, optional `order_status`, `timezone` (default Asia/Karachi),
+ * `peak_by=total_amount|order_count` (which metric picks the peak hour).
+ */
+async function findPeakSalesHours(req, res) {
+  try {
+    const rawCompany = req.user?.company_id;
+    const companyId =
+      rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+        rawCompany._id
+      : rawCompany;
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Authentication with company context is required",
+      });
+    }
+
+    const companyObjectId = coalesceObjectId(companyId);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Invalid company context",
+      });
+    }
+
+    const rangeResolved = resolveTopSellingDateRange(req);
+    if (rangeResolved.error) {
+      return res
+        .status(rangeResolved.error.status)
+        .json(rangeResolved.error.body);
+    }
+
+    const { fromDate, toDate, periodLabel } = rangeResolved;
+    const timezone = resolveSalesTimezone(req);
+    const peakBy = String(req.query?.peak_by || "total_amount")
+      .trim()
+      .toLowerCase();
+    const peakMetric =
+      peakBy === "order_count" ? "order_count" : "total_amount";
+
+    const cid = new mongoose.Types.ObjectId(String(companyObjectId));
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
+
+    const rawOrderStatus = req.query?.order_status;
+    if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
+      match.order_status = String(rawOrderStatus).trim();
+    }
+
+    let aggregatedRows;
+    try {
+      aggregatedRows = await Order.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              $hour: { date: "$createdAt", timezone },
+            },
+            total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+            order_count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+        {
+          $project: {
+            _id: 0,
+            hour: "$_id",
+            total_amount: { $round: ["$total_amount", 2] },
+            order_count: 1,
+          },
+        },
+      ]);
+    } catch (aggErr) {
+      const msg = String(aggErr?.message || aggErr);
+      if (msg.includes("timezone") || msg.includes("TimeZone")) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid timezone",
+          message: `Use a valid IANA timezone (e.g. Asia/Karachi). Received: ${timezone}`,
+        });
+      }
+      throw aggErr;
+    }
+
+    const { hours, summary } = buildPeakSalesHoursSeries(
+      aggregatedRows,
+      peakMetric,
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      timezone,
+      period: {
+        label: periodLabel,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+      },
+      peak_by: peakMetric,
+      summary,
+      hours,
+    });
+  } catch (error) {
+    console.error("findPeakSalesHours:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 /**
  * GET total sales (`SUM(order.total_amount)`) for the authenticated company:
  * **current calendar month** and **previous calendar month** (server local time).
@@ -3672,4 +4125,6 @@ module.exports = {
   findTotalSalesByOrder,
   findSalesDayWise,
   findSalesLast30Days,
+  findTopSellingProducts,
+  findPeakSalesHours,
 };
