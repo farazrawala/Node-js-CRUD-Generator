@@ -420,8 +420,171 @@ async function checkProductAlert(req, res) {
   }
 }
 
+/**
+ * GET /api/alerts/low-stock
+ * List products at or below `alert_qty` for the authenticated company.
+ * Query: `skip`, `limit` (default 50, max 200), optional `mode=live` (default) | `records`.
+ * - live: current stock vs alert_qty on product rows
+ * - records: active rows in `alerts` collection (may include stale items until next stock sync)
+ */
+async function getLowStockAlerts(req, res) {
+  try {
+    const companyFilter = companyIdMatch(req.user?.company_id);
+    if (!companyFilter) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        message: "Company context is required for stock alerts",
+      });
+    }
+
+    const companyId = coalesceObjectId(req.user?.company_id);
+    const skip = Math.max(0, parseInt(req.query?.skip, 10) || 0);
+    const limitRaw = parseInt(req.query?.limit, 10);
+    const limit = limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+    const mode = String(req.query?.mode || "live").trim().toLowerCase();
+
+    const productSelect =
+      "product_name product_code sku barcode alert_qty stock product_price wholesale_price product_image unit";
+
+    function mapProductRow(product, alertRecord = null) {
+      const onHand = Number(product?.stock) || 0;
+      const alertQty = Number(product?.alert_qty) || 0;
+      return {
+        alert_id: alertRecord?._id ?? null,
+        product_id: product?._id ?? null,
+        product_name: product?.product_name ?? null,
+        product_code: product?.product_code ?? null,
+        sku: product?.sku ?? null,
+        barcode: product?.barcode ?? null,
+        unit: product?.unit ?? null,
+        on_hand: onHand,
+        alert_qty: alertQty,
+        shortage: Math.max(0, alertQty - onHand),
+        product_price: product?.product_price ?? 0,
+        wholesale_price: product?.wholesale_price ?? 0,
+        product_image: product?.product_image ?? null,
+        low_stock: alertQty > 0 && onHand <= alertQty,
+        alert_created_at: alertRecord?.createdAt ?? null,
+      };
+    }
+
+    if (mode === "records") {
+      const alertFilter = {
+        company_id: companyFilter,
+        status: "active",
+        deletedAt: null,
+      };
+
+      const [total, alertRows] = await Promise.all([
+        Alerts.countDocuments(alertFilter),
+        Alerts.find(alertFilter)
+          .sort({ updatedAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+      ]);
+
+      const productIds = [
+        ...new Set(
+          alertRows
+            .map((row) => String(row.product_id || "").trim())
+            .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+        ),
+      ];
+
+      const products = productIds.length
+        ? await Product.find({
+            _id: { $in: productIds },
+            company_id: companyFilter,
+            deletedAt: null,
+          })
+            .select(productSelect)
+            .lean()
+        : [];
+
+      const productMap = new Map(products.map((p) => [String(p._id), p]));
+      const data = alertRows.map((alertRow) => {
+        const product = productMap.get(String(alertRow.product_id));
+        return mapProductRow(product, alertRow);
+      });
+
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        company_id: String(companyId),
+        mode: "records",
+        total,
+        skip,
+        limit,
+        count: data.length,
+        summary: { low_stock_count: total },
+        data,
+      });
+    }
+
+    const productFilter = {
+      company_id: companyFilter,
+      status: "active",
+      deletedAt: null,
+      alert_qty: { $gt: 0 },
+      $expr: {
+        $lte: [{ $ifNull: ["$stock", 0] }, "$alert_qty"],
+      },
+    };
+
+    const [total, products] = await Promise.all([
+      Product.countDocuments(productFilter),
+      Product.find(productFilter)
+        .select(productSelect)
+        .sort({ stock: 1, product_name: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const productIds = products.map((p) => String(p._id));
+    const alertRows = productIds.length
+      ? await Alerts.find({
+          product_id: { $in: productIds },
+          company_id: companyFilter,
+          status: "active",
+          deletedAt: null,
+        }).lean()
+      : [];
+    const alertByProduct = new Map(
+      alertRows.map((row) => [String(row.product_id), row]),
+    );
+
+    const data = products.map((product) =>
+      mapProductRow(product, alertByProduct.get(String(product._id)) || null),
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(companyId),
+      mode: "live",
+      total,
+      skip,
+      limit,
+      count: data.length,
+      summary: { low_stock_count: total },
+      data,
+    });
+  } catch (err) {
+    console.error("getLowStockAlerts:", err);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: err.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   checkProductAlert,
-
+  getLowStockAlerts,
   evaluateProductStockAlert,
 };

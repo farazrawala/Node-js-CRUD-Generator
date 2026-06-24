@@ -24,7 +24,7 @@ const {
   paymentReceiptCreate,
   paymentReceiptUpdate,
 } = require("../controllers/payment_receipt");
-const { checkProductAlert } = require("../controllers/alerts");
+const { checkProductAlert, getLowStockAlerts } = require("../controllers/alerts");
 const {
   // handleUserSignup,
 
@@ -254,6 +254,8 @@ router.patch("/users/:id/make-default-vendor", makeDefaultVendor);
 // router.post("/user/get-one", findUserByEmail);
 
 router.get("/alerts/check-product-alert/:product_id/:qty", checkProductAlert);
+router.get("/alerts/low-stock", getLowStockAlerts);
+router.get("/alerts/get-low-stock", getLowStockAlerts);
 
 router.get("/purchase_order/import-form", purchaseOrderImportFormSchema);
 router.post("/purchase_order/import", purchaseOrderImportFromFile);
