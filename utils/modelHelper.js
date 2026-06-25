@@ -3630,15 +3630,70 @@ const handleGenericFindOne = async (
 
 const handleGenericCreate = async (req, controllerName = null, options = {}) => {
   const result = await handleGenericCreateCore(req, controllerName, options);
+  if (result?.success) {
+    await maybeInvalidateModelListCache(req, controllerName, result, options);
+  }
   await maybeLogGenericCrudFailure(req, controllerName, "create", result, options);
   return result;
 };
 
 const handleGenericUpdate = async (req, controllerName = null, options = {}) => {
   const result = await handleGenericUpdateCore(req, controllerName, options);
+  if (result?.success) {
+    await maybeInvalidateModelListCache(req, controllerName, result, options);
+  }
   await maybeLogGenericCrudFailure(req, controllerName, "update", result, options);
   return result;
 };
+
+/**
+ * Clear list cache (`get-all`, `get-all-active`) for the mutated model.
+ * Uses `{companyId}:{module}:{action}:*` keys (e.g. purchase_return).
+ */
+async function maybeInvalidateModelListCache(
+  req,
+  controllerName,
+  result,
+  options = {},
+) {
+  if (options.skipCacheInvalidation) return;
+
+  const modelName =
+    controllerName && String(controllerName).trim() !== "" ?
+      String(controllerName).trim()
+    : getControllerName();
+  if (!modelName) return;
+
+  try {
+    const {
+      invalidateModuleListCaches,
+      resolveCompanyIdForCacheInvalidation,
+      isListCacheBypassed,
+    } = require("./redisCache");
+
+    if (isListCacheBypassed(modelName)) return;
+
+    const companyId = resolveCompanyIdForCacheInvalidation(req, result?.data);
+    if (!companyId) {
+      console.warn(
+        `[cache] skip invalidation for ${modelName}: no company_id on req or saved record`,
+      );
+      return;
+    }
+
+    const deleted = await invalidateModuleListCaches(companyId, modelName);
+    if (deleted > 0) {
+      console.log(
+        `[cache] cleared ${deleted} list key(s) for ${modelName} (company ${companyId})`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[cache] invalidation failed for ${modelName}:`,
+      err?.message || err,
+    );
+  }
+}
 
 module.exports = {
   generateSlug,

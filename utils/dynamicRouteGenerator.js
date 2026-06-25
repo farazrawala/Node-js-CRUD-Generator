@@ -417,18 +417,12 @@ function generateControllerFunctions(modelName) {
             }
             return out;
           });
-          if (response?.success) {
-            await invalidateModuleListCachesForReq(req, modelName);
-          }
           return res.status(response.status).json(response);
         }
 
         const response = await handleGenericCreate(req, modelName, {
           afterCreate,
         });
-        if (response?.success) {
-          await invalidateModuleListCachesForReq(req, modelName);
-        }
         return res.status(response.status).json(response);
       } catch (err) {
         console.error(`❌ ${modelName} create error:`, err.message);
@@ -555,9 +549,6 @@ function generateControllerFunctions(modelName) {
             }
             return out;
           });
-          if (response?.success) {
-            await invalidateModuleListCachesForReq(req, modelName);
-          }
           return res.status(response.status).json(response);
         }
 
@@ -566,9 +557,6 @@ function generateControllerFunctions(modelName) {
           modelName,
           updateOptions,
         );
-        if (response?.success) {
-          await invalidateModuleListCachesForReq(req, modelName);
-        }
         return res.status(response.status).json(response);
       } catch (err) {
         console.error(`❌ ${modelName} update error:`, err.message);

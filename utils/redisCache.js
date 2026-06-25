@@ -497,6 +497,29 @@ async function invalidateModuleListCachesForReq(req, module) {
   return deleted;
 }
 
+/** Invalidate all list-cache keys for one tenant + module (no Express req required). */
+async function invalidateModuleListCaches(companyId, module) {
+  if (isListCacheBypassed(module)) return 0;
+  const tenant = normalizeCompanyIdForCache(companyId);
+  if (!tenant) return 0;
+  let deleted = 0;
+  for (const action of LIST_CACHE_ACTIONS) {
+    deleted += await invalidateListCache(tenant, module, action);
+  }
+  return deleted;
+}
+
+/** Resolve tenant id for cache invalidation after a mutation. */
+function resolveCompanyIdForCacheInvalidation(req, record = null) {
+  const fromUser = normalizeCompanyIdForCache(req?.user?.company_id);
+  if (fromUser) return fromUser;
+  const fromBody = normalizeCompanyIdForCache(req?.body?.company_id);
+  if (fromBody) return fromBody;
+  const fromRecord = normalizeCompanyIdForCache(record?.company_id);
+  if (fromRecord) return fromRecord;
+  return null;
+}
+
 /**
  * Drop every list-cache key for a tenant: `{companyId}:*` (all modules/actions/query variants).
  */
@@ -855,6 +878,8 @@ module.exports = {
   invalidateListCache,
   invalidateListCacheForReq,
   invalidateModuleListCachesForReq,
+  invalidateModuleListCaches,
+  resolveCompanyIdForCacheInvalidation,
   invalidateAllListCacheForCompany,
   invalidateAllListCacheForReq,
   listAllListCacheForCompany,
