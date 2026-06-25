@@ -770,7 +770,10 @@ async function insertOrderReferencedInventoryMovement({
   }
 
   const bodyBeforeInventoryMovement = req.body;
-  const hadRouteParamId = Object.prototype.hasOwnProperty.call(req.params, "id");
+  const hadRouteParamId = Object.prototype.hasOwnProperty.call(
+    req.params,
+    "id",
+  );
   const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
 
   req.body = {
@@ -823,8 +826,12 @@ async function applyOrderLineReplaceInventory({
   mongoSession = null,
   logUrl = "/api/order/order_update",
 }) {
-  const inventoryLogContext = salesWarehouseInventoryLogContext(orderId, orderNo);
-  const movementWarehouseMap = buildOutboundQtyMapFromMovements(oldOutMovements);
+  const inventoryLogContext = salesWarehouseInventoryLogContext(
+    orderId,
+    orderNo,
+  );
+  const movementWarehouseMap =
+    buildOutboundQtyMapFromMovements(oldOutMovements);
   const oldMap = buildOrderLineRestoreQtyMap({
     existingOrderItems,
     movementWarehouseMap,
@@ -1060,17 +1067,19 @@ async function teardownOrderForLineReplace({
   if (mongoSession) movQuery = movQuery.session(mongoSession);
   const oldOutMovements = await movQuery.lean();
 
-  const { transactions, lineItems } = await softDeleteActiveOrderRelatedRecords({
-    orderId,
-    transactionNumber,
-    companyId,
-    mongoSession,
-    userId,
-    options: {
-      gl: true,
-      lineItems: true,
+  const { transactions, lineItems } = await softDeleteActiveOrderRelatedRecords(
+    {
+      orderId,
+      transactionNumber,
+      companyId,
+      mongoSession,
+      userId,
+      options: {
+        gl: true,
+        lineItems: true,
+      },
     },
-  });
+  );
 
   return {
     oldOutMovements,
@@ -1092,7 +1101,10 @@ async function applyOrderOutboundLines({
   mongoSession = null,
   logUrl = "/api/order/order_save",
 }) {
-  const inventoryLogContext = salesWarehouseInventoryLogContext(orderId, orderNo);
+  const inventoryLogContext = salesWarehouseInventoryLogContext(
+    orderId,
+    orderNo,
+  );
   const productStockUpdates = [];
 
   for (const line of lines) {
@@ -1235,8 +1247,12 @@ async function applyOrderDeleteInventoryRestore({
   mongoSession = null,
   logUrl = "/api/order/order_delete",
 }) {
-  const inventoryLogContext = salesWarehouseInventoryLogContext(orderId, orderNo);
-  const movementWarehouseMap = buildOutboundQtyMapFromMovements(oldOutMovements);
+  const inventoryLogContext = salesWarehouseInventoryLogContext(
+    orderId,
+    orderNo,
+  );
+  const movementWarehouseMap =
+    buildOutboundQtyMapFromMovements(oldOutMovements);
   const restoreMap = buildOrderLineRestoreQtyMap({
     existingOrderItems,
     movementWarehouseMap,
@@ -2108,7 +2124,10 @@ async function order_save(req, res) {
               amount: record?.discount,
               reference_user_id: record?.customer_id,
               transaction_number,
-              description: orderGlDescription("Sale Discount", record?.order_no),
+              description: orderGlDescription(
+                "Sale Discount",
+                record?.order_no,
+              ),
               reference_id: {
                 module: "order",
                 ref_id: record._id,
@@ -2118,10 +2137,13 @@ async function order_save(req, res) {
               // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
               account_id: orderReq.body?.posPayMethod,
               type: "debit",
-              amount: orderTotal,
+              amount: orderTotal - record?.shipment - record?.discount,
               reference_user_id: record?.customer_id,
               transaction_number,
-              description: orderGlDescription("Mode of Payment", record?.order_no),
+              description: orderGlDescription(
+                "Mode of Payment",
+                record?.order_no,
+              ),
               reference_id: {
                 module: "order",
                 ref_id: record._id,
@@ -3111,9 +3133,7 @@ function buildDayWiseSalesSeries(fromDate, toDate, aggregatedRows) {
       total_amount: Math.round(dayTotal * 100) / 100,
       order_count: dayCount,
       average_order_value:
-        dayCount > 0 ?
-          Math.round((dayTotal / dayCount) * 100) / 100
-        : 0,
+        dayCount > 0 ? Math.round((dayTotal / dayCount) * 100) / 100 : 0,
     });
     cur.setDate(cur.getDate() + 1);
   }
@@ -3301,7 +3321,9 @@ function resolveTopSellingDateRange(req) {
     };
   }
 
-  const period = String(req.query?.period || "").trim().toLowerCase();
+  const period = String(req.query?.period || "")
+    .trim()
+    .toLowerCase();
   if (
     period === "last_30_days" ||
     period === "last30days" ||
@@ -3387,7 +3409,9 @@ async function findTopSellingProducts(req, res) {
         Math.min(limitRaw, TOP_SELLING_MAX_LIMIT)
       : TOP_SELLING_DEFAULT_LIMIT;
 
-    const sortBy = String(req.query?.sort_by || "qty").trim().toLowerCase();
+    const sortBy = String(req.query?.sort_by || "qty")
+      .trim()
+      .toLowerCase();
     const sortField =
       sortBy === "revenue" ? "total_revenue"
       : sortBy === "profit" ? "total_profit"
@@ -3483,9 +3507,10 @@ async function findTopSellingProducts(req, res) {
         from: fromDate.toISOString(),
         to: toDate.toISOString(),
       },
-      sort_by: sortField === "total_revenue" ? "revenue"
-      : sortField === "total_profit" ? "profit"
-      : "qty",
+      sort_by:
+        sortField === "total_revenue" ? "revenue"
+        : sortField === "total_profit" ? "profit"
+        : "qty",
       total,
       skip,
       limit,
@@ -3860,7 +3885,12 @@ async function findSalesByCategory(req, res) {
         acc.line_count += Number(row.line_count) || 0;
         return acc;
       },
-      { total_revenue: 0, total_qty: 0, line_count: 0, category_count: rows.length },
+      {
+        total_revenue: 0,
+        total_qty: 0,
+        line_count: 0,
+        category_count: rows.length,
+      },
     );
     summary.total_revenue = Math.round(summary.total_revenue * 100) / 100;
 
@@ -3990,7 +4020,8 @@ async function findDailyOrders(req, res) {
 
     const hasPeriod =
       req.query?.period != null && String(req.query.period).trim() !== "";
-    const hasFrom = req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
     const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
     if (!hasPeriod && !hasFrom && !hasTo) {
       req.query.period = "last_30_days";
@@ -4080,12 +4111,15 @@ async function findAccountsReceivableSummary(req, res) {
 
     const arResolved = await requireArAccount(companyResolved);
     if (!arResolved.ok) {
-      return res.status(arResolved.response.status).json(arResolved.response.body);
+      return res
+        .status(arResolved.response.status)
+        .json(arResolved.response.body);
     }
 
     const hasPeriod =
       req.query?.period != null && String(req.query.period).trim() !== "";
-    const hasFrom = req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
     const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
     if (!hasPeriod && !hasFrom && !hasTo) {
       req.query.period = "current_month";
