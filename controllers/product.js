@@ -29,6 +29,10 @@ const {
   importProductsFromText,
   PRODUCT_IMPORT_COLUMNS,
 } = require("../utils/productCsvImport");
+const {
+  updateBarcodesFromText,
+  BARCODE_IMPORT_COLUMNS,
+} = require("../utils/productBarcodeImport");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -1346,6 +1350,132 @@ async function productImportFromFile(req, res) {
   }
 }
 
+/**
+ * GET /api/product/update-barcode-form — column reference for barcode update.
+ */
+function productBarcodeUpdateFormSchema(req, res) {
+  return res.status(200).json({
+    success: true,
+    endpoint: "POST /api/product/update-barcode",
+    description:
+      "Update product.barcode for existing products, matched by product name.",
+    content_types: [
+      "multipart/form-data (field: file)",
+      "application/json ({ items: [{ product_name, barcode }] })",
+      "text/plain body (csv/text)",
+    ],
+    columns: BARCODE_IMPORT_COLUMNS,
+    example_row: {
+      product_name: "IKHLAS OIL",
+      barcode: "4369179812026",
+    },
+    options: {
+      dry_run: "true|false — parse + match only, persist nothing (default false)",
+      overwrite_existing:
+        "true|false — update even when the product already has a different barcode (default true)",
+    },
+    sample_file:
+      "geopos_products_barcode.csv (comma-separated: product_name, barcode)",
+  });
+}
+
+/**
+ * POST /api/product/update-barcode
+ * Update `product.barcode` for existing products, matched by product name.
+ *
+ * multipart field: `file` (`.csv`, `.tsv`) with header `product_name,barcode`
+ * or JSON `{ items: [{ product_name, barcode }] }` / `csv` / `text` body.
+ * Query/body: dry_run, overwrite_existing
+ */
+async function productBarcodeUpdateFromFile(req, res) {
+  try {
+    const companyId = coalesceObjectId(
+      req.body?.company_id || req.user?.company_id,
+    );
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request body).",
+      });
+    }
+
+    const dryRun =
+      String(req.query?.dry_run ?? req.body?.dry_run ?? "false")
+        .trim()
+        .toLowerCase() === "true";
+    const overwriteExisting =
+      String(
+        req.query?.overwrite_existing ??
+          req.body?.overwrite_existing ??
+          "true",
+      )
+        .trim()
+        .toLowerCase() !== "false";
+
+    let text = null;
+
+    const fileBuffer = readImportFileBuffer(req);
+    if (fileBuffer) {
+      text = fileBuffer.toString("utf8");
+    } else if (typeof req.body?.csv === "string" && req.body.csv.trim()) {
+      text = req.body.csv;
+    } else if (typeof req.body?.text === "string" && req.body.text.trim()) {
+      text = req.body.text;
+    } else if (Array.isArray(req.body?.items) && req.body.items.length) {
+      const header = "product_name,barcode\n";
+      const lines = req.body.items.map((row) =>
+        [
+          `"${String(row.product_name || row.name || "").replace(/"/g, '""').trim()}"`,
+          `"${String(row.barcode ?? row.code ?? "").replace(/"/g, '""').trim()}"`,
+        ].join(","),
+      );
+      text = header + lines.join("\n");
+    }
+
+    if (!text) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Upload a CSV/TSV file (form field `file`) or send `items` / `csv` / `text` in the body.",
+        columns: BARCODE_IMPORT_COLUMNS,
+      });
+    }
+
+    const result = await updateBarcodesFromText(text, {
+      companyId,
+      updatedBy: req.user?._id,
+      options: { dryRun, overwriteExisting },
+    });
+
+    if (!dryRun) {
+      await invalidateProductListCache(req);
+    }
+
+    const statusCode =
+      !dryRun && result.summary?.failed > 0 && result.summary?.updated === 0 ?
+        400
+      : !dryRun && result.summary?.failed > 0 ?
+        207
+      : 200;
+
+    return res.status(statusCode).json({
+      success: dryRun || result.summary?.failed === 0,
+      message:
+        dryRun ?
+          `Dry run: ${result.parsed.row_count} row(s) ready to update.`
+        : `Barcode update complete — updated ${result.summary.updated}, skipped ${result.summary.skipped}, failed ${result.summary.failed}.`,
+      data: result,
+    });
+  } catch (error) {
+    console.error("❌ productBarcodeUpdateFromFile:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Barcode update failed",
+      details: error.details || undefined,
+    });
+  }
+}
+
 async function performProductUpdate(req, options = {}) {
   const session = options.session || null;
   const strictSideEffects = Boolean(session || options.strictSideEffects);
@@ -2047,6 +2177,8 @@ module.exports = {
   productCreate,
   productImportFromFile,
   productImportFormSchema,
+  productBarcodeUpdateFromFile,
+  productBarcodeUpdateFormSchema,
   productUpdate,
   productById,
   getAllProducts,

@@ -48,6 +48,8 @@ const {
   productCreate,
   productImportFromFile,
   productImportFormSchema,
+  productBarcodeUpdateFromFile,
+  productBarcodeUpdateFormSchema,
   productUpdate,
   productById,
   getAllProducts,
@@ -358,6 +360,9 @@ router.post("/inventory_movements/stock-transfer", stockTransfer);
 // Product routes - Custom CRUD + warehouse inventory management
 router.get("/product/import-form", productImportFormSchema);
 router.post("/product/import", productImportFromFile);
+
+router.get("/product/update-barcode-form", productBarcodeUpdateFormSchema);
+router.post("/product/update-barcode", productBarcodeUpdateFromFile);
 
 router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
