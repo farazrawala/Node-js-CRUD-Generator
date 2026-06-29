@@ -139,11 +139,6 @@ const modelSchema = new mongoose.Schema(
       default: 0,
       field_name: "Wholesale Price",
     },
-    cost_price: {
-      type: Number,
-      default: 0,
-      field_name: "Cost Price",
-    },
     product_price: {
       type: Number,
       default: 0,

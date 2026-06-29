@@ -33,10 +33,6 @@ const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
-const {
-  applyWholesalePriceRemoveForPoLines,
-  applyWholesalePriceWeightedAverageForPoLines,
-} = require("./purchase_order");
 
 /**
  * Purchase return HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -2015,19 +2011,10 @@ async function purchaseReturnCreate(req, res) {
       }
       // step 6–11 end
 
-      // Reverse weighted-average wholesale_price after outbound warehouse qty (mirrors PO delete).
-      const wholesaleRows = await applyWholesalePriceRemoveForPoLines({
-        lines: lineItemsFromClient,
-        companyId,
-        req,
-        mongoSession,
-        logTags: PURCHASE_RETURN_LOG_TAGS,
-        fallbackUrl:
-          req.originalUrl ||
-          req.path ||
-          "/api/purchase_return/purchase_return_create",
-      });
-      wholesaleUpdates.push(...wholesaleRows);
+      // A purchase return is an OUTBOUND on already-blended inventory, so it is
+      // WAC-neutral (like a sale): stock is removed at the current weighted
+      // average and `product.wholesale_price` is left unchanged. (Reversing at
+      // the line/purchase cost here previously skewed WAC, e.g. 240 → 280.)
 
       // step 3–4 start — product stock (ledger sync + non-warehouse bump)
       const stockReconcile = await reconcileProductStockAfterPrCreate({
@@ -2889,24 +2876,10 @@ async function purchase_return_delete(req, res) {
       }
       // step 3 end
 
-      // step 3b — restore weighted-average wholesale_price before warehouse qty is added back (mirrors PO create).
-      const endStep3b = prDeleteStepTimer.start(
-        "3b",
-        "product wholesale_price restore (weighted avg)",
-      );
-      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
-        lines: existingPrItems,
-        companyId,
-        req,
-        mongoSession,
-        logTags: PURCHASE_RETURN_LOG_TAGS,
-        fallbackUrl:
-          req.originalUrl ||
-          req.path ||
-          "/api/purchase_return/purchase_return_delete",
-      });
-      wholesaleUpdates.push(...wholesaleRows);
-      endStep3b({ wholesale_updates: wholesaleUpdates.length });
+      // Deleting a purchase return adds the returned stock back. Because the
+      // original purchase return was WAC-neutral (outbound at the running
+      // average), restoring it is WAC-neutral too — `wholesale_price` is left
+      // unchanged here.
 
       // step 4 start — restore warehouse_inventory + insert reversal `in` movements
       const endStep4 = prDeleteStepTimer.start(

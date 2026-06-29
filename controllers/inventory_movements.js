@@ -13,6 +13,9 @@ const InventoryMovements = require("../models/inventory_movements");
 const Product = require("../models/product");
 const Warehouse = require("../models/warehouse");
 const { invalidateModuleListCachesForReq } = require("../utils/redisCache");
+const {
+  computeWeightedAverageCost,
+} = require("../utils/weightedAverageCost");
 
 const INVENTORY_MOVEMENTS_LIST_CACHE_MODULE = "inventory_movements";
 
@@ -447,11 +450,7 @@ async function logInventoryMovementCreated(
     {
       action: "Inventory movement created :: " + productLabel,
       url: req.originalUrl || req.path || "/api/inventory_movements/save",
-      tags: [
-        "inventory_movement",
-        movementType,
-        ...(refType ? [refType] : []),
-      ],
+      tags: ["inventory_movement", movementType, ...(refType ? [refType] : [])],
       description: movementLogMessage,
       reference_id,
       reference_type,
@@ -565,10 +564,19 @@ async function runInventoryMovementTxnBody(req, session) {
         null,
       )
     : in_qty - out_qty;
-  const cost_in_stock = Math.abs(qty_in_stock) * wholesaleUnit;
-  const total_qty = Math.abs(qty_in_stock) + lineQty;
-  const total_cost = Math.abs(cost_in_stock) + lineCost;
-  const average_cost = total_qty !== 0 ? total_cost / total_qty : 0;
+  // Signed on-hand contributes to the weighted average (negative stock is NOT
+  // clamped/abs'd — that was the historical bug producing a wrong WAC).
+  const incomingUnitCost = lineQty !== 0 ? lineCost / lineQty : 0;
+  const wac = computeWeightedAverageCost({
+    existingQty: qty_in_stock,
+    existingCost: wholesaleUnit,
+    incomingQty: lineQty,
+    incomingCost: incomingUnitCost,
+  });
+  const cost_in_stock = qty_in_stock * wholesaleUnit;
+  const total_qty = wac.newQty;
+  const total_cost = cost_in_stock + lineCost;
+  const average_cost = wac.newCost;
 
   const consoleLog = [
     "in_qty :" + in_qty,
@@ -1020,13 +1028,7 @@ async function syncProductStockFromMovementLedger(
             req.originalUrl ||
             req.path ||
             "/api/inventory_movements/stock-by-product",
-          tags: [
-            "product",
-            "stock",
-            "inventory_movement",
-            "sync",
-            ...logTags,
-          ],
+          tags: ["product", "stock", "inventory_movement", "sync", ...logTags],
           description: description,
           reference_id: productIdStr,
           reference_type: "product",

@@ -31,6 +31,9 @@ const {
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
 const {
+  allowAddToCartWhenStockInsufficient,
+} = require("../utils/companyProductSettings");
+const {
   resolveReportPeriodRange,
   periodResponse: reportPeriodResponse,
 } = require("../utils/reportPeriodRange");
@@ -825,6 +828,7 @@ async function applyOrderLineReplaceInventory({
   req,
   mongoSession = null,
   logUrl = "/api/order/order_update",
+  allowInsufficientStock = false,
 }) {
   const inventoryLogContext = salesWarehouseInventoryLogContext(
     orderId,
@@ -935,6 +939,8 @@ async function applyOrderLineReplaceInventory({
             session: mongoSession,
             req,
             logContext: inventoryLogContext,
+            allowNegative: allowInsufficientStock,
+            fallbackWarehouseId: warehouseIdStr,
           });
         for (const whChange of stockChanges) {
           productStockUpdates.push({
@@ -1100,12 +1106,18 @@ async function applyOrderOutboundLines({
   req,
   mongoSession = null,
   logUrl = "/api/order/order_save",
+  allowInsufficientStock = false,
 }) {
   const inventoryLogContext = salesWarehouseInventoryLogContext(
     orderId,
     orderNo,
   );
   const productStockUpdates = [];
+
+  console.log("[order oversell] allow_add_to_cart_when_stock_insufficient:", {
+    allowInsufficientStock,
+    raw_product_settings: req?.user?.company_id?.product_settings ?? null,
+  });
 
   for (const line of lines) {
     const unitCost = Number(line.price);
@@ -1147,6 +1159,8 @@ async function applyOrderOutboundLines({
           session: mongoSession,
           req,
           logContext: inventoryLogContext,
+          allowNegative: allowInsufficientStock,
+          fallbackWarehouseId: resolveDefaultWarehouseId(req),
         }));
     } catch (warehouseResolveErr) {
       if (warehouseResolveErr.clientPayload) {
@@ -2075,7 +2089,14 @@ async function order_save(req, res) {
     orderSaveExecutionMode =
       mongoSession ? "mongodb_transaction" : "no_session";
 
+    // console.log("req_order_save", req);
+    // console.log("req_order_save_body", req.body);
+    // return false; //amount_received
     // step 2 start — order insert
+    const lines_subtotal = req.body.lines_subtotal;
+    const discount = req.body.discount;
+    const shipment = req.body.shipment;
+
     response = await handleGenericCreate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterCreate: async (record, orderReq, sess) => {
@@ -2087,6 +2108,29 @@ async function order_save(req, res) {
               0,
             )
             .toFixed(2),
+        );
+
+        // Cash received and unpaid balance (A/c Receivable) must be finite — the
+        // `transaction.amount` field is required, so an undefined/empty client
+        // `remaining_amount` would abort the whole order transaction. Derive both
+        // from the saved record (model already rounds total_amount = subtotal −
+        // discount + shipment and clamps amount_received).
+        const receivedAmount = Math.max(
+          0,
+          Math.round((Number(record?.amount_received) || 0) * 100) / 100,
+        );
+        const totalAmountDue =
+          Number.isFinite(Number(record?.total_amount)) ?
+            Number(record.total_amount)
+          : Math.round(
+              ((Number(lines_subtotal) || 0) -
+                (Number(discount) || 0) +
+                (Number(shipment) || 0)) *
+                100,
+            ) / 100;
+        const remainingAmountDue = Math.max(
+          0,
+          Math.round((totalAmountDue - receivedAmount) * 100) / 100,
         );
 
         // Four ledger lines; amounts come from the saved order + line subtotal sum. Same `transaction_number` on all.
@@ -2137,11 +2181,28 @@ async function order_save(req, res) {
               // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
               account_id: orderReq.body?.posPayMethod,
               type: "debit",
-              amount: orderTotal + record?.shipment - record?.discount,
+              amount: receivedAmount,
               reference_user_id: record?.customer_id,
               transaction_number,
               description: orderGlDescription(
                 "Mode of Payment",
+                record?.order_no,
+              ),
+              reference_id: {
+                module: "order",
+                ref_id: record._id,
+              },
+            },
+            {
+              //remaining amount.
+              account_id:
+                orderReq.user.company_id.default_account_receivable_account,
+              type: "debit",
+              amount: remainingAmountDue,
+              reference_user_id: record?.customer_id,
+              transaction_number,
+              description: orderGlDescription(
+                "A/c Receivable",
                 record?.order_no,
               ),
               reference_id: {
@@ -2223,6 +2284,9 @@ async function order_save(req, res) {
       req,
       mongoSession,
       logUrl: req.originalUrl || req.path || "/api/order/order_save",
+      allowInsufficientStock: allowAddToCartWhenStockInsufficient(
+        req.user?.company_id,
+      ),
     });
     productStockUpdates.push(...outboundAudit);
     // step 5 end
@@ -2619,6 +2683,9 @@ async function order_update(req, res) {
         req,
         mongoSession,
         logUrl: req.originalUrl || req.path || "/api/order/order_update",
+        allowInsufficientStock: allowAddToCartWhenStockInsufficient(
+          req.user?.company_id,
+        ),
       });
       // step 10 end
 

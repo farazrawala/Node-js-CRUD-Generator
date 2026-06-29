@@ -102,6 +102,15 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Printer Settings",
     },
+    product_settings: {
+      // JSON string of product feature flags. Defaults to allowing oversell
+      // (add-to-cart / sell when on-hand is insufficient) so new companies can
+      // transact while inventory is still being set up; negative on-hand is
+      // fully supported by the weighted-average-cost logic.
+      type: String,
+      field_name: "Product Settings",
+      default: '{"allow_add_to_cart_when_stock_insufficient":true}',
+    },
 
     default_cash_account: {
       type: mongoose.Schema.Types.ObjectId,

@@ -39,9 +39,11 @@ const modelSchema = new mongoose.Schema(
     },
 
     quantity: {
+      // No `min: 0` — oversell (negative on-hand) is allowed when a company
+      // enables it; the JS guards in `applyQuantityDelta` still block negative
+      // for every normal flow unless `allowNegative` is explicitly passed.
       type: Number,
       default: 0,
-      min: 0,
       required: true,
     },
 
@@ -128,6 +130,7 @@ modelSchema.statics.applyQuantityDelta = async function ({
   session = null,
   req = null,
   logContext = null,
+  allowNegative = false,
 } = {}) {
   const delta = roundQty(qtyDelta);
   if (!Number.isFinite(delta) || delta === 0) return null;
@@ -146,7 +149,11 @@ modelSchema.statics.applyQuantityDelta = async function ({
   if (row) {
     const previousQty = Number(row.quantity) || 0;
     const nextQty = roundQty(previousQty + delta);
-    if (nextQty < 0) {
+    // Only an OUTBOUND (delta < 0) can be blocked for insufficient stock.
+    // An inbound (delta > 0) must never be rejected — even when on-hand is
+    // already negative, adding stock is a legitimate recovery toward zero
+    // (e.g. sales return / purchase into an oversold balance).
+    if (delta < 0 && nextQty < 0 && !allowNegative) {
       throw new Error(
         `Insufficient warehouse inventory quantity (need ${Math.abs(delta)}, available ${previousQty})`,
       );
@@ -169,7 +176,7 @@ modelSchema.statics.applyQuantityDelta = async function ({
     return change;
   }
 
-  if (delta < 0) {
+  if (delta < 0 && !allowNegative) {
     throw new Error("Insufficient warehouse inventory to subtract stock");
   }
 
@@ -213,6 +220,8 @@ modelSchema.statics.planOutboundAllocation = async function ({
   qtyNeeded,
   preferredWarehouseId = null,
   session = null,
+  allowNegative = false,
+  fallbackWarehouseId = null,
 } = {}) {
   const qty = roundQty(qtyNeeded);
   if (!Number.isFinite(qty) || qty <= 0) {
@@ -270,6 +279,52 @@ modelSchema.statics.planOutboundAllocation = async function ({
   }
 
   if (remaining > 0.0001) {
+    // Oversell: when the company allows insufficient-stock checkout, absorb the
+    // shortfall into a single warehouse (preferred → explicit fallback → the
+    // warehouse we already drew from) and let its on-hand go negative.
+    if (allowNegative) {
+      const fallback =
+        (
+          fallbackWarehouseId &&
+          mongoose.Types.ObjectId.isValid(String(fallbackWarehouseId).trim())
+        ) ?
+          String(fallbackWarehouseId).trim()
+        : null;
+      const shortfallWarehouseId =
+        pref || fallback || (sorted[0] && String(sorted[0].warehouse_id)) || null;
+
+      if (!shortfallWarehouseId) {
+        const err = new Error(
+          `Cannot oversell product ${String(pid)}: no warehouse available to absorb negative stock`,
+        );
+        err.clientPayload = {
+          success: false,
+          status: 400,
+          error: "No warehouse for oversell",
+          details: err.message,
+          type: "validation",
+          qty_needed: qty,
+          product_id: String(pid),
+          company_id: String(cid),
+        };
+        throw err;
+      }
+
+      const existing = allocations.find(
+        (a) => String(a.warehouse_id) === shortfallWarehouseId,
+      );
+      if (existing) {
+        existing.quantity = roundQty(existing.quantity + remaining);
+      } else {
+        allocations.push({
+          warehouse_id: shortfallWarehouseId,
+          quantity: roundQty(remaining),
+        });
+      }
+      remaining = 0;
+      return allocations;
+    }
+
     const totalAvailable = roundQty(qty - remaining);
     const err = new Error(
       `Insufficient warehouse inventory for product ${String(pid)}: need ${qty}, available ${totalAvailable} across warehouses`,
@@ -305,6 +360,8 @@ modelSchema.statics.applySplitWarehouseOutbound = async function ({
   session = null,
   req = null,
   logContext = null,
+  allowNegative = false,
+  fallbackWarehouseId = null,
 } = {}) {
   const allocations = await this.planOutboundAllocation({
     productId,
@@ -312,6 +369,8 @@ modelSchema.statics.applySplitWarehouseOutbound = async function ({
     qtyNeeded,
     preferredWarehouseId,
     session,
+    allowNegative,
+    fallbackWarehouseId: fallbackWarehouseId || preferredWarehouseId,
   });
 
   const stockChanges = [];
@@ -325,6 +384,7 @@ modelSchema.statics.applySplitWarehouseOutbound = async function ({
       session,
       req,
       logContext,
+      allowNegative,
     });
     if (change) {
       stockChanges.push({ ...change, source: "warehouse_inventory" });
@@ -353,6 +413,8 @@ modelSchema.statics.applySplitWarehouseOutbound = async function ({
  * @param {import("mongoose").ClientSession|null} [options.session]
  * @param {*} [options.userId]
  * @param {string} [options.auditSource] Default `warehouse_inventory`
+ * @param {boolean} [options.allowNegativeReverse] Allow `reverseLines` outbound to drive
+ *   on-hand negative (default `true`). Reversing a recorded inbound is bookkeeping, not a sale.
  * @returns {Promise<object[]>} Audit entries (`source` set on each)
  */
 modelSchema.statics.applyStockChangesFromLines = async function ({
@@ -365,6 +427,12 @@ modelSchema.statics.applyStockChangesFromLines = async function ({
   auditSource = "warehouse_inventory",
   req = null,
   logContext = null,
+  // Reversing a previously-recorded inbound (e.g. PO edit/delete) is a
+  // bookkeeping correction, not a real sale. It MUST be allowed to drive
+  // on-hand negative — otherwise a PO could never be edited/deleted once any
+  // of its received stock was sold. Negative on-hand is fully supported by the
+  // weighted-average-cost logic, so this is safe.
+  allowNegativeReverse = true,
 } = {}) {
   const stockChangeAuditLog = [];
 
@@ -382,6 +450,7 @@ modelSchema.statics.applyStockChangesFromLines = async function ({
       session,
       req,
       logContext,
+      allowNegative: allowNegativeReverse,
     });
     for (const row of reverseChanges.stockChanges || []) {
       stockChangeAuditLog.push({ ...row, source: auditSource });

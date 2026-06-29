@@ -8,6 +8,7 @@
     "devs": "nodemon -L index.js",
     "server": "node index.js",
     "start": "node index.js",
+    "test": "node --test tests/**/*.test.js",
     "postinstall": "node -e \"require('./utils/repairIconvLite').repairIconvLiteEncodings(); require('iconv-lite').encodingExists('utf8')\"",
     "redis:inspect": "node scripts/redis-inspect.js"
   },

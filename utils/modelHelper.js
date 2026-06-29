@@ -150,19 +150,19 @@ const getControllerName = () => {
   const stack = new Error().stack;
   const lines = stack.split("\n");
 
-  console.log("🔍 Stack trace for controller detection:");
+  // console.log("🔍 Stack trace for controller detection:");
   lines.forEach((line, index) => {
-    console.log(`  ${index}: ${line.trim()}`);
+    // console.log(`  ${index}: ${line.trim()}`);
   });
 
   // Look for the controller file in the stack trace
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    console.log(`🔍 Checking line ${i}: ${line.trim()}`);
+    // console.log(`🔍 Checking line ${i}: ${line.trim()}`);
 
     // Look for lines that contain controller files (not modelHelper.js)
     if (line.includes("controllers/") && !line.includes("modelHelper.js")) {
-      console.log(`🔍 Found controller line: ${line}`);
+      // console.log(`🔍 Found controller line: ${line}`);
 
       // Try different regex patterns for file path extraction
       let filePath = null;
@@ -447,18 +447,17 @@ async function maybeLogGenericCrudFailure(
     await logGenericCrudFailure(req, modelName, operation, result, {
       recordId:
         operation === "update" ?
-          req.params?.[idParam] ?? req.params?.id
+          (req.params?.[idParam] ?? req.params?.id)
         : undefined,
       fallbackUrl: req.originalUrl || req.path,
       fallbackCompanyId: req.user?.company_id,
       inTransaction: Boolean(options.session),
     });
   } catch (logErr) {
-    console.error(
-      "[maybeLogGenericCrudFailure]",
-      logErr.message,
-      { model: modelName, operation },
-    );
+    console.error("[maybeLogGenericCrudFailure]", logErr.message, {
+      model: modelName,
+      operation,
+    });
   }
 }
 
@@ -966,7 +965,7 @@ const handleGenericCreateCore = async (
 
     if (req.user && req.user.company_id && modelSchema.company_id) {
       modelData.company_id = coalesceObjectId(req.user.company_id);
-      console.log(`✅ Automatically set company_id to:`, modelData.company_id);
+      // console.log(`✅ Automatically set company_id to:`, modelData.company_id);
     }
 
     // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
@@ -976,14 +975,14 @@ const handleGenericCreateCore = async (
     ) {
       const { generateProductBarcode } = require("./barcodeGenerator");
       modelData.barcode = generateProductBarcode();
-      console.log("🏷️ Generated new EAN13 barcode for API:", modelData.barcode);
+      // console.log("🏷️ Generated new EAN13 barcode for API:", modelData.barcode);
     }
 
-    console.log(`📝 Preparing data for ${modelName} creation:`, {
-      receivedFields: Object.keys(req.body),
-      schemaFields: Object.keys(modelSchema),
-      modelDataFields: Object.keys(modelData),
-    });
+    // console.log(`📝 Preparing data for ${modelName} creation:`, {
+    //   receivedFields: Object.keys(req.body),
+    //   schemaFields: Object.keys(modelSchema),
+    //   modelDataFields: Object.keys(modelData),
+    // });
 
     // Add default values for fields with defaults (only when absent from modelData).
     // Do not use `!modelData[field]` — `false`, `0`, and `""` are valid explicit values.
@@ -1399,7 +1398,9 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       let context = undefined;
       const tenantCompanyId = coalesceObjectId(filter.company_id);
       if (tenantCompanyId) {
-        let existsQ = Model.findById(recordId).select("_id company_id deletedAt");
+        let existsQ = Model.findById(recordId).select(
+          "_id company_id deletedAt",
+        );
         if (session) existsQ = existsQ.session(session);
         const existsAnyTenant = await existsQ.lean();
         if (existsAnyTenant) {
@@ -1552,8 +1553,8 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
         fieldConfig.field_type === "multiselect" &&
         req.body[`${fieldName}[]`] !== undefined
       ) {
-        console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
-        console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
+        // console.log(`🔍 Processing multiselect field (UPDATE): ${fieldName}[]`);
+        // console.log(`🔍 Raw form data:`, req.body[`${fieldName}[]`]);
 
         // Convert array field to proper format
         const multiselectValue = req.body[`${fieldName}[]`];
@@ -1562,7 +1563,7 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
             [multiselectValue]
           );
 
-        console.log(`🔍 Processed data:`, updateData[fieldName]);
+        // console.log(`🔍 Processed data:`, updateData[fieldName]);
 
         // Remove the original array field key if it exists in updateData
         delete updateData[`${fieldName}[]`];
@@ -1603,10 +1604,10 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
           (Array.isArray(req.body[fieldName]) ||
             typeof req.body[fieldName] === "object")
         ) {
-          console.log(
-            `🔍 Found ${fieldName} directly in req.body:`,
-            req.body[fieldName],
-          );
+          // console.log(
+          //   `🔍 Found ${fieldName} directly in req.body:`,
+          //   req.body[fieldName],
+          // );
           let values = req.body[fieldName];
 
           // Extract values from objects if array contains objects
@@ -1623,10 +1624,10 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
                 const objValue = Object.values(val)[0];
                 if (objValue) {
                   extractedValues.push(objValue);
-                  console.log(
-                    `✅ Extracted from object at index ${idx}:`,
-                    objValue,
-                  );
+                  // console.log(
+                  //   `✅ Extracted from object at index ${idx}:`,
+                  //   objValue,
+                  // );
                 }
               } else {
                 extractedValues.push(val);
@@ -1700,10 +1701,10 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
           });
 
           updateData[fieldName] = processedValues;
-          console.log(
-            `✅ Processed multiselect field ${fieldName} (UPDATE):`,
-            updateData[fieldName],
-          );
+          // console.log(
+          //   `✅ Processed multiselect field ${fieldName} (UPDATE):`,
+          //   updateData[fieldName],
+          // );
           delete req.body[fieldName]; // Remove to prevent re-processing
           return;
         }
@@ -1773,10 +1774,10 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
               }
             });
           updateData[fieldName] = processedValues;
-          console.log(
-            `✅ Processed indexed multiselect field ${fieldName} (UPDATE):`,
-            updateData[fieldName],
-          );
+          // console.log(
+          //   `✅ Processed indexed multiselect field ${fieldName} (UPDATE):`,
+          //   updateData[fieldName],
+          // );
 
           // Remove indexed fields from req.body
           Object.keys(req.body).forEach((key) => {
@@ -1819,23 +1820,23 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
           arrayFieldName = arrayMatch[1];
           arrayItemField = arrayMatch[2];
           index = 0; // Default to index 0
-          console.log(
-            `🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
-          );
+          // console.log(
+          //   `🔍 Update - Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
+          // );
         }
       }
 
       if (arrayMatch) {
         // Check if this is a valid array field in the schema
         // Check if it's an array type (Array.isArray(modelSchema[arrayFieldName].type))
-        console.log(
-          `🔍 Update - Checking schema for ${arrayFieldName}:`,
-          modelSchema[arrayFieldName],
-        );
-        console.log(
-          `🔍 Update - Is array type:`,
-          Array.isArray(modelSchema[arrayFieldName]?.type),
-        );
+        // console.log(
+        //   `🔍 Update - Checking schema for ${arrayFieldName}:`,
+        //   modelSchema[arrayFieldName],
+        // );
+        // console.log(
+        //   `🔍 Update - Is array type:`,
+        //   Array.isArray(modelSchema[arrayFieldName]?.type),
+        // );
 
         if (
           modelSchema[arrayFieldName] &&
@@ -1863,20 +1864,20 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
             updateData[arrayFieldName][index].last_updated = new Date();
           }
 
-          console.log(
-            `✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`,
-          );
-          console.log(
-            `🔍 Update - Current ${arrayFieldName} array:`,
-            JSON.stringify(updateData[arrayFieldName], null, 2),
-          );
+          // console.log(
+          //   `✅ Update - Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`,
+          // );
+          // console.log(
+          //   `🔍 Update - Current ${arrayFieldName} array:`,
+          //   JSON.stringify(updateData[arrayFieldName], null, 2),
+          // );
 
           // Remove the original key from req.body to prevent duplicate processing
           delete req.body[key];
         } else {
-          console.log(
-            `⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`,
-          );
+          // console.log(
+          //   `⚠️ Update - Schema field not found or not array type: ${arrayFieldName}`,
+          // );
         }
       }
     });
@@ -1891,13 +1892,13 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       updateData.company_id = coalesceObjectId(req.user.company_id);
     }
 
-    console.log(`📝 Preparing data for ${modelName} update:`, {
-      receivedFields: Object.keys(req.body),
-      schemaFields: Object.keys(modelSchema),
-      allowedFields:
-        allowedFields.length > 0 ? allowedFields : "ALL (except password)",
-      updateDataFields: Object.keys(updateData),
-    });
+    // console.log(`📝 Preparing data for ${modelName} update:`, {
+    //   receivedFields: Object.keys(req.body),
+    //   schemaFields: Object.keys(modelSchema),
+    //   allowedFields:
+    //     allowedFields.length > 0 ? allowedFields : "ALL (except password)",
+    //   updateDataFields: Object.keys(updateData),
+    // });
 
     // Run custom validation if provided
     if (customValidation) {
@@ -2424,9 +2425,7 @@ const handleGenericDelete = handleGenericSoftDelete;
 function parseObjectIdListFromQuery(raw) {
   if (raw == null || raw === "") return [];
   const parts = Array.isArray(raw) ? raw : String(raw).split(",");
-  return parts
-    .map((p) => coalesceObjectId(String(p).trim()))
-    .filter(Boolean);
+  return parts.map((p) => coalesceObjectId(String(p).trim())).filter(Boolean);
 }
 
 const INCLUDE_EXCLUDE_ID_QUERY_KEYS = [
@@ -2488,7 +2487,9 @@ function applyIncludeExcludeIdQueryFilter(filter, query = {}) {
   if (includeIds.length > 0) {
     andParts.push({
       $or: [
-        Object.keys(typeMatch).length > 0 ? typeMatch : { _id: { $exists: true } },
+        Object.keys(typeMatch).length > 0 ?
+          typeMatch
+        : { _id: { $exists: true } },
         { _id: { $in: includeIds } },
       ],
     });
@@ -2580,7 +2581,9 @@ function mergeSearchIntoFilter(filter, searchTerm, searchFields, Model = null) {
   const paths = Model?.schema?.paths || {};
   const orClauses = [];
   for (const field of searchFields) {
-    orClauses.push(...buildSearchOrClause(field, searchTerm, escaped, paths[field]));
+    orClauses.push(
+      ...buildSearchOrClause(field, searchTerm, escaped, paths[field]),
+    );
   }
   if (orClauses.length === 0) {
     return { ...filter };
@@ -2923,10 +2926,10 @@ const handleGenericGetAll = async (
         mergeSearchIntoFilter(filter, searchTerm, searchFields, Model)
       : { ...filter };
 
-    console.log(
-      `🔍 Fetching all ${modelName} records with filter:`,
-      mongoFilter,
-    );
+    // console.log(
+    //   `🔍 Fetching all ${modelName} records with filter:`,
+    //   mongoFilter,
+    // );
 
     const useGroupAggregation =
       group &&
@@ -3011,9 +3014,9 @@ const handleGenericGetAll = async (
         return shaped;
       });
 
-      console.log(
-        `✅ Successfully fetched ${responseData.length} grouped ${modelName} records`,
-      );
+      // console.log(
+      //   `✅ Successfully fetched ${responseData.length} grouped ${modelName} records`,
+      // );
 
       return {
         success: true,
@@ -3079,9 +3082,9 @@ const handleGenericGetAll = async (
       }),
     );
 
-    console.log(
-      `✅ Successfully fetched ${responseData.length} ${modelName} records`,
-    );
+    // console.log(
+    //   `✅ Successfully fetched ${responseData.length} ${modelName} records`,
+    // );
 
     return {
       success: true,
@@ -3254,7 +3257,7 @@ const handleGenericGetById = async (
     const { mongoosePopulate: populateForMongoose, shouldHydrateTxPolyRef } =
       normalizeTransactionPopulateList(modelName, populate);
 
-    console.log(`🔍 Fetching ${modelName} with ID: ${recordId}`);
+    // console.log(`🔍 Fetching ${modelName} with ID: ${recordId}`);
 
     // Build query
     let query = Model.findOne({ _id: recordId, ...filter });
@@ -3486,7 +3489,7 @@ const handleGenericFindOne = async (
     const { mongoosePopulate: populateForMongoose, shouldHydrateTxPolyRef } =
       normalizeTransactionPopulateList(modelName, populate);
 
-    console.log(`🔍 Finding one ${modelName} with criteria:`, searchCriteria);
+    // console.log(`🔍 Finding one ${modelName} with criteria:`, searchCriteria);
 
     // Execute beforeFind hook if provided
     let finalCriteria = { ...searchCriteria };
@@ -3628,21 +3631,41 @@ const handleGenericFindOne = async (
   }
 };
 
-const handleGenericCreate = async (req, controllerName = null, options = {}) => {
+const handleGenericCreate = async (
+  req,
+  controllerName = null,
+  options = {},
+) => {
   const result = await handleGenericCreateCore(req, controllerName, options);
   if (result?.success) {
     await maybeInvalidateModelListCache(req, controllerName, result, options);
   }
-  await maybeLogGenericCrudFailure(req, controllerName, "create", result, options);
+  await maybeLogGenericCrudFailure(
+    req,
+    controllerName,
+    "create",
+    result,
+    options,
+  );
   return result;
 };
 
-const handleGenericUpdate = async (req, controllerName = null, options = {}) => {
+const handleGenericUpdate = async (
+  req,
+  controllerName = null,
+  options = {},
+) => {
   const result = await handleGenericUpdateCore(req, controllerName, options);
   if (result?.success) {
     await maybeInvalidateModelListCache(req, controllerName, result, options);
   }
-  await maybeLogGenericCrudFailure(req, controllerName, "update", result, options);
+  await maybeLogGenericCrudFailure(
+    req,
+    controllerName,
+    "update",
+    result,
+    options,
+  );
   return result;
 };
 
@@ -3683,9 +3706,9 @@ async function maybeInvalidateModelListCache(
 
     const deleted = await invalidateModuleListCaches(companyId, modelName);
     if (deleted > 0) {
-      console.log(
-        `[cache] cleared ${deleted} list key(s) for ${modelName} (company ${companyId})`,
-      );
+      // console.log(
+      //   `[cache] cleared ${deleted} list key(s) for ${modelName} (company ${companyId})`,
+      // );
     }
   } catch (err) {
     console.warn(

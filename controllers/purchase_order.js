@@ -37,6 +37,10 @@ const {
 } = require("../utils/reportPeriodRange");
 const { resolveTenantCompany } = require("../utils/receivablesReport");
 const {
+  computeWeightedAverageCost,
+  computeReverseWeightedAverageCost,
+} = require("../utils/weightedAverageCost");
+const {
   importPurchaseOrderFromText,
   PO_IMPORT_COLUMNS,
 } = require("../utils/purchaseOrderCsvImport");
@@ -651,7 +655,9 @@ function resolvePoRemainingAmount(body) {
   const discount = Number(b.discount) || 0;
   const shipment = Number(b.shipment) || 0;
   const paid = Number(b.amount_paid) || 0;
-  return Math.round(Math.max(0, lines - discount + shipment - paid) * 100) / 100;
+  return (
+    Math.round(Math.max(0, lines - discount + shipment - paid) * 100) / 100
+  );
 }
 
 function collectLineItems(body) {
@@ -962,7 +968,11 @@ async function logProductWholesalePriceChange(
   );
 }
 
-/** Sum `warehouse_inventory.quantity` for one product (all warehouses, tenant-scoped). */
+/**
+ * Signed sum of `warehouse_inventory.quantity` for one product (all warehouses,
+ * tenant-scoped). NOT clamped — negative on-hand is preserved so the weighted
+ * average stays correct when stock has gone negative.
+ */
 async function sumWarehouseInventoryQtyForProduct(
   productId,
   companyId,
@@ -985,7 +995,7 @@ async function sumWarehouseInventoryQtyForProduct(
   ]);
   if (mongoSession) agg = agg.session(mongoSession);
   const rows = await agg;
-  return Math.max(0, roundPoMoney(rows[0]?.total || 0));
+  return roundPoMoney(rows[0]?.total || 0);
 }
 
 /**
@@ -1048,10 +1058,16 @@ async function applyWholesalePriceRemoveForPoLines({
       warehouseQtyBeforeRemove * wholesaleBefore,
     );
     const grandTotalAfter = roundPoMoney(grandTotalBefore - removedCost);
-    const averageCost =
-      warehouseQty > 0 ?
-        roundPoMoney(Math.max(0, grandTotalAfter) / warehouseQty)
-      : 0;
+    // Reverse the inbound layer via the centralized WAC helper. `warehouseQty`
+    // is the signed on-hand AFTER the reversed qty was removed; negative on-hand
+    // is preserved (not clamped) so the average stays correct.
+    const removedUnitCost = removedQty !== 0 ? removedCost / removedQty : 0;
+    const averageCost = computeReverseWeightedAverageCost({
+      remainingQty: warehouseQty,
+      currentCost: wholesaleBefore,
+      removedQty,
+      removedCost: removedUnitCost,
+    }).newCost;
 
     const priceUnchanged =
       roundPoMoney(wholesaleBefore) === roundPoMoney(averageCost);
@@ -1144,10 +1160,16 @@ async function applyWholesalePriceWeightedAverageForPoLines({
     const previousTotal = roundPoMoney(warehouseQty * wholesaleBefore);
     const totalQty = roundPoMoney(warehouseQty + currentQty);
     const grandTotal = roundPoMoney(previousTotal + newTotal);
-    const averageCost =
-      totalQty > 0 ?
-        roundPoMoney(grandTotal / totalQty)
-      : roundPoMoney(newTotal / currentQty);
+    // Centralized weighted average. `warehouseQty` is the signed on-hand BEFORE
+    // this inbound layer; negative on-hand contributes to the average instead of
+    // being clamped to zero.
+    const inboundUnitCost = currentQty !== 0 ? newTotal / currentQty : 0;
+    const averageCost = computeWeightedAverageCost({
+      existingQty: warehouseQty,
+      existingCost: wholesaleBefore,
+      incomingQty: currentQty,
+      incomingCost: inboundUnitCost,
+    }).newCost;
 
     const updateOpts = mongoSession ? { session: mongoSession } : {};
     const updated = await Product.findOneAndUpdate(
@@ -1543,7 +1565,9 @@ async function purchaseOrderCreate(req, res) {
                   description: "Purchase Discount",
                 },
                 {
-                  account_id: coalesceObjectId(record?.payment_method_accounts_id),
+                  account_id: coalesceObjectId(
+                    record?.payment_method_accounts_id,
+                  ),
                   type: "credit",
                   amount: record?.amount_paid ?? 0,
                   reference_user_id: record?.vendor_id,
@@ -1566,7 +1590,9 @@ async function purchaseOrderCreate(req, res) {
                       discount: record?.discount,
                       shipment: record?.shipment,
                       amount_paid: record?.amount_paid,
-                    }) || req.body?.remaining_amount || 0,
+                    }) ||
+                    req.body?.remaining_amount ||
+                    0,
                   reference_user_id: record?.vendor_id,
                   transaction_number,
                   description: "A/c Payable",
@@ -1790,56 +1816,56 @@ async function purchaseOrderCreate(req, res) {
         createPipelineError = bulkPipelineError;
       }
     } else {
-    // Prefer a single multi-document transaction when the deployment supports it (replica set / Atlas).
-    try {
-      mongooseClientSession = await mongoose.startSession();
-      await mongooseClientSession.withTransaction(async () => {
-        await runPurchaseOrderCreateBody(mongooseClientSession);
-      });
-      finishTxnWrap({ mode: "mongodb_transaction" });
-    } catch (mongoTransactionError) {
-      // Standalone mongod cannot start transactions; same work without session (see utils/mongoTransactionSupport).
-      if (isMongoTransactionUnsupportedError(mongoTransactionError)) {
-        finishTxnWrap({ mode: "txn_unavailable_retry" });
+      // Prefer a single multi-document transaction when the deployment supports it (replica set / Atlas).
+      try {
+        mongooseClientSession = await mongoose.startSession();
+        await mongooseClientSession.withTransaction(async () => {
+          await runPurchaseOrderCreateBody(mongooseClientSession);
+        });
+        finishTxnWrap({ mode: "mongodb_transaction" });
+      } catch (mongoTransactionError) {
+        // Standalone mongod cannot start transactions; same work without session (see utils/mongoTransactionSupport).
+        if (isMongoTransactionUnsupportedError(mongoTransactionError)) {
+          finishTxnWrap({ mode: "txn_unavailable_retry" });
+          if (mongooseClientSession) {
+            try {
+              mongooseClientSession.endSession();
+            } catch (_) {
+              /* ignore */
+            }
+            mongooseClientSession = null;
+          }
+          console.warn(
+            "[purchase_order] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
+          );
+          try {
+            persistedLineItems.length = 0;
+            productStockUpdates.length = 0;
+            wholesaleUpdates.length = 0;
+            purchaseOrderCreateResult = null;
+            poStepTimer.resetSteps();
+            const endTxnRetry = poStepTimer.start(
+              "txn",
+              "pipeline retry (no Mongo transaction)",
+            );
+            await runPurchaseOrderCreateBody(null);
+            endTxnRetry({ mode: "standalone_no_transaction" });
+          } catch (nonSessionRetryError) {
+            createPipelineError = nonSessionRetryError;
+          }
+        } else {
+          finishTxnWrap({ mode: "mongodb_transaction_failed" });
+          createPipelineError = mongoTransactionError;
+        }
+      } finally {
         if (mongooseClientSession) {
           try {
             mongooseClientSession.endSession();
           } catch (_) {
             /* ignore */
           }
-          mongooseClientSession = null;
-        }
-        console.warn(
-          "[purchase_order] MongoDB transactions unavailable (e.g. standalone mongod); continuing without transaction",
-        );
-        try {
-          persistedLineItems.length = 0;
-          productStockUpdates.length = 0;
-          wholesaleUpdates.length = 0;
-          purchaseOrderCreateResult = null;
-          poStepTimer.resetSteps();
-          const endTxnRetry = poStepTimer.start(
-            "txn",
-            "pipeline retry (no Mongo transaction)",
-          );
-          await runPurchaseOrderCreateBody(null);
-          endTxnRetry({ mode: "standalone_no_transaction" });
-        } catch (nonSessionRetryError) {
-          createPipelineError = nonSessionRetryError;
-        }
-      } else {
-        finishTxnWrap({ mode: "mongodb_transaction_failed" });
-        createPipelineError = mongoTransactionError;
-      }
-    } finally {
-      if (mongooseClientSession) {
-        try {
-          mongooseClientSession.endSession();
-        } catch (_) {
-          /* ignore */
         }
       }
-    }
     }
     // txn end
 
@@ -2591,8 +2617,7 @@ async function purchase_order_delete(req, res) {
 
         const bodyBeforeInventoryMovement = req.body;
         const hadRouteParamId =
-          req.params &&
-          Object.prototype.hasOwnProperty.call(req.params, "id");
+          req.params && Object.prototype.hasOwnProperty.call(req.params, "id");
         const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
 
         req.body = {
@@ -2937,7 +2962,8 @@ async function findPurchaseOrderPurchasesSummary(req, res) {
 
     const hasPeriod =
       req.query?.period != null && String(req.query.period).trim() !== "";
-    const hasFrom = req.query?.from != null && String(req.query.from).trim() !== "";
+    const hasFrom =
+      req.query?.from != null && String(req.query.from).trim() !== "";
     const hasTo = req.query?.to != null && String(req.query.to).trim() !== "";
     if (!hasPeriod && !hasFrom && !hasTo) {
       req.query.period = "current_month";
@@ -2984,17 +3010,17 @@ async function findPurchaseOrderPurchasesSummary(req, res) {
       );
 
     const vendorLimitRaw = parseInt(req.query?.vendor_limit, 10);
-    const vendorLimit =
-      vendorLimitRaw > 0 ? Math.min(vendorLimitRaw, 50) : 10;
+    const vendorLimit = vendorLimitRaw > 0 ? Math.min(vendorLimitRaw, 50) : 10;
 
-    const salesMatch = includeSales ?
-      {
-        company_id: cid,
-        status: "active",
-        deletedAt: null,
-        createdAt: { $gte: fromDate, $lte: toDate },
-      }
-    : null;
+    const salesMatch =
+      includeSales ?
+        {
+          company_id: cid,
+          status: "active",
+          deletedAt: null,
+          createdAt: { $gte: fromDate, $lte: toDate },
+        }
+      : null;
     if (salesMatch) {
       const rawOrderStatus = req.query?.order_status;
       if (rawOrderStatus != null && String(rawOrderStatus).trim() !== "") {
@@ -3009,8 +3035,14 @@ async function findPurchaseOrderPurchasesSummary(req, res) {
       topVendorRows,
       salesSummaryRows,
     ] = await Promise.all([
-      PurchaseOrder.aggregate([{ $match: poMatch }, ...PO_HEADER_SUMMARY_GROUP]),
-      PurchaseReturn.aggregate([{ $match: prMatch }, ...PO_HEADER_SUMMARY_GROUP]),
+      PurchaseOrder.aggregate([
+        { $match: poMatch },
+        ...PO_HEADER_SUMMARY_GROUP,
+      ]),
+      PurchaseReturn.aggregate([
+        { $match: prMatch },
+        ...PO_HEADER_SUMMARY_GROUP,
+      ]),
       PurchaseOrder.aggregate([{ $match: poMatch }, ...PO_DAILY_GROUP]),
       PurchaseOrder.aggregate([
         { $match: poMatch },
@@ -3068,7 +3100,8 @@ async function findPurchaseOrderPurchasesSummary(req, res) {
     const vendorById = new Map(vendors.map((v) => [String(v._id), v]));
 
     const top_vendors = topVendorRows.map((row) => {
-      const vendor = row.vendor_id ? vendorById.get(String(row.vendor_id)) : null;
+      const vendor =
+        row.vendor_id ? vendorById.get(String(row.vendor_id)) : null;
       return {
         vendor_id: row.vendor_id,
         vendor_name: vendor?.name ?? "Unassigned vendor",
@@ -3204,8 +3237,7 @@ async function purchaseOrderImportFromFile(req, res) {
       )
         .trim()
         .toLowerCase() !== "false";
-    const defaultQtyRaw =
-      req.query?.default_qty ?? req.body?.default_qty ?? 0;
+    const defaultQtyRaw = req.query?.default_qty ?? req.body?.default_qty ?? 0;
     const defaultQty = Math.max(0, Number(defaultQtyRaw) || 0);
     const warehouseId = coalesceObjectId(
       req.body?.warehouse_id || req.query?.warehouse_id,
@@ -3227,9 +3259,7 @@ async function purchaseOrderImportFromFile(req, res) {
       const lines = req.body.items.map((row) =>
         [
           String(row.product_name || row.name || "").trim(),
-          String(
-            row.wholesale_price ?? row.wholesale ?? row.cost ?? 0,
-          ).trim(),
+          String(row.wholesale_price ?? row.wholesale ?? row.cost ?? 0).trim(),
           String(row.qty ?? row.quantity ?? defaultQty).trim(),
         ].join(","),
       );
@@ -3276,14 +3306,13 @@ async function purchaseOrderImportFromFile(req, res) {
     const poMsg =
       poSuccess ?
         ` PO ${po.purchase_order_no || ""} created (${po.line_count} lines).`
-      : poSkipped ?
-        ` ${po.message || ""}`
-      : po ?
-        ` PO failed: ${po.message || "unknown"}.`
+      : poSkipped ? ` ${po.message || ""}`
+      : po ? ` PO failed: ${po.message || "unknown"}.`
       : "";
 
     return res.status(statusCode).json({
-      success: dryRun || poSuccess || (poSkipped && result.summary?.po_lines === 0),
+      success:
+        dryRun || poSuccess || (poSkipped && result.summary?.po_lines === 0),
       message:
         dryRun ?
           `Dry run: ${result.parsed.row_count} row(s) parsed.`
