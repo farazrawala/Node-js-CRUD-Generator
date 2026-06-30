@@ -159,6 +159,10 @@ async function checkHeaderAuthentication(req, res, next) {
     "/version",
     "/api/health",
     "/api/version",
+    "/process/execute-process",
+    "/api/process/execute-process",
+    /^\/process\/execute-process\/.*/,
+    /^\/api\/process\/execute-process\/.*/,
     /^\/uploads\/.*/,
     /^\/api\/uploads\/.*/,
   ];

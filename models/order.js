@@ -77,7 +77,9 @@ if (!mongoose.models.counter) {
 
 /** Numeric suffix from standard tenant format `ORD-####` (ignores legacy formats like ORD-BRA-####). */
 function parseOrdNumericSuffix(orderNo) {
-  const m = String(orderNo ?? "").trim().match(/^ORD-(\d+)$/i);
+  const m = String(orderNo ?? "")
+    .trim()
+    .match(/^ORD-(\d+)$/i);
   if (!m) return 0;
   const n = parseInt(m[1], 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -144,6 +146,12 @@ const modelSchema = new mongoose.Schema(
     order_no: {
       type: String,
       field_name: "Order No",
+    },
+
+    integration_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "integration",
+      field_name: "Integration",
     },
 
     email: {

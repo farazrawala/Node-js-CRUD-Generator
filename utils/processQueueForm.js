@@ -33,6 +33,7 @@ const PROCESS_QUEUE_FORM_FIELDS = {
       "fetch_brand",
       "sync_brand",
       "delete_brand",
+      "fetch_order",
     ],
   },
   status: { type: "string", default: "active" },

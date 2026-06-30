@@ -2,6 +2,8 @@ const ProcessModel = require("../models/process");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Product = require("../models/product");
+const Order = require("../models/order");
+const { createApplicationLog } = require("./applicationLogs");
 const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
 const SyncProduct = require("../models/sync_product");
@@ -213,6 +215,350 @@ async function findPosProductBySyncReference(
     _id: coalesceObjectId(row.product_id),
     deletedAt: null,
   }).lean();
+}
+
+function orderExternalRef(platform, remoteId) {
+  const id = String(remoteId ?? "").trim();
+  if (!id) {
+    return "";
+  }
+  return `${platform}:order:${id}`;
+}
+
+async function findExistingOrderByExternalRef(
+  companyId,
+  externalRef,
+  integrationId,
+) {
+  const company_id = coalesceObjectId(companyId);
+  const integration_id = coalesceObjectId(integrationId);
+  const description = String(externalRef ?? "").trim();
+  if (!company_id || !description) {
+    return null;
+  }
+
+  const filter = {
+    company_id,
+    description,
+    deletedAt: null,
+  };
+  if (integration_id) {
+    filter.integration_id = integration_id;
+  }
+
+  return Order.findOne(filter).lean();
+}
+
+async function resolvePosProductForRemoteLine({
+  integrationId,
+  companyId,
+  remoteProductId,
+  sku,
+  name,
+}) {
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+
+  if (integration_id && remoteProductId != null && remoteProductId !== "") {
+    const mapped = await findPosProductBySyncReference(
+      integration_id,
+      company_id,
+      String(remoteProductId),
+    );
+    if (mapped) {
+      return mapped;
+    }
+  }
+
+  if (sku) {
+    const bySku = await findExistingProductBySku(sku, company_id);
+    if (bySku) {
+      return bySku;
+    }
+  }
+
+  if (name) {
+    return findExistingProductByName(name, company_id);
+  }
+
+  return null;
+}
+
+function mapWooOrderStatus(status) {
+  const map = {
+    pending: "pending",
+    processing: "confirmed",
+    "on-hold": "pending",
+    completed: "completed",
+    cancelled: "cancelled",
+    refunded: "refunded",
+    failed: "failed",
+    trash: "cancelled",
+  };
+  return map[String(status || "").toLowerCase()] || "placed";
+}
+
+function mapShopifyOrderStatus(financialStatus, fulfillmentStatus) {
+  const fin = String(financialStatus || "").toLowerCase();
+  const fulf = String(fulfillmentStatus || "").toLowerCase();
+
+  if (fin === "refunded" || fin === "partially_refunded") {
+    return "refunded";
+  }
+  if (fin === "voided") {
+    return "cancelled";
+  }
+  if (fin === "paid" && (fulf === "fulfilled" || fulf === "partial")) {
+    return "completed";
+  }
+  if (fin === "paid") {
+    return "confirmed";
+  }
+  if (fin === "pending" || fin === "authorized") {
+    return "pending";
+  }
+  if (fulf === "fulfilled") {
+    return "delivered";
+  }
+  return "placed";
+}
+
+function createFetchOrderStats() {
+  return {
+    inserted: 0,
+    skipped: 0,
+    lines_inserted: 0,
+    lines_skipped: 0,
+    skipped_orders: [],
+  };
+}
+
+function recordOrderSkip(stats, entry, logCtx = {}) {
+  const skipEntry = {
+    store: entry.store,
+    remote_id: entry.remote_id ?? null,
+    order_number: entry.order_number ?? null,
+    reason: entry.reason,
+    detail: entry.detail ?? null,
+    unmatched_lines: entry.unmatched_lines ?? null,
+  };
+  stats.skipped += 1;
+  stats.skipped_orders.push(skipEntry);
+
+  if (logCtx.req) {
+    if (skipEntry.reason === "import_error") {
+      void logFetchOrderFailed(logCtx.req, {
+        process: logCtx.process,
+        companyId: logCtx.companyId,
+        store: skipEntry.store,
+        remoteId: skipEntry.remote_id,
+        orderNumber: skipEntry.order_number,
+        errorMessage: skipEntry.detail,
+      });
+    } else {
+      void logFetchOrderSkipped(logCtx.req, {
+        process: logCtx.process,
+        companyId: logCtx.companyId,
+        skipEntry,
+      });
+    }
+  }
+}
+
+function humanizeOrderSkipReason(entry) {
+  const label =
+    entry.order_number != null && entry.order_number !== "" ?
+      `${entry.store} #${entry.order_number}`
+    : `${entry.store} id ${entry.remote_id ?? "?"}`;
+
+  switch (entry.reason) {
+    case "already_imported":
+      return `${label}: already imported${entry.detail ? ` (${entry.detail})` : ""}`;
+    case "missing_remote_id":
+      return `${label}: missing store order ID`;
+    case "no_line_items":
+      return `${label}: order has no line items`;
+    case "no_matching_products": {
+      const lineDetail =
+        Array.isArray(entry.unmatched_lines) && entry.unmatched_lines.length > 0 ?
+          ` — unmatched: ${entry.unmatched_lines
+            .map(
+              (line) =>
+                `"${line.name || "item"}" (product_id=${line.product_id ?? "n/a"}, sku=${line.sku || "n/a"})`,
+            )
+            .join("; ")}`
+        : "";
+      return `${label}: no POS products matched${lineDetail}`;
+    }
+    case "import_error":
+      return `${label}: import failed — ${entry.detail || "unknown error"}`;
+    default:
+      return `${label}: ${entry.reason}${entry.detail ? ` — ${entry.detail}` : ""}`;
+  }
+}
+
+function formatFetchOrderBatchRemarks({
+  fetched,
+  inserted,
+  skipped,
+  lines_inserted,
+  lines_skipped,
+  skipped_orders = [],
+  isComplete,
+  page,
+}) {
+  const summary =
+    isComplete ?
+      `Order import completed: batch fetched ${fetched}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}.`
+    : `Batch complete: fetched ${fetched}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}. Call execute-process again for page ${page + 1}.`;
+
+  if (!skipped_orders.length) {
+    return summary;
+  }
+
+  const reasons = skipped_orders.map(humanizeOrderSkipReason).join(" | ");
+  return `${summary} Skip reasons: ${reasons}`;
+}
+
+function fetchOrderLogUrl(req) {
+  return req?.originalUrl || req?.path || req?.url || "/api/process/execute-process";
+}
+
+function fetchOrderStoreTags(store, outcome) {
+  const normalized = String(store || "").trim().toLowerCase();
+  const tags = ["fetch_order"];
+  if (normalized) {
+    tags.push(normalized);
+    if (outcome) {
+      tags.push(`${outcome}_${normalized}`);
+    }
+  }
+  return tags;
+}
+
+function formatFetchOrderRemoteLabel(store, remoteId, orderNumber) {
+  const normalized = String(store || "").trim().toLowerCase();
+  if (orderNumber != null && orderNumber !== "") {
+    return `${normalized} #${orderNumber}`;
+  }
+  return `${normalized} id ${remoteId ?? "?"}`;
+}
+
+async function logFetchOrderImported(
+  req,
+  { process, companyId, store, remoteId, orderNumber, posOrderId, posOrderNo, lineCount },
+) {
+  const label = formatFetchOrderRemoteLabel(store, remoteId, orderNumber);
+  await createApplicationLog(
+    req,
+    {
+      action: `Fetch order imported :: ${label}`,
+      url: fetchOrderLogUrl(req),
+      tags: fetchOrderStoreTags(store, "imported"),
+      description: {
+        process_id: process?._id ? String(process._id) : null,
+        store,
+        remote_id: remoteId ?? null,
+        order_number: orderNumber ?? null,
+        pos_order_id: posOrderId ? String(posOrderId) : null,
+        pos_order_no: posOrderNo ?? null,
+        lines_inserted: lineCount ?? 0,
+        message: `Imported ${label} as POS ${posOrderNo || posOrderId}`,
+      },
+      reference_id: posOrderId,
+      reference_type: "order",
+      company_id: companyId,
+      created_by: process?.created_by?._id || process?.created_by,
+    },
+    { silent: true },
+  );
+}
+
+async function logFetchOrderSkipped(
+  req,
+  { process, companyId, skipEntry },
+) {
+  const label = formatFetchOrderRemoteLabel(
+    skipEntry?.store,
+    skipEntry?.remote_id,
+    skipEntry?.order_number,
+  );
+  await createApplicationLog(
+    req,
+    {
+      action: `Fetch order skipped :: ${label}`,
+      url: fetchOrderLogUrl(req),
+      tags: fetchOrderStoreTags(skipEntry?.store, "skipped"),
+      description: {
+        process_id: process?._id ? String(process._id) : null,
+        store: skipEntry?.store ?? null,
+        remote_id: skipEntry?.remote_id ?? null,
+        order_number: skipEntry?.order_number ?? null,
+        reason: skipEntry?.reason ?? null,
+        detail: skipEntry?.detail ?? null,
+        unmatched_lines: skipEntry?.unmatched_lines ?? null,
+        message: humanizeOrderSkipReason(skipEntry),
+      },
+      reference_id: process?._id,
+      reference_type: "process",
+      company_id: companyId,
+      created_by: process?.created_by?._id || process?.created_by,
+    },
+    { silent: true },
+  );
+}
+
+async function logFetchOrderFailed(
+  req,
+  { process, companyId, store, remoteId, orderNumber, errorMessage },
+) {
+  const label = formatFetchOrderRemoteLabel(store, remoteId, orderNumber);
+  await createApplicationLog(
+    req,
+    {
+      action: `Fetch order failed :: ${label}`,
+      url: fetchOrderLogUrl(req),
+      tags: fetchOrderStoreTags(store, "failed"),
+      description: {
+        process_id: process?._id ? String(process._id) : null,
+        store,
+        remote_id: remoteId ?? null,
+        order_number: orderNumber ?? null,
+        error: errorMessage || "unknown error",
+        message: `Import failed for ${label}: ${errorMessage || "unknown error"}`,
+      },
+      reference_id: process?._id,
+      reference_type: "process",
+      company_id: companyId,
+      created_by: process?.created_by?._id || process?.created_by,
+    },
+    { silent: true },
+  );
+}
+
+async function logFetchOrderBatchFailed(
+  req,
+  { process, companyId, store, errorMessage },
+) {
+  await createApplicationLog(
+    req,
+    {
+      action: `Fetch order batch failed :: ${store || "store"}`,
+      url: fetchOrderLogUrl(req),
+      tags: fetchOrderStoreTags(store, "failed"),
+      description: {
+        process_id: process?._id ? String(process._id) : null,
+        store: store ?? null,
+        error: errorMessage || "unknown error",
+        message: `Order fetch batch failed: ${errorMessage || "unknown error"}`,
+      },
+      reference_id: process?._id,
+      reference_type: "process",
+      company_id: companyId,
+      created_by: process?.created_by?._id || process?.created_by,
+    },
+    { silent: true },
+  );
 }
 
 async function findExistingBrandByName(name, companyId) {
@@ -695,6 +1041,65 @@ async function finishFetchProductBatch(req, res, process, batchResult) {
 
 const failFetchProductBatch = failFetchCategoryBatch;
 
+async function finishFetchOrderBatch(req, res, process, batchResult) {
+  const { limit, page, hits, count } = resolveBatchPagination(process);
+  const {
+    fetched,
+    inserted,
+    skipped,
+    isComplete,
+    nextOffset,
+    remarks,
+    lines_inserted = 0,
+    lines_skipped = 0,
+    skipped_orders = [],
+  } = batchResult;
+
+  const newHits = hits + 1;
+  const newCount = count + inserted + skipped;
+  const update = {
+    hits: newHits,
+    count: newCount,
+    page: isComplete ? page : page + 1,
+    progress: isComplete ? "completed" : "started",
+    status: isComplete ? "completed" : "active",
+    remarks,
+  };
+
+  if (nextOffset !== undefined) {
+    update.offset = nextOffset;
+  }
+
+  await ProcessModel.findByIdAndUpdate(process._id, update);
+  if (isComplete) {
+    await releaseProcessFromQueue(process);
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: remarks,
+    data: {
+      process_id: process._id,
+      page: update.page,
+      hits: newHits,
+      count: newCount,
+      progress: update.progress,
+      status: update.status,
+      batch: {
+        fetched,
+        inserted,
+        skipped,
+        limit,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+      },
+    },
+  });
+}
+
+const failFetchOrderBatch = failFetchCategoryBatch;
+
 async function markProcessOutcome(processId, status, remarks) {
   const doc = await ProcessModel.findByIdAndUpdate(
     processId,
@@ -718,6 +1123,18 @@ module.exports = {
   upsertSyncBrandMapping,
   upsertSyncProductMapping,
   findPosProductBySyncReference,
+  orderExternalRef,
+  findExistingOrderByExternalRef,
+  resolvePosProductForRemoteLine,
+  mapWooOrderStatus,
+  mapShopifyOrderStatus,
+  createFetchOrderStats,
+  recordOrderSkip,
+  formatFetchOrderBatchRemarks,
+  logFetchOrderImported,
+  logFetchOrderSkipped,
+  logFetchOrderFailed,
+  logFetchOrderBatchFailed,
   resolveBatchPagination,
   dispatchByStoreType,
   findExistingCategoryByName,
@@ -734,9 +1151,11 @@ module.exports = {
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
   finishFetchProductBatch,
+  finishFetchOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,
+  failFetchOrderBatch,
   markProcessOutcome,
   coalesceObjectId,
 };

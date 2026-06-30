@@ -82,7 +82,7 @@ async function explainNoActiveProcess(req) {
   }
 
   hints.push(
-    "Use fetch_product / fetch_category / fetch_brand to import from the store; sync_* actions push one POS row to the store.",
+    "Use fetch_product / fetch_category / fetch_brand / fetch_order to import from the store; sync_* actions push one POS row to the store.",
   );
 
   return {
@@ -231,6 +231,7 @@ const PROCESS_ACTIONS = new Set([
   "fetch_brand",
   "sync_brand",
   "delete_brand",
+  "fetch_order",
 ]);
 
 function normalizeBulkProcessRow(row, { companyId, createdBy }) {
@@ -276,7 +277,8 @@ function validateProcessRow(row) {
     (row.action === "fetch_category" ||
       row.action === "fetch_products" ||
       row.action === "fetch_product" ||
-      row.action === "fetch_brand") &&
+      row.action === "fetch_brand" ||
+      row.action === "fetch_order") &&
     !row.integration_id
   ) {
     return "integration_id is required for fetch actions.";
@@ -566,6 +568,12 @@ async function runProcessAction(req, res, process) {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.sync_brand,
         shopify: shopifyProcess.sync_brand,
+      });
+    }
+    case "fetch_order": {
+      return dispatchByStoreType(req, res, process, {
+        woocommerce: woocommerceProcess.fetch_order,
+        shopify: shopifyProcess.fetch_order,
       });
     }
 

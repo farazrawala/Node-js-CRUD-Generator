@@ -57,7 +57,8 @@ const modelSchema = new mongoose.Schema(
 
     image: {
       type: String,
-      field_name: "Blog Image",
+      field_name: "Store Image",
+      field_type: "image",
     },
 
     // default fields

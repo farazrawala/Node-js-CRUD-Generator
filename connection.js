@@ -42,10 +42,28 @@ async function connectMonogodb(url) {
   }
 
   const mode = isLiveEnvironment() ? "live (Atlas)" : "local";
+  const dbLabel = (() => {
+    try {
+      const u = new URL(
+        String(resolvedUrl).replace(/^mongodb(\+srv)?:/, "https:"),
+      );
+      const name = u.pathname.replace(/^\//, "").trim();
+      return name || "test";
+    } catch {
+      return "(unknown)";
+    }
+  })();
+
   console.log(`📡 MongoDB mode: ${mode}`);
+  console.log(`📡 MongoDB database: ${dbLabel}`);
 
   mongoose.connection.on("connected", () => {
-    console.log("✅ MongoDB connected:", mongoose.connection.host);
+    const activeDb = mongoose.connection.db?.databaseName || dbLabel;
+    console.log(
+      "✅ MongoDB connected:",
+      mongoose.connection.host,
+      `(db: ${activeDb})`,
+    );
   });
   mongoose.connection.on("error", (err) => {
     console.error("❌ MongoDB connection error:", err.message);

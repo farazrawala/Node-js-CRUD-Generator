@@ -2,6 +2,8 @@ const WooCommerceRestApi = require("@woocommerce/woocommerce-rest-api").default;
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Product = require("../models/product");
+const Order = require("../models/order");
+const OrderItem = require("../models/order_item");
 const SyncCategory = require("../models/sync_category");
 const {
   categorySlugFromName,
@@ -21,11 +23,22 @@ const {
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
   finishFetchProductBatch,
+  finishFetchOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,
+  failFetchOrderBatch,
   markProcessOutcome,
   coalesceObjectId,
+  orderExternalRef,
+  findExistingOrderByExternalRef,
+  resolvePosProductForRemoteLine,
+  mapWooOrderStatus,
+  createFetchOrderStats,
+  recordOrderSkip,
+  formatFetchOrderBatchRemarks,
+  logFetchOrderImported,
+  logFetchOrderBatchFailed,
 } = require("../utils/processHelpers");
 
 async function recordBrandSyncMapping(
@@ -1836,6 +1849,266 @@ async function fetch_brand(req, res, process) {
   }
 }
 
+async function importWooOrderToPos(remoteOrder, ctx) {
+  const { companyId, process, stats, req } = ctx;
+  const logCtx = { req, process, companyId };
+  const integrationId = resolveIntegrationId(process);
+  const remoteId = remoteOrder?.id;
+  const externalRef = orderExternalRef("woocommerce", remoteId);
+
+  if (!externalRef) {
+    recordOrderSkip(stats, {
+      store: "woocommerce",
+      remote_id: remoteId,
+      order_number: remoteOrder?.number,
+      reason: "missing_remote_id",
+      detail: "WooCommerce order has no id",
+    }, logCtx);
+    return;
+  }
+
+  const existing = await findExistingOrderByExternalRef(
+    companyId,
+    externalRef,
+    integrationId,
+  );
+  if (existing) {
+    recordOrderSkip(stats, {
+      store: "woocommerce",
+      remote_id: remoteId,
+      order_number: remoteOrder?.number,
+      reason: "already_imported",
+      detail: existing.order_no ?
+          `POS ${existing.order_no}`
+        : `POS order ${existing._id}`,
+    }, logCtx);
+    return;
+  }
+
+  const lineItems = Array.isArray(remoteOrder?.line_items) ?
+      remoteOrder.line_items
+    : [];
+  const orderItemsPayload = [];
+  const unmatchedLines = [];
+  let linesSubtotal = 0;
+
+  for (const line of lineItems) {
+    const qty = Number(line?.quantity) || 0;
+    const price = Number(line?.price) || 0;
+    if (qty <= 0) {
+      continue;
+    }
+
+    const product = await resolvePosProductForRemoteLine({
+      integrationId,
+      companyId,
+      remoteProductId: line?.product_id,
+      sku: line?.sku,
+      name: line?.name,
+    });
+
+    if (!product?._id) {
+      stats.lines_skipped += 1;
+      unmatchedLines.push({
+        name: line?.name,
+        product_id: line?.product_id,
+        sku: line?.sku,
+      });
+      continue;
+    }
+
+    const subtotal = Math.round(price * qty * 100) / 100;
+    linesSubtotal += subtotal;
+    orderItemsPayload.push({
+      product_id: product._id,
+      name: String(line?.name || product.name || "Item").trim(),
+      price,
+      qty,
+      subtotal,
+      company_id: companyId,
+      created_by: coalesceObjectId(
+        process.created_by?._id || process.created_by,
+      ),
+      status: "active",
+    });
+  }
+
+  if (orderItemsPayload.length === 0) {
+    recordOrderSkip(stats, {
+      store: "woocommerce",
+      remote_id: remoteId,
+      order_number: remoteOrder?.number,
+      reason: lineItems.length === 0 ? "no_line_items" : "no_matching_products",
+      detail:
+        lineItems.length === 0 ?
+          "Order has no line items in WooCommerce"
+        : "Run fetch_product first or map products via sync_product",
+      unmatched_lines: unmatchedLines,
+    }, logCtx);
+    return;
+  }
+
+  const billing = remoteOrder?.billing || {};
+  const customerName = [billing.first_name, billing.last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  const order = await Order.create({
+    name:
+      customerName ||
+      `WooCommerce #${remoteOrder?.number || remoteId}`,
+    email: billing.email || "",
+    phone: billing.phone || "",
+    address: [
+      billing.address_1,
+      billing.address_2,
+      billing.city,
+      billing.state,
+      billing.postcode,
+      billing.country,
+    ]
+      .filter(Boolean)
+      .join(", "),
+    description: externalRef,
+    discount: Number(remoteOrder?.discount_total) || 0,
+    shipment: Number(remoteOrder?.shipping_total) || 0,
+    lines_subtotal: linesSubtotal,
+    amount_received: Number(remoteOrder?.total) || 0,
+    order_status: mapWooOrderStatus(remoteOrder?.status),
+    integration_id: integrationId,
+    company_id: companyId,
+    created_by: coalesceObjectId(
+      process.created_by?._id || process.created_by,
+    ),
+    status: "active",
+  });
+
+  for (const item of orderItemsPayload) {
+    await OrderItem.create({ ...item, order_id: order._id });
+    stats.lines_inserted += 1;
+  }
+
+  stats.inserted += 1;
+
+  if (req) {
+    void logFetchOrderImported(req, {
+      process,
+      companyId,
+      store: "woocommerce",
+      remoteId,
+      orderNumber: remoteOrder?.number,
+      posOrderId: order._id,
+      posOrderNo: order.order_no,
+      lineCount: orderItemsPayload.length,
+    });
+  }
+}
+
+/**
+ * Import orders from WooCommerce into POS (batch). Store → POS.
+ */
+async function fetch_order(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateWooIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildWooCommerceClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const { limit, page } = resolveBatchPagination(process);
+
+  try {
+    const response = await client.get("orders", {
+      page,
+      per_page: limit,
+      orderby: "id",
+      order: "asc",
+    });
+    const remoteOrders = Array.isArray(response?.data) ? response.data : [];
+    const stats = createFetchOrderStats();
+
+    const importCtx = { companyId, process, stats, req };
+
+    for (const remote of remoteOrders) {
+      try {
+        await importWooOrderToPos(remote, importCtx);
+      } catch (err) {
+        console.error(
+          `Failed to import WooCommerce order ${remote?.id}:`,
+          err?.message || err,
+        );
+        recordOrderSkip(stats, {
+          store: "woocommerce",
+          remote_id: remote?.id,
+          order_number: remote?.number,
+          reason: "import_error",
+          detail: err?.message || String(err),
+        }, importCtx);
+      }
+    }
+
+    const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
+      stats;
+    const fetched = remoteOrders.length;
+    const isComplete = fetched < limit;
+    const remarks = formatFetchOrderBatchRemarks({
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      isComplete,
+      page: page + 1,
+    });
+
+    return finishFetchOrderBatch(req, res, process, {
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      isComplete,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "WooCommerce order fetch failed:",
+      error?.response?.data || error.message,
+    );
+    const errorMessage =
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to fetch orders from WooCommerce.";
+    await logFetchOrderBatchFailed(req, {
+      process,
+      companyId,
+      store: "woocommerce",
+      errorMessage,
+    });
+    return failFetchOrderBatch(
+      process,
+      res,
+      errorMessage,
+      error?.response?.data || error,
+    );
+  }
+}
+
 /**
  * Import products from WooCommerce into POS (batch). Store → POS.
  */
@@ -2103,6 +2376,7 @@ module.exports = {
   syncWooCategoryById,
   fetch_category,
   fetch_brand,
+  fetch_order,
   fetch_product,
   sync_product,
   sync_category,

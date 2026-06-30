@@ -3,6 +3,8 @@ const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Company = require("../models/company");
 const Product = require("../models/product");
+const Order = require("../models/order");
+const OrderItem = require("../models/order_item");
 const SyncCategory = require("../models/sync_category");
 const WarehouseInventory = require("../models/warehouse_inventory");
 require("@shopify/shopify-api/adapters/node");
@@ -25,11 +27,22 @@ const {
   finishFetchCategoryBatch,
   finishFetchBrandBatch,
   finishFetchProductBatch,
+  finishFetchOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,
+  failFetchOrderBatch,
   markProcessOutcome,
   coalesceObjectId,
+  orderExternalRef,
+  findExistingOrderByExternalRef,
+  resolvePosProductForRemoteLine,
+  mapShopifyOrderStatus,
+  createFetchOrderStats,
+  recordOrderSkip,
+  formatFetchOrderBatchRemarks,
+  logFetchOrderImported,
+  logFetchOrderBatchFailed,
 } = require("../utils/processHelpers");
 
 function buildShopifyClient(integration) {
@@ -1293,6 +1306,287 @@ async function fetch_brand(req, res, process) {
   }
 }
 
+async function importShopifyOrderToPos(remoteOrder, ctx) {
+  const { companyId, process, stats, req } = ctx;
+  const logCtx = { req, process, companyId };
+  const integrationId = resolveIntegrationId(process);
+  const remoteId = remoteOrder?.id;
+  const externalRef = orderExternalRef("shopify", remoteId);
+
+  if (!externalRef) {
+    recordOrderSkip(stats, {
+      store: "shopify",
+      remote_id: remoteId,
+      order_number: remoteOrder?.order_number,
+      reason: "missing_remote_id",
+      detail: "Shopify order has no id",
+    }, logCtx);
+    return;
+  }
+
+  const existing = await findExistingOrderByExternalRef(
+    companyId,
+    externalRef,
+    integrationId,
+  );
+  if (existing) {
+    recordOrderSkip(stats, {
+      store: "shopify",
+      remote_id: remoteId,
+      order_number: remoteOrder?.order_number,
+      reason: "already_imported",
+      detail: existing.order_no ?
+          `POS ${existing.order_no}`
+        : `POS order ${existing._id}`,
+    }, logCtx);
+    return;
+  }
+
+  const lineItems = Array.isArray(remoteOrder?.line_items) ?
+      remoteOrder.line_items
+    : [];
+  const orderItemsPayload = [];
+  const unmatchedLines = [];
+  let linesSubtotal = 0;
+
+  for (const line of lineItems) {
+    const qty = Number(line?.quantity) || 0;
+    const price = Number(line?.price) || 0;
+    if (qty <= 0) {
+      continue;
+    }
+
+    const product = await resolvePosProductForRemoteLine({
+      integrationId,
+      companyId,
+      remoteProductId: line?.product_id,
+      sku: line?.sku,
+      name: line?.name,
+    });
+
+    if (!product?._id) {
+      stats.lines_skipped += 1;
+      unmatchedLines.push({
+        name: line?.name,
+        product_id: line?.product_id,
+        sku: line?.sku,
+      });
+      continue;
+    }
+
+    const subtotal = Math.round(price * qty * 100) / 100;
+    linesSubtotal += subtotal;
+    orderItemsPayload.push({
+      product_id: product._id,
+      name: String(line?.name || product.name || "Item").trim(),
+      price,
+      qty,
+      subtotal,
+      company_id: companyId,
+      created_by: coalesceObjectId(
+        process.created_by?._id || process.created_by,
+      ),
+      status: "active",
+    });
+  }
+
+  if (orderItemsPayload.length === 0) {
+    recordOrderSkip(stats, {
+      store: "shopify",
+      remote_id: remoteId,
+      order_number: remoteOrder?.order_number,
+      reason: lineItems.length === 0 ? "no_line_items" : "no_matching_products",
+      detail:
+        lineItems.length === 0 ?
+          "Order has no line items in Shopify"
+        : "Run fetch_product first or map products via sync_product",
+      unmatched_lines: unmatchedLines,
+    }, logCtx);
+    return;
+  }
+
+  const billing = remoteOrder?.billing_address || {};
+  const customer = remoteOrder?.customer || {};
+  const customerName = [billing.first_name, billing.last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  const discount = Number(remoteOrder?.total_discounts) || 0;
+  const shipment =
+    Number(remoteOrder?.total_shipping_price_set?.shop_money?.amount) ||
+    Number(remoteOrder?.total_shipping_price_set?.presentment_money?.amount) ||
+    0;
+
+  const order = await Order.create({
+    name:
+      customerName ||
+      [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim() ||
+      `Shopify #${remoteOrder?.order_number || remoteId}`,
+    email: remoteOrder?.email || customer.email || billing.email || "",
+    phone: billing.phone || customer.phone || "",
+    address: [
+      billing.address1,
+      billing.address2,
+      billing.city,
+      billing.province,
+      billing.zip,
+      billing.country,
+    ]
+      .filter(Boolean)
+      .join(", "),
+    description: externalRef,
+    discount,
+    shipment,
+    lines_subtotal: linesSubtotal,
+    amount_received: Number(remoteOrder?.total_price) || 0,
+    order_status: mapShopifyOrderStatus(
+      remoteOrder?.financial_status,
+      remoteOrder?.fulfillment_status,
+    ),
+    integration_id: integrationId,
+    company_id: companyId,
+    created_by: coalesceObjectId(
+      process.created_by?._id || process.created_by,
+    ),
+    status: "active",
+  });
+
+  for (const item of orderItemsPayload) {
+    await OrderItem.create({ ...item, order_id: order._id });
+    stats.lines_inserted += 1;
+  }
+
+  stats.inserted += 1;
+
+  if (req) {
+    void logFetchOrderImported(req, {
+      process,
+      companyId,
+      store: "shopify",
+      remoteId,
+      orderNumber: remoteOrder?.order_number,
+      posOrderId: order._id,
+      posOrderNo: order.order_no,
+      lineCount: orderItemsPayload.length,
+    });
+  }
+}
+
+/**
+ * Import orders from Shopify into POS (batch). Store → POS.
+ */
+async function fetch_order(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildShopifyClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const { limit, offset, page } = resolveBatchPagination(process);
+  const query = {
+    limit,
+    status: "any",
+    fields:
+      "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,customer",
+    order: "id asc",
+  };
+  if (offset > 0) {
+    query.since_id = offset;
+  }
+
+  try {
+    const listResponse = await client.get({ path: "orders", query });
+    const remoteOrders =
+      Array.isArray(listResponse?.body?.orders) ?
+        listResponse.body.orders
+      : [];
+    const stats = createFetchOrderStats();
+
+    const importCtx = { companyId, process, stats, req };
+
+    for (const remote of remoteOrders) {
+      try {
+        await importShopifyOrderToPos(remote, importCtx);
+      } catch (err) {
+        console.error(
+          `Failed to import Shopify order ${remote?.id}:`,
+          err?.message || err,
+        );
+        recordOrderSkip(stats, {
+          store: "shopify",
+          remote_id: remote?.id,
+          order_number: remote?.order_number,
+          reason: "import_error",
+          detail: err?.message || String(err),
+        }, importCtx);
+      }
+    }
+
+    const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
+      stats;
+    const fetched = remoteOrders.length;
+    const isComplete = fetched < limit;
+    const lastRemoteId = fetched > 0 ? remoteOrders[fetched - 1]?.id : offset;
+    const remarks = formatFetchOrderBatchRemarks({
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      isComplete,
+      page: page + 1,
+    });
+
+    return finishFetchOrderBatch(req, res, process, {
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      isComplete,
+      nextOffset: lastRemoteId || 0,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "Shopify order fetch failed:",
+      error?.response?.body || error?.response?.data || error?.message || error,
+    );
+    const errorPayload =
+      error?.response?.body ||
+      error?.response?.data ||
+      error?.message ||
+      "Failed to fetch orders from Shopify.";
+    const errorMessage =
+      typeof errorPayload === "string" ?
+        errorPayload
+      : errorPayload?.message || JSON.stringify(errorPayload);
+    await logFetchOrderBatchFailed(req, {
+      process,
+      companyId,
+      store: "shopify",
+      errorMessage,
+    });
+    return failFetchOrderBatch(process, res, errorPayload, errorPayload);
+  }
+}
+
 /**
  * Import products from Shopify into POS (batch). Store → POS.
  */
@@ -1499,6 +1793,7 @@ module.exports = {
   buildShopifyClient,
   fetch_category,
   fetch_brand,
+  fetch_order,
   fetch_product,
   sync_product,
   sync_category,

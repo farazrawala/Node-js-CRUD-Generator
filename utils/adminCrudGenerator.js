@@ -1313,7 +1313,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           const field = fieldConfig[fieldName];
           if (field.type === "file" && req.files[fieldName]) {
             filesToUpload[fieldName] = req.files[fieldName];
-            // Don't set data[fieldName] yet - we'll do it after record creation
+            delete data[fieldName];
           }
         });
       }
@@ -2201,74 +2201,94 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       // Handle file uploads for file fields (using same structure as API: uploads/singularName/recordId/)
       if (req.files) {
         const recordId = record._id.toString();
-        Object.keys(fieldConfig).forEach((fieldName) => {
+        const fs = require("fs");
+
+        for (const fieldName of Object.keys(fieldConfig)) {
           const field = fieldConfig[fieldName];
-          if (field.type === "file" && req.files[fieldName]) {
-            const file = req.files[fieldName];
+          if (field.type !== "file" || !req.files[fieldName]) {
+            continue;
+          }
 
-            // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
-            const uploadDir = path.join(
-              __dirname,
-              "..",
-              "uploads",
-              singularName,
-              recordId,
-            );
-            if (!require("fs").existsSync(uploadDir)) {
-              require("fs").mkdirSync(uploadDir, { recursive: true });
-            }
+          const file = req.files[fieldName];
 
-            // Support multiple files if input is multiple
-            const filesArray = Array.isArray(file) ? file : [file];
-            const storedPaths = [];
-            filesArray.forEach((f, index) => {
-              const timestamp = Date.now();
-              const fileExtension =
-                path.extname(f.name) || `.${f.mimetype.split("/")[1]}`;
-              const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
-              const filePath = path.join(uploadDir, fileName);
+          // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
+          const uploadDir = path.join(
+            __dirname,
+            "..",
+            "uploads",
+            singularName,
+            recordId,
+          );
+          if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+          }
 
-              f.mv(filePath, (err) => {
-                if (err) {
-                  console.error("File upload error:", err);
-                }
+          // Support multiple files if input is multiple
+          const filesArray = Array.isArray(file) ? file : [file];
+          const storedPaths = [];
+
+          for (let index = 0; index < filesArray.length; index++) {
+            const f = filesArray[index];
+            const timestamp = Date.now();
+            const fileExtension =
+              path.extname(f.name) || `.${f.mimetype.split("/")[1]}`;
+            const fileName = `${fieldName}_${timestamp}_${index}${fileExtension}`;
+            const filePath = path.join(uploadDir, fileName);
+
+            try {
+              await new Promise((resolve, reject) => {
+                f.mv(filePath, (err) => {
+                  if (err) {
+                    console.error("File upload error:", err);
+                    reject(err);
+                  } else {
+                    resolve();
+                  }
+                });
               });
-              // Store relative path: uploads/singularName/recordId/filename (e.g., uploads/product/recordId/filename)
               const relativePath = `uploads/${singularName}/${recordId}/${fileName}`;
               storedPaths.push(relativePath);
-            });
-            const expectsArray =
-              Array.isArray(Model.schema.obj[fieldName]?.type) ||
-              Model.schema.paths[fieldName]?.instance === "Array";
-
-            if (expectsArray) {
-              // For array fields, append new images to existing ones (or already filtered ones)
-              let existingImages;
-              if (updateData[fieldName] !== undefined) {
-                // Use already filtered images if removal was processed
-                existingImages =
-                  Array.isArray(updateData[fieldName]) ?
-                    updateData[fieldName]
-                  : [updateData[fieldName]].filter((img) => img);
-              } else {
-                // Use original images from record
-                const recordImages = record[fieldName] || [];
-                existingImages =
-                  Array.isArray(recordImages) ? recordImages : (
-                    [recordImages].filter((img) => img)
-                  );
-              }
-
-              updateData[fieldName] = [...existingImages, ...storedPaths];
-              console.log(
-                `📷 Appending ${storedPaths.length} new images to existing ${existingImages.length} images for field ${fieldName}`,
-              );
-            } else {
-              // For single image fields, replace the existing image
-              updateData[fieldName] = storedPaths[0];
+              console.log(`✅ File uploaded on update: ${relativePath}`);
+            } catch (uploadErr) {
+              console.error(`❌ File upload failed for ${fileName}:`, uploadErr);
             }
           }
-        });
+
+          if (storedPaths.length === 0) {
+            continue;
+          }
+
+          const expectsArray =
+            Array.isArray(Model.schema.obj[fieldName]?.type) ||
+            Model.schema.paths[fieldName]?.instance === "Array";
+
+          if (expectsArray) {
+            // For array fields, append new images to existing ones (or already filtered ones)
+            let existingImages;
+            if (updateData[fieldName] !== undefined) {
+              // Use already filtered images if removal was processed
+              existingImages =
+                Array.isArray(updateData[fieldName]) ?
+                  updateData[fieldName]
+                : [updateData[fieldName]].filter((img) => img);
+            } else {
+              // Use original images from record
+              const recordImages = record[fieldName] || [];
+              existingImages =
+                Array.isArray(recordImages) ? recordImages : (
+                  [recordImages].filter((img) => img)
+                );
+            }
+
+            updateData[fieldName] = [...existingImages, ...storedPaths];
+            console.log(
+              `📷 Appending ${storedPaths.length} new images to existing ${existingImages.length} images for field ${fieldName}`,
+            );
+          } else {
+            // For single image fields, replace the existing image
+            updateData[fieldName] = storedPaths[0];
+          }
+        }
       }
 
       if (fieldProcessing.beforeUpdate) {
