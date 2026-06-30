@@ -41,6 +41,9 @@ const {
   computeReverseWeightedAverageCost,
 } = require("../utils/weightedAverageCost");
 const {
+  applyWacLedgerReplayForProducts,
+} = require("../utils/wacLedgerReplay");
+const {
   importPurchaseOrderFromText,
   PO_IMPORT_COLUMNS,
 } = require("../utils/purchaseOrderCsvImport");
@@ -995,7 +998,69 @@ async function sumWarehouseInventoryQtyForProduct(
   ]);
   if (mongoSession) agg = agg.session(mongoSession);
   const rows = await agg;
-  return roundPoMoney(rows[0]?.total || 0);
+  return roundPoMoney(rows[0]?.total || 0  );
+}
+
+/** Distinct `product_id` values from PO line payloads (warehouse WAC scope). */
+function collectProductIdsFromPoLines(lines) {
+  const set = new Set();
+  for (const line of lines || []) {
+    const id = line?.product_id != null ? String(line.product_id).trim() : "";
+    if (id && mongoose.Types.ObjectId.isValid(id)) {
+      set.add(id);
+    }
+  }
+  return [...set];
+}
+
+/**
+ * Full WAC ledger replay from transaction #1 for PO-affected products.
+ * Replaces incremental reverse/forward on PO edit and PO delete.
+ */
+async function replayWacForPoProductIds({
+  productIds,
+  companyId,
+  req,
+  mongoSession = null,
+  logTags = ["purchase_order"],
+  fallbackUrl = "/api/purchase_order/update",
+  preserveWholesalePrice = false,
+  inboundLayersByProduct = null,
+}) {
+  if (!productIds?.length) return [];
+  return applyWacLedgerReplayForProducts({
+    productIds,
+    companyId,
+    session: mongoSession,
+    req,
+    logTags,
+    fallbackUrl,
+    logChange: logProductWholesalePriceChange,
+    preserveWholesalePrice,
+    inboundLayersByProduct,
+  });
+}
+
+function buildInboundLayersByProductFromPoLines(lines) {
+  const inboundByProduct = summarizePoWarehouseInboundByProduct(lines);
+  const layers = {};
+  for (const [productIdStr, inbound] of inboundByProduct) {
+    if (inbound.qty <= 0) continue;
+    layers[productIdStr] = {
+      incomingQty: inbound.qty,
+      incomingCost: inbound.extendedCost / inbound.qty,
+    };
+  }
+  return layers;
+}
+
+/** PO delete replay-history: exclude deleted PO from ledger, keep current WAC. */
+async function replayWacForPoDelete(params) {
+  return replayWacForPoProductIds({
+    ...params,
+    preserveWholesalePrice: true,
+    logTags: params.logTags || ["purchase_order", "purchase_order_delete"],
+  });
 }
 
 /**
@@ -1769,15 +1834,6 @@ async function purchaseOrderCreate(req, res) {
       }
       // step 6 end
 
-      // Weighted-average wholesale_price (warehouse qty × current cost + inbound line cost)
-      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
-        lines: lineItemsFromClient,
-        companyId,
-        req,
-        mongoSession,
-      });
-      wholesaleUpdates.push(...wholesaleRows);
-
       // step 3–4 start — warehouse_inventory upsert
       const stockReconcile = await applyWarehouseInventoryForPoLines({
         lines: lineItemsFromClient,
@@ -1790,6 +1846,20 @@ async function purchaseOrderCreate(req, res) {
       });
       productStockUpdates.push(...stockReconcile.productStockUpdates);
       // step 3–4 end
+
+      // Full WAC ledger replay from transaction #1 (after stock is on-hand)
+      const wholesaleRows = await replayWacForPoProductIds({
+        productIds: collectProductIdsFromPoLines(lineItemsFromClient),
+        companyId,
+        req,
+        mongoSession,
+        logTags: ["purchase_order"],
+        fallbackUrl:
+          req.originalUrl || "/api/purchase_order/purchase_order_create",
+        inboundLayersByProduct:
+          buildInboundLayersByProductFromPoLines(lineItemsFromClient),
+      });
+      wholesaleUpdates.push(...wholesaleRows);
     };
 
     // txn start — MongoDB transaction wrapper (or standalone retry)
@@ -2229,7 +2299,7 @@ async function purchase_order_update(req, res) {
       }
       // step 10 end
 
-      // step 11 start — warehouse_inventory reverse (old PO line qty) + wholesale undo
+      // step 11 start — warehouse_inventory reverse (old PO line qty)
       await WarehouseInventory.applyStockChangesFromLines({
         reverseLines: existingPoItems,
         inboundLines: [],
@@ -2244,26 +2314,9 @@ async function purchase_order_update(req, res) {
           reference_no: response.data?.purchase_order_no,
         },
       });
-      const wholesaleReverseRows = await applyWholesalePriceRemoveForPoLines({
-        lines: existingPoItems,
-        companyId,
-        req,
-        mongoSession,
-      });
-      wholesaleUpdates.push(...wholesaleReverseRows);
       // step 11 end
 
-      // step 12 start — weighted-average product.wholesale_price (new lines)
-      const wholesaleRows = await applyWholesalePriceWeightedAverageForPoLines({
-        lines,
-        companyId,
-        req,
-        mongoSession,
-      });
-      wholesaleUpdates.push(...wholesaleRows);
-      // step 12 end
-
-      // step 13 start — warehouse_inventory inbound (new line qty)
+      // step 12 start — warehouse_inventory inbound (new line qty)
       const stockReconcile = await applyWarehouseInventoryForPoLines({
         lines,
         insertedLineDocs: persistedLineItems,
@@ -2275,6 +2328,22 @@ async function purchase_order_update(req, res) {
         purchaseOrderNo: response.data?.purchase_order_no,
       });
       productStockUpdates.push(...stockReconcile.productStockUpdates);
+      // step 12 end
+
+      // step 13 start — full WAC ledger replay from transaction #1
+      const replayProductIds = collectProductIdsFromPoLines([
+        ...existingPoItems,
+        ...lines,
+      ]);
+      const wholesaleRows = await replayWacForPoProductIds({
+        productIds: replayProductIds,
+        companyId,
+        req,
+        mongoSession,
+        logTags: ["purchase_order", "purchase_order_update"],
+        fallbackUrl: req.originalUrl || "/api/purchase_order/update",
+      });
+      wholesaleUpdates.push(...wholesaleRows);
       // step 13 end
 
       poLineReplaceSnapshot = {
@@ -2424,9 +2493,9 @@ async function purchase_order_update(req, res) {
  * |    1 | purchase_order          | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | many         | medium | By PO header `transaction_number` |
  * |    3 | purchase_order_item     | update (soft)      | many         | medium | All active lines for this PO |
- * |    4 | inventory_movements     | insert             | one × N      | low    | One `out` row per warehouse line (reverses original `in`) |
- * |    5 | warehouse_inventory     | read / update      | one × N      | medium | Subtract line qty via `reverseLines` |
- * |    6 | product, logs           | read / update      | one × P      | medium | `applyWholesalePriceRemoveForPoLines` when applicable |
+ * |    4 | inventory_movements     | —                  | —            | —      | Skipped — replay-history delete does not reverse physical stock |
+ * |    5 | warehouse_inventory     | —                  | —            | —      | Skipped — on-hand unchanged; WAC rebuilt via ledger replay |
+ * |    6 | product, logs           | read / update      | one × P      | medium | Full WAC ledger replay (deleted PO excluded from event log) |
  * |    7 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only |
  * |    8 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE ORDER DELETE ROLLBACK`) |
  *
@@ -2588,120 +2657,22 @@ async function purchase_order_delete(req, res) {
         );
       }
 
-      // step 4 start — insert reversal inventory_movements (`out`) per warehouse line
-      for (let lineIndex = 0; lineIndex < existingPoItems.length; lineIndex++) {
-        const line = existingPoItems[lineIndex];
-        const productIdStr = String(line.product_id ?? "").trim();
-        const lineQtyNum = Number(line.qty);
-        const warehouseIdStr =
-          line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
+      // step 4–5 skipped — replay-history delete removes the PO from the WAC
+      // transaction log only. Physical warehouse on-hand is NOT reversed here
+      // (otherwise a later purchase return / sale sees the wrong available qty).
+      // Full WAC ledger replay (step 6) recalculates wholesale_price.
 
-        if (
-          !productIdStr ||
-          !mongoose.Types.ObjectId.isValid(productIdStr) ||
-          !Number.isFinite(lineQtyNum) ||
-          lineQtyNum <= 0 ||
-          !warehouseIdStr ||
-          !mongoose.Types.ObjectId.isValid(warehouseIdStr)
-        ) {
-          continue;
-        }
-
-        const unitCost = Number(line.price);
-        if (!Number.isFinite(unitCost) || unitCost < 0) {
-          throw new Error(
-            "Each PO line with a warehouse needs a finite unit price (price) and positive quantity for inventory reversal",
-          );
-        }
-        const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
-
-        const bodyBeforeInventoryMovement = req.body;
-        const hadRouteParamId =
-          req.params && Object.prototype.hasOwnProperty.call(req.params, "id");
-        const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-        req.body = {
-          product_id: productIdStr,
-          warehouse_id: warehouseIdStr,
-          quantity: lineQtyNum,
-          movement_type: "out",
-          unit_cost: unitCost,
-          total_cost: totalCostMovement,
-          reference_type: "purchase_order",
-          reference_id: poId,
-          reference_name: purchaseOrderReferenceName(
-            "Purchase Order Delete",
-            existingPo.purchase_order_no,
-          ),
-          company_id: companyId,
-          status: "active",
-        };
-
-        const endStep4Line = poDeleteStepTimer.start(
-          4,
-          "inventory_movements insert (out reversal)",
-          { line_index: lineIndex, warehouse_id: warehouseIdStr },
-        );
-        try {
-          await insertInventoryMovementRecord(req, mongoSession);
-          deleteSnapshot.reversal_movements_inserted += 1;
-        } catch (inventoryMovementErr) {
-          if (inventoryMovementErr.clientPayload) {
-            throwWithGenericFailure(
-              inventoryMovementErr.clientPayload,
-              "Inventory movement reversal for purchase order delete failed",
-            );
-          }
-          throw inventoryMovementErr;
-        } finally {
-          endStep4Line();
-          req.body = bodyBeforeInventoryMovement;
-          if (hadRouteParamId) {
-            req.params.id = savedRouteParamId;
-          } else {
-            delete req.params.id;
-          }
-        }
-      }
-      // step 4 end
-
-      // step 5 start — reverse warehouse_inventory (subtract received qty)
-      const endStep5 = poDeleteStepTimer.start(
-        5,
-        "warehouse_inventory reverse (reverseLines)",
-        { line_count: existingPoItems.length },
-      );
-      const stockReconcile =
-        await WarehouseInventory.applyStockChangesFromLines({
-          reverseLines: existingPoItems,
-          inboundLines: [],
-          savedLineItemRows: [],
-          companyId,
-          session: mongoSession,
-          userId,
-          req,
-          logContext: {
-            reference_type: "purchase",
-            reference_id: existingPo._id,
-            reference_no: existingPo.purchase_order_no,
-          },
-        });
-      for (const row of stockReconcile || []) {
-        productStockUpdates.push({ ...row, source: "warehouse_inventory" });
-      }
-      endStep5({ warehouse_updates: productStockUpdates.length });
-      // step 5 end
-
-      // step 6 start — reverse weighted-average wholesale_price when warehouse lines existed
+      // step 6 start — full WAC ledger replay (deleted PO already excluded from DB)
       const endStep6 = poDeleteStepTimer.start(
         6,
-        "product wholesale_price reverse",
+        "product wholesale_price WAC ledger replay",
       );
-      const wholesaleRows = await applyWholesalePriceRemoveForPoLines({
-        lines: existingPoItems,
+      const wholesaleRows = await replayWacForPoDelete({
+        productIds: collectProductIdsFromPoLines(existingPoItems),
         companyId,
         req,
         mongoSession,
+        fallbackUrl: req.originalUrl || "/api/purchase_order/delete",
       });
       wholesaleUpdates.push(...wholesaleRows);
       endStep6({ wholesale_updates: wholesaleUpdates.length });
