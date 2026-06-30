@@ -32,6 +32,8 @@ const {
   coalesceObjectId,
   orderExternalRef,
   findExistingOrderByExternalRef,
+  findExistingImportedOrder,
+  resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
   mapWooOrderStatus,
   createFetchOrderStats,
@@ -1855,6 +1857,11 @@ async function importWooOrderToPos(remoteOrder, ctx) {
   const integrationId = resolveIntegrationId(process);
   const remoteId = remoteOrder?.id;
   const externalRef = orderExternalRef("woocommerce", remoteId);
+  const integrationOrderId = resolveIntegrationOrderId(
+    "woocommerce",
+    remoteOrder,
+    remoteId,
+  );
 
   if (!externalRef) {
     recordOrderSkip(stats, {
@@ -1867,11 +1874,11 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     return;
   }
 
-  const existing = await findExistingOrderByExternalRef(
-    companyId,
+  const existing = await findExistingImportedOrder(companyId, {
     externalRef,
     integrationId,
-  );
+    integrationOrderId,
+  });
   if (existing) {
     recordOrderSkip(stats, {
       store: "woocommerce",
@@ -1971,6 +1978,7 @@ async function importWooOrderToPos(remoteOrder, ctx) {
       .filter(Boolean)
       .join(", "),
     description: externalRef,
+    integration_order_id: integrationOrderId,
     discount: Number(remoteOrder?.discount_total) || 0,
     shipment: Number(remoteOrder?.shipping_total) || 0,
     lines_subtotal: linesSubtotal,

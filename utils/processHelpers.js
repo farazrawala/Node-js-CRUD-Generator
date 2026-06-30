@@ -225,6 +225,22 @@ function orderExternalRef(platform, remoteId) {
   return `${platform}:order:${id}`;
 }
 
+function resolveIntegrationOrderId(store, remoteOrder, remoteId) {
+  if (store === "woocommerce") {
+    const orderNo = remoteOrder?.number;
+    if (orderNo != null && String(orderNo).trim() !== "") {
+      return String(orderNo).trim();
+    }
+  }
+  if (store === "shopify") {
+    const orderNo = remoteOrder?.order_number ?? remoteOrder?.name;
+    if (orderNo != null && String(orderNo).trim() !== "") {
+      return String(orderNo).trim();
+    }
+  }
+  return remoteId != null ? String(remoteId).trim() : "";
+}
+
 async function findExistingOrderByExternalRef(
   companyId,
   externalRef,
@@ -247,6 +263,34 @@ async function findExistingOrderByExternalRef(
   }
 
   return Order.findOne(filter).lean();
+}
+
+async function findExistingImportedOrder(
+  companyId,
+  { externalRef, integrationId, integrationOrderId },
+) {
+  const byRef = await findExistingOrderByExternalRef(
+    companyId,
+    externalRef,
+    integrationId,
+  );
+  if (byRef) {
+    return byRef;
+  }
+
+  const company_id = coalesceObjectId(companyId);
+  const integration_id = coalesceObjectId(integrationId);
+  const integration_order_id = String(integrationOrderId ?? "").trim();
+  if (!company_id || !integration_id || !integration_order_id) {
+    return null;
+  }
+
+  return Order.findOne({
+    company_id,
+    integration_id,
+    integration_order_id,
+    deletedAt: null,
+  }).lean();
 }
 
 async function resolvePosProductForRemoteLine({
@@ -460,6 +504,7 @@ async function logFetchOrderImported(
         store,
         remote_id: remoteId ?? null,
         order_number: orderNumber ?? null,
+        integration_order_id: orderNumber ?? null,
         pos_order_id: posOrderId ? String(posOrderId) : null,
         pos_order_no: posOrderNo ?? null,
         lines_inserted: lineCount ?? 0,
@@ -1124,7 +1169,9 @@ module.exports = {
   upsertSyncProductMapping,
   findPosProductBySyncReference,
   orderExternalRef,
+  resolveIntegrationOrderId,
   findExistingOrderByExternalRef,
+  findExistingImportedOrder,
   resolvePosProductForRemoteLine,
   mapWooOrderStatus,
   mapShopifyOrderStatus,

@@ -1963,10 +1963,20 @@ async function getOrderByorderItem(req, res) {
     deletedAt: null,
     company_id: req.user?.company_id,
   };
+  const populate = buildPopulateFromQuery(req.query || {}, "order");
+  if (
+    !populate.some(
+      (p) => (typeof p === "string" ? p : p?.path) === "integration_id",
+    )
+  ) {
+    populate.push("integration_id");
+  }
+
   const response = await handleGenericGetAll(req, "order", {
     filter,
     excludeFields: [],
     sort: { createdAt: -1 },
+    populate,
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
   });

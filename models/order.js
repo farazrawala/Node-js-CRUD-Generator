@@ -154,6 +154,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "Integration",
     },
 
+    integration_order_id: {
+      type: String,
+      field_name: "Integration Order ID",
+    },
+
     email: {
       type: String,
       // required: true,

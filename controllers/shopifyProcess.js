@@ -36,6 +36,8 @@ const {
   coalesceObjectId,
   orderExternalRef,
   findExistingOrderByExternalRef,
+  findExistingImportedOrder,
+  resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
   mapShopifyOrderStatus,
   createFetchOrderStats,
@@ -1312,6 +1314,11 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
   const integrationId = resolveIntegrationId(process);
   const remoteId = remoteOrder?.id;
   const externalRef = orderExternalRef("shopify", remoteId);
+  const integrationOrderId = resolveIntegrationOrderId(
+    "shopify",
+    remoteOrder,
+    remoteId,
+  );
 
   if (!externalRef) {
     recordOrderSkip(stats, {
@@ -1324,11 +1331,11 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     return;
   }
 
-  const existing = await findExistingOrderByExternalRef(
-    companyId,
+  const existing = await findExistingImportedOrder(companyId, {
     externalRef,
     integrationId,
-  );
+    integrationOrderId,
+  });
   if (existing) {
     recordOrderSkip(stats, {
       store: "shopify",
@@ -1436,6 +1443,7 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       .filter(Boolean)
       .join(", "),
     description: externalRef,
+    integration_order_id: integrationOrderId,
     discount,
     shipment,
     lines_subtotal: linesSubtotal,
