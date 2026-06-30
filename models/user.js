@@ -18,31 +18,38 @@ const PERMISSION_MODULE_KEYS = [
   "pos",
   "orders",
   "purchase-orders",
+  "purchase-order-returns",
+  "sales-returns",
   "products",
   "categories",
+  "brands",
+  "integration",
+  "process",
   "warehouse",
+  "warehouse-inventory",
   "stock",
   "adjustments",
-
+  "company",
   "barcode-print",
   "attributes",
   "users",
-
   "amount-transfers",
   "branch",
-
   "accounts",
   "balance-sheet",
+  "advance-balance-sheet",
+  "profit-vs-gl-gap",
   "income-statement",
   "ledger",
   "payments",
   "payment-receipts",
-
   "expenses",
   "transactions",
   "logs",
-  // "payments",
-  // "payments",
+  // Legacy / SPA aliases — keep so existing saved permissions are not stripped
+  "order",
+  "proces",
+  "category",
 ];
 
 /** Keys allowed on each permission row (matches permissionSetSchema). */

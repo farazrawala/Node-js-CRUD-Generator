@@ -118,12 +118,37 @@ const userAdminCRUD = adminCrudGenerator(
       // Configure the permission matrix once—modules become rows, actions become columns.
       permissions: {
         modules: [
-          { key: "integration", label: "Integration" },
+          { key: "pos", label: "POS" },
           { key: "orders", label: "Orders" },
-          { key: "category", label: "Category" },
+          { key: "purchase-orders", label: "Purchase Orders" },
+          { key: "purchase-order-returns", label: "Purchase Order Returns" },
+          { key: "sales-returns", label: "Sales Returns" },
+          { key: "products", label: "Products" },
+          { key: "categories", label: "Categories" },
+          { key: "brands", label: "Brands" },
+          { key: "integration", label: "Integration" },
           { key: "process", label: "Process" },
-          { key: "analytics", label: "Analytics" },
-          { key: "inventory", label: "Inventory" },
+          { key: "warehouse", label: "Warehouse" },
+          { key: "warehouse-inventory", label: "Warehouse Inventory" },
+          { key: "stock", label: "Stock" },
+          { key: "adjustments", label: "Adjustments" },
+          { key: "company", label: "Company" },
+          { key: "barcode-print", label: "Barcode Print" },
+          { key: "attributes", label: "Attributes" },
+          { key: "users", label: "Users" },
+          { key: "amount-transfers", label: "Amount Transfers" },
+          { key: "branch", label: "Branch" },
+          { key: "accounts", label: "Accounts" },
+          { key: "balance-sheet", label: "Balance Sheet" },
+          { key: "advance-balance-sheet", label: "Advance Balance Sheet" },
+          { key: "profit-vs-gl-gap", label: "Profit vs GL Gap" },
+          { key: "income-statement", label: "Income Statement" },
+          { key: "ledger", label: "Ledger" },
+          { key: "payments", label: "Payments" },
+          { key: "payment-receipts", label: "Payment Receipts" },
+          { key: "expenses", label: "Expenses" },
+          { key: "transactions", label: "Transactions" },
+          { key: "logs", label: "Logs" },
         ],
         actions: [
           { key: "view", label: "View" },
@@ -2558,9 +2583,9 @@ const processAdminCRUD = adminCrudGenerator(
 
         return populatedRecords.map((record) => {
           const recordObj = record.toObject ? record.toObject() : record;
-          const isEditContext = String(req?.originalUrl || req?.path || "").includes(
-            "/edit/",
-          );
+          const isEditContext = String(
+            req?.originalUrl || req?.path || "",
+          ).includes("/edit/");
 
           if (record.created_by && typeof record.created_by === "object") {
             recordObj.created_by = record.created_by.name || "No User";
@@ -2597,7 +2622,8 @@ const processAdminCRUD = adminCrudGenerator(
           }
 
           if (record.brand_id && typeof record.brand_id === "object") {
-            recordObj.brand_display = record.brand_id.name || record.brand_id.slug;
+            recordObj.brand_display =
+              record.brand_id.name || record.brand_id.slug;
             recordObj.brand_id =
               record.brand_id._id?.toString() || String(record.brand_id);
           }
