@@ -41,6 +41,7 @@ const {
   formatFetchOrderBatchRemarks,
   logFetchOrderImported,
   logFetchOrderBatchFailed,
+  fallbackRemoteOrderLinesSubtotal,
 } = require("../utils/processHelpers");
 
 async function recordBrandSyncMapping(
@@ -1896,7 +1897,6 @@ async function importWooOrderToPos(remoteOrder, ctx) {
       remoteOrder.line_items
     : [];
   const orderItemsPayload = [];
-  const unmatchedLines = [];
   let linesSubtotal = 0;
 
   for (const line of lineItems) {
@@ -1916,11 +1916,6 @@ async function importWooOrderToPos(remoteOrder, ctx) {
 
     if (!product?._id) {
       stats.lines_skipped += 1;
-      unmatchedLines.push({
-        name: line?.name,
-        product_id: line?.product_id,
-        sku: line?.sku,
-      });
       continue;
     }
 
@@ -1940,19 +1935,8 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     });
   }
 
-  if (orderItemsPayload.length === 0) {
-    recordOrderSkip(stats, {
-      store: "woocommerce",
-      remote_id: remoteId,
-      order_number: remoteOrder?.number,
-      reason: lineItems.length === 0 ? "no_line_items" : "no_matching_products",
-      detail:
-        lineItems.length === 0 ?
-          "Order has no line items in WooCommerce"
-        : "Run fetch_product first or map products via sync_product",
-      unmatched_lines: unmatchedLines,
-    }, logCtx);
-    return;
+  if (linesSubtotal === 0) {
+    linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, "woocommerce");
   }
 
   const billing = remoteOrder?.billing || {};

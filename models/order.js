@@ -35,7 +35,20 @@ function isPlausibleEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-/** Single source of truth for `order_status` enum (keep purchase_order aligned manually if shared). */
+/**
+ * Single source of truth for `order_status` enum (keep purchase_order aligned manually if shared).
+ *
+ * Integration / checkout semantics:
+ * - pending_payment — order received, no payment initiated (unpaid)
+ * - failed — payment failed or declined
+ * - processing — payment received, order awaiting fulfillment
+ * - completed — order fulfilled and complete
+ * - on_hold — awaiting payment confirmation (e.g. manual bank transfer)
+ * - cancelled — cancelled by admin or customer
+ * - refunded — order fully or partially refunded
+ * - draft / drafted — checkout block order not yet finalized (auto-draft; `drafted` is legacy)
+ * - checkout_draft — in-progress block-checkout order (newer draft state)
+ */
 const ORDER_STATUS_VALUES = [
   "active",
   "placed",
@@ -43,11 +56,16 @@ const ORDER_STATUS_VALUES = [
   "shipped",
   "delivered",
   "drafted",
+  "draft",
+  "checkout_draft",
   "pending",
+  "pending_payment",
+  "on_hold",
   "completed",
   "cancelled",
   "refunded",
   "failed",
+  "processing",
 ];
 
 /**
@@ -56,9 +74,17 @@ const ORDER_STATUS_VALUES = [
  */
 const ORDER_STATUS_GROUPS = {
   /** Before firm commit / payment intent */
-  draftLike: new Set(["drafted", "pending"]),
-  /** Open sales / work in progress */
-  open: new Set(["active", "placed", "confirmed"]),
+  draftLike: new Set(["drafted", "draft", "checkout_draft"]),
+  /** Open sales / work in progress (incl. unpaid and awaiting fulfillment) */
+  open: new Set([
+    "active",
+    "placed",
+    "confirmed",
+    "pending",
+    "pending_payment",
+    "on_hold",
+    "processing",
+  ]),
   /** Physical / digital fulfillment */
   fulfillment: new Set(["shipped", "delivered"]),
   /** Closed — no further fulfillment; adjust stock/GL rules carefully per value */

@@ -45,6 +45,7 @@ const {
   formatFetchOrderBatchRemarks,
   logFetchOrderImported,
   logFetchOrderBatchFailed,
+  fallbackRemoteOrderLinesSubtotal,
 } = require("../utils/processHelpers");
 
 function buildShopifyClient(integration) {
@@ -1353,7 +1354,6 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       remoteOrder.line_items
     : [];
   const orderItemsPayload = [];
-  const unmatchedLines = [];
   let linesSubtotal = 0;
 
   for (const line of lineItems) {
@@ -1373,11 +1373,6 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
 
     if (!product?._id) {
       stats.lines_skipped += 1;
-      unmatchedLines.push({
-        name: line?.name,
-        product_id: line?.product_id,
-        sku: line?.sku,
-      });
       continue;
     }
 
@@ -1397,19 +1392,8 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     });
   }
 
-  if (orderItemsPayload.length === 0) {
-    recordOrderSkip(stats, {
-      store: "shopify",
-      remote_id: remoteId,
-      order_number: remoteOrder?.order_number,
-      reason: lineItems.length === 0 ? "no_line_items" : "no_matching_products",
-      detail:
-        lineItems.length === 0 ?
-          "Order has no line items in Shopify"
-        : "Run fetch_product first or map products via sync_product",
-      unmatched_lines: unmatchedLines,
-    }, logCtx);
-    return;
+  if (linesSubtotal === 0) {
+    linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, "shopify");
   }
 
   const billing = remoteOrder?.billing_address || {};

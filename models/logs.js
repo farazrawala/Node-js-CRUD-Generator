@@ -123,6 +123,10 @@ const modelSchema = new mongoose.Schema(
         message: `At most ${MAX_TAGS} tags`,
       },
     },
+    human_readable_description: {
+      type: String,
+      field_name: "Human Readable Description",
+    },
     description: {
       type: String,
       maxlength: MAX_DESCRIPTION_LEN,
@@ -184,7 +188,10 @@ modelSchema.pre("validate", function (next) {
       this.tags = clampTags(this.tags);
     }
     if (this.reference_type != null) {
-      this.reference_type = truncate(this.reference_type, MAX_REFERENCE_TYPE_LEN);
+      this.reference_type = truncate(
+        this.reference_type,
+        MAX_REFERENCE_TYPE_LEN,
+      );
     }
     next();
   } catch (e) {

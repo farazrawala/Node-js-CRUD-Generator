@@ -342,6 +342,42 @@ function mapWooOrderStatus(status) {
   return map[String(status || "").toLowerCase()] || "placed";
 }
 
+/** When no POS line items were built, preserve store subtotal on the order header. */
+function fallbackRemoteOrderLinesSubtotal(remoteOrder, store) {
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const storeKey = String(store || "").toLowerCase();
+
+  if (storeKey === "shopify") {
+    const subtotal = Number(remoteOrder?.subtotal_price);
+    if (Number.isFinite(subtotal) && subtotal >= 0) {
+      return round2(subtotal);
+    }
+  } else {
+    const subtotal = Number(remoteOrder?.subtotal);
+    if (Number.isFinite(subtotal) && subtotal >= 0) {
+      return round2(subtotal);
+    }
+  }
+
+  const total = Number(remoteOrder?.total);
+  if (!Number.isFinite(total) || total < 0) {
+    return 0;
+  }
+
+  const shipping =
+    storeKey === "shopify" ?
+      Number(remoteOrder?.total_shipping_price_set?.shop_money?.amount) ||
+      Number(remoteOrder?.total_shipping_price_set?.presentment_money?.amount) ||
+      0
+    : Number(remoteOrder?.shipping_total) || 0;
+  const discount =
+    storeKey === "shopify" ?
+      Number(remoteOrder?.total_discounts) || 0
+    : Number(remoteOrder?.discount_total) || 0;
+
+  return round2(Math.max(0, total - shipping + discount));
+}
+
 function mapShopifyOrderStatus(financialStatus, fulfillmentStatus) {
   const fin = String(financialStatus || "").toLowerCase();
   const fulf = String(fulfillmentStatus || "").toLowerCase();
@@ -1175,6 +1211,7 @@ module.exports = {
   resolvePosProductForRemoteLine,
   mapWooOrderStatus,
   mapShopifyOrderStatus,
+  fallbackRemoteOrderLinesSubtotal,
   createFetchOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
