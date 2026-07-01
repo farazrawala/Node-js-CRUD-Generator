@@ -1269,9 +1269,18 @@ async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
 }
 
 async function markProcessOutcome(processId, status, remarks) {
+  const update = { status, remarks };
+  if (status === "completed") {
+    update.progress = "completed";
+  } else if (status === "failed") {
+    update.progress = "failed";
+  } else if (status === "active") {
+    update.progress = "started";
+  }
+
   const doc = await ProcessModel.findByIdAndUpdate(
     processId,
-    { status, remarks },
+    update,
     { new: true },
   ).lean();
   if (

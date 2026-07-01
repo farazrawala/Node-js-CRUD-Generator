@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { restrictTo } = require("../middlewares/auth");
 const routeRegistry = require("../utils/routeRegistry");
+const { enqueueProductWebsiteSyncJobs } = require("../utils/productSyncQueue");
 
 // Base URL configuration for assets and links
 const BASE_URL = process.env.BASE_URL || "http://localhost:8000";
@@ -2180,6 +2181,25 @@ const productAdminCRUD = adminCrudGenerator(
 
           return recordObj;
         }),
+    },
+    hooks: {
+      afterUpdate: async (updatedRecord, req) => {
+        try {
+          await enqueueProductWebsiteSyncJobs({
+            productId: updatedRecord?._id,
+            companyId:
+              updatedRecord?.company_id ||
+              req.user?.company_id ||
+              req.body?.company_id,
+            createdBy: req.user?._id || updatedRecord?.updated_by,
+          });
+        } catch (queueErr) {
+          console.warn(
+            "enqueueProductWebsiteSyncJobs (admin) failed:",
+            queueErr?.message || queueErr,
+          );
+        }
+      },
     },
   },
 );

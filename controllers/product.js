@@ -33,6 +33,7 @@ const {
   updateBarcodesFromText,
   BARCODE_IMPORT_COLUMNS,
 } = require("../utils/productBarcodeImport");
+const { enqueueProductWebsiteSyncJobs } = require("../utils/productSyncQueue");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -1602,6 +1603,29 @@ async function productUpdate(req, res) {
   }
 
   await invalidateProductListCache(req);
+
+  try {
+    const queueResult = await enqueueProductWebsiteSyncJobs({
+      productId: tracker.productId || req.params?.id,
+      companyId: req.user?.company_id,
+      createdBy: req.user?._id,
+    });
+    if (queueResult.count > 0) {
+      response = {
+        ...response,
+        sync_queue: {
+          queued: queueResult.count,
+          process_ids: queueResult.created.map((row) => row._id),
+        },
+      };
+    }
+  } catch (queueErr) {
+    console.warn(
+      "enqueueProductWebsiteSyncJobs failed:",
+      queueErr?.message || queueErr,
+    );
+  }
+
   return res.status(response?.status || 200).json(response);
 }
 

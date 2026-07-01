@@ -6,6 +6,7 @@ const Product = require("../models/product");
 const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
 const SyncCategory = require("../models/sync_category");
+const SyncProduct = require("../models/sync_product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 require("@shopify/shopify-api/adapters/node");
 const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
@@ -50,6 +51,12 @@ const {
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
 } = require("../utils/processHelpers");
+const {
+  resolvePosProductSku,
+  buildShopifyProductSyncPayload,
+  buildShopifyVariantSyncPayload,
+  hasSyncPayloadFields,
+} = require("../utils/integrationProductSync");
 
 function buildShopifyClient(integration) {
   const rawUrl =
@@ -946,11 +953,7 @@ async function sync_product(req, res, process) {
     return res.status(400).json({ success: false, message: error });
   }
 
-  const sku =
-    (typeof product.sku === "string" && product.sku.trim()) ||
-    (typeof product.product_code === "string" && product.product_code.trim()) ||
-    (product._id ? String(product._id) : "");
-
+  const sku = resolvePosProductSku(product);
   if (!sku) {
     return res.status(400).json({
       success: false,
@@ -958,75 +961,175 @@ async function sync_product(req, res, process) {
     });
   }
 
-  try {
-    const variantResponse = await client.get({
-      path: "variants",
-      query: { sku },
-    });
-    const existingVariants =
-      Array.isArray(variantResponse?.body?.variants) ?
-        variantResponse.body.variants
-      : [];
+  const companyId = resolveCompanyId(process);
+  const integrationId = resolveIntegrationId(process);
+  const productId = coalesceObjectId(product._id);
 
-    if (existingVariants.length > 0) {
-      let existingProduct = null;
-      const productId = existingVariants[0]?.product_id;
-      if (productId) {
+  const syncRow = await SyncProduct.findOne({
+    product_id: productId,
+    integration_id: integrationId,
+    company_id: companyId,
+    deletedAt: null,
+  }).lean();
+
+  try {
+    let remoteProduct = null;
+    let remoteId =
+      syncRow?.refference_id != null && String(syncRow.refference_id).trim() !== "" ?
+        String(syncRow.refference_id).trim()
+      : null;
+
+    if (remoteId) {
+      try {
+        const productResponse = await client.get({
+          path: `products/${remoteId}`,
+        });
+        remoteProduct = productResponse?.body?.product || null;
+      } catch (fetchErr) {
+        console.warn(
+          `Shopify product ${remoteId} not found; will try SKU lookup:`,
+          fetchErr?.response?.body || fetchErr?.message || fetchErr,
+        );
+        remoteId = null;
+      }
+    }
+
+    if (!remoteProduct) {
+      const variantResponse = await client.get({
+        path: "variants",
+        query: { sku },
+      });
+      const existingVariants =
+        Array.isArray(variantResponse?.body?.variants) ?
+          variantResponse.body.variants
+        : [];
+      if (existingVariants.length > 0 && existingVariants[0]?.product_id) {
+        remoteId = String(existingVariants[0].product_id);
         try {
           const productResponse = await client.get({
-            path: `products/${productId}`,
+            path: `products/${remoteId}`,
           });
-          existingProduct = productResponse?.body?.product || null;
-        } catch (fetchError) {
+          remoteProduct = productResponse?.body?.product || null;
+        } catch (fetchErr) {
           console.warn(
-            "Failed to load existing Shopify product details:",
-            fetchError?.response?.body || fetchError?.message || fetchError,
+            "Failed to load Shopify product by variant SKU:",
+            fetchErr?.response?.body || fetchErr?.message || fetchErr,
           );
         }
       }
+    }
+
+    if (remoteProduct && remoteId) {
+      const updatePayload = buildShopifyProductSyncPayload(
+        product,
+        integration,
+        { mode: "update" },
+      );
+      const variantPayload = buildShopifyVariantSyncPayload(
+        product,
+        integration,
+        { mode: "update" },
+      );
+
+      if (!hasSyncPayloadFields(updatePayload) && !variantPayload) {
+        await recordShopifyProductSyncMapping(
+          process,
+          companyId,
+          productId,
+          remoteId,
+        );
+        await markProcessOutcome(
+          process._id,
+          "completed",
+          `Product Name : ${product.product_name} — no Shopify fields enabled for update.`,
+        );
+        return res.status(200).json({
+          success: true,
+          data: remoteProduct,
+          message: `Product Name : ${product.product_name} — sync mapping kept; no fields enabled.`,
+        });
+      }
+
+      let updatedProduct = remoteProduct;
+      if (hasSyncPayloadFields(updatePayload)) {
+        const updatedResponse = await client.put({
+          path: `products/${remoteId}`,
+          data: { product: updatePayload },
+          type: "json",
+        });
+        updatedProduct = updatedResponse?.body?.product || updatedProduct;
+      }
+
+      if (variantPayload) {
+        const variantId =
+          updatedProduct?.variants?.[0]?.id || remoteProduct?.variants?.[0]?.id;
+        if (variantId) {
+          await client.put({
+            path: `variants/${variantId}`,
+            data: { variant: { ...variantPayload, sku } },
+            type: "json",
+          });
+        }
+      }
+
+      await recordShopifyProductSyncMapping(
+        process,
+        companyId,
+        productId,
+        remoteId,
+      );
 
       await markProcessOutcome(
         process._id,
         "completed",
-        `Product Name : ${product.product_name} already existed on Shopify — skipped creation.`,
+        `Product Name : ${product.product_name} updated on Shopify.`,
       );
 
       return res.status(200).json({
         success: true,
-        data: existingProduct || existingVariants[0],
-        message: `Product Name : ${product.product_name} already exists on Shopify.`,
+        data: updatedProduct,
+        message: `Product Name : ${product.product_name} updated on Shopify.`,
       });
     }
 
-    const variantPayload = {
+    const variantPayload = buildShopifyVariantSyncPayload(product, integration, {
+      mode: "create",
+    }) || {
       price:
         product.product_price !== undefined && product.product_price !== null ?
           String(product.product_price)
         : "0.00",
       sku,
     };
+    if (!variantPayload.sku) variantPayload.sku = sku;
 
-    if (product.weight !== undefined && product.weight !== null) {
-      const numericWeight = Number(product.weight);
-      if (!Number.isNaN(numericWeight)) {
-        variantPayload.weight = numericWeight;
-        variantPayload.weight_unit = "g";
-      }
+    const createPayload = buildShopifyProductSyncPayload(product, integration, {
+      mode: "create",
+    });
+    if (!createPayload.title) {
+      createPayload.title = product.product_name || sku;
     }
 
     const createdProductResponse = await client.post({
       path: "products",
       data: {
         product: {
-          title: product.product_name,
-          body_html: product.product_description || "",
-          status: "active",
-          product_type: product.product_type || "Single",
+          ...createPayload,
+          status: createPayload.status || "active",
           variants: [variantPayload],
         },
       },
       type: "json",
     });
+
+    const createdProduct = createdProductResponse?.body?.product;
+    const createdId = createdProduct?.id;
+    await recordShopifyProductSyncMapping(
+      process,
+      companyId,
+      productId,
+      createdId,
+    );
 
     await markProcessOutcome(
       process._id,
@@ -1036,7 +1139,7 @@ async function sync_product(req, res, process) {
 
     return res.status(201).json({
       success: true,
-      data: createdProductResponse?.body?.product,
+      data: createdProduct,
       message: `Product Name : ${product.product_name} synced to Shopify successfully.`,
     });
   } catch (error) {
