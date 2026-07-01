@@ -159,9 +159,7 @@ async function loadActiveProcess(req, queueRetry = 0) {
 
   if (isQueueEnabled() && !hasExplicitProcessId) {
     const scopedCompanyId =
-      req.query.company_id ?
-        normalizeCompanyId(req.query.company_id)
-      : null;
+      req.query.company_id ? normalizeCompanyId(req.query.company_id) : null;
     const nextJob = await peekNextProcessJob(scopedCompanyId);
     if (nextJob?.jobId) {
       queuedJobCompanyId = nextJob.companyId || scopedCompanyId;
@@ -224,7 +222,7 @@ const PROCESS_ACTIONS = new Set([
   "fetch_products",
   "fetch_product",
   "sync_product",
-  "delete_product",
+  // "delete_product",
   "fetch_category",
   "sync_category",
   "delete_category",
@@ -361,9 +359,7 @@ async function createProcessQueueRecords(req, res) {
             offset: normalized.offset,
             remarks: normalized.remarks,
             force:
-              body.force === true ||
-              body.force === "1" ||
-              body.force === 1,
+              body.force === true || body.force === "1" || body.force === 1,
           },
         });
         created.push({
@@ -603,7 +599,10 @@ async function runProcessExecution(req) {
 }
 
 async function runQueueWorker(req, res) {
-  const { drainProcessQueue, getWorkerStatus } = require("../utils/processQueueWorker");
+  const {
+    drainProcessQueue,
+    getWorkerStatus,
+  } = require("../utils/processQueueWorker");
   const status = getWorkerStatus();
 
   if (status.draining) {

@@ -128,10 +128,98 @@ async function importWooBrandToPos(
   return posId;
 }
 
+function normalizeWooProductType(remoteType) {
+  return String(remoteType || "").toLowerCase().trim();
+}
+
 function mapWooProductType(remoteType) {
-  return String(remoteType || "").toLowerCase() === "variable" ?
+  const type = normalizeWooProductType(remoteType);
+  return type === "variable" || type.startsWith("variable-") ?
       "Variable"
     : "Single";
+}
+
+function isWooVariationRow(remote) {
+  return normalizeWooProductType(remote?.type) === "variation";
+}
+
+function hasWooVariationAttributes(remote) {
+  const attrs = Array.isArray(remote?.attributes) ? remote.attributes : [];
+  return attrs.some((attr) => {
+    const isVariationAttr =
+      attr?.variation === true ||
+      attr?.variation === 1 ||
+      String(attr?.variation || "").toLowerCase() === "true";
+    if (!isVariationAttr) {
+      return false;
+    }
+    const options = Array.isArray(attr?.options) ? attr.options : [];
+    return options.some((option) => String(option || "").trim());
+  });
+}
+
+/** WooCommerce variable parent — type, variation IDs, or variation attributes on the payload. */
+function isWooVariableProduct(remote) {
+  if (!remote || isWooVariationRow(remote)) {
+    return false;
+  }
+  const type = normalizeWooProductType(remote.type);
+  if (type === "variable" || type.startsWith("variable-")) {
+    return true;
+  }
+  const variationIds = Array.isArray(remote.variations) ? remote.variations : [];
+  if (variationIds.length > 0) {
+    return true;
+  }
+  return hasWooVariationAttributes(remote);
+}
+
+async function wooProductHasRemoteVariations(client, wooProductId) {
+  const wooId = Number(wooProductId);
+  if (!client || !wooId) {
+    return false;
+  }
+
+  try {
+    const response = await client.get(`products/${wooId}/variations`, {
+      per_page: 1,
+      orderby: "id",
+      order: "asc",
+    });
+    const variations = Array.isArray(response?.data) ? response.data : [];
+    return variations.length > 0;
+  } catch (error) {
+    console.warn(
+      `WooCommerce variation probe failed for product ${wooId}:`,
+      error?.response?.data || error.message,
+    );
+    return false;
+  }
+}
+
+/** Resolve variable parent using payload hints and, when needed, the variations API. */
+async function resolveWooIsVariableProduct(client, remote) {
+  if (isWooVariableProduct(remote)) {
+    return true;
+  }
+  if (!client || !Number(remote?.id)) {
+    return false;
+  }
+
+  const type = normalizeWooProductType(remote.type);
+  const shouldProbe =
+    hasWooVariationAttributes(remote) ||
+    (!type && Number(remote?.id));
+
+  if (!shouldProbe) {
+    return false;
+  }
+
+  if (await wooProductHasRemoteVariations(client, remote.id)) {
+    return true;
+  }
+
+  return hasWooVariationAttributes(remote);
 }
 
 function mapWooProductPrice(remote) {
@@ -152,22 +240,33 @@ function mapWooProductPrice(remote) {
   return 0;
 }
 
-async function fetchWooProductById(client, wooId, remoteById) {
+async function fetchWooProductById(client, wooId, remoteById, { forceRefresh = false } = {}) {
   const id = Number(wooId);
   if (!id) {
     return null;
   }
 
-  if (remoteById?.has(id)) {
-    return remoteById.get(id);
+  if (!forceRefresh && remoteById?.has(id)) {
+    const cached = remoteById.get(id);
+    if (cached?.type || isWooVariableProduct(cached)) {
+      return cached;
+    }
   }
 
-  const response = await client.get(`products/${id}`);
-  const data = response?.data;
-  if (data?.id != null && remoteById) {
-    remoteById.set(Number(data.id), data);
+  try {
+    const response = await client.get(`products/${id}`);
+    const data = response?.data;
+    if (data?.id != null && remoteById) {
+      remoteById.set(Number(data.id), data);
+    }
+    return data || null;
+  } catch (error) {
+    console.warn(
+      `WooCommerce product ${id} detail fetch failed:`,
+      error?.response?.data || error.message,
+    );
+    return remoteById?.get(id) || null;
   }
-  return data || null;
 }
 
 async function resolveWooProductPrice(client, remote) {
@@ -177,8 +276,7 @@ async function resolveWooProductPrice(client, remote) {
   }
 
   const wooId = Number(remote?.id);
-  const isVariable = String(remote?.type || "").toLowerCase() === "variable";
-  if (!isVariable || !wooId) {
+  if (!isWooVariableProduct(remote) || !wooId) {
     return price;
   }
 
@@ -208,7 +306,7 @@ function formatWooVariationLabel(variation) {
     .map((attr) => String(attr?.option || "").trim())
     .filter(Boolean);
   if (options.length) {
-    return options.join(" x ");
+    return options.map((option) => option.toUpperCase()).join("-");
   }
 
   const fallback = String(variation?.name || "").trim();
@@ -219,21 +317,68 @@ function formatWooVariationLabel(variation) {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean)
-    .join(" x ");
+    .map((part) => part.toUpperCase())
+    .join("-");
 }
 
-function buildWooVariationProductName(parentName, variation) {
-  const label = formatWooVariationLabel(variation);
-  if (!label) {
-    return parentName;
+/** e.g. parent woo-var-0006 + variation woo-var-0006-NAVY-L → NAVY-L */
+function extractWooVariationLabelFromSku(parentSku, variationSku) {
+  const parent = String(parentSku || "").trim();
+  const remote = String(variationSku || "").trim();
+  if (!remote) {
+    return "";
   }
-  return `${parentName} [${label}]`;
+  if (parent && remote.startsWith(`${parent}-`)) {
+    return remote.slice(parent.length + 1).toUpperCase();
+  }
+  if (parent && remote !== parent) {
+    return "";
+  }
+
+  const tailMatch = remote.match(/-([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)$/);
+  return tailMatch ? tailMatch[1].toUpperCase() : "";
 }
 
-function buildWooVariationSku(parentSku, wooParentId, variationId) {
+function buildWooVariationProductName(parentName, variation, parentSku) {
+  const label =
+    formatWooVariationLabel(variation) ||
+    extractWooVariationLabelFromSku(parentSku, variation?.sku);
+
+  if (label) {
+    return `${parentName} [${label}]`;
+  }
+
+  const variationId = Number(variation?.id);
+  if (variationId) {
+    return `${parentName} [#${variationId}]`;
+  }
+
+  return `${parentName} [Variation]`;
+}
+
+function buildWooVariationSku(parentSku, wooParentId, variationId, variation) {
+  const normalizedParentSku = String(parentSku || "").trim();
+  const remoteSku = String(variation?.sku || "").trim();
+  if (remoteSku && remoteSku !== normalizedParentSku) {
+    return remoteSku;
+  }
+
   const base =
-    String(parentSku || "").trim() ||
+    normalizedParentSku ||
     (wooParentId ? `wc-${wooParentId}` : "wc-var");
+  const label = formatWooVariationLabel(variation)
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/gi, "")
+    .toUpperCase();
+  if (label) {
+    return `${base}-${label}`;
+  }
+
+  const skuLabel = extractWooVariationLabelFromSku(normalizedParentSku, remoteSku);
+  if (skuLabel) {
+    return `${base}-${skuLabel}`;
+  }
+
   return `${base}-var-${variationId}`;
 }
 
@@ -299,6 +444,8 @@ async function findPosProductForWooImport({
   wooReferenceId,
   sku,
   name,
+  isVariation = false,
+  parentProductId = null,
 }) {
   const integrationId = resolveIntegrationId(process);
   if (wooReferenceId && integrationId) {
@@ -317,6 +464,19 @@ async function findPosProductForWooImport({
     if (bySku) {
       return bySku;
     }
+  }
+
+  if (isVariation) {
+    const parentOid = coalesceObjectId(parentProductId);
+    if (name && parentOid) {
+      return Product.findOne({
+        company_id: companyId,
+        product_name: name,
+        parent_product_id: parentOid,
+        deletedAt: null,
+      }).lean();
+    }
+    return null;
   }
 
   if (name) {
@@ -346,13 +506,24 @@ async function upsertWooProductRow({
   }
 
   const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
-  const existing = await findPosProductForWooImport({
+  let existing = await findPosProductForWooImport({
     process,
     companyId,
     wooReferenceId,
     sku,
     name: trimmedName,
+    isVariation,
+    parentProductId,
   });
+
+  if (
+    existing &&
+    isVariation &&
+    parentProductId &&
+    String(existing._id) === String(parentProductId)
+  ) {
+    existing = null;
+  }
 
   const payload = {
     product_name: trimmedName,
@@ -373,6 +544,8 @@ async function upsertWooProductRow({
 
   if (parentProductId) {
     payload.parent_product_id = coalesceObjectId(parentProductId);
+  } else if (productType === "Variable") {
+    payload.parent_product_id = null;
   }
 
   let posId;
@@ -461,11 +634,16 @@ async function importWooVariableProductToPos(
       continue;
     }
 
-    const variationName = buildWooVariationProductName(parentName, variation);
+    const variationName = buildWooVariationProductName(
+      parentName,
+      variation,
+      parentSku,
+    );
     const variationSku = buildWooVariationSku(
       parentSku,
       wooParentId,
       variationId,
+      variation,
     );
     const variationPrice = mapWooProductPrice(variation);
     const resolvedVariationPrice =
@@ -629,7 +807,10 @@ async function importWooProductToPos(
   }
 
   const isVariable =
-    String(remoteWooProduct?.type || "").toLowerCase() === "variable";
+    client ?
+      await resolveWooIsVariableProduct(client, remoteWooProduct)
+    : isWooVariableProduct(remoteWooProduct);
+
   if (isVariable && client) {
     return importWooVariableProductToPos(remoteWooProduct, {
       client,
@@ -649,7 +830,7 @@ async function importWooProductToPos(
     remote: remoteWooProduct,
     name,
     sku,
-    productType: "Single",
+    productType: mapWooProductType(remoteWooProduct?.type),
     productPrice,
     categoryIds,
     parentProductId: null,
@@ -2344,7 +2525,15 @@ async function fetch_product(req, res, process) {
 
     for (const remote of remoteProducts) {
       const remoteDetail =
-        (await fetchWooProductById(client, remote?.id, remoteById)) || remote;
+        (await fetchWooProductById(client, remote?.id, remoteById, {
+          forceRefresh: true,
+        })) || remote;
+
+      if (isWooVariationRow(remoteDetail)) {
+        stats.skipped += 1;
+        continue;
+      }
+
       const name = String(remoteDetail?.name || "").trim();
       if (!name) {
         stats.skipped += 1;
@@ -2553,4 +2742,7 @@ module.exports = {
   sync_product,
   sync_category,
   sync_brand,
+  importWooProductToPos,
+  resolvePosCategoryIdsFromWooProduct,
+  resolveWooProductPrice,
 };

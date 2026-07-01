@@ -1727,6 +1727,18 @@ function buildVariantDescription(baseDescription, attributes = []) {
             ? existingBaseProduct.data.multi_images
             : galleryImages;
           existingCount += 1;
+
+          const shouldBeVariable =
+            hasVariants || String(product?.type || "").toLowerCase() === "variable";
+          if (
+            shouldBeVariable &&
+            existingBaseProduct.data?.product_type !== "Variable"
+          ) {
+            await Product.updateOne(
+              { _id: baseProductId },
+              { $set: { product_type: "Variable" } },
+            );
+          }
         } else {
           const baseProductReq = Object.create(req);
           baseProductReq.body = {
