@@ -2549,6 +2549,10 @@ const processAdminCRUD = adminCrudGenerator(
         { value: "fetch_category", label: "Fetch categories (store → POS)" },
         { value: "fetch_brand", label: "Fetch brands (store → POS)" },
         { value: "fetch_order", label: "Fetch orders (store → POS)" },
+        {
+          value: "fetch_latest_order",
+          label: "Fetch latest orders (new only, store → POS)",
+        },
         { value: "sync_product", label: "Sync product" },
         { value: "sync_category", label: "Sync category (POS → store)" },
         { value: "sync_brand", label: "Sync brand (POS → store)" },

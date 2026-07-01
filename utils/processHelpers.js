@@ -501,6 +501,31 @@ function formatFetchOrderBatchRemarks({
   return `${summary} Skip reasons: ${reasons}`;
 }
 
+/** One-shot poll of newest store orders (only missing rows are inserted). */
+function formatFetchLatestOrderRemarks({
+  fetched,
+  inserted,
+  skipped,
+  lines_inserted,
+  lines_skipped,
+  skipped_orders = [],
+  limit,
+}) {
+  const summary = `Latest order poll: checked ${fetched} newest (limit ${limit}), inserted ${inserted}, already in POS ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}.`;
+
+  if (!skipped_orders.length) {
+    return summary;
+  }
+
+  const errors = skipped_orders.filter((e) => e.reason === "import_error");
+  if (!errors.length) {
+    return summary;
+  }
+
+  const reasons = errors.map(humanizeOrderSkipReason).join(" | ");
+  return `${summary} Errors: ${reasons}`;
+}
+
 function fetchOrderLogUrl(req) {
   return req?.originalUrl || req?.path || req?.url || "/api/process/execute-process";
 }
@@ -754,6 +779,19 @@ function resolveBatchPagination(process) {
   const progress = process.progress || "not_started";
   const offset = Number(process.offset) || 0;
   return { limit, page, hits, count, progress, offset };
+}
+
+const FETCH_LATEST_ORDER_DEFAULT_LIMIT = 20;
+
+/** Batch size for `fetch_latest_order` (default 20, minimum 20, max 100). */
+function resolveLatestOrderBatchLimit(process) {
+  const raw = Number(process?.limit);
+  const limit =
+    raw > 0 ? raw : FETCH_LATEST_ORDER_DEFAULT_LIMIT;
+  return Math.max(
+    FETCH_LATEST_ORDER_DEFAULT_LIMIT,
+    Math.min(limit, 100),
+  );
 }
 
 function dispatchByStoreType(req, res, process, handlers) {
@@ -1182,6 +1220,54 @@ async function finishFetchOrderBatch(req, res, process, batchResult) {
 
 const failFetchOrderBatch = failFetchCategoryBatch;
 
+/** Single poll — keep process active for recurring cron / queue runs. */
+async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
+  const { limit, hits, count } = resolveBatchPagination(process);
+  const {
+    fetched,
+    inserted,
+    skipped,
+    remarks,
+    lines_inserted = 0,
+    lines_skipped = 0,
+    skipped_orders = [],
+  } = batchResult;
+
+  const newHits = hits + 1;
+  const newCount = count + inserted;
+
+  await ProcessModel.findByIdAndUpdate(process._id, {
+    hits: newHits,
+    count: newCount,
+    page: 1,
+    progress: "not_started",
+    status: "active",
+    remarks,
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: remarks,
+    data: {
+      process_id: process._id,
+      page: 1,
+      hits: newHits,
+      count: newCount,
+      progress: "not_started",
+      status: "active",
+      batch: {
+        fetched,
+        inserted,
+        skipped,
+        limit,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+      },
+    },
+  });
+}
+
 async function markProcessOutcome(processId, status, remarks) {
   const doc = await ProcessModel.findByIdAndUpdate(
     processId,
@@ -1216,11 +1302,14 @@ module.exports = {
   createFetchOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
+  formatFetchLatestOrderRemarks,
   logFetchOrderImported,
   logFetchOrderSkipped,
   logFetchOrderFailed,
   logFetchOrderBatchFailed,
   resolveBatchPagination,
+  resolveLatestOrderBatchLimit,
+  FETCH_LATEST_ORDER_DEFAULT_LIMIT,
   dispatchByStoreType,
   findExistingCategoryByName,
   findExistingCategoryBySlug,
@@ -1237,6 +1326,7 @@ module.exports = {
   finishFetchBrandBatch,
   finishFetchProductBatch,
   finishFetchOrderBatch,
+  finishFetchLatestOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,

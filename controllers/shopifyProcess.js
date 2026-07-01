@@ -16,6 +16,7 @@ const {
   upsertSyncCategoryMapping,
   upsertSyncBrandMapping,
   resolveBatchPagination,
+  resolveLatestOrderBatchLimit,
   findExistingCategoryByName,
   findExistingCategory,
   findExistingBrand,
@@ -28,6 +29,7 @@ const {
   finishFetchBrandBatch,
   finishFetchProductBatch,
   finishFetchOrderBatch,
+  finishFetchLatestOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,
@@ -43,6 +45,7 @@ const {
   createFetchOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
+  formatFetchLatestOrderRemarks,
   logFetchOrderImported,
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
@@ -1580,6 +1583,115 @@ async function fetch_order(req, res, process) {
 }
 
 /**
+ * Poll newest Shopify orders (newest first) and import any not yet in POS.
+ * One execute-process call; process stays active for recurring cron runs.
+ * `limit` = how many recent store orders to check (default 20, max 100).
+ */
+async function fetch_latest_order(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildShopifyClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const perPage = resolveLatestOrderBatchLimit(process);
+
+  try {
+    const listResponse = await client.get({
+      path: "orders",
+      query: {
+        limit: perPage,
+        status: "any",
+        fields:
+          "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,subtotal_price,total_discounts,total_shipping_price_set,billing_address,customer",
+        order: "id desc",
+      },
+    });
+    const remoteOrders =
+      Array.isArray(listResponse?.body?.orders) ?
+        listResponse.body.orders
+      : [];
+    const stats = createFetchOrderStats();
+    const importCtx = { companyId, process, stats, req };
+
+    for (const remote of remoteOrders) {
+      try {
+        await importShopifyOrderToPos(remote, importCtx);
+      } catch (err) {
+        console.error(
+          `Failed to import Shopify order ${remote?.id}:`,
+          err?.message || err,
+        );
+        recordOrderSkip(stats, {
+          store: "shopify",
+          remote_id: remote?.id,
+          order_number: remote?.order_number,
+          reason: "import_error",
+          detail: err?.message || String(err),
+        }, importCtx);
+      }
+    }
+
+    const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
+      stats;
+    const fetched = remoteOrders.length;
+    const remarks = formatFetchLatestOrderRemarks({
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      limit: perPage,
+    });
+
+    return finishFetchLatestOrderBatch(req, res, process, {
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "Shopify latest order fetch failed:",
+      error?.response?.body || error?.response?.data || error?.message || error,
+    );
+    const errorPayload =
+      error?.response?.body ||
+      error?.response?.data ||
+      error?.message ||
+      "Failed to fetch latest orders from Shopify.";
+    const errorMessage =
+      typeof errorPayload === "string" ?
+        errorPayload
+      : errorPayload?.message || JSON.stringify(errorPayload);
+    await logFetchOrderBatchFailed(req, {
+      process,
+      companyId,
+      store: "shopify",
+      errorMessage,
+    });
+    return failFetchOrderBatch(process, res, errorPayload, errorPayload);
+  }
+}
+
+/**
  * Import products from Shopify into POS (batch). Store → POS.
  */
 async function fetch_product(req, res, process) {
@@ -1786,6 +1898,7 @@ module.exports = {
   fetch_category,
   fetch_brand,
   fetch_order,
+  fetch_latest_order,
   fetch_product,
   sync_product,
   sync_category,

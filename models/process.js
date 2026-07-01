@@ -40,6 +40,7 @@ const modelSchema = new mongoose.Schema(
         "delete_brand",
 
         "fetch_order",
+        "fetch_latest_order",
         "sync_order",
         "delete_order",
       ],

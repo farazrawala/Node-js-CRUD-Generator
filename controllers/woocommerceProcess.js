@@ -14,6 +14,7 @@ const {
   upsertSyncProductMapping,
   findPosProductBySyncReference,
   resolveBatchPagination,
+  resolveLatestOrderBatchLimit,
   findExistingCategory,
   findExistingBrand,
   findExistingProduct,
@@ -24,6 +25,7 @@ const {
   finishFetchBrandBatch,
   finishFetchProductBatch,
   finishFetchOrderBatch,
+  finishFetchLatestOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,
@@ -39,6 +41,7 @@ const {
   createFetchOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
+  formatFetchLatestOrderRemarks,
   logFetchOrderImported,
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
@@ -2102,6 +2105,108 @@ async function fetch_order(req, res, process) {
 }
 
 /**
+ * Poll newest WooCommerce orders (newest first) and import any not yet in POS.
+ * One execute-process call; process stays active for recurring cron runs.
+ * `limit` = how many recent store orders to check (default 20, max 100).
+ */
+async function fetch_latest_order(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateWooIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildWooCommerceClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const perPage = resolveLatestOrderBatchLimit(process);
+
+  try {
+    const response = await client.get("orders", {
+      page: 1,
+      per_page: perPage,
+      orderby: "id",
+      order: "desc",
+    });
+    const remoteOrders = Array.isArray(response?.data) ? response.data : [];
+    const stats = createFetchOrderStats();
+    const importCtx = { companyId, process, stats, req };
+
+    for (const remote of remoteOrders) {
+      try {
+        await importWooOrderToPos(remote, importCtx);
+      } catch (err) {
+        console.error(
+          `Failed to import WooCommerce order ${remote?.id}:`,
+          err?.message || err,
+        );
+        recordOrderSkip(stats, {
+          store: "woocommerce",
+          remote_id: remote?.id,
+          order_number: remote?.number,
+          reason: "import_error",
+          detail: err?.message || String(err),
+        }, importCtx);
+      }
+    }
+
+    const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
+      stats;
+    const fetched = remoteOrders.length;
+    const remarks = formatFetchLatestOrderRemarks({
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      limit: perPage,
+    });
+
+    return finishFetchLatestOrderBatch(req, res, process, {
+      fetched,
+      inserted,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "WooCommerce latest order fetch failed:",
+      error?.response?.data || error.message,
+    );
+    const errorMessage =
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to fetch latest orders from WooCommerce.";
+    await logFetchOrderBatchFailed(req, {
+      process,
+      companyId,
+      store: "woocommerce",
+      errorMessage,
+    });
+    return failFetchOrderBatch(
+      process,
+      res,
+      errorMessage,
+      error?.response?.data || error,
+    );
+  }
+}
+
+/**
  * Import products from WooCommerce into POS (batch). Store → POS.
  */
 async function fetch_product(req, res, process) {
@@ -2369,6 +2474,7 @@ module.exports = {
   fetch_category,
   fetch_brand,
   fetch_order,
+  fetch_latest_order,
   fetch_product,
   sync_product,
   sync_category,

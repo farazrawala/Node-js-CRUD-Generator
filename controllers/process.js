@@ -82,7 +82,7 @@ async function explainNoActiveProcess(req) {
   }
 
   hints.push(
-    "Use fetch_product / fetch_category / fetch_brand / fetch_order to import from the store; sync_* actions push one POS row to the store.",
+    "Use fetch_product / fetch_category / fetch_brand / fetch_order / fetch_latest_order to import from the store; sync_* actions push one POS row to the store.",
   );
 
   return {
@@ -232,6 +232,7 @@ const PROCESS_ACTIONS = new Set([
   "sync_brand",
   "delete_brand",
   "fetch_order",
+  "fetch_latest_order",
 ]);
 
 function normalizeBulkProcessRow(row, { companyId, createdBy }) {
@@ -246,7 +247,9 @@ function normalizeBulkProcessRow(row, { companyId, createdBy }) {
     count: Number(row.count) || 0,
     page: Number(row.page) || 1,
     offset: Number(row.offset) || 0,
-    limit: Number(row.limit) || 1,
+    limit:
+      Number(row.limit) ||
+      (String(row.action || "").trim() === "fetch_latest_order" ? 20 : 1),
     priority: Number(row.priority) || 100,
     remarks: row.remarks || "",
     hits: Number(row.hits) || 0,
@@ -278,7 +281,8 @@ function validateProcessRow(row) {
       row.action === "fetch_products" ||
       row.action === "fetch_product" ||
       row.action === "fetch_brand" ||
-      row.action === "fetch_order") &&
+      row.action === "fetch_order" ||
+      row.action === "fetch_latest_order") &&
     !row.integration_id
   ) {
     return "integration_id is required for fetch actions.";
@@ -574,6 +578,12 @@ async function runProcessAction(req, res, process) {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_order,
         shopify: shopifyProcess.fetch_order,
+      });
+    }
+    case "fetch_latest_order": {
+      return dispatchByStoreType(req, res, process, {
+        woocommerce: woocommerceProcess.fetch_latest_order,
+        shopify: shopifyProcess.fetch_latest_order,
       });
     }
 
