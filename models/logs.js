@@ -123,10 +123,6 @@ const modelSchema = new mongoose.Schema(
         message: `At most ${MAX_TAGS} tags`,
       },
     },
-    human_readable_description: {
-      type: String,
-      field_name: "Human Readable Description",
-    },
     description: {
       type: String,
       maxlength: MAX_DESCRIPTION_LEN,

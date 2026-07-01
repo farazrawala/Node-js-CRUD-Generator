@@ -328,11 +328,12 @@ async function resolvePosProductForRemoteLine({
   return null;
 }
 
+/** WooCommerce `status` → POS `order_status` (see ORDER_STATUS_VALUES in models/order.js). */
 function mapWooOrderStatus(status) {
   const map = {
-    pending: "pending",
-    processing: "confirmed",
-    "on-hold": "pending",
+    pending: "pending_payment",
+    processing: "processing",
+    "on-hold": "on_hold",
     completed: "completed",
     cancelled: "cancelled",
     refunded: "refunded",
