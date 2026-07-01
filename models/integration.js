@@ -61,6 +61,49 @@ const modelSchema = new mongoose.Schema(
       field_type: "image",
     },
 
+    sync_product_name: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product name",
+      field_type: "select",
+    },
+    sync_product_slug: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product slug",
+      field_type: "select",
+    },
+    sync_product_image: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product image",
+      field_type: "select",
+    },
+    sync_product_price: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product price",
+      field_type: "select",
+    },
+    sync_product_description: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product description",
+      field_type: "select",
+    },
+    sync_product_status: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product status",
+      field_type: "select",
+    },
+
     // default fields
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
