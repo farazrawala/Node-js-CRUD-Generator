@@ -137,12 +137,19 @@ async function upsertSyncBrandMapping({
 }
 
 /** Map POS product ↔ store product (website id in refference_id). */
+function normalizeSyncProductType(value) {
+  return String(value ?? "").trim().toLowerCase() === "variable" ?
+      "Variable"
+    : "Single";
+}
+
 async function upsertSyncProductMapping({
   productId,
   integrationId,
   companyId,
   referenceId,
   createdBy,
+  productType,
 }) {
   const product_id = coalesceObjectId(productId);
   const integration_id = coalesceObjectId(integrationId);
@@ -152,6 +159,17 @@ async function upsertSyncProductMapping({
   if (!product_id || !integration_id || !company_id || !refference_id) {
     return null;
   }
+
+  // Fall back to the POS product's own type when the caller doesn't supply one,
+  // so the mapping row always reflects the current product_type.
+  let resolvedType = productType;
+  if (resolvedType == null) {
+    const productDoc = await Product.findById(product_id)
+      .select("product_type")
+      .lean();
+    resolvedType = productDoc?.product_type;
+  }
+  const product_type = normalizeSyncProductType(resolvedType);
 
   const actor = coalesceObjectId(createdBy);
   const filter = {
@@ -163,13 +181,17 @@ async function upsertSyncProductMapping({
 
   const existing = await SyncProduct.findOne(filter).lean();
   if (existing) {
-    if (String(existing.refference_id) === refference_id) {
+    if (
+      String(existing.refference_id) === refference_id &&
+      existing.product_type === product_type
+    ) {
       return existing;
     }
     return SyncProduct.findByIdAndUpdate(
       existing._id,
       {
         refference_id,
+        product_type,
         status: "active",
         updated_by: actor,
       },
@@ -182,6 +204,7 @@ async function upsertSyncProductMapping({
     integration_id,
     company_id,
     refference_id,
+    product_type,
     status: "active",
     created_by: actor,
   });

@@ -6,6 +6,8 @@ const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
 const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
+const Attribute = require("../models/attribute");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const {
   categorySlugFromName,
   resolveCompanyId,
@@ -51,8 +53,50 @@ const {
   resolvePosProductSku,
   buildWooCommerceProductSyncPayload,
   buildWooCommerceVariationSyncPayload,
+  buildWooVariableAttributePlan,
+  parsePosVariationValues,
   hasSyncPayloadFields,
 } = require("../utils/integrationProductSync");
+
+/**
+ * Sum active warehouse_inventory on-hand quantity per product. Mirrors how POS
+ * computes displayed stock (status active, not soft-deleted, scoped to company).
+ * @returns {Promise<Map<string, number>>} productId (string) -> total quantity
+ */
+async function resolveProductStockTotals(productIds, companyId) {
+  const ids = (Array.isArray(productIds) ? productIds : [])
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
+  if (!ids.length) {
+    return new Map();
+  }
+
+  const matchFilter = {
+    product_id: { $in: ids },
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+  const scopedCompanyId = coalesceObjectId(companyId);
+  if (scopedCompanyId) {
+    matchFilter.company_id = scopedCompanyId;
+  }
+
+  try {
+    const grouped = await WarehouseInventory.aggregate([
+      { $match: matchFilter },
+      { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
+    ]);
+    return new Map(
+      grouped.map((row) => [String(row._id), Number(row.total) || 0]),
+    );
+  } catch (error) {
+    console.warn(
+      "Failed to aggregate warehouse inventory for WooCommerce sync:",
+      error?.message,
+    );
+    return new Map();
+  }
+}
 
 async function recordBrandSyncMapping(
   process,
@@ -437,6 +481,50 @@ async function recordProductSyncMapping(
     );
     return null;
   }
+}
+
+/**
+ * Map a POS product's category_id[] to WooCommerce category refs [{ id }]
+ * using the sync_category mappings for this integration/company.
+ */
+async function resolveWooCategoryRefsForProduct(product, integrationId, companyId) {
+  const categoryIds = Array.isArray(product?.category_id) ?
+    product.category_id
+    : [];
+  if (!categoryIds.length) {
+    return [];
+  }
+
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+  if (!integration_id || !company_id) {
+    return [];
+  }
+
+  const normalizedIds = categoryIds
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
+  if (!normalizedIds.length) {
+    return [];
+  }
+
+  const rows = await SyncCategory.find({
+    category_id: { $in: normalizedIds },
+    integration_id,
+    company_id,
+    deletedAt: null,
+  }).lean();
+
+  const seen = new Set();
+  const refs = [];
+  for (const row of rows) {
+    const wooId = Number(row.refference_id);
+    if (Number.isFinite(wooId) && wooId > 0 && !seen.has(wooId)) {
+      seen.add(wooId);
+      refs.push({ id: wooId });
+    }
+  }
+  return refs;
 }
 
 async function findPosProductForWooImport({
@@ -1677,12 +1765,27 @@ async function syncWooSimpleProductToStore(
     }
   }
 
+  const categoryRefs = await resolveWooCategoryRefsForProduct(
+    product,
+    integrationId,
+    companyId,
+  );
+
+  const productStockTotals = await resolveProductStockTotals(
+    [productId],
+    companyId,
+  );
+  const stockQuantity = productStockTotals.get(String(productId)) ?? 0;
+
   if (remoteProduct && remoteId) {
     const updatePayload = buildWooCommerceProductSyncPayload(
       product,
       integration,
-      { mode: "update" },
+      { mode: "update", stockQuantity },
     );
+    if (categoryRefs.length) {
+      updatePayload.categories = categoryRefs;
+    }
 
     if (!hasSyncPayloadFields(updatePayload)) {
       await recordProductSyncMapping(process, companyId, productId, remoteId);
@@ -1722,10 +1825,14 @@ async function syncWooSimpleProductToStore(
     sku,
     ...buildWooCommerceProductSyncPayload(product, integration, {
       mode: "create",
+      stockQuantity,
     }),
   };
   if (!createPayload.name) {
     createPayload.name = product.product_name || sku;
+  }
+  if (categoryRefs.length) {
+    createPayload.categories = categoryRefs;
   }
 
   const createdProductResponse = await client.post("products", createPayload);
@@ -1883,6 +1990,85 @@ async function findWooVariationRemoteId({
   return null;
 }
 
+/**
+ * Resolve the attribute name for each label position (e.g. position 0 -> "Size",
+ * position 1 -> "Colors") by matching the full set of values seen at that
+ * position against the company's saved attribute definitions. Matching the whole
+ * value-set (rather than a single value) avoids mis-classifying values that
+ * appear under multiple attributes. Positions with no confident match resolve to
+ * null so the plan falls back to a generic "Attribute N" name.
+ */
+async function resolveWooAttributePositionNames(children, parentSku, companyId) {
+  const valueRows = (Array.isArray(children) ? children : []).map((child) =>
+    parsePosVariationValues(child, parentSku),
+  );
+  const positionCount = valueRows.reduce(
+    (max, values) => Math.max(max, values.length),
+    0,
+  );
+  if (!positionCount) {
+    return [];
+  }
+
+  const valueSetsByPosition = [];
+  for (let i = 0; i < positionCount; i += 1) {
+    const set = new Set();
+    for (const values of valueRows) {
+      if (values[i]) {
+        set.add(values[i].toLowerCase());
+      }
+    }
+    valueSetsByPosition.push(set);
+  }
+
+  let attributeDefs = [];
+  try {
+    const attributes = await Attribute.find({
+      company_id: companyId,
+      deletedAt: null,
+    }).lean();
+    attributeDefs = attributes.map((attr) => ({
+      name: attr?.name,
+      values: new Set(
+        (attr?.attribute_values || [])
+          .map((value) => String(value?.name || "").trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    }));
+  } catch (error) {
+    console.warn(
+      "Failed to load attribute definitions for WooCommerce sync:",
+      error?.message,
+    );
+    attributeDefs = [];
+  }
+
+  return valueSetsByPosition.map((valueSet) => {
+    const values = [...valueSet];
+    if (!values.length) {
+      return null;
+    }
+    let bestName = null;
+    let bestScore = -1;
+    for (const def of attributeDefs) {
+      if (!def.name || !def.values.size) {
+        continue;
+      }
+      const covered = values.filter((value) => def.values.has(value)).length;
+      if (covered !== values.length) {
+        continue;
+      }
+      // Prefer the tightest matching attribute (fewest unrelated options).
+      const score = 1000 - (def.values.size - covered);
+      if (score > bestScore) {
+        bestScore = score;
+        bestName = def.name;
+      }
+    }
+    return bestName;
+  });
+}
+
 async function syncWooVariationChildToStore({
   client,
   integration,
@@ -1893,6 +2079,8 @@ async function syncWooVariationChildToStore({
   parentSku,
   childProduct,
   childSyncRow,
+  variationAttributes,
+  stockQuantity,
   stats,
 }) {
   const childId = coalesceObjectId(childProduct._id);
@@ -1910,7 +2098,7 @@ async function syncWooVariationChildToStore({
       integration,
       remoteParent,
       parentSku,
-      { mode: "update" },
+      { mode: "update", variationAttributes, stockQuantity },
     );
 
     if (!hasSyncPayloadFields(updatePayload)) {
@@ -1943,7 +2131,7 @@ async function syncWooVariationChildToStore({
     integration,
     remoteParent,
     parentSku,
-    { mode: "create" },
+    { mode: "create", variationAttributes, stockQuantity },
   );
   if (!hasSyncPayloadFields(createPayload)) {
     stats.variations_skipped += 1;
@@ -1984,6 +2172,19 @@ async function syncWooVariableProductToStore(
 
   const children = await loadPosVariationChildren(parentId, companyId);
   const childIds = children.map((row) => coalesceObjectId(row._id)).filter(Boolean);
+
+  const positionNames = await resolveWooAttributePositionNames(
+    children,
+    parentSku,
+    companyId,
+  );
+  const { parentAttributes, childAttributesById } = buildWooVariableAttributePlan(
+    children,
+    parentSku,
+    positionNames,
+  );
+
+  const childStockTotals = await resolveProductStockTotals(childIds, companyId);
 
   const syncRows = await SyncProduct.find({
     integration_id: integrationId,
@@ -2030,6 +2231,12 @@ async function syncWooVariableProductToStore(
     }
   }
 
+  const parentCategoryRefs = await resolveWooCategoryRefsForProduct(
+    parentProduct,
+    integrationId,
+    companyId,
+  );
+
   if (remoteParent && wooParentId) {
     const updatePayload = {
       type: "variable",
@@ -2037,6 +2244,12 @@ async function syncWooVariableProductToStore(
         mode: "update",
       }),
     };
+    if (parentCategoryRefs.length) {
+      updatePayload.categories = parentCategoryRefs;
+    }
+    if (parentAttributes.length) {
+      updatePayload.attributes = parentAttributes;
+    }
     if (hasSyncPayloadFields(updatePayload)) {
       const updated = await client.put(`products/${wooParentId}`, updatePayload);
       remoteParent = updated?.data || remoteParent;
@@ -2052,6 +2265,12 @@ async function syncWooVariableProductToStore(
     };
     if (!createPayload.name) {
       createPayload.name = parentProduct.product_name || parentSku;
+    }
+    if (parentCategoryRefs.length) {
+      createPayload.categories = parentCategoryRefs;
+    }
+    if (parentAttributes.length) {
+      createPayload.attributes = parentAttributes;
     }
     const created = await client.post("products", createPayload);
     remoteParent = created?.data || null;
@@ -2075,6 +2294,8 @@ async function syncWooVariableProductToStore(
         parentSku,
         childProduct: child,
         childSyncRow: childSyncByProductId.get(String(child._id)) || null,
+        variationAttributes: childAttributesById.get(String(child._id)) || [],
+        stockQuantity: childStockTotals.get(String(child._id)) ?? 0,
         stats,
       });
     } catch (error) {

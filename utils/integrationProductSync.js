@@ -102,6 +102,8 @@ function buildWooCommerceProductSyncPayload(product, integration, options = {}) 
     payload.weight = String(product.weight);
   }
 
+  applyWooStockToPayload(payload, integration, options.stockQuantity, mode);
+
   return payload;
 }
 
@@ -181,6 +183,35 @@ function hasSyncPayloadFields(payload) {
   return payload && typeof payload === "object" && Object.keys(payload).length > 0;
 }
 
+/**
+ * Build WooCommerce stock fields from a POS on-hand quantity. Returns null when
+ * the quantity isn't a finite number (so callers can skip stock entirely).
+ */
+function buildWooStockPayloadFields(quantity) {
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty)) {
+    return null;
+  }
+  return {
+    manage_stock: true,
+    stock_quantity: qty,
+    stock_status: qty > 0 ? "instock" : "outofstock",
+  };
+}
+
+function applyWooStockToPayload(payload, integration, quantity, mode) {
+  const allowStock =
+    mode === "create" ||
+    isIntegrationSyncEnabled(integration, "sync_product_stock");
+  if (!allowStock) {
+    return;
+  }
+  const stockFields = buildWooStockPayloadFields(quantity);
+  if (stockFields) {
+    Object.assign(payload, stockFields);
+  }
+}
+
 function parsePosVariationLabel(child, parentSku) {
   const name = String(child?.product_name || "");
   const bracket = name.match(/\[([^\]]+)\]\s*$/);
@@ -195,6 +226,85 @@ function parsePosVariationLabel(child, parentSku) {
   }
 
   return "";
+}
+
+/**
+ * Split a POS variation label into its positional attribute values.
+ * POS builds labels like "large - Red" (UI) or "NAVY-L" (WooCommerce import).
+ * Prefer the spaced " - " separator when present so multi-word / dashed values
+ * (e.g. "extra-large") stay intact; otherwise fall back to a plain "-".
+ */
+function parsePosVariationValues(child, parentSku) {
+  const label = parsePosVariationLabel(child, parentSku);
+  if (!label) {
+    return [];
+  }
+  const parts =
+    label.includes(" - ") ? label.split(" - ") : label.split("-");
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
+/**
+ * Build the attribute plan for a variable product from its POS children.
+ *
+ * POS does not persist structured attribute data on products/variations — the
+ * only signal is the positional values embedded in each child name. This derives
+ * the parent-level `attributes` array (with `variation: true`) that WooCommerce
+ * needs to render variation dropdowns, plus the per-child attribute selections.
+ *
+ * @param {Array} children POS variation child products.
+ * @param {string} parentSku Parent SKU used as a label fallback.
+ * @param {Array<string|null>} positionNames Resolved attribute name per position
+ *   (e.g. ["Size", "Colors"]). Missing entries fall back to "Attribute N".
+ */
+function buildWooVariableAttributePlan(children, parentSku, positionNames = []) {
+  const rows = (Array.isArray(children) ? children : []).map((child) => ({
+    child,
+    values: parsePosVariationValues(child, parentSku),
+  }));
+
+  const positionCount = rows.reduce(
+    (max, row) => Math.max(max, row.values.length),
+    0,
+  );
+
+  const names = [];
+  const optionsByPosition = [];
+  const seenByPosition = [];
+  for (let i = 0; i < positionCount; i += 1) {
+    const resolved = positionNames?.[i] && String(positionNames[i]).trim();
+    names[i] = resolved || `Attribute ${i + 1}`;
+    optionsByPosition[i] = [];
+    seenByPosition[i] = new Set();
+  }
+
+  for (const row of rows) {
+    row.values.forEach((value, i) => {
+      const key = value.toLowerCase();
+      if (!seenByPosition[i].has(key)) {
+        seenByPosition[i].add(key);
+        optionsByPosition[i].push(value);
+      }
+    });
+  }
+
+  const parentAttributes = names.map((name, i) => ({
+    name,
+    position: i,
+    visible: true,
+    variation: true,
+    options: optionsByPosition[i],
+  }));
+
+  const childAttributesById = new Map();
+  for (const row of rows) {
+    const attrs = row.values
+      .map((value, i) => ({ name: names[i], option: value }))
+      .filter((attr) => attr.name && attr.option);
+    childAttributesById.set(String(row.child?._id), attrs);
+  }
+
+  return { parentAttributes, childAttributesById };
 }
 
 function mapLabelToWooVariationAttributes(label, remoteParentAttributes) {
@@ -280,13 +390,26 @@ function buildWooCommerceVariationSyncPayload(
     payload.weight = String(child.weight);
   }
 
-  const label = parsePosVariationLabel(child, parentSku);
-  const variationAttributes = mapLabelToWooVariationAttributes(
-    label,
-    remoteParent?.attributes,
-  );
-  if (variationAttributes.length) {
-    payload.attributes = variationAttributes;
+  applyWooStockToPayload(payload, integration, options.stockQuantity, mode);
+
+  // Prefer attributes derived from the POS attribute plan (works even when the
+  // WooCommerce parent has no attributes yet); fall back to matching the label
+  // against the remote parent's existing attributes.
+  const planAttributes =
+    Array.isArray(options.variationAttributes) ?
+      options.variationAttributes.filter((attr) => attr?.name && attr?.option)
+    : [];
+  if (planAttributes.length) {
+    payload.attributes = planAttributes;
+  } else {
+    const label = parsePosVariationLabel(child, parentSku);
+    const variationAttributes = mapLabelToWooVariationAttributes(
+      label,
+      remoteParent?.attributes,
+    );
+    if (variationAttributes.length) {
+      payload.attributes = variationAttributes;
+    }
   }
 
   return payload;
@@ -302,6 +425,9 @@ module.exports = {
   buildShopifyProductSyncPayload,
   buildShopifyVariantSyncPayload,
   hasSyncPayloadFields,
+  buildWooStockPayloadFields,
   parsePosVariationLabel,
+  parsePosVariationValues,
+  buildWooVariableAttributePlan,
   mapLabelToWooVariationAttributes,
 };

@@ -18,6 +18,12 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Refference ID",
     },
+    product_type: {
+      type: String,
+      enum: ["Single", "Variable"],
+      default: "Single",
+      field_name: "Product Type",
+    },
     company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",
