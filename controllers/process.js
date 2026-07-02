@@ -225,10 +225,10 @@ const PROCESS_ACTIONS = new Set([
   // "delete_product",
   "fetch_category",
   "sync_category",
-  "delete_category",
+  // "delete_category",
   "fetch_brand",
   "sync_brand",
-  "delete_brand",
+  // "delete_brand",
   "fetch_order",
   "fetch_latest_order",
 ]);

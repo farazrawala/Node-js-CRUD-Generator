@@ -1145,6 +1145,30 @@ async function productUpdateVariation(req, res) {
   }
 
   await invalidateProductListCache(req);
+
+  try {
+    const queueResult = await enqueueProductWebsiteSyncJobs({
+      productId: tracker.parentProductId || req.params?.id,
+      companyId: tracker.companyId || req.user?.company_id,
+      createdBy: req.user?._id,
+    });
+    if (queueResult.count > 0) {
+      result.payload = {
+        ...result.payload,
+        sync_queue: {
+          queued: queueResult.count,
+          process_ids: queueResult.created.map((row) => row._id),
+          sync_target_product_id: queueResult.sync_target_product_id,
+        },
+      };
+    }
+  } catch (queueErr) {
+    console.warn(
+      "enqueueProductWebsiteSyncJobs failed:",
+      queueErr?.message || queueErr,
+    );
+  }
+
   return res.status(result?.status || 200).json(result.payload);
 }
 
@@ -1204,7 +1228,8 @@ function productImportFormSchema(req, res) {
       qty: 85,
     },
     options: {
-      update_existing: "true|false — update price/category if product exists (default true)",
+      update_existing:
+        "true|false — update price/category if product exists (default true)",
       dry_run: "true|false — parse only (default false)",
       add_stock_via_purchase:
         "true|false — after import, create one PO for rows with qty > 0 (default true)",
@@ -1253,8 +1278,7 @@ async function productImportFromFile(req, res) {
       )
         .trim()
         .toLowerCase() !== "false";
-    const defaultQtyRaw =
-      req.query?.default_qty ?? req.body?.default_qty ?? 0;
+    const defaultQtyRaw = req.query?.default_qty ?? req.body?.default_qty ?? 0;
     const defaultQty = Math.max(0, Number(defaultQtyRaw) || 0);
     const warehouseId = coalesceObjectId(
       req.body?.warehouse_id || req.query?.warehouse_id,
@@ -1319,18 +1343,15 @@ async function productImportFromFile(req, res) {
     const statusCode =
       !dryRun && result.summary?.failed > 0 && result.summary?.created === 0 ?
         400
-      : !dryRun && result.summary?.failed > 0 ?
-        207
+      : !dryRun && result.summary?.failed > 0 ? 207
       : 200;
 
     const poInfo = result.purchase_order;
     const poMsg =
       poInfo?.success ?
         ` PO ${poInfo.purchase_order_no || ""} created (${poInfo.line_count} lines).`
-      : poInfo?.skipped ?
-        ""
-      : poInfo ?
-        ` Stock PO failed: ${poInfo.message || "unknown"}.`
+      : poInfo?.skipped ? ""
+      : poInfo ? ` Stock PO failed: ${poInfo.message || "unknown"}.`
       : "";
 
     return res.status(statusCode).json({
@@ -1371,7 +1392,8 @@ function productBarcodeUpdateFormSchema(req, res) {
       barcode: "4369179812026",
     },
     options: {
-      dry_run: "true|false — parse + match only, persist nothing (default false)",
+      dry_run:
+        "true|false — parse + match only, persist nothing (default false)",
       overwrite_existing:
         "true|false — update even when the product already has a different barcode (default true)",
     },
@@ -1406,9 +1428,7 @@ async function productBarcodeUpdateFromFile(req, res) {
         .toLowerCase() === "true";
     const overwriteExisting =
       String(
-        req.query?.overwrite_existing ??
-          req.body?.overwrite_existing ??
-          "true",
+        req.query?.overwrite_existing ?? req.body?.overwrite_existing ?? "true",
       )
         .trim()
         .toLowerCase() !== "false";
@@ -1426,8 +1446,12 @@ async function productBarcodeUpdateFromFile(req, res) {
       const header = "product_name,barcode\n";
       const lines = req.body.items.map((row) =>
         [
-          `"${String(row.product_name || row.name || "").replace(/"/g, '""').trim()}"`,
-          `"${String(row.barcode ?? row.code ?? "").replace(/"/g, '""').trim()}"`,
+          `"${String(row.product_name || row.name || "")
+            .replace(/"/g, '""')
+            .trim()}"`,
+          `"${String(row.barcode ?? row.code ?? "")
+            .replace(/"/g, '""')
+            .trim()}"`,
         ].join(","),
       );
       text = header + lines.join("\n");
@@ -1455,8 +1479,7 @@ async function productBarcodeUpdateFromFile(req, res) {
     const statusCode =
       !dryRun && result.summary?.failed > 0 && result.summary?.updated === 0 ?
         400
-      : !dryRun && result.summary?.failed > 0 ?
-        207
+      : !dryRun && result.summary?.failed > 0 ? 207
       : 200;
 
     return res.status(statusCode).json({
@@ -1640,8 +1663,7 @@ async function getAllProducts(req, res) {
   return runCachedListHandler(req, res, {
     module: PRODUCT_LIST_CACHE_MODULE,
     action: "get-all",
-    fetch: () =>
-      fetchParentProductList(req, buildParentProductListFilter(req)),
+    fetch: () => fetchParentProductList(req, buildParentProductListFilter(req)),
   });
 }
 
@@ -2120,22 +2142,12 @@ async function productCostUpdate(req, res) {
 
 async function getAllActiveProductsPOS(req, res) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
-  const searchTerm =
-    req.query.search != null ? String(req.query.search).trim() : "";
 
   const filter = {
     deletedAt: null,
+    status: "active",
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
-
-  // Catalog grid: parent/single rows only. Search/scan: include variations (barcode often on child SKU).
-  if (!searchTerm) {
-    filter.$or = [
-      { $expr: { $eq: ["$_id", "$parent_product_id"] } },
-      { parent_product_id: null },
-      { parent_product_id: { $exists: false } },
-    ];
-  }
 
   const rawCategory = req.query.category_id ?? req.query.categoryId;
   if (rawCategory != null && String(rawCategory).trim() !== "") {

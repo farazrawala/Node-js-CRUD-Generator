@@ -50,6 +50,7 @@ const {
 const {
   resolvePosProductSku,
   buildWooCommerceProductSyncPayload,
+  buildWooCommerceVariationSyncPayload,
   hasSyncPayloadFields,
 } = require("../utils/integrationProductSync");
 
@@ -1624,6 +1625,494 @@ async function fetch_category(req, res, process) {
 }
 
 /**
+ * Push one POS simple product to WooCommerce.
+ */
+async function syncWooSimpleProductToStore(
+  req,
+  res,
+  process,
+  { client, integration, product, companyId, integrationId },
+) {
+  const sku = resolvePosProductSku(product);
+  const productId = coalesceObjectId(product._id);
+
+  const syncRow = await SyncProduct.findOne({
+    product_id: productId,
+    integration_id: integrationId,
+    company_id: companyId,
+    deletedAt: null,
+  }).lean();
+
+  const productType =
+    (
+      typeof product.product_type === "string" &&
+      product.product_type.toLowerCase() === "variable"
+    ) ?
+      "variable"
+    : "simple";
+
+  let remoteProduct = null;
+  let remoteId = resolveWooParentReferenceId(syncRow?.refference_id);
+
+  if (remoteId) {
+    try {
+      const byId = await client.get(`products/${remoteId}`);
+      remoteProduct = byId?.data || null;
+    } catch (fetchErr) {
+      console.warn(
+        `WooCommerce product ${remoteId} not found; will try SKU lookup:`,
+        fetchErr?.response?.data?.message || fetchErr?.message,
+      );
+      remoteId = null;
+    }
+  }
+
+  if (!remoteProduct) {
+    const existingResponse = await client.get("products", { sku });
+    const existingProducts =
+      Array.isArray(existingResponse?.data) ? existingResponse.data : [];
+    if (existingProducts.length > 0) {
+      remoteProduct = existingProducts[0];
+      remoteId = String(remoteProduct.id);
+    }
+  }
+
+  if (remoteProduct && remoteId) {
+    const updatePayload = buildWooCommerceProductSyncPayload(
+      product,
+      integration,
+      { mode: "update" },
+    );
+
+    if (!hasSyncPayloadFields(updatePayload)) {
+      await recordProductSyncMapping(process, companyId, productId, remoteId);
+      await markProcessOutcome(
+        process._id,
+        "completed",
+        `Product Name : ${product.product_name} — no WooCommerce fields enabled for update.`,
+      );
+      return res.status(200).json({
+        success: true,
+        data: remoteProduct,
+        message: `Product Name : ${product.product_name} — sync mapping kept; no fields enabled.`,
+      });
+    }
+
+    const updatedResponse = await client.put(
+      `products/${remoteId}`,
+      updatePayload,
+    );
+    await recordProductSyncMapping(process, companyId, productId, remoteId);
+
+    await markProcessOutcome(
+      process._id,
+      "completed",
+      `Product Name : ${product.product_name} updated on WooCommerce.`,
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: updatedResponse?.data,
+      message: `Product Name : ${product.product_name} updated on WooCommerce.`,
+    });
+  }
+
+  const createPayload = {
+    type: productType,
+    sku,
+    ...buildWooCommerceProductSyncPayload(product, integration, {
+      mode: "create",
+    }),
+  };
+  if (!createPayload.name) {
+    createPayload.name = product.product_name || sku;
+  }
+
+  const createdProductResponse = await client.post("products", createPayload);
+  const createdId = createdProductResponse?.data?.id;
+  await recordProductSyncMapping(process, companyId, productId, createdId);
+
+  await markProcessOutcome(
+    process._id,
+    "completed",
+    `Product Name : ${product.product_name} created on WooCommerce.`,
+  );
+
+  return res.status(201).json({
+    success: true,
+    data: createdProductResponse?.data,
+    message: `Product Name : ${product.product_name} synced to WooCommerce successfully.`,
+  });
+}
+
+function parseWooSyncReference(referenceId) {
+  const raw = String(referenceId || "").trim();
+  if (!raw) {
+    return { parentId: null, variationId: null };
+  }
+  if (raw.includes(":")) {
+    const [parentId, variationId] = raw.split(":");
+    return {
+      parentId: String(parentId || "").trim() || null,
+      variationId: String(variationId || "").trim() || null,
+    };
+  }
+  return { parentId: raw, variationId: null };
+}
+
+function resolveWooParentReferenceId(referenceId) {
+  return parseWooSyncReference(referenceId).parentId;
+}
+
+async function resolveWooSyncRootProduct(product, companyId) {
+  const productId = coalesceObjectId(product?._id);
+  if (!productId) {
+    return { rootProduct: product, editedProduct: product };
+  }
+
+  if (
+    typeof product?.product_type === "string" &&
+    product.product_type.toLowerCase() === "variable"
+  ) {
+    return { rootProduct: product, editedProduct: product };
+  }
+
+  const parentId = coalesceObjectId(product?.parent_product_id);
+  if (!parentId || String(parentId) === String(productId)) {
+    return { rootProduct: product, editedProduct: product };
+  }
+
+  const parent = await Product.findOne({
+    _id: parentId,
+    company_id: companyId,
+    deletedAt: null,
+  }).lean();
+
+  if (
+    parent &&
+    typeof parent.product_type === "string" &&
+    parent.product_type.toLowerCase() === "variable"
+  ) {
+    return { rootProduct: parent, editedProduct: product };
+  }
+
+  return { rootProduct: product, editedProduct: product };
+}
+
+async function loadPosVariationChildren(parentProductId, companyId) {
+  const parentId = coalesceObjectId(parentProductId);
+  if (!parentId) {
+    return [];
+  }
+
+  return Product.find({
+    company_id: companyId,
+    parent_product_id: parentId,
+    deletedAt: null,
+    product_type: "Single",
+    _id: { $ne: parentId },
+  })
+    .sort({ product_name: 1 })
+    .lean();
+}
+
+async function resolveWooParentRemoteId({
+  client,
+  parentProduct,
+  parentSyncRow,
+  childSyncRows,
+}) {
+  let remoteId = resolveWooParentReferenceId(parentSyncRow?.refference_id);
+  if (remoteId) {
+    return remoteId;
+  }
+
+  for (const row of childSyncRows) {
+    remoteId = parseWooSyncReference(row?.refference_id).parentId;
+    if (remoteId) {
+      return remoteId;
+    }
+  }
+
+  const parentSku = resolvePosProductSku(parentProduct);
+  if (parentSku) {
+    const existingResponse = await client.get("products", { sku: parentSku });
+    const existingProducts =
+      Array.isArray(existingResponse?.data) ? existingResponse.data : [];
+    if (existingProducts[0]?.id != null) {
+      return String(existingProducts[0].id);
+    }
+  }
+
+  return null;
+}
+
+async function findWooVariationRemoteId({
+  client,
+  wooParentId,
+  childProduct,
+  childSyncRow,
+  parentSku,
+}) {
+  const fromSync = parseWooSyncReference(childSyncRow?.refference_id).variationId;
+  if (fromSync) {
+    return fromSync;
+  }
+
+  const childSku = resolvePosProductSku(childProduct);
+  if (!childSku) {
+    return null;
+  }
+
+  try {
+    const response = await client.get(`products/${wooParentId}/variations`, {
+      sku: childSku,
+      per_page: 100,
+    });
+    const matches = Array.isArray(response?.data) ? response.data : [];
+    if (matches[0]?.id != null) {
+      return String(matches[0].id);
+    }
+  } catch (error) {
+    console.warn(
+      `WooCommerce variation SKU lookup failed for ${childSku}:`,
+      error?.response?.data || error.message,
+    );
+  }
+
+  return null;
+}
+
+async function syncWooVariationChildToStore({
+  client,
+  integration,
+  companyId,
+  process,
+  wooParentId,
+  remoteParent,
+  parentSku,
+  childProduct,
+  childSyncRow,
+  stats,
+}) {
+  const childId = coalesceObjectId(childProduct._id);
+  const remoteVariationId = await findWooVariationRemoteId({
+    client,
+    wooParentId,
+    childProduct,
+    childSyncRow,
+    parentSku,
+  });
+
+  if (remoteVariationId) {
+    const updatePayload = buildWooCommerceVariationSyncPayload(
+      childProduct,
+      integration,
+      remoteParent,
+      parentSku,
+      { mode: "update" },
+    );
+
+    if (!hasSyncPayloadFields(updatePayload)) {
+      await recordProductSyncMapping(
+        process,
+        companyId,
+        childId,
+        `${wooParentId}:${remoteVariationId}`,
+      );
+      stats.variations_skipped += 1;
+      return;
+    }
+
+    await client.put(
+      `products/${wooParentId}/variations/${remoteVariationId}`,
+      updatePayload,
+    );
+    await recordProductSyncMapping(
+      process,
+      companyId,
+      childId,
+      `${wooParentId}:${remoteVariationId}`,
+    );
+    stats.variations_updated += 1;
+    return;
+  }
+
+  const createPayload = buildWooCommerceVariationSyncPayload(
+    childProduct,
+    integration,
+    remoteParent,
+    parentSku,
+    { mode: "create" },
+  );
+  if (!hasSyncPayloadFields(createPayload)) {
+    stats.variations_skipped += 1;
+    return;
+  }
+
+  const created = await client.post(
+    `products/${wooParentId}/variations`,
+    createPayload,
+  );
+  const createdVariationId = created?.data?.id;
+  if (createdVariationId != null) {
+    await recordProductSyncMapping(
+      process,
+      companyId,
+      childId,
+      `${wooParentId}:${createdVariationId}`,
+    );
+    stats.variations_created += 1;
+  }
+}
+
+async function syncWooVariableProductToStore(
+  req,
+  res,
+  process,
+  { client, integration, parentProduct, companyId, integrationId },
+) {
+  const parentId = coalesceObjectId(parentProduct._id);
+  const parentSku = resolvePosProductSku(parentProduct);
+  if (!parentSku) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Parent product SKU or identifier is required to sync with WooCommerce.",
+    });
+  }
+
+  const children = await loadPosVariationChildren(parentId, companyId);
+  const childIds = children.map((row) => coalesceObjectId(row._id)).filter(Boolean);
+
+  const syncRows = await SyncProduct.find({
+    integration_id: integrationId,
+    company_id: companyId,
+    deletedAt: null,
+    product_id: { $in: [parentId, ...childIds] },
+  }).lean();
+
+  const parentSyncRow = syncRows.find(
+    (row) => String(row.product_id) === String(parentId),
+  );
+  const childSyncByProductId = new Map(
+    syncRows
+      .filter((row) => String(row.product_id) !== String(parentId))
+      .map((row) => [String(row.product_id), row]),
+  );
+
+  const stats = {
+    variations_updated: 0,
+    variations_created: 0,
+    variations_skipped: 0,
+  };
+
+  let wooParentId = await resolveWooParentRemoteId({
+    client,
+    parentProduct,
+    parentSyncRow,
+    childSyncRows: syncRows.filter(
+      (row) => String(row.product_id) !== String(parentId),
+    ),
+  });
+
+  let remoteParent = null;
+  if (wooParentId) {
+    try {
+      const response = await client.get(`products/${wooParentId}`);
+      remoteParent = response?.data || null;
+    } catch (error) {
+      console.warn(
+        `WooCommerce parent ${wooParentId} not found; will recreate:`,
+        error?.response?.data?.message || error.message,
+      );
+      wooParentId = null;
+    }
+  }
+
+  if (remoteParent && wooParentId) {
+    const updatePayload = {
+      type: "variable",
+      ...buildWooCommerceProductSyncPayload(parentProduct, integration, {
+        mode: "update",
+      }),
+    };
+    if (hasSyncPayloadFields(updatePayload)) {
+      const updated = await client.put(`products/${wooParentId}`, updatePayload);
+      remoteParent = updated?.data || remoteParent;
+    }
+    await recordProductSyncMapping(process, companyId, parentId, wooParentId);
+  } else {
+    const createPayload = {
+      type: "variable",
+      sku: parentSku,
+      ...buildWooCommerceProductSyncPayload(parentProduct, integration, {
+        mode: "create",
+      }),
+    };
+    if (!createPayload.name) {
+      createPayload.name = parentProduct.product_name || parentSku;
+    }
+    const created = await client.post("products", createPayload);
+    remoteParent = created?.data || null;
+    wooParentId =
+      remoteParent?.id != null ? String(remoteParent.id) : null;
+    if (!wooParentId) {
+      throw new Error("WooCommerce did not return a parent product id.");
+    }
+    await recordProductSyncMapping(process, companyId, parentId, wooParentId);
+  }
+
+  for (const child of children) {
+    try {
+      await syncWooVariationChildToStore({
+        client,
+        integration,
+        companyId,
+        process,
+        wooParentId,
+        remoteParent,
+        parentSku,
+        childProduct: child,
+        childSyncRow: childSyncByProductId.get(String(child._id)) || null,
+        stats,
+      });
+    } catch (error) {
+      console.error(
+        `Failed to sync WooCommerce variation for POS product ${child._id} (${child.product_name}):`,
+        error?.response?.data || error.message,
+      );
+      stats.variations_skipped += 1;
+    }
+  }
+
+  const {
+    variations_updated,
+    variations_created,
+    variations_skipped,
+  } = stats;
+  const remarks =
+    `Product Name : ${parentProduct.product_name} synced to WooCommerce ` +
+    `(parent ${wooParentId}, variations updated ${variations_updated}, ` +
+    `created ${variations_created}, skipped ${variations_skipped}).`;
+
+  await markProcessOutcome(process._id, "completed", remarks);
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      parent: remoteParent,
+      woo_parent_id: wooParentId,
+      variations_updated,
+      variations_created,
+      variations_skipped,
+      variation_count: children.length,
+    },
+    message: remarks,
+  });
+}
+
+/**
  * Push one POS product to WooCommerce.
  */
 async function sync_product(req, res, process) {
@@ -1646,144 +2135,30 @@ async function sync_product(req, res, process) {
     return res.status(400).json({ success: false, message: error });
   }
 
-  const sku = resolvePosProductSku(product);
-  if (!sku) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Product SKU or identifier is required to sync with WooCommerce.",
-    });
-  }
-
   const companyId = resolveCompanyId(process);
   const integrationId = resolveIntegrationId(process);
-  const productId = coalesceObjectId(product._id);
-
-  const syncRow = await SyncProduct.findOne({
-    product_id: productId,
-    integration_id: integrationId,
-    company_id: companyId,
-    deletedAt: null,
-  }).lean();
-
-  const productType =
-    (
-      typeof product.product_type === "string" &&
-      product.product_type.toLowerCase() === "variable"
-    ) ?
-      "variable"
-    : "simple";
+  const { rootProduct } = await resolveWooSyncRootProduct(product, companyId);
 
   try {
-    let remoteProduct = null;
-    let remoteId =
-      syncRow?.refference_id != null && String(syncRow.refference_id).trim() !== "" ?
-        String(syncRow.refference_id).trim()
-      : null;
-
-    if (remoteId) {
-      try {
-        const byId = await client.get(`products/${remoteId}`);
-        remoteProduct = byId?.data || null;
-      } catch (fetchErr) {
-        console.warn(
-          `WooCommerce product ${remoteId} not found; will try SKU lookup:`,
-          fetchErr?.response?.data?.message || fetchErr?.message,
-        );
-        remoteId = null;
-      }
-    }
-
-    if (!remoteProduct) {
-      const existingResponse = await client.get("products", { sku });
-      const existingProducts =
-        Array.isArray(existingResponse?.data) ? existingResponse.data : [];
-      if (existingProducts.length > 0) {
-        remoteProduct = existingProducts[0];
-        remoteId = String(remoteProduct.id);
-      }
-    }
-
-    if (remoteProduct && remoteId) {
-      const updatePayload = buildWooCommerceProductSyncPayload(
-        product,
+    if (
+      typeof rootProduct?.product_type === "string" &&
+      rootProduct.product_type.toLowerCase() === "variable"
+    ) {
+      return syncWooVariableProductToStore(req, res, process, {
+        client,
         integration,
-        { mode: "update" },
-      );
-
-      if (!hasSyncPayloadFields(updatePayload)) {
-        await recordProductSyncMapping(
-          process,
-          companyId,
-          productId,
-          remoteId,
-        );
-        await markProcessOutcome(
-          process._id,
-          "completed",
-          `Product Name : ${product.product_name} — no WooCommerce fields enabled for update.`,
-        );
-        return res.status(200).json({
-          success: true,
-          data: remoteProduct,
-          message: `Product Name : ${product.product_name} — sync mapping kept; no fields enabled.`,
-        });
-      }
-
-      const updatedResponse = await client.put(
-        `products/${remoteId}`,
-        updatePayload,
-      );
-      await recordProductSyncMapping(
-        process,
+        parentProduct: rootProduct,
         companyId,
-        productId,
-        remoteId,
-      );
-
-      await markProcessOutcome(
-        process._id,
-        "completed",
-        `Product Name : ${product.product_name} updated on WooCommerce.`,
-      );
-
-      return res.status(200).json({
-        success: true,
-        data: updatedResponse?.data,
-        message: `Product Name : ${product.product_name} updated on WooCommerce.`,
+        integrationId,
       });
     }
 
-    const createPayload = {
-      type: productType,
-      sku,
-      ...buildWooCommerceProductSyncPayload(product, integration, {
-        mode: "create",
-      }),
-    };
-    if (!createPayload.name) {
-      createPayload.name = product.product_name || sku;
-    }
-
-    const createdProductResponse = await client.post("products", createPayload);
-    const createdId = createdProductResponse?.data?.id;
-    await recordProductSyncMapping(
-      process,
+    return syncWooSimpleProductToStore(req, res, process, {
+      client,
+      integration,
+      product,
       companyId,
-      productId,
-      createdId,
-    );
-
-    await markProcessOutcome(
-      process._id,
-      "completed",
-      `Product Name : ${product.product_name} created on WooCommerce.`,
-    );
-
-    return res.status(201).json({
-      success: true,
-      data: createdProductResponse?.data,
-      message: `Product Name : ${product.product_name} synced to WooCommerce successfully.`,
+      integrationId,
     });
   } catch (error) {
     console.error(

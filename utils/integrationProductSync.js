@@ -181,13 +181,127 @@ function hasSyncPayloadFields(payload) {
   return payload && typeof payload === "object" && Object.keys(payload).length > 0;
 }
 
+function parsePosVariationLabel(child, parentSku) {
+  const name = String(child?.product_name || "");
+  const bracket = name.match(/\[([^\]]+)\]\s*$/);
+  if (bracket?.[1]) {
+    return String(bracket[1]).trim();
+  }
+
+  const parent = String(parentSku || "").trim();
+  const childSku = resolvePosProductSku(child);
+  if (parent && childSku.startsWith(`${parent}-`)) {
+    return childSku.slice(parent.length + 1);
+  }
+
+  return "";
+}
+
+function mapLabelToWooVariationAttributes(label, remoteParentAttributes) {
+  const parts = String(label || "")
+    .split("-")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!parts.length) {
+    return [];
+  }
+
+  const attrs = Array.isArray(remoteParentAttributes) ? remoteParentAttributes : [];
+  const matched = [];
+  const usedParts = new Set();
+
+  for (const remoteAttr of attrs) {
+    const options = Array.isArray(remoteAttr?.options) ? remoteAttr.options : [];
+    for (const option of options) {
+      const optionText = String(option || "").trim();
+      if (!optionText) {
+        continue;
+      }
+      const normalizedOption = optionText.toUpperCase().replace(/\s+/g, "-");
+      const partIndex = parts.findIndex(
+        (part, index) =>
+          !usedParts.has(index) &&
+          (part.toUpperCase() === normalizedOption ||
+            part.toUpperCase() === optionText.toUpperCase()),
+      );
+      if (partIndex < 0) {
+        continue;
+      }
+
+      const entry = { option: optionText };
+      if (remoteAttr?.id != null) {
+        entry.id = remoteAttr.id;
+      } else if (remoteAttr?.name) {
+        entry.name = remoteAttr.name;
+      }
+      matched.push(entry);
+      usedParts.add(partIndex);
+      break;
+    }
+  }
+
+  return matched;
+}
+
+function buildWooCommerceVariationSyncPayload(
+  child,
+  integration,
+  remoteParent,
+  parentSku,
+  options = {},
+) {
+  const mode = options.mode === "create" ? "create" : "update";
+  const payload = {};
+
+  const allowPrice =
+    mode === "create" ||
+    isIntegrationSyncEnabled(integration, "sync_product_price");
+  const allowStatus =
+    mode === "create" ||
+    isIntegrationSyncEnabled(integration, "sync_product_status");
+
+  const childSku = resolvePosProductSku(child);
+  if (childSku) {
+    payload.sku = childSku;
+  }
+
+  if (allowPrice) {
+    payload.regular_price =
+      child?.product_price !== undefined && child?.product_price !== null ?
+        String(child.product_price)
+      : "0";
+  }
+
+  if (allowStatus) {
+    payload.status = mapPosStatusToWoo(child?.status);
+  }
+
+  if (child?.weight !== undefined && child?.weight !== null) {
+    payload.weight = String(child.weight);
+  }
+
+  const label = parsePosVariationLabel(child, parentSku);
+  const variationAttributes = mapLabelToWooVariationAttributes(
+    label,
+    remoteParent?.attributes,
+  );
+  if (variationAttributes.length) {
+    payload.attributes = variationAttributes;
+  }
+
+  return payload;
+}
+
 module.exports = {
   SYNC_TOGGLE_KEYS,
   isIntegrationSyncEnabled,
   resolvePosProductSku,
   resolvePublicAssetUrl,
   buildWooCommerceProductSyncPayload,
+  buildWooCommerceVariationSyncPayload,
   buildShopifyProductSyncPayload,
   buildShopifyVariantSyncPayload,
   hasSyncPayloadFields,
+  parsePosVariationLabel,
+  mapLabelToWooVariationAttributes,
 };
