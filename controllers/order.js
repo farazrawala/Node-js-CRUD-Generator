@@ -2106,6 +2106,10 @@ async function order_save(req, res) {
     const lines_subtotal = req.body.lines_subtotal;
     const discount = req.body.discount;
     const shipment = req.body.shipment;
+    // console.log("lines_subtotal_order_save", lines_subtotal);
+    // console.log("discount_order_save", discount);
+    // console.log("shipment_order_save", shipment);
+    // return false;
 
     response = await handleGenericCreate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
@@ -2191,7 +2195,7 @@ async function order_save(req, res) {
               // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
               account_id: orderReq.body?.posPayMethod,
               type: "debit",
-              amount: receivedAmount,
+              amount: lines_subtotal + shipment - discount,
               reference_user_id: record?.customer_id,
               transaction_number,
               description: orderGlDescription(

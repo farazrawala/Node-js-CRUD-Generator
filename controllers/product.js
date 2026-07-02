@@ -2174,7 +2174,6 @@ async function getAllActiveProductsPOS(req, res) {
 
   const filter = {
     deletedAt: null,
-    status: "active",
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
 
