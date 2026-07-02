@@ -427,6 +427,35 @@ function parseProductVariationsFromRequest(body) {
   return parseProductVariationsFromBody(body);
 }
 
+/** Existing variation row id from API payloads (`id`, `_id`, or `product_id`). */
+function resolveVariationProductId(variation) {
+  if (!variation || typeof variation !== "object") {
+    return null;
+  }
+  for (const key of ["id", "_id", "product_id"]) {
+    const raw = variation[key];
+    if (raw == null || raw === "") {
+      continue;
+    }
+    const oid = coalesceObjectId(raw);
+    if (oid) {
+      return String(oid);
+    }
+  }
+  return null;
+}
+
+function stripVariationIdentityFields(variationBody) {
+  if (!variationBody || typeof variationBody !== "object") {
+    return variationBody;
+  }
+  const cleaned = { ...variationBody };
+  delete cleaned.id;
+  delete cleaned._id;
+  delete cleaned.product_id;
+  return cleaned;
+}
+
 function productVariationLogContext(req, extra = {}) {
   return {
     company_id: req.user?.company_id,
@@ -945,8 +974,9 @@ async function runProductUpdateVariationBody(req, session, tracker) {
     for (const variation of variations) {
       if (!variation || typeof variation !== "object") continue;
 
-      if (variation.id) {
-        const variationId = String(variation.id);
+      const variationId = resolveVariationProductId(variation);
+
+      if (variationId) {
         const before = await fetchProductLeanSnapshot(
           variationId,
           tracker.companyId,
@@ -963,8 +993,7 @@ async function runProductUpdateVariationBody(req, session, tracker) {
         }
         tracker.variationUpdatesBefore.push({ id: variationId, before });
 
-        const variationBody = { ...variation };
-        delete variationBody.id;
+        const variationBody = stripVariationIdentityFields({ ...variation });
         variationBody.company_id = company.data._id.toString();
         variationBody.warehouse_inventory = [
           {
@@ -1004,7 +1033,7 @@ async function runProductUpdateVariationBody(req, session, tracker) {
           response: variationResponse,
         });
       } else {
-        const variantBody = {
+        const variantBody = stripVariationIdentityFields({
           ...variation,
           company_id: company.data._id.toString(),
           warehouse_inventory: [
@@ -1016,7 +1045,7 @@ async function runProductUpdateVariationBody(req, session, tracker) {
             },
           ],
           parent_product_id: parentProductId,
-        };
+        });
 
         const variantReq = requestWithOverrides(req, { body: variantBody });
         const variationResponse = await handleGenericCreate(
