@@ -56,6 +56,7 @@ const {
   buildShopifyProductSyncPayload,
   buildShopifyVariantSyncPayload,
   hasSyncPayloadFields,
+  isIntegrationSyncEnabled,
 } = require("../utils/integrationProductSync");
 
 function buildShopifyClient(integration) {
@@ -99,7 +100,12 @@ function buildShopifyClient(integration) {
     apiKey,
     apiSecretKey: apiSecret,
     adminApiAccessToken: accessToken,
-    scopes: ["read_products", "write_products", "read_inventory"],
+    scopes: [
+      "read_products",
+      "write_products",
+      "read_inventory",
+      "write_inventory",
+    ],
     hostName: shopDomain,
     apiVersion: ApiVersion.October24,
     isCustomStoreApp: true,
@@ -374,6 +380,122 @@ async function resolveShopifyVariantStockQuantity(variant, client) {
   }
 
   return mapShopifyVariantInventoryQuantity(variant);
+}
+
+/** When the token lacks write_inventory, skip pushing stock for the rest of the run. */
+let shopifyInventoryWriteUnavailable = false;
+
+/** Sum POS on-hand quantity per product from warehouse_inventory (push side). */
+async function resolveShopifyStockTotals(productIds, companyId) {
+  const ids = (Array.isArray(productIds) ? productIds : [])
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
+  if (!ids.length) {
+    return new Map();
+  }
+
+  const matchFilter = {
+    product_id: { $in: ids },
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+  const scopedCompanyId = coalesceObjectId(companyId);
+  if (scopedCompanyId) {
+    matchFilter.company_id = scopedCompanyId;
+  }
+
+  try {
+    const grouped = await WarehouseInventory.aggregate([
+      { $match: matchFilter },
+      { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
+    ]);
+    return new Map(
+      grouped.map((row) => [String(row._id), Number(row.total) || 0]),
+    );
+  } catch (error) {
+    console.warn(
+      "Failed to aggregate warehouse inventory for Shopify sync:",
+      error?.message,
+    );
+    return new Map();
+  }
+}
+
+/** Resolve the Shopify location to write inventory against (prefer active). */
+async function resolveShopifyPrimaryLocationId(client) {
+  try {
+    const resp = await client.get({ path: "locations" });
+    const locations =
+      Array.isArray(resp?.body?.locations) ? resp.body.locations : [];
+    const active = locations.find((loc) => loc?.active) || locations[0];
+    return active?.id != null ? String(active.id) : null;
+  } catch (error) {
+    console.warn(
+      "Shopify locations lookup failed; cannot push stock:",
+      describeShopifyError(error),
+    );
+    return null;
+  }
+}
+
+/**
+ * Set a Shopify variant's available inventory at the given location. Enables
+ * Shopify inventory tracking on the variant first if needed. Returns true when
+ * the level was set. Disables further stock pushes if write_inventory is missing.
+ */
+async function setShopifyVariantInventory({
+  client,
+  variant,
+  quantity,
+  locationId,
+}) {
+  if (shopifyInventoryWriteUnavailable || !locationId || !variant?.id) {
+    return false;
+  }
+  const inventoryItemId = variant?.inventory_item_id;
+  if (!inventoryItemId) {
+    return false;
+  }
+  const available = Math.max(0, Math.round(Number(quantity) || 0));
+
+  try {
+    if (variant.inventory_management !== "shopify") {
+      await client.put({
+        path: `variants/${variant.id}`,
+        data: {
+          variant: { id: variant.id, inventory_management: "shopify" },
+        },
+        type: "application/json",
+      });
+    }
+
+    await client.post({
+      path: "inventory_levels/set",
+      data: {
+        location_id: Number(locationId),
+        inventory_item_id: Number(inventoryItemId),
+        available,
+      },
+      type: "application/json",
+    });
+    return true;
+  } catch (error) {
+    const text = JSON.stringify(
+      error?.response?.body || error?.message || error || "",
+    ).toLowerCase();
+    if (isShopifyInventoryScopeError(error) || text.includes("write_inventory")) {
+      shopifyInventoryWriteUnavailable = true;
+      console.warn(
+        "[shopify sync] write_inventory scope missing — skipping stock sync.",
+      );
+    } else {
+      console.warn(
+        `Shopify inventory set failed for item ${inventoryItemId}:`,
+        describeShopifyError(error),
+      );
+    }
+    return false;
+  }
 }
 
 async function resolveCompanyDefaultWarehouseId(companyId) {
@@ -1064,6 +1186,15 @@ async function syncShopifyVariableProductToStore(
     .map((row) => coalesceObjectId(row._id))
     .filter(Boolean);
 
+  const stockSyncEnabled = isIntegrationSyncEnabled(
+    integration,
+    "sync_product_stock",
+  );
+  const childStockTotals =
+    stockSyncEnabled ?
+      await resolveShopifyStockTotals(childIds, companyId)
+    : new Map();
+
   const syncRows = await SyncProduct.find({
     integration_id: integrationId,
     company_id: companyId,
@@ -1084,6 +1215,7 @@ async function syncShopifyVariableProductToStore(
     variations_updated: 0,
     variations_skipped: 0,
     variations_unmatched: 0,
+    inventory_updated: 0,
   };
 
   // Resolve the Shopify product id from the parent mapping, then any child
@@ -1184,6 +1316,9 @@ async function syncShopifyVariableProductToStore(
       .map((v) => [String(v.sku).trim().toLowerCase(), v]),
   );
 
+  const locationId =
+    stockSyncEnabled ? await resolveShopifyPrimaryLocationId(client) : null;
+
   for (const child of children) {
     try {
       const childId = coalesceObjectId(child._id);
@@ -1210,29 +1345,36 @@ async function syncShopifyVariableProductToStore(
       const variantPayload = buildShopifyVariantSyncPayload(child, integration, {
         mode: "update",
       });
-      if (!variantPayload) {
-        await recordShopifyProductSyncMapping(
-          process,
-          companyId,
-          childId,
-          `${shopifyProductId}:${variant.id}`,
-        );
+      if (variantPayload) {
+        await client.put({
+          path: `variants/${variant.id}`,
+          data: { variant: { ...variantPayload, id: variant.id } },
+          type: "application/json",
+        });
+        stats.variations_updated += 1;
+      } else {
         stats.variations_skipped += 1;
-        continue;
       }
 
-      await client.put({
-        path: `variants/${variant.id}`,
-        data: { variant: { ...variantPayload, id: variant.id } },
-        type: "application/json",
-      });
+      if (stockSyncEnabled && locationId) {
+        const quantity = childStockTotals.get(String(child._id)) ?? 0;
+        const inventorySet = await setShopifyVariantInventory({
+          client,
+          variant,
+          quantity,
+          locationId,
+        });
+        if (inventorySet) {
+          stats.inventory_updated += 1;
+        }
+      }
+
       await recordShopifyProductSyncMapping(
         process,
         companyId,
         childId,
         `${shopifyProductId}:${variant.id}`,
       );
-      stats.variations_updated += 1;
     } catch (error) {
       console.error(
         `Failed to sync Shopify variation for POS product ${child._id} (${child.product_name}):`,
@@ -1245,6 +1387,7 @@ async function syncShopifyVariableProductToStore(
   const remarks =
     `Product Name : ${parentProduct.product_name} synced to Shopify ` +
     `(product ${shopifyProductId}, variants updated ${stats.variations_updated}, ` +
+    `stock updated ${stats.inventory_updated}, ` +
     `skipped ${stats.variations_skipped}, unmatched ${stats.variations_unmatched}).`;
 
   await markProcessOutcome(process._id, "completed", remarks);
@@ -1397,8 +1540,16 @@ async function sync_product(req, res, process) {
         integration,
         { mode: "update" },
       );
+      const stockSyncEnabled = isIntegrationSyncEnabled(
+        integration,
+        "sync_product_stock",
+      );
 
-      if (!hasSyncPayloadFields(updatePayload) && !variantPayload) {
+      if (
+        !hasSyncPayloadFields(updatePayload) &&
+        !variantPayload &&
+        !stockSyncEnabled
+      ) {
         await recordShopifyProductSyncMapping(
           process,
           companyId,
@@ -1428,15 +1579,31 @@ async function sync_product(req, res, process) {
         updatedProduct = updatedResponse?.body?.product || updatedProduct;
       }
 
-      if (variantPayload) {
-        const variantId =
-          updatedProduct?.variants?.[0]?.id || remoteProduct?.variants?.[0]?.id;
-        if (variantId) {
-          step = `PUT variants/${variantId}`;
-          await client.put({
-            path: `variants/${variantId}`,
-            data: { variant: { ...variantPayload, sku } },
-            type: "application/json",
+      const singleVariant =
+        updatedProduct?.variants?.[0] || remoteProduct?.variants?.[0] || null;
+
+      if (variantPayload && singleVariant?.id) {
+        step = `PUT variants/${singleVariant.id}`;
+        await client.put({
+          path: `variants/${singleVariant.id}`,
+          data: { variant: { ...variantPayload, sku } },
+          type: "application/json",
+        });
+      }
+
+      if (stockSyncEnabled && singleVariant?.id) {
+        const locationId = await resolveShopifyPrimaryLocationId(client);
+        if (locationId) {
+          const stockTotals = await resolveShopifyStockTotals(
+            [productId],
+            companyId,
+          );
+          step = `SET inventory for variant ${singleVariant.id}`;
+          await setShopifyVariantInventory({
+            client,
+            variant: singleVariant,
+            quantity: stockTotals.get(String(productId)) ?? 0,
+            locationId,
           });
         }
       }
