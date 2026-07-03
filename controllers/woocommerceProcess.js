@@ -3255,24 +3255,30 @@ async function sync_brand(req, res, process) {
       Array.isArray(existingResponse?.data) ? existingResponse.data : [];
 
     if (existingBrands.length > 0) {
+      const existingBrandId = existingBrands[0].id;
+      const updatedBrandResponse = await client.put(
+        `products/brands/${existingBrandId}`,
+        brandPayload,
+      );
+
       await upsertSyncBrandMapping({
         brandId: brand._id,
         integrationId: resolveIntegrationId(process),
         companyId,
-        referenceId: existingBrands[0].id,
+        referenceId: existingBrandId,
         createdBy: process.created_by?._id || process.created_by,
       });
 
       await markProcessOutcome(
         process._id,
         "completed",
-        `Brand : ${name} already existed on WooCommerce — skipped creation.`,
+        `Brand : ${name} already existed on WooCommerce — updated.`,
       );
 
       return res.status(200).json({
         success: true,
-        data: existingBrands[0],
-        message: `Brand : ${name} already exists on WooCommerce.`,
+        data: updatedBrandResponse?.data || existingBrands[0],
+        message: `Brand : ${name} updated on WooCommerce.`,
       });
     }
 
