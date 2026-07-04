@@ -427,6 +427,42 @@ function parseProductVariationsFromRequest(body) {
   return parseProductVariationsFromBody(body);
 }
 
+/**
+ * Group uploaded files by variation index so each entry is shaped like
+ * `req.files` (keyed by the plain schema field name, e.g. `product_image`) and
+ * can be passed straight to the generic handlers.
+ *
+ * Handles both shapes:
+ *  - `parseNested: true` (this app's config) → `req.files.variations` is a
+ *    nested array: `[ { product_image: <file> }, ... ]`.
+ *  - flat bracketed keys (parseNested disabled) → `req.files["variations[0][product_image]"]`.
+ */
+function parseVariationFilesFromRequest(files) {
+  const variationFiles = [];
+  if (!files || typeof files !== "object") return variationFiles;
+
+  // express-fileupload parseNested shape: files.variations = [ { field: file } ]
+  if (Array.isArray(files.variations)) {
+    files.variations.forEach((entry, index) => {
+      if (entry && typeof entry === "object") {
+        variationFiles[index] = entry;
+      }
+    });
+    return variationFiles;
+  }
+
+  // Fallback: flat bracketed keys (parseNested disabled).
+  for (const key of Object.keys(files)) {
+    const match = key.match(/^variations\[(\d+)\]\[(.+)\]$/);
+    if (!match) continue;
+    const index = parseInt(match[1], 10);
+    const field = match[2];
+    if (!variationFiles[index]) variationFiles[index] = {};
+    variationFiles[index][field] = files[key];
+  }
+  return variationFiles;
+}
+
 /** Existing variation row id from API payloads (`id`, `_id`, or `product_id`). */
 function resolveVariationProductId(variation) {
   if (!variation || typeof variation !== "object") {
@@ -655,6 +691,7 @@ async function runProductCreateVariationBody(req, session, tracker) {
   }
 
   const variations = parseProductVariationsFromRequest(req.body);
+  const variationFiles = parseVariationFilesFromRequest(req.files);
 
   tracker.variation_step = "parent_product";
   const parentProductResponse = await handleGenericCreate(req, "product", {
@@ -685,10 +722,10 @@ async function runProductCreateVariationBody(req, session, tracker) {
 
   if (variations.length > 0) {
     tracker.variation_step = "variation_products";
-    let variationIndex = 0;
-    for (const variation of variations) {
+    for (const [variationIndex, variation] of variations.entries()) {
       if (!variation || typeof variation !== "object") continue;
 
+      const filesForVariation = variationFiles[variationIndex] || {};
       const variantBody = {
         ...variation,
         company_id: company.data._id.toString(),
@@ -706,7 +743,10 @@ async function runProductCreateVariationBody(req, session, tracker) {
         product_description: variation.product_description,
       };
 
-      const variationReq = requestWithOverrides(req, { body: variantBody });
+      const variationReq = requestWithOverrides(req, {
+        body: variantBody,
+        files: filesForVariation,
+      });
       const variationResponse = await handleGenericCreate(
         variationReq,
         "product",
@@ -741,7 +781,6 @@ async function runProductCreateVariationBody(req, session, tracker) {
         "variationProductIds",
         variationResponse.data._id,
       );
-      variationIndex += 1;
     }
   }
 
@@ -910,6 +949,7 @@ async function runProductUpdateVariationBody(req, session, tracker) {
   tracker.companyId = coalesceObjectId(company.data._id);
 
   const variations = parseProductVariationsFromRequest(req.body);
+  const variationFiles = parseVariationFilesFromRequest(req.files);
 
   if (!normalizeWarehouseInventoryInput(req.body)) {
     req.body.warehouse_inventory = [
@@ -969,11 +1009,11 @@ async function runProductUpdateVariationBody(req, session, tracker) {
 
   if (variations.length > 0) {
     tracker.variation_step = "variation_products";
-    let variationIndex = 0;
 
-    for (const variation of variations) {
+    for (const [variationIndex, variation] of variations.entries()) {
       if (!variation || typeof variation !== "object") continue;
 
+      const filesForVariation = variationFiles[variationIndex] || {};
       const variationId = resolveVariationProductId(variation);
 
       if (variationId) {
@@ -1008,6 +1048,7 @@ async function runProductUpdateVariationBody(req, session, tracker) {
         const variationReq = requestWithOverrides(req, {
           params: { ...req.params, id: variationId },
           body: variationBody,
+          files: filesForVariation,
         });
 
         const variationResponse = await handleGenericUpdate(
@@ -1047,7 +1088,10 @@ async function runProductUpdateVariationBody(req, session, tracker) {
           parent_product_id: parentProductId,
         });
 
-        const variantReq = requestWithOverrides(req, { body: variantBody });
+        const variantReq = requestWithOverrides(req, {
+          body: variantBody,
+          files: filesForVariation,
+        });
         const variationResponse = await handleGenericCreate(
           variantReq,
           "product",
@@ -1082,8 +1126,6 @@ async function runProductUpdateVariationBody(req, session, tracker) {
           response: variationResponse,
         });
       }
-
-      variationIndex += 1;
     }
   }
 
