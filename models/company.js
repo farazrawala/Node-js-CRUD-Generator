@@ -111,6 +111,10 @@ const modelSchema = new mongoose.Schema(
       field_name: "Product Settings",
       default: '{"allow_add_to_cart_when_stock_insufficient":true}',
     },
+    default_printer_settings: {
+      type: String,
+      field_name: "Default Printer Settings",
+    },
 
     default_cash_account: {
       type: mongoose.Schema.Types.ObjectId,

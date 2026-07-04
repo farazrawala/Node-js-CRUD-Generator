@@ -459,7 +459,7 @@ async function resolveAdjustmentLineAmount(record, session = null) {
   }
 
   const productQuery = Product.findById(record.product_id).select(
-    "wholesale_price product_name product_code",
+    "wholesale_price product_price product_name product_code",
   );
   if (session) productQuery.session(session);
   const product = await productQuery.lean();
@@ -473,11 +473,23 @@ async function resolveAdjustmentLineAmount(record, session = null) {
   const productName = String(
     product.product_name ?? product.name ?? product.product_code ?? "",
   ).trim();
+  const productLabel =
+    productName ||
+    product.product_code ||
+    String(record.product_id || "").trim() ||
+    "product";
 
   const unitCost = Number(product.wholesale_price ?? 0);
   if (!Number.isFinite(unitCost) || unitCost < 0) {
     const err = new Error(
-      "Product wholesale_price is required for adjustment costing",
+      `Product "${productLabel}" has an invalid wholesale_price. Set a cost on the product before creating an adjustment.`,
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  if (unitCost === 0) {
+    const err = new Error(
+      `Product "${productLabel}" has wholesale_price of 0. Set wholesale_price (cost) on the product before creating an adjustment, or receive stock via purchase order to update cost.`,
     );
     err.statusCode = 400;
     throw err;
@@ -486,7 +498,7 @@ async function resolveAdjustmentLineAmount(record, session = null) {
   const amount = Math.round(qty * unitCost * 100) / 100;
   if (amount <= 0) {
     const err = new Error(
-      "Adjustment amount must be greater than zero (quantity × wholesale price)",
+      `Adjustment amount must be greater than zero (quantity × wholesale price) for product "${productLabel}".`,
     );
     err.statusCode = 400;
     throw err;
