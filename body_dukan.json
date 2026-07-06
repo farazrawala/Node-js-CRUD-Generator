@@ -1,0 +1,11 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<title>502 Bad Gateway</title>
+</head><body>
+<h1>Bad Gateway</h1>
+<p>The proxy server received an invalid
+response from an upstream server.<br />
+</p>
+<p>Additionally, a 502 Bad Gateway
+error was encountered while trying to use an ErrorDocument to handle the request.</p>
+</body></html>

@@ -1,31 +1,34 @@
 // const sesssionIdToUseMap = new Map();
 const jwt = require("jsonwebtoken");
 const secret = "faraz";
-function setUserToken(user) {
-  console.log("🚀 setUserToken function called with user:", user);
 
+/** JWT must stay small — Apache/proxies reject Set-Cookie above ~4KB. */
+function companyIdForToken(companyId) {
+  if (companyId == null) return null;
+  if (typeof companyId === "object" && companyId._id != null) {
+    return String(companyId._id);
+  }
+  return String(companyId);
+}
+
+function buildJwtPayload(userObject) {
+  return {
+    _id: userObject._id,
+    name: userObject.name,
+    company_id: companyIdForToken(userObject.company_id),
+    email: userObject.email,
+    role: userObject.role,
+  };
+}
+
+function setUserToken(user) {
   // Convert Mongoose document to plain object
   // Use toObject with options to ensure Map fields (like permissions) are converted properly
   const userObject = user.toObject
     ? user.toObject({ flattenMaps: true })
     : { ...user };
 
-  const token = jwt.sign(
-    {
-      _id: userObject._id,
-      name: userObject.name,
-      company_id: userObject.company_id,
-      email: userObject.email,
-      password: userObject.password,
-      role: userObject.role,
-      permissions: userObject.permissions,
-      deletedAt: userObject.deletedAt,
-      createdAt: userObject.createdAt,
-      updatedAt: userObject.updatedAt,
-      __v: userObject.__v,
-    },
-    secret
-  );
+  const token = jwt.sign(buildJwtPayload(userObject), secret);
 
   userObject.token = token;
   return userObject;
@@ -48,23 +51,7 @@ function createToken(user) {
   // Convert Mongoose document to plain object
   const userObject = user.toObject ? user.toObject() : { ...user };
 
-  const token = jwt.sign(
-    {
-      _id: userObject._id,
-      name: userObject.name,
-      company_id: userObject.company_id,
-      email: userObject.email,
-      password: userObject.password,
-      role: userObject.role,
-      deletedAt: userObject.deletedAt,
-      createdAt: userObject.createdAt,
-      updatedAt: userObject.updatedAt,
-      __v: userObject.__v,
-    },
-    secret
-  );
-
-  return token;
+  return jwt.sign(buildJwtPayload(userObject), secret);
 }
 
 module.exports = {

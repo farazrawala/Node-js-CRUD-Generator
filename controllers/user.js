@@ -468,8 +468,7 @@ async function handleUserLogin(req, res) {
     ) {
       normalizePopulatedCompanyForClient(userWithToken.company_id);
     }
-    console.log("📞 setUserToken returned:", userWithToken);
-    console.log("📞 userWithToken.company_id:", userWithToken.company_id);
+    delete userWithToken.password;
 
     // Set cookie for regular user login too
     res.cookie("token", userWithToken.token, {
