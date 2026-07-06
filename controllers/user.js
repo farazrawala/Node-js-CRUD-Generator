@@ -422,24 +422,39 @@ async function handleUserLogin(req, res) {
       });
     }
 
-    // Find user by email only
-    const user = await User.findOne({
-      email: email.toLowerCase(),
-      // role: { $in: ["ADMIN", "USER"] },
-      // active: true,
-    }).populate(buildUserCompanyPopulate());
+    // Email is NOT globally unique in this app (unique index is company_id + email),
+    // so we must handle multiple user records matching the same email.
+    const normalizedEmail = String(email).trim().toLowerCase();
 
-    if (!user) {
+    const candidates = await User.find({
+      email: normalizedEmail,
+      // role: { $in: ["ADMIN", "USER"] },
+      // status: "active",
+      // deletedAt: null,
+    })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .populate(buildUserCompanyPopulate());
+
+    if (!candidates.length) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
       });
     }
 
-    // Verify password using the comparePassword method
-    const isPasswordValid = await user.comparePassword(password);
+    let user = null;
+    for (const candidate of candidates) {
+      // Verify password using the comparePassword method
+      // Stop at the first matching account (usually the latest updated one).
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await candidate.comparePassword(password);
+      if (ok) {
+        user = candidate;
+        break;
+      }
+    }
 
-    if (!isPasswordValid) {
+    if (!user) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",

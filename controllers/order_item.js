@@ -61,6 +61,228 @@ async function getAllorder_item(req, res) {
   return res.status(response.status).json(response);
 }
 
+/** Default reporting window when profit endpoints omit `from` and `to`. */
+const FIND_PROFIT_DEFAULT_RANGE_DAYS = 90;
+
+function resolveOrderItemReportCompanyId(req, res) {
+  const rawCompany = req.user?.company_id;
+  const companyId =
+    rawCompany && typeof rawCompany === "object" && rawCompany._id ?
+      rawCompany._id
+    : rawCompany;
+  if (!companyId) {
+    res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      message: "Authentication with company context is required",
+    });
+    return null;
+  }
+
+  const companyObjectId = coalesceObjectId(companyId);
+  if (
+    !companyObjectId ||
+    !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+  ) {
+    res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      message: "Invalid company context",
+    });
+    return null;
+  }
+
+  return new mongoose.Types.ObjectId(String(companyObjectId));
+}
+
+function applyOrderItemCreatedAtFilter(req, match, defaultRangeDays) {
+  const rawFrom =
+    req.query?.from ?? req.query?.startDate ?? req.query?.start_date;
+  const rawTo = req.query?.to ?? req.query?.endDate ?? req.query?.end_date;
+  const hasFrom = rawFrom != null && String(rawFrom).trim() !== "";
+  const hasTo = rawTo != null && String(rawTo).trim() !== "";
+
+  if (!hasFrom && !hasTo) {
+    const toDate = new Date();
+    const fromDate = new Date(toDate);
+    fromDate.setDate(fromDate.getDate() - defaultRangeDays);
+    match.createdAt = { $gte: fromDate, $lte: toDate };
+    return { from: fromDate, to: toDate, defaultRange: true };
+  }
+
+  match.createdAt = {};
+  if (hasFrom) {
+    const fromDate = new Date(String(rawFrom).trim());
+    if (Number.isNaN(fromDate.getTime())) {
+      return { error: "Invalid from date" };
+    }
+    match.createdAt.$gte = fromDate;
+  }
+  if (hasTo) {
+    const toDate = new Date(String(rawTo).trim());
+    if (Number.isNaN(toDate.getTime())) {
+      return { error: "Invalid to date" };
+    }
+    match.createdAt.$lte = toDate;
+  }
+
+  return {
+    from: match.createdAt.$gte ?? null,
+    to: match.createdAt.$lte ?? null,
+    defaultRange: false,
+  };
+}
+
+/**
+ * GET `SUM(profit)` from `order_item` for the authenticated user's `company_id`.
+ * Only lines with a matching stock-out `inventory_movements` row (`reference_type: order`).
+ * Query: `order_id`, `product_id`, optional `from` / `to` (or `startDate` / `endDate`) on line `createdAt`.
+ * If both dates are omitted, only the last {@link FIND_PROFIT_DEFAULT_RANGE_DAYS} days are included.
+ */
+async function profitByOrderItem(req, res) {
+  try {
+    const cid = resolveOrderItemReportCompanyId(req, res);
+    if (!cid) {
+      return;
+    }
+
+    const match = {
+      company_id: cid,
+      status: "active",
+      deletedAt: null,
+    };
+
+    const rawOrderId = req.query?.order_id ?? req.params?.order_id;
+    if (rawOrderId != null && String(rawOrderId).trim() !== "") {
+      const orderIdStr = String(rawOrderId).trim();
+      if (!mongoose.Types.ObjectId.isValid(orderIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid order_id",
+        });
+      }
+      match.order_id = new mongoose.Types.ObjectId(orderIdStr);
+    }
+
+    const rawProductId = req.query?.product_id;
+    if (rawProductId != null && String(rawProductId).trim() !== "") {
+      const productIdStr = String(rawProductId).trim();
+      if (!mongoose.Types.ObjectId.isValid(productIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid product_id",
+        });
+      }
+      match.product_id = new mongoose.Types.ObjectId(productIdStr);
+    }
+
+    const dateFilter = applyOrderItemCreatedAtFilter(
+      req,
+      match,
+      FIND_PROFIT_DEFAULT_RANGE_DAYS,
+    );
+    if (dateFilter?.error) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: dateFilter.error,
+      });
+    }
+
+    const rows = await OrderItem.aggregate([
+      { $match: match },
+      {
+        $lookup: {
+          from: "inventory_movements",
+          let: {
+            orderId: "$order_id",
+            productId: "$product_id",
+            companyId: "$company_id",
+          },
+          pipeline: [
+            {
+              $match: {
+                status: "active",
+                $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+              },
+            },
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$company_id", "$$companyId"] },
+                    { $eq: ["$product_id", "$$productId"] },
+                    { $eq: ["$reference_id", "$$orderId"] },
+                    { $eq: ["$reference_type", "order"] },
+                    {
+                      $eq: [
+                        { $toLower: { $ifNull: ["$movement_type", ""] } },
+                        "out",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $limit: 1 },
+          ],
+          as: "out_movements",
+        },
+      },
+      { $match: { "out_movements.0": { $exists: true } } },
+      {
+        $group: {
+          _id: null,
+          profit: { $sum: { $ifNull: ["$profit", 0] } },
+          subtotal: { $sum: { $ifNull: ["$subtotal", 0] } },
+          line_count: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          profit: { $round: ["$profit", 2] },
+          subtotal: { $round: ["$subtotal", 2] },
+          line_count: 1,
+        },
+      },
+    ]);
+
+    const profit = rows[0]?.profit ?? 0;
+    const subtotal = rows[0]?.subtotal ?? 0;
+    const line_count = rows[0]?.line_count ?? 0;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(cid),
+      profit,
+      subtotal,
+      line_count,
+      filters: {
+        order_id: match.order_id ? String(match.order_id) : null,
+        product_id: match.product_id ? String(match.product_id) : null,
+        from: dateFilter.from ? dateFilter.from.toISOString() : null,
+        to: dateFilter.to ? dateFilter.to.toISOString() : null,
+        default_range_days: dateFilter.defaultRange ?
+          FIND_PROFIT_DEFAULT_RANGE_DAYS
+        : null,
+      },
+    });
+  } catch (error) {
+    console.error("❌ profitByOrderItem:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 /** Default reporting window when GET …/cost-of-goods-sold-by-order-item omits `from` and `to`. */
 const FIND_COGS_DEFAULT_RANGE_DAYS = 365;
 
@@ -276,4 +498,5 @@ module.exports = {
   order_itemById,
   getAllorder_item,
   costOfGoodsSoldByOrderItem,
+  profitByOrderItem,
 };

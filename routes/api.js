@@ -105,7 +105,10 @@ const {
   getReceivablesSummary,
   getReceivablesAging,
 } = require("../controllers/ledger");
-const { costOfGoodsSoldByOrderItem } = require("../controllers/order_item");
+const {
+  costOfGoodsSoldByOrderItem,
+  profitByOrderItem,
+} = require("../controllers/order_item");
 const {
   checkIntegrationActive,
   syncStoreCategory,
@@ -489,6 +492,7 @@ router.patch("/order/order_update/:id", order_update);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/profit-by-order-item", findProfitByOrderItem);
+router.get("/order_item/profit-by-order-item", profitByOrderItem);
 router.get(
   "/order_item/cost-of-goods-sold-by-order-item",
   costOfGoodsSoldByOrderItem,
