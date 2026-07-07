@@ -5,6 +5,7 @@ const {
   getPublicAssetBaseUrl,
   normalizePublicUploadUrl,
 } = require("./basePath");
+const { buildProductThumbnailFields } = require("./productImageThumbnail");
 /**
  * Generate URL-friendly slug from text
  * @param {string} text - The text to convert to slug
@@ -1938,6 +1939,27 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       runValidators: true,
       ...(session ? { session } : {}),
     });
+
+    if (
+      modelName === "product" &&
+      (updateData.product_image !== undefined ||
+        updateData.multi_images !== undefined)
+    ) {
+      const thumbFields = await buildProductThumbnailFields({
+        product_image: updatedRecord.product_image,
+        multi_images: updatedRecord.multi_images,
+      });
+      if (Object.keys(thumbFields).length) {
+        Object.assign(updatedRecord, thumbFields);
+        updatedRecord._syncingThumbnails = true;
+        await updatedRecord.save(
+          session ?
+            { session, validateBeforeSave: false }
+          : { validateBeforeSave: false },
+        );
+        updatedRecord._syncingThumbnails = false;
+      }
+    }
 
     // Handle image uploads for update
     for (const imageField of imageFields) {

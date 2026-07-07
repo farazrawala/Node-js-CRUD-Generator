@@ -178,3 +178,31 @@ pm2 restart pos_admin --update-env
       console.log("req", req.body);
       return false;
       // step 7 start — transaction insert ×4 (GL rebuild after teardown)
+
+
+node scripts/split-shopify-csv.js bbg_shopify.csv 16 bbg_shopify_parts
+
+
+
+To redo thumbnails for products already in the DB:
+node scripts/regenerate-product-thumbnails.js
+
+Optional:
+node scripts/regenerate-product-thumbnails.js --company-id YOUR_COMPANY_ID
+node scripts/regenerate-product-thumbnails.js --limit 100
+
+
+
+Run it (recommended — no server needed)
+1. Add your company ID to .env:
+
+SHOPIFY_IMPORT_COMPANY_ID=your_mongodb_company_id_here
+2. Import all parts (fast, no images):
+
+node scripts/run-shopify-parts-import.js --local --no-images
+3. Resume from part 5 if it stopped:
+
+node scripts/run-shopify-parts-import.js --local --from 5 --no-images
+4. Dry run (parse only, no DB writes):
+
+node scripts/run-shopify-parts-import.js --local --dry-run --company-id YOUR_ID

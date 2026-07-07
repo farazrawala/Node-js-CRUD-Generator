@@ -1,5 +1,8 @@
 const mongoose = require("mongoose");
 const { generateSlug } = require("../utils/modelHelper");
+const {
+  buildProductThumbnailFields,
+} = require("../utils/productImageThumbnail");
 
 const modelSchema = new mongoose.Schema(
   {
@@ -154,10 +157,20 @@ const modelSchema = new mongoose.Schema(
       field_type: "image",
       field_name: "Featured Image",
     },
+    product_image_thumbnail_url: {
+      type: String,
+      field_type: "image",
+      field_name: "Thumbnail Image",
+    },
     multi_images: {
       type: [String],
       field_type: "image",
       field_name: "Multiple Images",
+    },
+    multi_image_thumbnails: {
+      type: [String],
+      field_type: "image",
+      field_name: "Gallery Thumbnails",
     },
     created_by: {
       type: mongoose.Schema.Types.ObjectId,
@@ -257,6 +270,28 @@ modelSchema.pre("save", function (next) {
   }
 
   next();
+});
+
+// Generate thumbnail paths when featured/gallery images change.
+modelSchema.pre("save", async function (next) {
+  if (this._syncingThumbnails) return next();
+  if (!this.isModified("product_image") && !this.isModified("multi_images")) {
+    return next();
+  }
+
+  try {
+    this._syncingThumbnails = true;
+    const thumbFields = await buildProductThumbnailFields({
+      product_image: this.product_image,
+      multi_images: this.multi_images,
+    });
+    Object.assign(this, thumbFields);
+    this._syncingThumbnails = false;
+    next();
+  } catch (error) {
+    this._syncingThumbnails = false;
+    next(error);
+  }
 });
 
 // Post-save hook to ensure parent_product_id is set to own ID for single products

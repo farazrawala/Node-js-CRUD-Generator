@@ -4,6 +4,7 @@ const Product = require("../models/product");
 const { coalesceObjectId, generateSlug } = require("./modelHelper");
 const { generateProductBarcode } = require("./barcodeGenerator");
 const { saveProductImagesFromUrls } = require("./productImageDownload");
+const { buildProductThumbnailFields } = require("./productImageThumbnail");
 const {
   categorySlugFromName,
   findExistingCategoryByName,
@@ -383,6 +384,8 @@ async function applyImportProductImages(
     product_image: saved.featured,
     multi_images: saved.gallery || [],
   };
+  const thumbFields = await buildProductThumbnailFields(update);
+  Object.assign(update, thumbFields);
 
   await Product.updateOne({ _id: product._id }, { $set: update });
   return { ...product, ...update };
