@@ -211,6 +211,10 @@ const modelSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    discount_percentage: {
+      type: Number,
+      default: 0,
+    },
     shipment: {
       type: Number,
       default: 0,
@@ -245,6 +249,11 @@ const modelSchema = new mongoose.Schema(
       default: 0,
       min: 0,
       field_name: "Total amount",
+    },
+    order_type: {
+      type: String,
+      enum: ["offline", "online"],
+      default: "offline",
     },
     /**
      * Sales lifecycle (mixed semantics historically). Prefer `ORDER_STATUS_GROUPS` +
