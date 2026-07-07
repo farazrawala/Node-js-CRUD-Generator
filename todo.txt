@@ -169,3 +169,12 @@ GET https://testv3.websitedemolynk.com/pos_admin/version
 
 cd /home/demowebsitv3/public_html/pos_admin
 pm2 restart pos_admin --update-env
+
+
+ console.log("oldOutMovements", oldOutMovements);
+      console.log("existingOrderItems", existingOrderItems);
+      console.log("newLines", lines.subtotal);
+
+      console.log("req", req.body);
+      return false;
+      // step 7 start — transaction insert ×4 (GL rebuild after teardown)
