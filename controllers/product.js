@@ -30,6 +30,11 @@ const {
   PRODUCT_IMPORT_COLUMNS,
 } = require("../utils/productCsvImport");
 const {
+  importShopifyProductsFromText,
+  SHOPIFY_IMPORT_COLUMNS,
+  parseShopifyProductCsv,
+} = require("../utils/shopifyProductCsvImport");
+const {
   updateBarcodesFromText,
   BARCODE_IMPORT_COLUMNS,
 } = require("../utils/productBarcodeImport");
@@ -1444,6 +1449,179 @@ async function productImportFromFile(req, res) {
 }
 
 /**
+ * GET /api/product/shopify-import-form — Shopify CSV column reference.
+ */
+function shopifyProductImportFormSchema(req, res) {
+  return res.status(200).json({
+    success: true,
+    endpoint: "POST /api/product/shopify-product-import",
+    content_types: [
+      "multipart/form-data (field: file)",
+      "text/plain body",
+      'application/json ({ csv: "..." })',
+    ],
+    columns: SHOPIFY_IMPORT_COLUMNS,
+    notes: [
+      "Upload a Shopify Products export CSV (Handle, Title, Variant Price, etc.).",
+      "Each variant row becomes one POS product (name includes option values).",
+      "Product Category paths like `A > B > C` are split into multiple categories.",
+      "Variant Barcode is used when present; otherwise a unique EAN13 barcode is generated.",
+      "Image Src / Variant Image URLs are downloaded into uploads/product/{product_id}/ and saved on product_image / multi_images.",
+      "Multi-line HTML in Body (HTML) is supported.",
+    ],
+    options: {
+      update_existing:
+        "true|false — update price/category if SKU/product exists (default true)",
+      dry_run: "true|false — parse only (default false)",
+      add_stock_via_purchase:
+        "true|false — after import, create one PO for rows with qty > 0 (default true)",
+      default_qty: "Qty when Variant Inventory Qty is empty (default 0)",
+      import_archived:
+        "true|false — include non-active Status rows (default false)",
+      download_images:
+        "true|false — download Image Src / Variant Image URLs (default true)",
+      update_existing_images:
+        "true|false — replace images on existing products (default false)",
+      warehouse_id: "Warehouse for stock (default: company default warehouse)",
+      vendor_id: "Optional vendor user id on the purchase order",
+    },
+    sample_file: "bbg_shopify.csv",
+  });
+}
+
+/**
+ * POST /api/product/shopify-product-import
+ * Import products from a Shopify product export CSV.
+ */
+async function shopifyProductImportFromFile(req, res) {
+  try {
+    const companyId = coalesceObjectId(
+      req.body?.company_id || req.user?.company_id,
+    );
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request body).",
+      });
+    }
+
+    const updateExisting =
+      String(req.query?.update_existing ?? req.body?.update_existing ?? "true")
+        .trim()
+        .toLowerCase() !== "false";
+    const dryRun =
+      String(req.query?.dry_run ?? req.body?.dry_run ?? "false")
+        .trim()
+        .toLowerCase() === "true";
+    const addStockViaPurchase =
+      String(
+        req.query?.add_stock_via_purchase ??
+          req.body?.add_stock_via_purchase ??
+          "true",
+      )
+        .trim()
+        .toLowerCase() !== "false";
+    const importArchived =
+      String(req.query?.import_archived ?? req.body?.import_archived ?? "false")
+        .trim()
+        .toLowerCase() === "true";
+    const downloadImages =
+      String(req.query?.download_images ?? req.body?.download_images ?? "true")
+        .trim()
+        .toLowerCase() !== "false";
+    const updateExistingImages =
+      String(
+        req.query?.update_existing_images ??
+          req.body?.update_existing_images ??
+          "false",
+      )
+        .trim()
+        .toLowerCase() === "true";
+    const defaultQtyRaw = req.query?.default_qty ?? req.body?.default_qty ?? 0;
+    const defaultQty = Math.max(0, Number(defaultQtyRaw) || 0);
+    const warehouseId = coalesceObjectId(
+      req.body?.warehouse_id || req.query?.warehouse_id,
+    );
+    const vendorId = coalesceObjectId(
+      req.body?.vendor_id || req.query?.vendor_id,
+    );
+
+    let text = null;
+    const fileBuffer = readImportFileBuffer(req);
+    if (fileBuffer) {
+      text = fileBuffer.toString("utf8");
+    } else if (typeof req.body?.csv === "string" && req.body.csv.trim()) {
+      text = req.body.csv;
+    } else if (typeof req.body?.text === "string" && req.body.text.trim()) {
+      text = req.body.text;
+    }
+
+    if (!text) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Upload a Shopify CSV file (form field `file`) or send `csv` / `text` in the body.",
+        columns: SHOPIFY_IMPORT_COLUMNS,
+      });
+    }
+
+    if (dryRun) {
+      const parsed = parseShopifyProductCsv(text, {
+        defaultQty,
+        importArchived,
+      });
+      return res.status(200).json({
+        success: true,
+        dry_run: true,
+        message: `Dry run: ${parsed.rows.length} Shopify variant row(s) ready to import.`,
+        shopify_parse_stats: parsed.stats,
+        sample: parsed.rows.slice(0, 10),
+        columns: SHOPIFY_IMPORT_COLUMNS,
+      });
+    }
+
+    const result = await importShopifyProductsFromText(text, {
+      companyId,
+      createdBy: req.user?._id,
+      req,
+      options: {
+        updateExisting,
+        dryRun: false,
+        addStockViaPurchase,
+        defaultQty,
+        importArchived,
+        downloadImages,
+        updateExistingImages,
+        warehouseId,
+        vendorId,
+        purchaseDescription: "Shopify product import stock",
+      },
+    });
+
+    const poInfo = result.purchase_order;
+    const poMsg =
+      poInfo?.success ?
+        ` PO ${poInfo.purchase_order_no || ""} created (${poInfo.line_count} lines).`
+      : poInfo?.skipped ? ""
+      : poInfo ? ` Stock PO failed: ${poInfo.message || "unknown"}.`
+      : "";
+
+    return res.status(200).json({
+      success: result.summary?.failed === 0,
+      message: `Shopify import complete — created ${result.summary.created}, updated ${result.summary.updated}, skipped ${result.summary.skipped}, failed ${result.summary.failed}. Categories created: ${result.summary.categories_created}.${poMsg}`,
+      data: result,
+    });
+  } catch (error) {
+    console.error("❌ shopifyProductImportFromFile:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Shopify product import failed",
+      details: error.details || undefined,
+    });
+  }
+}
+
+/**
  * GET /api/product/update-barcode-form — column reference for barcode update.
  */
 function productBarcodeUpdateFormSchema(req, res) {
@@ -2283,6 +2461,8 @@ module.exports = {
   productCreate,
   productImportFromFile,
   productImportFormSchema,
+  shopifyProductImportFromFile,
+  shopifyProductImportFormSchema,
   productBarcodeUpdateFromFile,
   productBarcodeUpdateFormSchema,
   productUpdate,
