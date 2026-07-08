@@ -2475,14 +2475,146 @@ async function order_update(req, res) {
       });
       // step 6 end
 
-      // step 7 start — transaction insert ×4 (GL rebuild after teardown)
-      await rebuildOrderGlTransactions({
-        record: response.data,
-        orderReq: req,
-        lines,
-        mongoSession,
-        postUpdateTransactions,
-      });
+      // step 7 start — transaction insert ×5 (GL after teardown)
+      const updatedOrder = response.data;
+      const transaction_number = updatedOrder?.transaction_number;
+      const lines_subtotal = req.body.lines_subtotal;
+      const discount = updatedOrder?.discount ?? req.body.discount;
+      const shipment = updatedOrder?.shipment ?? req.body.shipment;
+
+      const orderTotal = Number(
+        lines
+          .reduce(
+            (sum, l) => sum + (Number.isFinite(l.subtotal) ? l.subtotal : 0),
+            0,
+          )
+          .toFixed(2),
+      );
+
+      const receivedAmount = Math.max(
+        0,
+        Math.round((Number(updatedOrder?.amount_received) || 0) * 100) / 100,
+      );
+      const totalAmountDue =
+        Number.isFinite(Number(updatedOrder?.total_amount)) ?
+          Number(updatedOrder.total_amount)
+        : Math.round(
+            ((Number(lines_subtotal) || 0) -
+              (Number(discount) || 0) +
+              (Number(shipment) || 0)) *
+              100,
+          ) / 100;
+      const remainingAmountDue = Math.max(
+        0,
+        Math.round((totalAmountDue - receivedAmount) * 100) / 100,
+      );
+
+      const { created, failed } = await transactionBulkCreate(
+        req,
+        [
+          {
+            account_id: req.user.company_id.default_sales_account,
+            type: "credit",
+            amount: orderTotal,
+            reference_user_id: updatedOrder?.customer_id,
+            transaction_number,
+            description: orderGlDescription(
+              "Sale Order",
+              updatedOrder?.order_no,
+            ),
+            reference_id: {
+              module: "order",
+              ref_id: updatedOrder._id,
+            },
+          },
+          {
+            account_id: req.user.company_id.default_shipping_account,
+            type: "credit",
+            amount: updatedOrder?.shipment,
+            reference_user_id: updatedOrder?.customer_id,
+            transaction_number,
+            description: orderGlDescription(
+              "Sale Order",
+              updatedOrder?.order_no,
+            ),
+            reference_id: {
+              module: "order",
+              ref_id: updatedOrder._id,
+            },
+          },
+          {
+            account_id: req.user.company_id.default_sales_discount_account,
+            type: "debit",
+            amount: updatedOrder?.discount,
+            reference_user_id: updatedOrder?.customer_id,
+            transaction_number,
+            description: orderGlDescription(
+              "Sale Discount",
+              updatedOrder?.order_no,
+            ),
+            reference_id: {
+              module: "order",
+              ref_id: updatedOrder._id,
+            },
+          },
+          {
+            // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
+            account_id: req.body?.posPayMethod,
+            type: "debit",
+            amount: lines_subtotal + shipment - discount,
+            reference_user_id: updatedOrder?.customer_id,
+            transaction_number,
+            description: orderGlDescription(
+              "Mode of Payment",
+              updatedOrder?.order_no,
+            ),
+            reference_id: {
+              module: "order",
+              ref_id: updatedOrder._id,
+            },
+          },
+          {
+            // remaining amount.
+            account_id: req.user.company_id.default_account_receivable_account,
+            type: "debit",
+            amount: remainingAmountDue,
+            reference_user_id: updatedOrder?.customer_id,
+            transaction_number,
+            description: orderGlDescription(
+              "A/c Receivable",
+              updatedOrder?.order_no,
+            ),
+            reference_id: {
+              module: "order",
+              ref_id: updatedOrder._id,
+            },
+          },
+        ],
+        { stopOnError: true, session: mongoSession },
+      );
+
+      postUpdateTransactions.created = created;
+      postUpdateTransactions.failed = failed;
+
+      if (failed.length) {
+        const msg = `Post-order transaction bulk insert failed: ${JSON.stringify(
+          failed,
+        )}`;
+        console.error("⚠️ Post-order transaction bulk insert failed:", failed);
+        await logControllerError(req, msg, ORDER_TRANSACTION_ERROR_LOG);
+        const glErr = new Error(msg);
+        glErr.statusCode = 400;
+        glErr.responseType = "transaction_bulk";
+        glErr.details = failed;
+        throw glErr;
+      }
+
+      if (created[0]?.data?._id) {
+        console.log(
+          "✅ Transaction(s) created:",
+          created.map((c) => c.data._id),
+        );
+      }
       // step 7 end
 
       // step 8 start — order_item insertMany
