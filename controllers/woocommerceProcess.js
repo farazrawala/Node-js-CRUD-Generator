@@ -1,4 +1,8 @@
 const WooCommerceRestApi = require("@woocommerce/woocommerce-rest-api").default;
+const {
+  extractWooImageUrls,
+  syncFetchProductImages,
+} = require("../utils/fetchProductImages");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Product = require("../models/product");
@@ -669,6 +673,11 @@ async function upsertWooProductRow({
 
   if (categoryField.length) {
     stats.products_category_linked = (stats.products_category_linked || 0) + 1;
+  }
+
+  const imageUrls = extractWooImageUrls(remote, { isVariation });
+  if (imageUrls.length) {
+    await syncFetchProductImages(posId, imageUrls, existing);
   }
 
   return posId;

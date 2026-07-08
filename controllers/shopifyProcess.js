@@ -1,4 +1,8 @@
 const mongoose = require("mongoose");
+const {
+  extractShopifyImageUrls,
+  syncFetchProductImages,
+} = require("../utils/fetchProductImages");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Company = require("../models/company");
@@ -880,6 +884,14 @@ async function upsertShopifyProductRow({
     client,
     stats,
   });
+
+  const imageUrls = extractShopifyImageUrls(remoteProduct, {
+    variant,
+    isVariation,
+  });
+  if (imageUrls.length) {
+    await syncFetchProductImages(posId, imageUrls, existing);
+  }
 
   return posId;
 }
