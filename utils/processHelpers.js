@@ -1038,17 +1038,19 @@ async function finishFetchCategoryBatch(req, res, process, batchResult) {
 }
 
 async function failFetchCategoryBatch(process, res, errorMessage, errorDetail) {
+  const message = formatProcessRemarks(errorMessage, "Process batch failed.");
+  const detail = formatProcessRemarks(errorDetail, message);
   await ProcessModel.findByIdAndUpdate(process._id, {
     progress: "failed",
     status: "failed",
-    remarks: errorMessage,
+    remarks: message,
   });
   await releaseProcessFromQueue(process);
 
   return res.status(500).json({
     success: false,
-    message: errorMessage,
-    error: errorDetail || errorMessage,
+    message,
+    error: detail,
   });
 }
 
@@ -1291,8 +1293,26 @@ async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
   });
 }
 
+function formatProcessRemarks(value, fallback = "") {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "string") return value;
+  if (typeof value === "object") {
+    if (value.errors != null) {
+      return typeof value.errors === "string" ?
+          value.errors
+        : JSON.stringify(value.errors);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
 async function markProcessOutcome(processId, status, remarks) {
-  const update = { status, remarks };
+  const update = { status, remarks: formatProcessRemarks(remarks) };
   if (status === "completed") {
     update.progress = "completed";
   } else if (status === "failed") {
@@ -1364,5 +1384,6 @@ module.exports = {
   failFetchProductBatch,
   failFetchOrderBatch,
   markProcessOutcome,
+  formatProcessRemarks,
   coalesceObjectId,
 };

@@ -58,6 +58,11 @@ const {
   hasSyncPayloadFields,
   isIntegrationSyncEnabled,
 } = require("../utils/integrationProductSync");
+const {
+  isShopifyAuthError,
+  formatShopifyErrorPayload,
+  refreshShopifyAccessToken,
+} = require("../utils/shopifyTokenRefresh");
 
 function buildShopifyClient(integration) {
   const rawUrl =
@@ -118,6 +123,59 @@ function buildShopifyClient(integration) {
     client: new shopify.clients.Rest({ session }),
     shopDomain,
   };
+}
+
+/**
+ * Run a Shopify Admin API call; on auth failure refresh token in DB and retry once.
+ */
+async function runWithShopifyClient(integration, process, handler) {
+  let activeIntegration = integration;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const { client, error } = buildShopifyClient(activeIntegration);
+    if (error) {
+      throw new Error(error);
+    }
+
+    try {
+      return await handler(client, activeIntegration);
+    } catch (apiError) {
+      if (attempt === 0 && isShopifyAuthError(apiError)) {
+        const integrationId =
+          resolveIntegrationId(process) ||
+          activeIntegration?._id ||
+          activeIntegration?.id;
+        try {
+          const refreshed = await refreshShopifyAccessToken(
+            activeIntegration,
+            integrationId,
+          );
+          activeIntegration = {
+            ...activeIntegration,
+            token: refreshed.access_token,
+          };
+          if (
+            process?.integration_id &&
+            typeof process.integration_id === "object"
+          ) {
+            process.integration_id.token = refreshed.access_token;
+          }
+          console.warn(
+            `Shopify access token refreshed for integration ${integrationId}; retrying request.`,
+          );
+          continue;
+        } catch (refreshError) {
+          console.error(
+            "Shopify token refresh failed:",
+            refreshError.message || refreshError,
+          );
+        }
+      }
+      throw apiError;
+    }
+  }
+
+  throw new Error("Shopify request failed after token refresh retry.");
 }
 
 /**
@@ -993,99 +1051,96 @@ async function fetch_category(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   const { limit, offset } = resolveBatchPagination(process);
-  const query = { limit, order: "id asc" };
-  if (offset > 0) {
-    query.since_id = offset;
-  }
 
   try {
-    const listResponse = await client.get({
-      path: "custom_collections",
-      query,
-    });
-    const remoteCategories =
-      Array.isArray(listResponse?.body?.custom_collections) ?
-        listResponse.body.custom_collections
-      : [];
-
-    let inserted = 0;
-    let skipped = 0;
-
-    for (const remote of remoteCategories) {
-      const name = String(remote?.title || "").trim();
-      if (!name) {
-        skipped += 1;
-        continue;
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const query = { limit, order: "id asc" };
+      if (offset > 0) {
+        query.since_id = offset;
       }
 
-      const existing = await findExistingCategoryByName(name, companyId);
-      if (existing) {
-        skipped += 1;
+      const listResponse = await client.get({
+        path: "custom_collections",
+        query,
+      });
+      const remoteCategories =
+        Array.isArray(listResponse?.body?.custom_collections) ?
+          listResponse.body.custom_collections
+        : [];
+
+      let inserted = 0;
+      let skipped = 0;
+
+      for (const remote of remoteCategories) {
+        const name = String(remote?.title || "").trim();
+        if (!name) {
+          skipped += 1;
+          continue;
+        }
+
+        const existing = await findExistingCategoryByName(name, companyId);
+        if (existing) {
+          skipped += 1;
+          await upsertSyncCategoryMapping({
+            categoryId: existing._id,
+            integrationId: resolveIntegrationId(process),
+            companyId,
+            referenceId: remote.id,
+            createdBy: process.created_by?._id || process.created_by,
+          });
+          continue;
+        }
+
+        const created = await Category.create({
+          name,
+          slug: categorySlugFromName(name),
+          description: remote.body_html || "",
+          company_id: companyId,
+          status: "active",
+          isActive: remote.published !== false,
+          created_by: coalesceObjectId(
+            process.created_by?._id || process.created_by,
+          ),
+        });
         await upsertSyncCategoryMapping({
-          categoryId: existing._id,
+          categoryId: created._id,
           integrationId: resolveIntegrationId(process),
           companyId,
           referenceId: remote.id,
           createdBy: process.created_by?._id || process.created_by,
         });
-        continue;
+        inserted += 1;
       }
 
-      const created = await Category.create({
-        name,
-        slug: categorySlugFromName(name),
-        description: remote.body_html || "",
-        company_id: companyId,
-        status: "active",
-        isActive: remote.published !== false,
-        created_by: coalesceObjectId(
-          process.created_by?._id || process.created_by,
-        ),
-      });
-      await upsertSyncCategoryMapping({
-        categoryId: created._id,
-        integrationId: resolveIntegrationId(process),
-        companyId,
-        referenceId: remote.id,
-        createdBy: process.created_by?._id || process.created_by,
-      });
-      inserted += 1;
-    }
+      const fetched = remoteCategories.length;
+      const isComplete = fetched < limit;
+      const lastRemoteId =
+        fetched > 0 ? remoteCategories[fetched - 1]?.id : offset;
+      const remarks =
+        isComplete ?
+          `Category import completed: batch fetched ${fetched}, inserted ${inserted}, skipped ${skipped}. Total processed ${(Number(process.count) || 0) + inserted + skipped}.`
+        : `Batch complete: fetched ${fetched}, inserted ${inserted}, skipped ${skipped}. Call execute-process again for the next batch.`;
 
-    const fetched = remoteCategories.length;
-    const isComplete = fetched < limit;
-    const lastRemoteId =
-      fetched > 0 ? remoteCategories[fetched - 1]?.id : offset;
-    const remarks =
-      isComplete ?
-        `Category import completed: batch fetched ${fetched}, inserted ${inserted}, skipped ${skipped}. Total processed ${(Number(process.count) || 0) + inserted + skipped}.`
-      : `Batch complete: fetched ${fetched}, inserted ${inserted}, skipped ${skipped}. Call execute-process again for the next batch.`;
-
-    return finishFetchCategoryBatch(req, res, process, {
-      fetched,
-      inserted,
-      skipped,
-      isComplete,
-      nextOffset: lastRemoteId || 0,
-      remarks,
+      return finishFetchCategoryBatch(req, res, process, {
+        fetched,
+        inserted,
+        skipped,
+        isComplete,
+        nextOffset: lastRemoteId || 0,
+        remarks,
+      });
     });
   } catch (error) {
     console.error(
       "Shopify category fetch failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      "Failed to fetch categories from Shopify.";
-    return failFetchCategoryBatch(process, res, errorPayload, errorPayload);
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to fetch categories from Shopify.",
+    );
+    return failFetchCategoryBatch(process, res, errorMessage, errorMessage);
   }
 }
 
@@ -1418,11 +1473,6 @@ async function sync_product(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   const sku = resolvePosProductSku(product);
   if (!sku) {
     return res.status(400).json({
@@ -1435,51 +1485,53 @@ async function sync_product(req, res, process) {
   const integrationId = resolveIntegrationId(process);
   const productId = coalesceObjectId(product._id);
 
-  const { rootProduct } = await resolveShopifySyncRootProduct(
-    product,
-    companyId,
-  );
-
-  if (
-    typeof rootProduct?.product_type === "string" &&
-    rootProduct.product_type.toLowerCase() === "variable"
-  ) {
-    try {
-      return await syncShopifyVariableProductToStore(req, res, process, {
-        client,
-        integration,
-        parentProduct: rootProduct,
-        companyId,
-        integrationId,
-      });
-    } catch (error) {
-      const detail = describeShopifyError(error);
-      console.error(
-        `Shopify variable product sync failed for "${rootProduct.product_name}":`,
-        detail,
-      );
-      await markProcessOutcome(
-        process._id,
-        "failed",
-        `Failed to sync Product Name : ${rootProduct.product_name} to Shopify — ${detail}`,
-      );
-      return res.status(500).json({
-        success: false,
-        message: detail,
-        detail,
-      });
-    }
-  }
-
-  const syncRow = await SyncProduct.findOne({
-    product_id: productId,
-    integration_id: integrationId,
-    company_id: companyId,
-    deletedAt: null,
-  }).lean();
-
-  let step = "init";
   try {
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const { rootProduct } = await resolveShopifySyncRootProduct(
+        product,
+        companyId,
+      );
+
+      if (
+        typeof rootProduct?.product_type === "string" &&
+        rootProduct.product_type.toLowerCase() === "variable"
+      ) {
+        try {
+          return await syncShopifyVariableProductToStore(req, res, process, {
+            client,
+            integration,
+            parentProduct: rootProduct,
+            companyId,
+            integrationId,
+          });
+        } catch (error) {
+          const detail = describeShopifyError(error);
+          console.error(
+            `Shopify variable product sync failed for "${rootProduct.product_name}":`,
+            detail,
+          );
+          await markProcessOutcome(
+            process._id,
+            "failed",
+            `Failed to sync Product Name : ${rootProduct.product_name} to Shopify — ${detail}`,
+          );
+          return res.status(500).json({
+            success: false,
+            message: detail,
+            detail,
+          });
+        }
+      }
+
+      const syncRow = await SyncProduct.findOne({
+        product_id: productId,
+        integration_id: integrationId,
+        company_id: companyId,
+        deletedAt: null,
+      }).lean();
+
+      let step = "init";
+      try {
     let remoteProduct = null;
     let remoteId =
       syncRow?.refference_id != null && String(syncRow.refference_id).trim() !== "" ?
@@ -1692,18 +1744,29 @@ async function sync_product(req, res, process) {
       `Failed to sync Product Name : ${product.product_name} to Shopify [step: ${step}] — ${detail}`,
     );
 
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      `Failed to sync Product Name : ${product.product_name} to Shopify.`;
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      `Failed to sync Product Name : ${product.product_name} to Shopify.`,
+    );
 
     return res.status(500).json({
       success: false,
       step,
-      message: errorPayload,
+      message: errorMessage,
       detail,
-      error: errorPayload,
+      error: errorMessage,
+    });
+      }
+    });
+  } catch (error) {
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      `Failed to sync Product Name : ${product.product_name} to Shopify.`,
+    );
+    return res.status(500).json({
+      success: false,
+      message: errorMessage,
+      error: errorMessage,
     });
   }
 }
@@ -1727,85 +1790,82 @@ async function sync_category(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   try {
-    const title = category.name?.trim();
-    if (!title) {
-      return res.status(400).json({
-        success: false,
-        message: "Category name is required to sync with Shopify.",
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const title = category.name?.trim();
+      if (!title) {
+        return res.status(400).json({
+          success: false,
+          message: "Category name is required to sync with Shopify.",
+        });
+      }
+
+      const companyId = resolveCompanyId(process);
+      const listResponse = await client.get({
+        path: "custom_collections",
+        query: { title },
       });
-    }
+      const existing =
+        Array.isArray(listResponse?.body?.custom_collections) ?
+          listResponse.body.custom_collections
+        : [];
 
-    const companyId = resolveCompanyId(process);
-    const listResponse = await client.get({
-      path: "custom_collections",
-      query: { title },
-    });
-    const existing =
-      Array.isArray(listResponse?.body?.custom_collections) ?
-        listResponse.body.custom_collections
-      : [];
+      if (existing.length > 0) {
+        await upsertSyncCategoryMapping({
+          categoryId: category._id,
+          integrationId: resolveIntegrationId(process),
+          companyId,
+          referenceId: existing[0].id,
+          createdBy: process.created_by?._id || process.created_by,
+        });
 
-    if (existing.length > 0) {
+        await markProcessOutcome(
+          process._id,
+          "completed",
+          `Category : ${title} already existed on Shopify — skipped creation.`,
+        );
+
+        return res.status(200).json({
+          success: true,
+          data: existing[0],
+          message: `Category : ${title} already exists on Shopify.`,
+        });
+      }
+
+      const createdResponse = await client.post({
+        path: "custom_collections",
+        data: {
+          custom_collection: {
+            title,
+            body_html: category.description || "",
+            published: category.isActive !== false,
+          },
+        },
+        type: "application/json",
+      });
+
+      const createdCollection =
+        createdResponse?.body?.custom_collection || createdResponse?.body;
+
       await upsertSyncCategoryMapping({
         categoryId: category._id,
         integrationId: resolveIntegrationId(process),
         companyId,
-        referenceId: existing[0].id,
+        referenceId: createdCollection?.id,
         createdBy: process.created_by?._id || process.created_by,
       });
 
       await markProcessOutcome(
         process._id,
         "completed",
-        `Category : ${title} already existed on Shopify — skipped creation.`,
+        `Category : ${title} created on Shopify.`,
       );
 
-      return res.status(200).json({
+      return res.status(201).json({
         success: true,
-        data: existing[0],
-        message: `Category : ${title} already exists on Shopify.`,
+        data: createdCollection,
+        message: `Category : ${title} synced to Shopify successfully.`,
       });
-    }
-
-    const createdResponse = await client.post({
-      path: "custom_collections",
-      data: {
-        custom_collection: {
-          title,
-          body_html: category.description || "",
-          published: category.isActive !== false,
-        },
-      },
-      type: "application/json",
-    });
-
-    const createdCollection =
-      createdResponse?.body?.custom_collection || createdResponse?.body;
-
-    await upsertSyncCategoryMapping({
-      categoryId: category._id,
-      integrationId: resolveIntegrationId(process),
-      companyId,
-      referenceId: createdCollection?.id,
-      createdBy: process.created_by?._id || process.created_by,
-    });
-
-    await markProcessOutcome(
-      process._id,
-      "completed",
-      `Category : ${title} created on Shopify.`,
-    );
-
-    return res.status(201).json({
-      success: true,
-      data: createdCollection,
-      message: `Category : ${title} synced to Shopify successfully.`,
     });
   } catch (error) {
     console.error(
@@ -1819,16 +1879,15 @@ async function sync_category(req, res, process) {
       `Failed to sync Category : ${category.name} to Shopify.`,
     );
 
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      `Failed to sync Category : ${category.name} to Shopify.`;
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      `Failed to sync Category : ${category.name} to Shopify.`,
+    );
 
     return res.status(500).json({
       success: false,
-      message: errorPayload,
-      error: errorPayload,
+      message: errorMessage,
+      error: errorMessage,
     });
   }
 }
@@ -1851,45 +1910,66 @@ async function fetch_brand(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   const { limit, offset, page } = resolveBatchPagination(process);
-  const query = { limit, fields: "id,vendor", order: "id asc" };
-  if (offset > 0) {
-    query.since_id = offset;
-  }
 
   try {
-    const listResponse = await client.get({ path: "products", query });
-    const products =
-      Array.isArray(listResponse?.body?.products) ?
-        listResponse.body.products
-      : [];
-
-    const vendorByKey = new Map();
-    for (const product of products) {
-      const vendor = String(product?.vendor || "").trim();
-      if (vendor) {
-        vendorByKey.set(vendor.toLowerCase(), vendor);
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const query = { limit, fields: "id,vendor", order: "id asc" };
+      if (offset > 0) {
+        query.since_id = offset;
       }
-    }
 
-    let inserted = 0;
-    let skipped = 0;
-    let sync_brand_mapped = 0;
+      const listResponse = await client.get({ path: "products", query });
+      const products =
+        Array.isArray(listResponse?.body?.products) ?
+          listResponse.body.products
+        : [];
 
-    for (const name of vendorByKey.values()) {
-      const slug = categorySlugFromName(name);
-      const referenceId = `vendor:${slug}`;
-      const existing = await findExistingBrand(name, slug, companyId);
+      const vendorByKey = new Map();
+      for (const product of products) {
+        const vendor = String(product?.vendor || "").trim();
+        if (vendor) {
+          vendorByKey.set(vendor.toLowerCase(), vendor);
+        }
+      }
 
-      if (existing) {
-        skipped += 1;
+      let inserted = 0;
+      let skipped = 0;
+      let sync_brand_mapped = 0;
+
+      for (const name of vendorByKey.values()) {
+        const slug = categorySlugFromName(name);
+        const referenceId = `vendor:${slug}`;
+        const existing = await findExistingBrand(name, slug, companyId);
+
+        if (existing) {
+          skipped += 1;
+          const mapped = await upsertSyncBrandMapping({
+            brandId: existing._id,
+            integrationId: resolveIntegrationId(process),
+            companyId,
+            referenceId,
+            createdBy: process.created_by?._id || process.created_by,
+          });
+          if (mapped) {
+            sync_brand_mapped += 1;
+          }
+          continue;
+        }
+
+        const created = await Brand.create({
+          name,
+          slug,
+          description: name,
+          company_id: companyId,
+          status: "active",
+          created_by: coalesceObjectId(
+            process.created_by?._id || process.created_by,
+          ),
+        });
+        inserted += 1;
         const mapped = await upsertSyncBrandMapping({
-          brandId: existing._id,
+          brandId: created._id,
           integrationId: resolveIntegrationId(process),
           companyId,
           referenceId,
@@ -1898,60 +1978,36 @@ async function fetch_brand(req, res, process) {
         if (mapped) {
           sync_brand_mapped += 1;
         }
-        continue;
       }
 
-      const created = await Brand.create({
-        name,
-        slug,
-        description: name,
-        company_id: companyId,
-        status: "active",
-        created_by: coalesceObjectId(
-          process.created_by?._id || process.created_by,
-        ),
-      });
-      inserted += 1;
-      const mapped = await upsertSyncBrandMapping({
-        brandId: created._id,
-        integrationId: resolveIntegrationId(process),
-        companyId,
-        referenceId,
-        createdBy: process.created_by?._id || process.created_by,
-      });
-      if (mapped) {
-        sync_brand_mapped += 1;
-      }
-    }
+      const fetched = products.length;
+      const isComplete = fetched < limit;
+      const lastRemoteId = fetched > 0 ? products[fetched - 1]?.id : offset;
+      const remarks =
+        isComplete ?
+          `Brand import completed: products scanned ${fetched}, vendors inserted ${inserted}, skipped ${skipped}, sync mapped ${sync_brand_mapped}.`
+        : `Batch complete: products scanned ${fetched}, vendors inserted ${inserted}, skipped ${skipped}. Call execute-process again for page ${page + 1}.`;
 
-    const fetched = products.length;
-    const isComplete = fetched < limit;
-    const lastRemoteId = fetched > 0 ? products[fetched - 1]?.id : offset;
-    const remarks =
-      isComplete ?
-        `Brand import completed: products scanned ${fetched}, vendors inserted ${inserted}, skipped ${skipped}, sync mapped ${sync_brand_mapped}.`
-      : `Batch complete: products scanned ${fetched}, vendors inserted ${inserted}, skipped ${skipped}. Call execute-process again for page ${page + 1}.`;
-
-    return finishFetchBrandBatch(req, res, process, {
-      fetched,
-      inserted,
-      skipped,
-      sync_brand_mapped,
-      isComplete,
-      nextOffset: lastRemoteId || 0,
-      remarks,
+      return finishFetchBrandBatch(req, res, process, {
+        fetched,
+        inserted,
+        skipped,
+        sync_brand_mapped,
+        isComplete,
+        nextOffset: lastRemoteId || 0,
+        remarks,
+      });
     });
   } catch (error) {
     console.error(
       "Shopify brand fetch failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      "Failed to fetch brands from Shopify product vendors.";
-    return failFetchBrandBatch(process, res, errorPayload, errorPayload);
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to fetch brands from Shopify product vendors.",
+    );
+    return failFetchBrandBatch(process, res, errorMessage, errorMessage);
   }
 }
 
@@ -2129,99 +2185,92 @@ async function fetch_order(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   const { limit, offset, page } = resolveBatchPagination(process);
-  const query = {
-    limit,
-    status: "any",
-    fields:
-      "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,customer",
-    order: "id asc",
-  };
-  if (offset > 0) {
-    query.since_id = offset;
-  }
 
   try {
-    const listResponse = await client.get({ path: "orders", query });
-    const remoteOrders =
-      Array.isArray(listResponse?.body?.orders) ?
-        listResponse.body.orders
-      : [];
-    const stats = createFetchOrderStats();
-
-    const importCtx = { companyId, process, stats, req };
-
-    for (const remote of remoteOrders) {
-      try {
-        await importShopifyOrderToPos(remote, importCtx);
-      } catch (err) {
-        console.error(
-          `Failed to import Shopify order ${remote?.id}:`,
-          err?.message || err,
-        );
-        recordOrderSkip(stats, {
-          store: "shopify",
-          remote_id: remote?.id,
-          order_number: remote?.order_number,
-          reason: "import_error",
-          detail: err?.message || String(err),
-        }, importCtx);
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const query = {
+        limit,
+        status: "any",
+        fields:
+          "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,customer",
+        order: "id asc",
+      };
+      if (offset > 0) {
+        query.since_id = offset;
       }
-    }
 
-    const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
-      stats;
-    const fetched = remoteOrders.length;
-    const isComplete = fetched < limit;
-    const lastRemoteId = fetched > 0 ? remoteOrders[fetched - 1]?.id : offset;
-    const remarks = formatFetchOrderBatchRemarks({
-      fetched,
-      inserted,
-      skipped,
-      lines_inserted,
-      lines_skipped,
-      skipped_orders,
-      isComplete,
-      page: page + 1,
-    });
+      const listResponse = await client.get({ path: "orders", query });
+      const remoteOrders =
+        Array.isArray(listResponse?.body?.orders) ?
+          listResponse.body.orders
+        : [];
+      const stats = createFetchOrderStats();
 
-    return finishFetchOrderBatch(req, res, process, {
-      fetched,
-      inserted,
-      skipped,
-      lines_inserted,
-      lines_skipped,
-      skipped_orders,
-      isComplete,
-      nextOffset: lastRemoteId || 0,
-      remarks,
+      const importCtx = { companyId, process, stats, req };
+
+      for (const remote of remoteOrders) {
+        try {
+          await importShopifyOrderToPos(remote, importCtx);
+        } catch (err) {
+          console.error(
+            `Failed to import Shopify order ${remote?.id}:`,
+            err?.message || err,
+          );
+          recordOrderSkip(stats, {
+            store: "shopify",
+            remote_id: remote?.id,
+            order_number: remote?.order_number,
+            reason: "import_error",
+            detail: err?.message || String(err),
+          }, importCtx);
+        }
+      }
+
+      const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
+        stats;
+      const fetched = remoteOrders.length;
+      const isComplete = fetched < limit;
+      const lastRemoteId = fetched > 0 ? remoteOrders[fetched - 1]?.id : offset;
+      const remarks = formatFetchOrderBatchRemarks({
+        fetched,
+        inserted,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        isComplete,
+        page: page + 1,
+      });
+
+      return finishFetchOrderBatch(req, res, process, {
+        fetched,
+        inserted,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        isComplete,
+        nextOffset: lastRemoteId || 0,
+        remarks,
+      });
     });
   } catch (error) {
     console.error(
       "Shopify order fetch failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      "Failed to fetch orders from Shopify.";
-    const errorMessage =
-      typeof errorPayload === "string" ?
-        errorPayload
-      : errorPayload?.message || JSON.stringify(errorPayload);
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to fetch orders from Shopify.",
+    );
     await logFetchOrderBatchFailed(req, {
       process,
       companyId,
       store: "shopify",
       errorMessage,
     });
-    return failFetchOrderBatch(process, res, errorPayload, errorPayload);
+    return failFetchOrderBatch(process, res, errorMessage, errorMessage);
   }
 }
 
@@ -2245,92 +2294,84 @@ async function fetch_latest_order(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   const perPage = resolveLatestOrderBatchLimit(process);
 
   try {
-    const listResponse = await client.get({
-      path: "orders",
-      query: {
-        limit: perPage,
-        status: "any",
-        fields:
-          "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,subtotal_price,total_discounts,total_shipping_price_set,billing_address,customer",
-        order: "id desc",
-      },
-    });
-    const remoteOrders =
-      Array.isArray(listResponse?.body?.orders) ?
-        listResponse.body.orders
-      : [];
-    const stats = createFetchOrderStats();
-    const importCtx = { companyId, process, stats, req };
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const listResponse = await client.get({
+        path: "orders",
+        query: {
+          limit: perPage,
+          status: "any",
+          fields:
+            "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,subtotal_price,total_discounts,total_shipping_price_set,billing_address,customer",
+          order: "id desc",
+        },
+      });
+      const remoteOrders =
+        Array.isArray(listResponse?.body?.orders) ?
+          listResponse.body.orders
+        : [];
+      const stats = createFetchOrderStats();
+      const importCtx = { companyId, process, stats, req };
 
-    for (const remote of remoteOrders) {
-      try {
-        await importShopifyOrderToPos(remote, importCtx);
-      } catch (err) {
-        console.error(
-          `Failed to import Shopify order ${remote?.id}:`,
-          err?.message || err,
-        );
-        recordOrderSkip(stats, {
-          store: "shopify",
-          remote_id: remote?.id,
-          order_number: remote?.order_number,
-          reason: "import_error",
-          detail: err?.message || String(err),
-        }, importCtx);
+      for (const remote of remoteOrders) {
+        try {
+          await importShopifyOrderToPos(remote, importCtx);
+        } catch (err) {
+          console.error(
+            `Failed to import Shopify order ${remote?.id}:`,
+            err?.message || err,
+          );
+          recordOrderSkip(stats, {
+            store: "shopify",
+            remote_id: remote?.id,
+            order_number: remote?.order_number,
+            reason: "import_error",
+            detail: err?.message || String(err),
+          }, importCtx);
+        }
       }
-    }
 
-    const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
-      stats;
-    const fetched = remoteOrders.length;
-    const remarks = formatFetchLatestOrderRemarks({
-      fetched,
-      inserted,
-      skipped,
-      lines_inserted,
-      lines_skipped,
-      skipped_orders,
-      limit: perPage,
-    });
+      const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
+        stats;
+      const fetched = remoteOrders.length;
+      const remarks = formatFetchLatestOrderRemarks({
+        fetched,
+        inserted,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        limit: perPage,
+      });
 
-    return finishFetchLatestOrderBatch(req, res, process, {
-      fetched,
-      inserted,
-      skipped,
-      lines_inserted,
-      lines_skipped,
-      skipped_orders,
-      remarks,
+      return finishFetchLatestOrderBatch(req, res, process, {
+        fetched,
+        inserted,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        remarks,
+      });
     });
   } catch (error) {
     console.error(
       "Shopify latest order fetch failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      "Failed to fetch latest orders from Shopify.";
-    const errorMessage =
-      typeof errorPayload === "string" ?
-        errorPayload
-      : errorPayload?.message || JSON.stringify(errorPayload);
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to fetch latest orders from Shopify.",
+    );
     await logFetchOrderBatchFailed(req, {
       process,
       companyId,
       store: "shopify",
       errorMessage,
     });
-    return failFetchOrderBatch(process, res, errorPayload, errorPayload);
+    return failFetchOrderBatch(process, res, errorMessage, errorMessage);
   }
 }
 
@@ -2352,136 +2393,133 @@ async function fetch_product(req, res, process) {
     });
   }
 
-  const { client, error } = buildShopifyClient(integration);
-  if (error) {
-    return res.status(400).json({ success: false, message: error });
-  }
-
   const { limit, offset, page } = resolveBatchPagination(process);
-  const query = {
-    limit,
-    order: "id asc",
-  };
-  if (offset > 0) {
-    query.since_id = offset;
-  }
 
   try {
-    const warehouseId = await resolveCompanyDefaultWarehouseId(companyId);
-    if (!warehouseId) {
-      console.warn(
-        "[shopify fetch_product] company has no default warehouse_id; products will import without stock.",
-      );
-    }
-
-    const listResponse = await client.get({ path: "products", query });
-    const remoteProducts =
-      Array.isArray(listResponse?.body?.products) ?
-        listResponse.body.products
-      : [];
-    const stats = {
-      inserted: 0,
-      updated: 0,
-      skipped: 0,
-      stock_synced: 0,
-      stock_updated: 0,
-      categories_found: 0,
-      categories_inserted: 0,
-      products_category_linked: 0,
-      sync_product_mapped: 0,
-      variations_fetched: 0,
-      variations_inserted: 0,
-      variations_updated: 0,
-    };
-    const categoryCtx = { companyId, process, stats };
-
-    for (const remote of remoteProducts) {
-      const name = String(remote?.title || "").trim();
-      if (!name) {
-        stats.skipped += 1;
-        continue;
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const query = {
+        limit,
+        order: "id asc",
+      };
+      if (offset > 0) {
+        query.since_id = offset;
       }
 
-      try {
-        const variant = Array.isArray(remote?.variants) ? remote.variants[0] : null;
-        const productPrice = mapShopifyVariantPrice(variant);
-        const categoryIds = await resolvePosCategoryIdsFromShopifyProduct(
-          remote,
-          client,
-          categoryCtx,
+      const warehouseId = await resolveCompanyDefaultWarehouseId(companyId);
+      if (!warehouseId) {
+        console.warn(
+          "[shopify fetch_product] company has no default warehouse_id; products will import without stock.",
         );
-        await importShopifyProductToPos(remote, {
-          companyId,
-          process,
-          stats,
-          productPrice,
-          categoryIds,
-          warehouseId,
-          client,
-        });
-      } catch (err) {
-        console.error(
-          `Failed to import Shopify product ${remote?.id} (${name}):`,
-          err?.message || err,
-        );
-        stats.skipped += 1;
       }
-    }
 
-    const {
-      inserted,
-      updated = 0,
-      skipped,
-      stock_synced = 0,
-      stock_updated = 0,
-      categories_found = 0,
-      categories_inserted = 0,
-      products_category_linked = 0,
-      variations_fetched = 0,
-      variations_inserted = 0,
-      variations_updated = 0,
-    } = stats;
-    const fetched = remoteProducts.length;
-    const isComplete = fetched < limit;
-    const lastRemoteId = fetched > 0 ? remoteProducts[fetched - 1]?.id : offset;
-    const stockSummary = warehouseId ?
-        `, stock synced ${stock_synced} (${stock_updated} qty changed)`
-      : ", stock skipped (no default warehouse on company)";
-    const variationSummary =
-      variations_fetched > 0 ?
-        `, variations fetched ${variations_fetched}, inserted ${variations_inserted}, updated ${variations_updated}`
-      : "";
-    const remarks =
-      isComplete ?
-        `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
-      : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+      const listResponse = await client.get({ path: "products", query });
+      const remoteProducts =
+        Array.isArray(listResponse?.body?.products) ?
+          listResponse.body.products
+        : [];
+      const stats = {
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        stock_synced: 0,
+        stock_updated: 0,
+        categories_found: 0,
+        categories_inserted: 0,
+        products_category_linked: 0,
+        sync_product_mapped: 0,
+        variations_fetched: 0,
+        variations_inserted: 0,
+        variations_updated: 0,
+      };
+      const categoryCtx = { companyId, process, stats };
 
-    return finishFetchProductBatch(req, res, process, {
-      fetched,
-      inserted,
-      updated,
-      skipped,
-      categories_found,
-      categories_inserted,
-      products_category_linked,
-      variations_fetched,
-      variations_inserted,
-      variations_updated,
-      isComplete,
-      nextOffset: lastRemoteId || 0,
-      remarks,
+      for (const remote of remoteProducts) {
+        const name = String(remote?.title || "").trim();
+        if (!name) {
+          stats.skipped += 1;
+          continue;
+        }
+
+        try {
+          const variant = Array.isArray(remote?.variants) ? remote.variants[0] : null;
+          const productPrice = mapShopifyVariantPrice(variant);
+          const categoryIds = await resolvePosCategoryIdsFromShopifyProduct(
+            remote,
+            client,
+            categoryCtx,
+          );
+          await importShopifyProductToPos(remote, {
+            companyId,
+            process,
+            stats,
+            productPrice,
+            categoryIds,
+            warehouseId,
+            client,
+          });
+        } catch (err) {
+          console.error(
+            `Failed to import Shopify product ${remote?.id} (${name}):`,
+            err?.message || err,
+          );
+          stats.skipped += 1;
+        }
+      }
+
+      const {
+        inserted,
+        updated = 0,
+        skipped,
+        stock_synced = 0,
+        stock_updated = 0,
+        categories_found = 0,
+        categories_inserted = 0,
+        products_category_linked = 0,
+        variations_fetched = 0,
+        variations_inserted = 0,
+        variations_updated = 0,
+      } = stats;
+      const fetched = remoteProducts.length;
+      const isComplete = fetched < limit;
+      const lastRemoteId = fetched > 0 ? remoteProducts[fetched - 1]?.id : offset;
+      const stockSummary = warehouseId ?
+          `, stock synced ${stock_synced} (${stock_updated} qty changed)`
+        : ", stock skipped (no default warehouse on company)";
+      const variationSummary =
+        variations_fetched > 0 ?
+          `, variations fetched ${variations_fetched}, inserted ${variations_inserted}, updated ${variations_updated}`
+        : "";
+      const remarks =
+        isComplete ?
+          `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
+        : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+
+      return finishFetchProductBatch(req, res, process, {
+        fetched,
+        inserted,
+        updated,
+        skipped,
+        categories_found,
+        categories_inserted,
+        products_category_linked,
+        variations_fetched,
+        variations_inserted,
+        variations_updated,
+        isComplete,
+        nextOffset: lastRemoteId || 0,
+        remarks,
+      });
     });
   } catch (error) {
     console.error(
       "Shopify product fetch failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorPayload =
-      error?.response?.body ||
-      error?.response?.data ||
-      error?.message ||
-      "Failed to fetch products from Shopify.";
-    return failFetchProductBatch(process, res, errorPayload, errorPayload);
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to fetch products from Shopify.",
+    );
+    return failFetchProductBatch(process, res, errorMessage, errorMessage);
   }
 }
 
