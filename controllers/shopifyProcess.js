@@ -2417,13 +2417,7 @@ async function fetch_product(req, res, process) {
         query.since_id = offset;
       }
 
-      const warehouseId = await resolveCompanyDefaultWarehouseId(companyId);
-      if (!warehouseId) {
-        console.warn(
-          "[shopify fetch_product] company has no default warehouse_id; products will import without stock.",
-        );
-      }
-
+      // fetch_product imports catalog only — do not resolve warehouse or sync qty/stock.
       const listResponse = await client.get({ path: "products", query });
       const remoteProducts =
         Array.isArray(listResponse?.body?.products) ?
@@ -2433,8 +2427,6 @@ async function fetch_product(req, res, process) {
         inserted: 0,
         updated: 0,
         skipped: 0,
-        stock_synced: 0,
-        stock_updated: 0,
         categories_found: 0,
         categories_inserted: 0,
         products_category_linked: 0,
@@ -2466,7 +2458,7 @@ async function fetch_product(req, res, process) {
             stats,
             productPrice,
             categoryIds,
-            warehouseId,
+            warehouseId: null,
             client,
           });
         } catch (err) {
@@ -2482,8 +2474,6 @@ async function fetch_product(req, res, process) {
         inserted,
         updated = 0,
         skipped,
-        stock_synced = 0,
-        stock_updated = 0,
         categories_found = 0,
         categories_inserted = 0,
         products_category_linked = 0,
@@ -2494,17 +2484,14 @@ async function fetch_product(req, res, process) {
       const fetched = remoteProducts.length;
       const isComplete = fetched < limit;
       const lastRemoteId = fetched > 0 ? remoteProducts[fetched - 1]?.id : offset;
-      const stockSummary = warehouseId ?
-          `, stock synced ${stock_synced} (${stock_updated} qty changed)`
-        : ", stock skipped (no default warehouse on company)";
       const variationSummary =
         variations_fetched > 0 ?
           `, variations fetched ${variations_fetched}, inserted ${variations_inserted}, updated ${variations_updated}`
         : "";
       const remarks =
         isComplete ?
-          `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
-        : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}${stockSummary}${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
+          `Product import completed: batch fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, stock not fetched${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}.`
+        : `Batch complete: fetched ${fetched}, inserted ${inserted}, updated ${updated}, skipped ${skipped}, stock not fetched${variationSummary}, categories found ${categories_found}, categories inserted ${categories_inserted}, products linked ${products_category_linked}. Call execute-process again for page ${page + 1}.`;
 
       return finishFetchProductBatch(req, res, process, {
         fetched,
