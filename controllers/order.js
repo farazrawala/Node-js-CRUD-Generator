@@ -2003,7 +2003,7 @@ async function order_save(req, res) {
               // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
               account_id: orderReq.body?.posPayMethod,
               type: "debit",
-              amount: lines_subtotal + shipment - discount,
+              amount: lines_subtotal + shipment - discount - remainingAmountDue,
               reference_user_id: record?.customer_id,
               transaction_number,
               description: orderGlDescription(
