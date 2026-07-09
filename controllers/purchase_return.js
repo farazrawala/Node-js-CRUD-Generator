@@ -33,6 +33,9 @@ const { evaluateProductStockAlert } = require("./alerts");
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  allowAddToCartWhenStockInsufficient,
+} = require("../utils/companyProductSettings");
 
 /**
  * Purchase return HTTP handlers: header + line items, inventory movement ledger (`inventory_movements` only),
@@ -1289,6 +1292,11 @@ async function applyPurchaseReturnOutboundForLine({
       preferredRaw
     : null;
 
+  const allowInsufficientStock = allowAddToCartWhenStockInsufficient(
+    req?.user?.company_id,
+  );
+  const fallbackWarehouseId = resolveDefaultWarehouseId(req);
+
   let allocations;
   let stockChanges;
   try {
@@ -1302,6 +1310,8 @@ async function applyPurchaseReturnOutboundForLine({
         session: mongoSession,
         req,
         logContext: inventoryLogContext,
+        allowNegative: allowInsufficientStock,
+        fallbackWarehouseId,
       }));
   } catch (err) {
     if (err.clientPayload) {
