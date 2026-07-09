@@ -1311,6 +1311,178 @@ function formatProcessRemarks(value, fallback = "") {
   return String(value);
 }
 
+const PROCESS_REMARKS_MAX_LENGTH = 4000;
+
+function truncateProcessRemarks(text) {
+  const value = String(text || "").trim();
+  if (value.length <= PROCESS_REMARKS_MAX_LENGTH) {
+    return value;
+  }
+  return `${value.slice(0, PROCESS_REMARKS_MAX_LENGTH - 20)}…[truncated]`;
+}
+
+/**
+ * Extract a human-readable error from axios errors, API JSON bodies, or Error objects.
+ */
+function extractProcessErrorMessage(source) {
+  if (source == null) {
+    return "Unknown process error";
+  }
+  if (typeof source === "string") {
+    return source.trim() || "Unknown process error";
+  }
+
+  const responseData = source.response?.data;
+  if (responseData != null) {
+    if (typeof responseData === "string" && responseData.trim()) {
+      return responseData.trim();
+    }
+    if (typeof responseData.message === "string" && responseData.message.trim()) {
+      return responseData.message.trim();
+    }
+    if (typeof responseData.error === "string" && responseData.error.trim()) {
+      return responseData.error.trim();
+    }
+    if (responseData.errors != null) {
+      return formatProcessRemarks(responseData.errors);
+    }
+    try {
+      return JSON.stringify(responseData);
+    } catch {
+      return String(responseData);
+    }
+  }
+
+  if (typeof source.message === "string" && source.message.trim()) {
+    const genericAxios = /^Request failed with status code \d+$/i.test(
+      source.message,
+    );
+    if (!genericAxios || !source.response) {
+      return source.message.trim();
+    }
+  }
+
+  if (source.error != null) {
+    return formatProcessRemarks(source.error);
+  }
+
+  if (source instanceof Error) {
+    return source.message || "Unknown process error";
+  }
+
+  try {
+    return JSON.stringify(source);
+  } catch {
+    return String(source);
+  }
+}
+
+function buildProcessFailureRemarks(process, exactError) {
+  const action = String(process?.action || "process").trim();
+  const productName =
+    process?.product_id?.product_name ||
+    process?.product_id?.name ||
+    process?.product_id?.sku ||
+    "";
+  const categoryName = process?.category_id?.name || "";
+  const brandName = process?.brand_id?.name || "";
+
+  let subject = "";
+  if (productName) {
+    subject = productName;
+  } else if (categoryName) {
+    subject = categoryName;
+  } else if (brandName) {
+    subject = brandName;
+  }
+
+  const prefix = subject ? `${action} (${subject}): ` : `${action}: `;
+  return truncateProcessRemarks(`${prefix}${exactError}`);
+}
+
+function buildProcessFailureLogDescription(process, remarks) {
+  const lines = [remarks];
+  if (process?._id) {
+    lines.push(`process_id: ${process._id}`);
+  }
+  if (process?.action) {
+    lines.push(`action: ${process.action}`);
+  }
+  const integrationName =
+    process?.integration_id?.name ||
+    process?.integration_id?.store_type ||
+    process?.integration_id;
+  if (integrationName) {
+    lines.push(`integration: ${integrationName}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Mark process failed, store exact error in remarks, and write a logs row.
+ */
+async function recordProcessFailure(req, process, errorSource, options = {}) {
+  if (!process?._id) {
+    return null;
+  }
+
+  const exactError = extractProcessErrorMessage(errorSource);
+  const remarks = buildProcessFailureRemarks(process, exactError);
+
+  await markProcessOutcome(process._id, "failed", remarks);
+
+  try {
+    const { logControllerError } = require("./logControllerError");
+    await logControllerError(req, buildProcessFailureLogDescription(process, remarks), {
+      action: `PROCESS ${String(process.action || "job").toUpperCase()} FAILED`,
+      tags: ["process", "error", String(process.action || "process")],
+      fallbackUrl:
+        options.fallbackUrl ||
+        `/api/process/execute-process/${process._id}`,
+      fallbackCompanyId: resolveCompanyId(process),
+    });
+  } catch (logErr) {
+    console.warn("[process] failure log:", logErr?.message || logErr);
+  }
+
+  return { remarks, exactError };
+}
+
+/**
+ * Intercept res.status/json so failed handler responses update remarks + logs.
+ */
+function attachProcessFailureHooks(req, res, process) {
+  if (!process?._id || res._processFailureHooksAttached) {
+    return;
+  }
+  res._processFailureHooksAttached = true;
+
+  let pendingStatus = Number(res.statusCode) || 200;
+  const originalStatus = res.status.bind(res);
+  const originalJson = res.json.bind(res);
+
+  res.status = function processStatus(code) {
+    pendingStatus = Number(code) || 200;
+    return originalStatus(code);
+  };
+
+  res.json = function processJson(payload) {
+    const isFailure =
+      pendingStatus >= 400 ||
+      (payload && typeof payload === "object" && payload.success === false);
+
+    if (isFailure) {
+      recordProcessFailure(req, process, payload || { message: `HTTP ${pendingStatus}` }, {
+        fallbackUrl: req.originalUrl || req.path || undefined,
+      }).catch((err) => {
+        console.warn("[process] record failure:", err?.message || err);
+      });
+    }
+
+    return originalJson(payload);
+  };
+}
+
 async function markProcessOutcome(processId, status, remarks) {
   const update = { status, remarks: formatProcessRemarks(remarks) };
   if (status === "completed") {
@@ -1385,5 +1557,8 @@ module.exports = {
   failFetchOrderBatch,
   markProcessOutcome,
   formatProcessRemarks,
+  extractProcessErrorMessage,
+  recordProcessFailure,
+  attachProcessFailureHooks,
   coalesceObjectId,
 };

@@ -2374,7 +2374,7 @@ async function sync_product(req, res, process) {
       typeof rootProduct?.product_type === "string" &&
       rootProduct.product_type.toLowerCase() === "variable"
     ) {
-      return syncWooVariableProductToStore(req, res, process, {
+      return await syncWooVariableProductToStore(req, res, process, {
         client,
         integration,
         parentProduct: rootProduct,
@@ -2383,7 +2383,7 @@ async function sync_product(req, res, process) {
       });
     }
 
-    return syncWooSimpleProductToStore(req, res, process, {
+    return await syncWooSimpleProductToStore(req, res, process, {
       client,
       integration,
       product,

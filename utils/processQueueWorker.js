@@ -46,7 +46,7 @@ function summarizeBatchResult(result) {
   return {
     success: result?.success,
     statusCode: result?.statusCode,
-    process_id: data.process_id || null,
+    process_id: data.process_id || result?.body?.process_id || null,
     progress: data.progress || null,
     status: data.status || null,
     message: result?.body?.message || result?.body?.error || null,
@@ -55,7 +55,6 @@ function summarizeBatchResult(result) {
 
 function shouldStopDrain(result) {
   if (!result) return true;
-  if (result.statusCode >= 500) return true;
   if (
     result.statusCode === 400 &&
     String(result.body?.message || "").includes("No active process")
@@ -67,6 +66,7 @@ function shouldStopDrain(result) {
 
 /**
  * Run process batches until the queue is empty, the job finishes, or maxBatches is hit.
+ * Each batch calls execute-process, which reads Redis first then falls back to MongoDB.
  */
 async function drainProcessQueue(options = {}) {
   if (draining) {
@@ -88,34 +88,44 @@ async function drainProcessQueue(options = {}) {
     const { runProcessExecution } = require("../controllers/process");
 
     for (let i = 0; i < maxBatches; i += 1) {
-      const nextJob = await peekNextProcessJob(scopedCompanyId);
-      if (!nextJob?.jobId && !scopedProcessId) {
-        break;
-      }
-
       const req = buildWorkerReq({
-        companyId: scopedCompanyId || nextJob?.companyId,
+        companyId: scopedCompanyId,
         processId: scopedProcessId,
         user: options.user,
       });
 
-      const result = await runProcessExecution(req);
-      results.push(summarizeBatchResult(result));
+      try {
+        const result = await runProcessExecution(req);
+        results.push(summarizeBatchResult(result));
 
-      if (shouldStopDrain(result)) {
-        break;
-      }
-
-      if (scopedProcessId) {
-        const data = result.body?.data || {};
-        if (
-          data.status === "completed" ||
-          data.status === "failed" ||
-          data.progress === "completed" ||
-          data.progress === "failed"
-        ) {
+        if (shouldStopDrain(result)) {
           break;
         }
+
+        if (scopedProcessId) {
+          const data = result.body?.data || {};
+          if (
+            data.status === "completed" ||
+            data.status === "failed" ||
+            data.progress === "completed" ||
+            data.progress === "failed"
+          ) {
+            break;
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[process-queue-worker] batch failed:",
+          err?.response?.data?.message || err?.message || err,
+        );
+        results.push({
+          success: false,
+          statusCode: err?.response?.status || 500,
+          process_id: null,
+          progress: null,
+          status: null,
+          message: err?.response?.data?.message || err?.message || String(err),
+        });
       }
 
       if (batchDelay > 0) {
@@ -124,6 +134,7 @@ async function drainProcessQueue(options = {}) {
     }
   } catch (err) {
     console.warn("[process-queue-worker] drain failed:", err?.message || err);
+    draining = false;
     return {
       status: "error",
       error: err?.message || String(err),

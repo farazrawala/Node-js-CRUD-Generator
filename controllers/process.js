@@ -2,7 +2,12 @@ const {
   coalesceObjectId,
   activeNotDeletedCriteria,
 } = require("../utils/modelHelper");
-const { dispatchByStoreType } = require("../utils/processHelpers");
+const {
+  dispatchByStoreType,
+  extractProcessErrorMessage,
+  recordProcessFailure,
+  attachProcessFailureHooks,
+} = require("../utils/processHelpers");
 const ProcessModel = require("../models/process");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
@@ -13,6 +18,7 @@ const {
   enqueueProcess,
   releaseProcessFromQueue,
   peekNextProcessJob,
+  shouldQueueProcess,
 } = require("../utils/processQueue");
 const { normalizeCompanyId } = require("../utils/redisQueue");
 const {
@@ -422,6 +428,263 @@ async function processQueueCreate(req, res) {
   return createProcessQueueRecords(req, res);
 }
 
+const RUNNABLE_PROCESS_STATUSES = new Set(["active", "pending"]);
+
+function buildProcessEnqueueAllFilter({
+  companyId,
+  action,
+  integrationId,
+  progress,
+}) {
+  const companyCriteria = buildCompanyIdCriteria(companyId);
+  const filter = {
+    status: { $in: [...RUNNABLE_PROCESS_STATUSES] },
+    progress: { $nin: ["completed", "failed"] },
+    $and: [activeNotDeletedCriteria()],
+  };
+  if (companyCriteria) {
+    filter.$and.push(companyCriteria);
+  }
+  if (action) {
+    filter.action = action;
+  }
+  if (integrationId) {
+    filter.integration_id = integrationId;
+  }
+  const progressFilter = String(progress || "").trim();
+  if (progressFilter) {
+    filter.progress = progressFilter;
+  }
+  return filter;
+}
+
+async function buildProcessEnqueueDiagnostics(companyId, filters = {}) {
+  const companyCriteria = buildCompanyIdCriteria(companyId);
+  const baseAnd = [activeNotDeletedCriteria()];
+  if (companyCriteria) {
+    baseAnd.push(companyCriteria);
+  }
+
+  const globalMatch = { $and: [activeNotDeletedCriteria()] };
+  if (filters.action) globalMatch.action = filters.action;
+  if (filters.integrationId) globalMatch.integration_id = filters.integrationId;
+  if (filters.progress) globalMatch.progress = filters.progress;
+  else {
+    globalMatch.progress = { $nin: ["completed", "failed"] };
+  }
+  globalMatch.status = { $in: [...RUNNABLE_PROCESS_STATUSES] };
+
+  const [forCompany, notStartedForCompany, activeNotStartedForCompany, otherCompanies] =
+    await Promise.all([
+      ProcessModel.aggregate([
+        { $match: { $and: baseAnd } },
+        {
+          $group: {
+            _id: { status: "$status", progress: "$progress" },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { count: -1 } },
+      ]),
+      ProcessModel.countDocuments({
+        $and: [...baseAnd, { progress: "not_started" }],
+      }),
+      ProcessModel.countDocuments({
+        $and: [
+          ...baseAnd,
+          { status: "active", progress: "not_started" },
+        ],
+      }),
+      ProcessModel.aggregate([
+        { $match: globalMatch },
+        { $group: { _id: "$company_id", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 5 },
+      ]),
+    ]);
+
+  const otherCompaniesWithProcesses = otherCompanies.map((row) => ({
+    company_id: row._id ? String(row._id) : null,
+    count: row.count,
+  }));
+
+  const hints = [];
+  if (notStartedForCompany > 0 && activeNotStartedForCompany === 0) {
+    hints.push(
+      "Found not_started rows but none with status=active. Edit them in Admin and set Status to Active, or pass progress=not_started (pending rows are auto-activated on enqueue).",
+    );
+  } else if (notStartedForCompany === 0) {
+    hints.push(
+      "No matching rows for this company_id. Your login token company may differ from the process rows in Admin.",
+    );
+    if (otherCompaniesWithProcesses.length > 0) {
+      hints.push(
+        `Pass company_id in the JSON body, e.g. "company_id": "${otherCompaniesWithProcesses[0].company_id}".`,
+      );
+    }
+  }
+
+  return {
+    processes_for_company: forCompany.map((row) => ({
+      status: row._id.status,
+      progress: row._id.progress,
+      count: row.count,
+    })),
+    not_started_for_company: notStartedForCompany,
+    active_not_started_for_company: activeNotStartedForCompany,
+    other_companies_with_processes: otherCompaniesWithProcesses,
+    hints,
+  };
+}
+
+/**
+ * POST/GET /api/process/queue-enqueue-all
+ *
+ * Enqueue every eligible process row for a company (status active/pending,
+ * progress not completed/failed). Optional filters: action, integration_id, progress.
+ */
+async function processEnqueueAll(req, res) {
+  try {
+    const body = normalizeProcessQueueBody(req.body);
+    const companyId = coalesceObjectId(
+      body.company_id || req.query?.company_id || req.user?.company_id,
+    );
+
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request).",
+      });
+    }
+
+    const action = String(body.action || req.query?.action || "").trim();
+    if (action && !PROCESS_ACTIONS.has(action)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid action filter: ${action}`,
+      });
+    }
+
+    const integrationId = coalesceObjectId(
+      body.integration_id || req.query?.integration_id,
+    );
+    const progress = String(body.progress || req.query?.progress || "").trim();
+
+    const filter = buildProcessEnqueueAllFilter({
+      companyId,
+      action: action || null,
+      integrationId,
+      progress,
+    });
+
+    const processDocs = await ProcessModel.find(filter)
+      .sort({ priority: 1, createdAt: 1 })
+      .lean();
+
+    const enqueued = [];
+    const skipped = [];
+    const failed = [];
+    const reactivated = [];
+
+    for (const doc of processDocs) {
+      let row = doc;
+      if (String(doc.status || "") === "pending") {
+        row = await ProcessModel.findByIdAndUpdate(
+          doc._id,
+          { status: "active" },
+          { new: true },
+        ).lean();
+        reactivated.push(doc._id);
+      }
+
+      if (!shouldQueueProcess(row)) {
+        skipped.push({
+          _id: doc._id,
+          action: doc.action,
+          status: row?.status,
+          progress: row?.progress,
+          reason: "not_queueable",
+        });
+        continue;
+      }
+
+      try {
+        const result = await enqueueProcess(row);
+        if (result.queued) {
+          enqueued.push({
+            _id: doc._id,
+            action: doc.action,
+            priority: row.priority,
+            backend: result.backend,
+          });
+        } else {
+          skipped.push({
+            _id: doc._id,
+            action: doc.action,
+            reason: "queue_unavailable",
+          });
+        }
+      } catch (err) {
+        failed.push({
+          _id: doc._id,
+          action: doc.action,
+          error: err.message || "Enqueue failed",
+        });
+      }
+    }
+
+    const diagnostics =
+      processDocs.length === 0 ?
+        await buildProcessEnqueueDiagnostics(companyId, {
+          action: action || null,
+          integrationId,
+          progress,
+        })
+      : null;
+
+    const statusCode = failed.length > 0 && enqueued.length === 0 ? 500 : 200;
+    return res.status(statusCode).json({
+      success: enqueued.length > 0 || failed.length === 0,
+      message:
+        enqueued.length > 0 ?
+          `Enqueued ${enqueued.length} process job(s). Call execute-process or run-queue-worker to run.`
+        : processDocs.length === 0 ?
+          "No eligible process records found for this company/filter."
+        : "No process jobs were enqueued.",
+      data: {
+        summary: {
+          total: processDocs.length,
+          enqueued: enqueued.length,
+          skipped: skipped.length,
+          failed: failed.length,
+          reactivated: reactivated.length,
+        },
+        filters: {
+          company_id: companyId,
+          action: action || null,
+          integration_id: integrationId || null,
+          progress: progress || null,
+          status: [...RUNNABLE_PROCESS_STATUSES],
+        },
+        enqueued,
+        skipped,
+        failed,
+        reactivated,
+        diagnostics,
+        queue_enabled: isQueueEnabled(),
+        queue_key: `${String(companyId).toLowerCase()}:process`,
+        execute_process_url: "/api/process/execute-process",
+        run_queue_worker_url: "/api/process/run-queue-worker",
+      },
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      message: err.message || "Failed to enqueue process jobs",
+    });
+  }
+}
+
 /**
  * POST/GET /api/process/fetch-product-queue
  * FormData/JSON: integration_id, limit, priority, page, force
@@ -528,7 +791,22 @@ async function execute_process(req, res) {
     });
   }
 
-  return runProcessAction(req, res, process);
+  attachProcessFailureHooks(req, res, process);
+
+  try {
+    return await runProcessAction(req, res, process);
+  } catch (err) {
+    console.error("[process] execute failed:", err?.response?.data || err?.message || err);
+    if (!res.headersSent) {
+      await recordProcessFailure(req, process, err);
+      return res.status(500).json({
+        success: false,
+        message: extractProcessErrorMessage(err),
+        process_id: process._id,
+      });
+    }
+    throw err;
+  }
 }
 
 async function runProcessAction(req, res, process) {
@@ -594,7 +872,30 @@ async function runProcessAction(req, res, process) {
 
 async function runProcessExecution(req) {
   const res = createMockExpressResponse();
-  await execute_process(req, res);
+  const process = await loadActiveProcess(req);
+
+  if (!process) {
+    const details = await explainNoActiveProcess(req);
+    res.status(400).json({ success: false, ...details });
+    return res.getResult();
+  }
+
+  attachProcessFailureHooks(req, res, process);
+
+  try {
+    await runProcessAction(req, res, process);
+  } catch (err) {
+    console.error("[process] worker batch failed:", err?.response?.data || err?.message || err);
+    if (!res.headersSent) {
+      await recordProcessFailure(req, process, err);
+      res.status(500).json({
+        success: false,
+        message: extractProcessErrorMessage(err),
+        process_id: process._id,
+      });
+    }
+  }
+
   return res.getResult();
 }
 
@@ -620,10 +921,20 @@ async function runQueueWorker(req, res) {
     user: req.user,
   });
 
-  return res.status(200).json({
-    success: true,
-    message: `Queue worker finished (${result.batches_run || 0} batch(es) run).`,
-    data: result,
+  const batchesRun = result.batches_run || 0;
+  const failedBatches = (result.results || []).filter((row) => row.success === false);
+  const workerFailed = result.status === "error";
+
+  return res.status(workerFailed ? 500 : 200).json({
+    success: !workerFailed,
+    message:
+      workerFailed ?
+        `Queue worker failed (${batchesRun} batch(es) run before error).`
+      : `Queue worker finished (${batchesRun} batch(es) run).`,
+    data: {
+      ...result,
+      failed_batches: failedBatches.length,
+    },
   });
 }
 
@@ -642,6 +953,7 @@ module.exports = {
   getQueueWorkerStatus,
   processBulkCreate,
   processQueueCreate,
+  processEnqueueAll,
   processFetchProductQueue,
   processQueueFormSchema,
 };

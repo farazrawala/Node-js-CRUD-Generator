@@ -1317,6 +1317,192 @@ async function applyWarehouseInventoryForPoLines({
   return { productStockUpdates: stockChangeAuditLog };
 }
 
+function resolveDefaultWarehouseId(req) {
+  const co = req?.user?.company_id;
+  if (!co || typeof co !== "object") return null;
+  return coalesceObjectId(co.warehouse_id);
+}
+
+function warehouseStockKey(productId, warehouseId) {
+  return `${String(productId).trim()}:${String(warehouseId).trim()}`;
+}
+
+function buildInboundQtyMapFromMovements(movements) {
+  const map = new Map();
+  for (const mov of movements || []) {
+    const pid = mov.product_id != null ? String(mov.product_id).trim() : "";
+    const wid = mov.warehouse_id != null ? String(mov.warehouse_id).trim() : "";
+    const qty = Number(mov.quantity);
+    if (
+      !pid ||
+      !mongoose.Types.ObjectId.isValid(pid) ||
+      !wid ||
+      !mongoose.Types.ObjectId.isValid(wid) ||
+      !Number.isFinite(qty) ||
+      qty <= 0
+    ) {
+      continue;
+    }
+    const key = warehouseStockKey(pid, wid);
+    map.set(key, Math.round(((map.get(key) || 0) + qty) * 100) / 100);
+  }
+  return map;
+}
+
+function findPriorWarehouseForProduct(qtyMap, productIdStr) {
+  const prefix = `${String(productIdStr).trim()}:`;
+  for (const key of qtyMap.keys()) {
+    if (key.startsWith(prefix)) return key.split(":")[1];
+  }
+  return null;
+}
+
+function enrichPoLinesWithWarehouseFromMovements(lines, inboundMap, req) {
+  const defaultWarehouseId = resolveDefaultWarehouseId(req);
+  const enriched = [];
+
+  for (const line of lines || []) {
+    const pid = line.product_id != null ? String(line.product_id).trim() : "";
+    const qty = Number(line.qty);
+    if (
+      !pid ||
+      !mongoose.Types.ObjectId.isValid(pid) ||
+      !Number.isFinite(qty) ||
+      qty <= 0
+    ) {
+      continue;
+    }
+
+    let wid = null;
+    if (
+      line.warehouse_id != null &&
+      mongoose.Types.ObjectId.isValid(String(line.warehouse_id).trim())
+    ) {
+      wid = String(line.warehouse_id).trim();
+    } else {
+      wid = findPriorWarehouseForProduct(inboundMap, pid);
+      if (
+        !wid &&
+        defaultWarehouseId &&
+        mongoose.Types.ObjectId.isValid(String(defaultWarehouseId))
+      ) {
+        wid = String(defaultWarehouseId).trim();
+      }
+    }
+    if (!wid) continue;
+
+    enriched.push({
+      ...line,
+      product_id: pid,
+      warehouse_id: wid,
+      qty,
+      price: line.price,
+    });
+  }
+
+  return enriched;
+}
+
+/**
+ * Delete PO: reverse warehouse on-hand and insert reversal `out` movements
+ * (mirrors PO create inbound `in` + warehouse increase).
+ */
+async function applyPurchaseOrderDeleteInventoryReverse({
+  oldInMovements,
+  existingPoItems,
+  purchaseOrderId,
+  purchaseOrderNo = null,
+  companyId,
+  req,
+  mongoSession = null,
+}) {
+  const inventoryLogContext = {
+    reference_type: "purchase_order",
+    reference_id: purchaseOrderId,
+    reference_no: purchaseOrderNo,
+  };
+  const inboundMap = buildInboundQtyMapFromMovements(oldInMovements);
+  const linesToReverse = enrichPoLinesWithWarehouseFromMovements(
+    existingPoItems,
+    inboundMap,
+    req,
+  );
+
+  const productStockUpdates = [];
+  let reversalMovementsInserted = 0;
+
+  const warehouseChanges = await WarehouseInventory.applyStockChangesFromLines({
+    reverseLines: linesToReverse,
+    inboundLines: [],
+    savedLineItemRows: [],
+    companyId,
+    session: mongoSession,
+    userId: req.user?._id,
+    req,
+    logContext: inventoryLogContext,
+    auditSource: "warehouse_inventory",
+  });
+  productStockUpdates.push(...warehouseChanges);
+
+  for (let lineIndex = 0; lineIndex < linesToReverse.length; lineIndex++) {
+    const line = linesToReverse[lineIndex];
+    const warehouseIdStr = String(line.warehouse_id).trim();
+    const lineQtyNum = Number(line.qty);
+    const unitCost = Number(line.price);
+    if (!Number.isFinite(unitCost) || unitCost < 0) {
+      throw new Error(
+        `Each PO line needs a finite unit price (price) for inventory reversal (product ${line.product_id})`,
+      );
+    }
+    const totalCostMovement = Math.round(lineQtyNum * unitCost * 100) / 100;
+
+    const bodyBeforeInventoryMovement = req.body;
+    const hadRouteParamId =
+      req.params &&
+      Object.prototype.hasOwnProperty.call(req.params, "id");
+    const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
+
+    req.body = {
+      product_id: String(line.product_id).trim(),
+      warehouse_id: warehouseIdStr,
+      quantity: lineQtyNum,
+      movement_type: "out",
+      unit_cost: unitCost,
+      total_cost: totalCostMovement,
+      reference_type: "purchase_order",
+      reference_id: purchaseOrderId,
+      reference_name: purchaseOrderReferenceName(
+        "Purchase Order Delete",
+        purchaseOrderNo,
+      ),
+      company_id: companyId,
+      status: "active",
+    };
+
+    try {
+      await insertInventoryMovementRecord(req, mongoSession);
+      reversalMovementsInserted += 1;
+    } catch (inventoryMovementErr) {
+      if (inventoryMovementErr.clientPayload) {
+        throwWithGenericFailure(
+          inventoryMovementErr.clientPayload,
+          "Inventory reversal for purchase order delete failed",
+        );
+      }
+      throw inventoryMovementErr;
+    } finally {
+      req.body = bodyBeforeInventoryMovement;
+      if (hadRouteParamId) {
+        req.params.id = savedRouteParamId;
+      } else {
+        delete req.params.id;
+      }
+    }
+  }
+
+  return { productStockUpdates, reversalMovementsInserted };
+}
+
 function shapePurchaseOrderWithItems(poPlain, items) {
   const purchase_order_items_total = items.reduce((sum, item) => {
     const sub = Number(item.subtotal);
@@ -2493,8 +2679,8 @@ async function purchase_order_update(req, res) {
  * |    1 | purchase_order          | update (soft)      | one          | low    | `status: inactive`, `deletedAt` |
  * |    2 | transaction             | update (soft)      | many         | medium | By PO header `transaction_number` |
  * |    3 | purchase_order_item     | update (soft)      | many         | medium | All active lines for this PO |
- * |    4 | inventory_movements     | —                  | —            | —      | Skipped — replay-history delete does not reverse physical stock |
- * |    5 | warehouse_inventory     | —                  | —            | —      | Skipped — on-hand unchanged; WAC rebuilt via ledger replay |
+ * |    4 | warehouse_inventory     | read / update      | one × N      | medium | `applyPurchaseOrderDeleteInventoryReverse` — reverse inbound qty |
+ * |    5 | inventory_movements     | insert             | one × N      | low    | Reversal `out` rows (original `in` rows stay active) |
  * |    6 | product, logs           | read / update      | one × P      | medium | Full WAC ledger replay (deleted PO excluded from event log) |
  * |    7 | logs                    | insert             | one          | low    | `createApplicationLog` — success path only |
  * |    8 | logs                    | insert             | one          | low    | `logRollbackFailure` — failure path (`PURCHASE ORDER DELETE ROLLBACK`) |
@@ -2557,6 +2743,16 @@ async function purchase_order_delete(req, res) {
       deletedAt: null,
     })
       .sort({ createdAt: 1 })
+      .lean();
+
+    const oldInMovementsPreTxn = await InventoryMovements.find({
+      reference_type: "purchase_order",
+      reference_id: poId,
+      movement_type: "in",
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    })
+      .select("product_id warehouse_id quantity")
       .lean();
 
     poDeleteStepTimer = startPoCreateStepTimer();
@@ -2657,10 +2853,29 @@ async function purchase_order_delete(req, res) {
         );
       }
 
-      // step 4–5 skipped — replay-history delete removes the PO from the WAC
-      // transaction log only. Physical warehouse on-hand is NOT reversed here
-      // (otherwise a later purchase return / sale sees the wrong available qty).
-      // Full WAC ledger replay (step 6) recalculates wholesale_price.
+      // step 4–5 start — reverse warehouse_inventory + insert reversal `out` movements
+      const endStep4 = poDeleteStepTimer.start(
+        4,
+        "warehouse_inventory reverse + inventory_movements insert (out reversal)",
+      );
+      const inventoryReverse = await applyPurchaseOrderDeleteInventoryReverse({
+        oldInMovements: oldInMovementsPreTxn,
+        existingPoItems,
+        purchaseOrderId: poId,
+        purchaseOrderNo: existingPo.purchase_order_no,
+        companyId,
+        req,
+        mongoSession,
+      });
+      productStockUpdates.push(...inventoryReverse.productStockUpdates);
+      deleteSnapshot.reversal_movements_inserted =
+        inventoryReverse.reversalMovementsInserted;
+      endStep4({
+        warehouse_inventory_updates: inventoryReverse.productStockUpdates.length,
+        reversal_movements_inserted:
+          inventoryReverse.reversalMovementsInserted,
+      });
+      // step 4–5 end
 
       // step 6 start — full WAC ledger replay (deleted PO already excluded from DB)
       const endStep6 = poDeleteStepTimer.start(

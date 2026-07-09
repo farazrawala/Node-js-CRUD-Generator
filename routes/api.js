@@ -124,6 +124,7 @@ const {
   execute_process,
   processBulkCreate,
   processQueueCreate,
+  processEnqueueAll,
   processFetchProductQueue,
   processQueueFormSchema,
   runQueueWorker,
@@ -406,6 +407,8 @@ router.get("/integration/find-product-relations/:id", syncProductRelations);
 // Process routes (GET or POST — some clients/proxies use POST)
 router.get("/process/queue-form", processQueueFormSchema);
 router.post("/process/queue-create", processQueueCreate);
+router.post("/process/queue-enqueue-all", processEnqueueAll);
+router.get("/process/queue-enqueue-all", processEnqueueAll);
 router.post("/process/fetch-product-queue", processFetchProductQueue);
 router.get("/process/fetch-product-queue", processFetchProductQueue);
 router.post("/process/bulk-create", processBulkCreate);
