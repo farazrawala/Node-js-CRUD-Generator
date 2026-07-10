@@ -44,7 +44,7 @@ function thumbnailRelativePath(sourceRelativePath) {
 
 /**
  * Create a resized thumbnail next to the source image.
- * @returns {Promise<string|null>} uploads/product/{id}/file_thumb.jpg
+ * @returns {Promise<string|null>} uploads/products/<company_id>/<product_id>/file_thumb.jpg
  */
 async function createProductImageThumbnail(
   sourceRelativePath,

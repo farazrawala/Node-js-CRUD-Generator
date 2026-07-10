@@ -330,13 +330,23 @@ const transformImageUrls = (data, Model, req = null) => {
 /**
  * Handle image upload for fields with field_type: "image"
  * Supports multiple files if the client sends multiple files under the same field name.
+ * Products → uploads/products/<company_id>/<product_id>/
+ * Other models → uploads/{modelName}/{recordId}/
  * @param {Object} req - Express request object
  * @param {string} fieldName - The field name
  * @param {string} modelName - The model name
  * @param {string} recordId - The record ID
+ * @param {Object} [options]
+ * @param {string|Object} [options.companyId] - Required for product uploads
  * @returns {Promise<string|string[]|null>} The uploaded image path(s) or null if no image
  */
-const handleImageUpload = async (req, fieldName, modelName, recordId) => {
+const handleImageUpload = async (
+  req,
+  fieldName,
+  modelName,
+  recordId,
+  options = {},
+) => {
   try {
     // Check if there's a file in the request
     if (!req.files || !req.files[fieldName]) {
@@ -355,14 +365,29 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
       "image/webp",
     ];
 
-    // Ensure directory exists: uploads/{modelName}/{recordId}/
-    const uploadDir = path.join(
-      __dirname,
-      "..",
-      "uploads",
+    const {
+      resolveUploadDirSegments,
+      isProductUploadModel,
+    } = require("./productImagePaths");
+
+    const companyId =
+      options.companyId ??
+      req.user?.company_id ??
+      req.body?.company_id ??
+      null;
+
+    if (isProductUploadModel(modelName) && !companyId) {
+      throw new Error(
+        "company_id is required to upload product images (uploads/products/<company_id>/<product_id>)",
+      );
+    }
+
+    const dirSegments = resolveUploadDirSegments(
       modelName,
       recordId,
+      companyId,
     );
+    const uploadDir = path.join(__dirname, "..", ...dirSegments);
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
@@ -386,7 +411,7 @@ const handleImageUpload = async (req, fieldName, modelName, recordId) => {
             return reject(new Error("Failed to save image file"));
           }
           const relativePath = path
-            .join("uploads", modelName, recordId, fileName)
+            .join(...dirSegments, fileName)
             .replace(/\\/g, "/");
           console.log(`✅ Image uploaded successfully: ${relativePath}`);
           resolve(relativePath);
@@ -1081,6 +1106,10 @@ const handleGenericCreateCore = async (
           imageField,
           modelName,
           result._id.toString(),
+          {
+            companyId:
+              result.company_id || req.user?.company_id || req.body?.company_id,
+          },
         );
         if (uploaded) {
           // If schema expects array (type: [String]) store as array; else store single string
@@ -1969,6 +1998,13 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
           imageField,
           modelName,
           recordId,
+          {
+            companyId:
+              updatedRecord?.company_id ||
+              existingRecord?.company_id ||
+              req.user?.company_id ||
+              req.body?.company_id,
+          },
         );
         if (uploaded) {
           const expectsArray =

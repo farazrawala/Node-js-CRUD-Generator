@@ -3,6 +3,11 @@ const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const {
+  buildProductImageAbsoluteDir,
+  buildProductImageRelativePath,
+  toIdString,
+} = require("./productImagePaths");
 
 function sanitizeFileName(baseName, fallbackExt = ".jpg") {
   if (!baseName || typeof baseName !== "string") {
@@ -131,31 +136,30 @@ function normalizeImageUrlList(urls) {
 }
 
 /**
- * Download remote image URLs into uploads/product/{productId}/ and return relative paths.
+ * Download remote image URLs into uploads/products/<company_id>/<product_id>/
+ * and return relative paths.
  * Reuses the same cached file when the same URL is imported again for one product in a run.
  */
 async function saveProductImagesFromUrls(
   imageUrls = [],
-  { productId = null, urlCache = null } = {},
+  { productId = null, companyId = null, urlCache = null } = {},
 ) {
   const normalized = normalizeImageUrlList(imageUrls);
-  if (!normalized.length || !productId) return null;
+  const productIdString = toIdString(productId);
+  const companyIdString = toIdString(companyId);
+  if (!normalized.length || !productIdString || !companyIdString) return null;
 
-  const productIdString =
-    typeof productId === "string" ? productId : productId.toString();
-  const uploadRoot = path.join(
-    __dirname,
-    "..",
-    "uploads",
-    "product",
+  const uploadRoot = buildProductImageAbsoluteDir(
+    companyIdString,
     productIdString,
   );
+  if (!uploadRoot) return null;
   await fs.promises.mkdir(uploadRoot, { recursive: true });
 
   const savedPaths = [];
 
   for (const sourceUrl of normalized) {
-    const cacheKey = `${productIdString}:${sourceUrl}`;
+    const cacheKey = `${companyIdString}:${productIdString}:${sourceUrl}`;
     if (urlCache?.has(cacheKey)) {
       savedPaths.push(urlCache.get(cacheKey));
       continue;
@@ -165,9 +169,11 @@ async function saveProductImagesFromUrls(
     const ext = extensionFromImageUrl(sourceUrl);
     const fileName = `${hash}${ext}`;
     const targetPath = path.join(uploadRoot, fileName);
-    const relativePath = path
-      .join("uploads", "product", productIdString, fileName)
-      .replace(/\\/g, "/");
+    const relativePath = buildProductImageRelativePath(
+      companyIdString,
+      productIdString,
+      fileName,
+    );
 
     try {
       if (!fs.existsSync(targetPath)) {

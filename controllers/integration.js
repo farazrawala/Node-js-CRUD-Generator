@@ -16,6 +16,12 @@ const {
   handleGenericFindOne,
   generateSlug,
 } = require("../utils/modelHelper");
+const {
+  buildProductImageAbsoluteDir,
+  buildProductImageRelativePath,
+  isLocalProductAssetPath,
+  toIdString,
+} = require("../utils/productImagePaths");
 
 function sanitizeFileName(baseName, fallbackExt = ".jpg") {
   if (!baseName || typeof baseName !== "string") {
@@ -111,8 +117,21 @@ function downloadImageToFile(imageUrl, destinationPath, redirectCount = 0) {
   });
 }
 
-async function saveProductImagesLocally(productId, imageEntries = []) {
+async function saveProductImagesLocally(
+  productId,
+  imageEntries = [],
+  companyId = null,
+) {
   if (!productId || !Array.isArray(imageEntries) || imageEntries.length === 0) {
+    return null;
+  }
+
+  const companyIdString = toIdString(companyId);
+  const productIdString = toIdString(productId);
+  if (!companyIdString || !productIdString) {
+    console.warn(
+      "⚠️ saveProductImagesLocally skipped: company_id and product_id are required",
+    );
     return null;
   }
 
@@ -124,7 +143,11 @@ async function saveProductImagesLocally(productId, imageEntries = []) {
     return null;
   }
 
-  const uploadsDirectory = path.join(__dirname, "..", "uploads", "product", productId.toString());
+  const uploadsDirectory = buildProductImageAbsoluteDir(
+    companyIdString,
+    productIdString,
+  );
+  if (!uploadsDirectory) return null;
   await fs.promises.mkdir(uploadsDirectory, { recursive: true });
 
   const savedPaths = [];
@@ -151,9 +174,11 @@ async function saveProductImagesLocally(productId, imageEntries = []) {
 
     try {
       await downloadImageToFile(sourceUrl, targetPath);
-      const relativePath = path
-        .join("uploads", "product", productId.toString(), uniqueFileName)
-        .replace(/\\/g, "/");
+      const relativePath = buildProductImageRelativePath(
+        companyIdString,
+        productIdString,
+        uniqueFileName,
+      );
       savedPaths.push(relativePath);
     } catch (error) {
       console.warn("⚠️ Failed to download WooCommerce product image:", sourceUrl, error.message);
@@ -170,46 +195,44 @@ async function saveProductImagesLocally(productId, imageEntries = []) {
   };
 }
 
-async function resetProductImageDirectory(productId) {
+async function resetProductImageDirectory(productId, companyId = null) {
   if (!productId) {
     return;
   }
 
-  const directoryPath = path.join(
-    __dirname,
-    "..",
-    "uploads",
-    "product",
-    productId.toString()
-  );
+  const productIdString = toIdString(productId);
+  const companyIdString = toIdString(companyId);
+  const directories = [];
 
-  try {
-    if (fs.promises.rm) {
-      await fs.promises.rm(directoryPath, { recursive: true, force: true });
-    } else {
-      await fs.promises.rmdir(directoryPath, { recursive: true });
-    }
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.warn(
-        "⚠️ Failed to reset product image directory:",
-        directoryPath,
-        error.message || error
-      );
-    }
-  }
-}
-
-function isLocalProductAssetPath(value, productId) {
-  if (!value || typeof value !== "string" || !productId) {
-    return false;
+  if (companyIdString && productIdString) {
+    const scoped = buildProductImageAbsoluteDir(companyIdString, productIdString);
+    if (scoped) directories.push(scoped);
   }
 
-  const normalizedValue = value.replace(/\\/g, "/");
-  const productIdString =
-    typeof productId === "string" ? productId : productId.toString();
+  // Also clear legacy uploads/product/<product_id>/ if present
+  if (productIdString) {
+    directories.push(
+      path.join(__dirname, "..", "uploads", "product", productIdString),
+    );
+  }
 
-  return normalizedValue.startsWith(`uploads/product/${productIdString}/`);
+  for (const directoryPath of directories) {
+    try {
+      if (fs.promises.rm) {
+        await fs.promises.rm(directoryPath, { recursive: true, force: true });
+      } else {
+        await fs.promises.rmdir(directoryPath, { recursive: true });
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        console.warn(
+          "⚠️ Failed to reset product image directory:",
+          directoryPath,
+          error.message || error
+        );
+      }
+    }
+  }
 }
 
 function extractWooImageEntries(product = {}) {
@@ -1328,12 +1351,17 @@ function buildVariantDescription(baseDescription, attributes = []) {
             : [];
           const hasLocalFeatured = isLocalProductAssetPath(
             baseProductImage,
-            baseProductIdString
+            baseProductIdString,
+            store.company_id
           );
           const hasLocalGallery =
             normalizedGallery.length > 0 &&
             normalizedGallery.every((imgPath) =>
-              isLocalProductAssetPath(imgPath, baseProductIdString)
+              isLocalProductAssetPath(
+                imgPath,
+                baseProductIdString,
+                store.company_id
+              )
             );
           const expectedGalleryCount = Math.max(imageEntries.length - 1, 0);
           const galleryCountMatches =
@@ -1345,12 +1373,16 @@ function buildVariantDescription(baseDescription, attributes = []) {
 
           if (shouldDownloadImages) {
             if (existingBaseProduct.success) {
-              await resetProductImageDirectory(baseProductIdString);
+              await resetProductImageDirectory(
+                baseProductIdString,
+                store.company_id
+              );
             }
 
             const savedImages = await saveProductImagesLocally(
               baseProductIdString,
-              imageEntries
+              imageEntries,
+              store.company_id
             );
 
             if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {
@@ -1801,12 +1833,17 @@ function buildVariantDescription(baseDescription, attributes = []) {
             : [];
           const hasLocalFeatured = isLocalProductAssetPath(
             baseProductImage,
-            baseProductIdString
+            baseProductIdString,
+            store.company_id
           );
           const hasLocalGallery =
             normalizedGallery.length > 0 &&
             normalizedGallery.every((imgPath) =>
-              isLocalProductAssetPath(imgPath, baseProductIdString)
+              isLocalProductAssetPath(
+                imgPath,
+                baseProductIdString,
+                store.company_id
+              )
             );
           const expectedGalleryCount = Math.max(imageEntries.length - 1, 0);
           const galleryCountMatches =
@@ -1818,12 +1855,16 @@ function buildVariantDescription(baseDescription, attributes = []) {
 
           if (shouldDownloadImages) {
             if (existingBaseProduct.success) {
-              await resetProductImageDirectory(baseProductIdString);
+              await resetProductImageDirectory(
+                baseProductIdString,
+                store.company_id
+              );
             }
 
             const savedImages = await saveProductImagesLocally(
               baseProductIdString,
-              imageEntries
+              imageEntries,
+              store.company_id
             );
 
               if (savedImages && (savedImages.featured || savedImages.gallery?.length)) {

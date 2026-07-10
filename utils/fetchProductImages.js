@@ -1,18 +1,7 @@
 const Product = require("../models/product");
 const { saveProductImagesFromUrls } = require("./productImageDownload");
 const { buildProductThumbnailFields } = require("./productImageThumbnail");
-
-function isLocalProductAssetPath(value, productId) {
-  if (!value || typeof value !== "string" || !productId) {
-    return false;
-  }
-
-  const normalizedValue = value.replace(/\\/g, "/");
-  const productIdString =
-    typeof productId === "string" ? productId : productId.toString();
-
-  return normalizedValue.startsWith(`uploads/product/${productIdString}/`);
-}
+const { isLocalProductAssetPath, toIdString } = require("./productImagePaths");
 
 function extractWooImageUrls(remote = {}, { isVariation = false } = {}) {
   if (isVariation) {
@@ -67,7 +56,8 @@ function extractShopifyImageUrls(
 }
 
 /**
- * Download remote store image URLs into uploads/product/{id}/ and update the product row.
+ * Download remote store image URLs into uploads/products/<company_id>/<product_id>/
+ * and update the product row.
  * Skips when the product already has a locally stored featured image.
  */
 async function syncFetchProductImages(
@@ -80,12 +70,33 @@ async function syncFetchProductImages(
   }
 
   const productIdStr = String(productId);
-  const currentFeatured = existingProduct?.product_image || "";
-  if (isLocalProductAssetPath(currentFeatured, productIdStr)) {
+  const companyId =
+    toIdString(existingProduct?.company_id) ||
+    toIdString(
+      (
+        await Product.findById(productId)
+          .select("company_id product_image")
+          .lean()
+      )?.company_id,
+    );
+
+  if (!companyId) {
+    console.warn(
+      "⚠️ syncFetchProductImages skipped: missing company_id for product",
+      productIdStr,
+    );
     return false;
   }
 
-  const saved = await saveProductImagesFromUrls(imageUrls, { productId });
+  const currentFeatured = existingProduct?.product_image || "";
+  if (isLocalProductAssetPath(currentFeatured, productIdStr, companyId)) {
+    return false;
+  }
+
+  const saved = await saveProductImagesFromUrls(imageUrls, {
+    productId,
+    companyId,
+  });
   if (!saved?.featured) {
     return false;
   }

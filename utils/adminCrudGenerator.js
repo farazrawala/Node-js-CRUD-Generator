@@ -1400,24 +1400,36 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       const savedRecord = await record.save();
 
-      // Now handle file uploads with the record ID (using same structure as API: uploads/singularName/recordId/)
+      // Now handle file uploads with the record ID
+      // Products → uploads/products/<company_id>/<product_id>/
+      // Other models → uploads/{singularName}/{recordId}/
       if (Object.keys(filesToUpload).length > 0) {
         const recordId = savedRecord._id.toString();
         const fs = require("fs");
+        const {
+          resolveUploadDirSegments,
+          isProductUploadModel,
+        } = require("./productImagePaths");
+        const companyId =
+          savedRecord.company_id || req.user?.company_id || data.company_id;
+
+        if (isProductUploadModel(singularName) && !companyId) {
+          console.error(
+            "❌ company_id is required to upload product images",
+          );
+        }
 
         // Process all file uploads
         for (const fieldName of Object.keys(filesToUpload)) {
           const file = filesToUpload[fieldName];
           const field = fieldConfig[fieldName];
 
-          // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
-          const uploadDir = path.join(
-            __dirname,
-            "..",
-            "uploads",
+          const dirSegments = resolveUploadDirSegments(
             singularName,
             recordId,
+            companyId,
           );
+          const uploadDir = path.join(__dirname, "..", ...dirSegments);
           if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
           }
@@ -1448,8 +1460,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                 });
               });
 
-              // Store relative path: uploads/singularName/recordId/filename (e.g., uploads/product/recordId/filename)
-              const relativePath = `uploads/${singularName}/${recordId}/${fileName}`;
+              const relativePath = path
+                .join(...dirSegments, fileName)
+                .replace(/\\/g, "/");
               storedPaths.push(relativePath);
               console.log(`✅ File uploaded: ${relativePath}`);
             } catch (error) {
@@ -1467,7 +1480,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         // Save the record again with image paths
         await savedRecord.save();
         console.log(
-          `✅ All files uploaded to: uploads/${singularName}/${recordId}/`,
+          `✅ All files uploaded to: ${resolveUploadDirSegments(singularName, recordId, companyId).join("/")}/`,
         );
       }
 
@@ -2198,10 +2211,20 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       });
 
-      // Handle file uploads for file fields (using same structure as API: uploads/singularName/recordId/)
+      // Handle file uploads for file fields
+      // Products → uploads/products/<company_id>/<product_id>/
+      // Other models → uploads/{singularName}/{recordId}/
       if (req.files) {
         const recordId = record._id.toString();
         const fs = require("fs");
+        const {
+          resolveUploadDirSegments,
+          isProductUploadModel,
+        } = require("./productImagePaths");
+        const companyId =
+          record.company_id ||
+          updateData.company_id ||
+          req.user?.company_id;
 
         for (const fieldName of Object.keys(fieldConfig)) {
           const field = fieldConfig[fieldName];
@@ -2209,16 +2232,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             continue;
           }
 
+          if (isProductUploadModel(singularName) && !companyId) {
+            console.error(
+              "❌ company_id is required to upload product images",
+            );
+            continue;
+          }
+
           const file = req.files[fieldName];
 
-          // Create upload directory: uploads/{singularName}/{recordId}/ (e.g., uploads/product/recordId/)
-          const uploadDir = path.join(
-            __dirname,
-            "..",
-            "uploads",
+          const dirSegments = resolveUploadDirSegments(
             singularName,
             recordId,
+            companyId,
           );
+          const uploadDir = path.join(__dirname, "..", ...dirSegments);
           if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
           }
@@ -2246,7 +2274,9 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                   }
                 });
               });
-              const relativePath = `uploads/${singularName}/${recordId}/${fileName}`;
+              const relativePath = path
+                .join(...dirSegments, fileName)
+                .replace(/\\/g, "/");
               storedPaths.push(relativePath);
               console.log(`✅ File uploaded on update: ${relativePath}`);
             } catch (uploadErr) {

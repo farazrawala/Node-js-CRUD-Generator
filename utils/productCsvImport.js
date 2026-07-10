@@ -376,6 +376,7 @@ async function applyImportProductImages(
 
   const saved = await saveProductImagesFromUrls(urls, {
     productId: product._id,
+    companyId: product.company_id || options.companyId,
     urlCache: imageUrlCache,
   });
   if (!saved?.featured) return product;
@@ -454,7 +455,7 @@ async function upsertImportProduct(
 
     const updated = await Product.findById(existing._id).lean();
     const withImages = await applyImportProductImages(updated, row, {
-      options,
+      options: { ...options, companyId },
       imageUrlCache,
     });
     return { action: "updated", product: withImages };
@@ -469,7 +470,7 @@ async function upsertImportProduct(
   const withImages = await applyImportProductImages(
     created.toObject ? created.toObject() : created,
     row,
-    { options, imageUrlCache },
+    { options: { ...options, companyId }, imageUrlCache },
   );
   return { action: "created", product: withImages };
 }

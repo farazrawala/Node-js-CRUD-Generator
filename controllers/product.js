@@ -1466,7 +1466,7 @@ function shopifyProductImportFormSchema(req, res) {
       "Each variant row becomes one POS product (name includes option values).",
       "Product Category paths like `A > B > C` are split into multiple categories.",
       "Variant Barcode is used when present; otherwise a unique EAN13 barcode is generated.",
-      "Image Src / Variant Image URLs are downloaded into uploads/product/{product_id}/ and saved on product_image / multi_images.",
+      "Image Src / Variant Image URLs are downloaded into uploads/products/<company_id>/<product_id>/ and saved on product_image / multi_images.",
       "Multi-line HTML in Body (HTML) is supported.",
     ],
     options: {
