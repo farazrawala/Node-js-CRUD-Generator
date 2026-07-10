@@ -1,24 +1,32 @@
 # Deployed to public_html/pos_admin/.htaccess via FTP
+
 # Node on 127.0.0.1:8000 (pm2 start index.js --name pos-api)
 
 RewriteEngine On
 RewriteBase /pos_admin/
 
 # Stop Apache from serving index.js as the directory index (shows raw source)
+
 DirectoryIndex disabled
 Options -Indexes
 
 # Block downloading server source and env
+
 <FilesMatch "^(index\.js|\.env|package\.json|package-lock\.json)$">
-  Require all denied
+Require all denied
 </FilesMatch>
 
 # Block direct web access to log files (download via /admin/debug/logs only)
+
 RewriteRule ^logs/ - [F,L]
 
 # Uploads: serve from disk — NEVER proxy to Node (avoids API auth / JSON 404)
+
 RewriteRule ^api/uploads/(.+)$ uploads/$1 [L]
 RewriteRule ^uploads/ - [L]
 
-# Proxy everything else to Node — strip /pos_admin prefix (routes are /login/admin, /api/..., not /pos_admin/...)
-RewriteRule ^(.*)$ http://127.0.0.1:8000/$1 [P,L,QSA]
+# Proxy /pos_admin in Apache vhost (deploy/apache-pos-admin-vhost.conf) — NOT [P] here (slow on dedicated).
+
+# Temporary fallback only if vhost is not configured:
+
+# RewriteRule ^(.\*)$ http://127.0.0.1:8000/$1 [P,L,QSA]

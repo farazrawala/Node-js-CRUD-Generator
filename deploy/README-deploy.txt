@@ -49,6 +49,22 @@ STEP 3 — Apache proxy (if not using cPanel Node app):
 
 STEP 4 — Verify:
 
+  # On server — Node must be fast; Apache proxy must not add seconds:
+  curl -s -o /dev/null -w "direct: %{time_total}s\n" http://127.0.0.1:8000/api/health
+  curl -k -s -o /dev/null -w "apache: %{time_total}s\n" \
+    --resolve testv3.websitedemolynk.com:443:127.0.0.1 \
+    https://testv3.websitedemolynk.com/pos_admin/api/health
+  # direct ~0.01s, apache should be <0.5s. If apache is 10s+, fix vhost proxy (see below).
+
+  SLOW API (all requests) — Apache .htaccess [P] proxy:
+  Symptom: direct Node health ~0.01s but https://…/pos_admin/api/health 10–60s.
+  Fix: deploy/apache-pos-admin-vhost.conf in Apache vhost; remove [P] line from pos_admin/.htaccess.
+  cp deploy/apache-pos-admin-vhost.conf /etc/apache2/conf.d/pos_admin_proxy.conf
+  apachectl configtest && systemctl reload httpd
+  Also check ModSecurity/WAF on /pos_admin/api.
+
+  MongoDB on same server: use 127.0.0.1 in MONGODB_URI_LIVE, not the public IP (192.249.x.x).
+
   https://testv3.websitedemolynk.com/pos_admin/api/version
     → version.deployVersion increases on every push to main (e.g. 1.0.42, 1.0.43)
     → version.deployNumber = GitHub Actions run number
