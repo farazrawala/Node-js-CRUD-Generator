@@ -629,6 +629,220 @@ async function clearCompanyQueue(req, res) {
   }
 }
 
+/**
+ * Resolve company id for draft routes: prefer path param, fall back to auth tenant.
+ * Ensures the authenticated user may only mutate their own company.
+ */
+function resolveDraftCompanyId(req) {
+  const paramId = coalesceObjectId(
+    req.params?.companyId || req.params?.id || req.body?.company_id,
+  );
+  const tenantId = coalesceObjectId(req.user?.company_id);
+  if (paramId && tenantId && String(paramId) !== String(tenantId)) {
+    const err = new Error("You can only manage drafts for your own company");
+    err.statusCode = 403;
+    throw err;
+  }
+  return paramId || tenantId;
+}
+
+function parseDraftPayload(body) {
+  let payload = body?.payload;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      const err = new Error("payload must be valid JSON");
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) {
+    const err = new Error("payload is required and must be an object");
+    err.statusCode = 400;
+    throw err;
+  }
+  return payload;
+}
+
+function parseDraftLabel(body, fallback = "") {
+  const raw = body?.label;
+  if (raw == null) return fallback;
+  return String(raw).trim() || fallback;
+}
+
+/**
+ * POST `/api/company/draft-orders/:companyId`
+ * Body: `{ payload, label? }` — push onto `company.draft_orders`.
+ */
+async function addCompanyDraftOrder(req, res) {
+  try {
+    const companyId = resolveDraftCompanyId(req);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
+      });
+    }
+
+    const payload = parseDraftPayload(req.body || {});
+    const label = parseDraftLabel(req.body, "Draft");
+
+    const company = await Company.findOne({
+      _id: companyId,
+      deletedAt: null,
+    });
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Company not found",
+      });
+    }
+
+    company.draft_orders = company.draft_orders || [];
+    company.draft_orders.push({
+      payload,
+      label,
+      updated_at: new Date(),
+    });
+    if (req.user?._id) company.updated_by = req.user._id;
+    await company.save();
+
+    const draft = company.draft_orders.at(-1);
+    return res.status(201).json({
+      success: true,
+      status: 201,
+      message: "Draft order saved",
+      data: company,
+      draft,
+    });
+  } catch (error) {
+    const status = error?.statusCode || 500;
+    console.error("❌ addCompanyDraftOrder:", error?.message || error);
+    return res.status(status).json({
+      success: false,
+      status,
+      message: error?.message || "Failed to save draft order",
+      error: error?.message || "Failed to save draft order",
+    });
+  }
+}
+
+/**
+ * PATCH `/api/company/draft-orders/:companyId/:draftId`
+ * Body: `{ payload, label? }` — `$set` matching subdoc.
+ */
+async function updateCompanyDraftOrder(req, res) {
+  try {
+    const companyId = resolveDraftCompanyId(req);
+    const draftId = coalesceObjectId(req.params?.draftId);
+    if (!companyId || !draftId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id and draft_id are required",
+      });
+    }
+
+    const payload = parseDraftPayload(req.body || {});
+    const setFields = {
+      "draft_orders.$.payload": payload,
+      "draft_orders.$.updated_at": new Date(),
+    };
+    if (req.body?.label !== undefined) {
+      setFields["draft_orders.$.label"] = parseDraftLabel(req.body, "Draft");
+    }
+    if (req.user?._id) {
+      setFields.updated_by = req.user._id;
+    }
+
+    const result = await Company.updateOne(
+      { _id: companyId, "draft_orders._id": draftId, deletedAt: null },
+      { $set: setFields },
+    );
+
+    if (!result.matchedCount && !result.n) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Draft order not found",
+      });
+    }
+
+    const company = await Company.findById(companyId);
+    const draft = company?.draft_orders?.id?.(draftId) || null;
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Draft order updated",
+      data: company,
+      draft,
+    });
+  } catch (error) {
+    const status = error?.statusCode || 500;
+    console.error("❌ updateCompanyDraftOrder:", error?.message || error);
+    return res.status(status).json({
+      success: false,
+      status,
+      message: error?.message || "Failed to update draft order",
+      error: error?.message || "Failed to update draft order",
+    });
+  }
+}
+
+/**
+ * DELETE `/api/company/draft-orders/:companyId/:draftId`
+ * `$pull` draft subdoc by `_id`.
+ */
+async function removeCompanyDraftOrder(req, res) {
+  try {
+    const companyId = resolveDraftCompanyId(req);
+    const draftId = coalesceObjectId(req.params?.draftId);
+    if (!companyId || !draftId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id and draft_id are required",
+      });
+    }
+
+    const result = await Company.updateOne(
+      { _id: companyId, "draft_orders._id": draftId, deletedAt: null },
+      {
+        $pull: { draft_orders: { _id: draftId } },
+        ...(req.user?._id ? { $set: { updated_by: req.user._id } } : {}),
+      },
+    );
+
+    if (!result.matchedCount && !result.n) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Draft order not found",
+      });
+    }
+
+    const company = await Company.findById(companyId);
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Draft order deleted",
+      data: company,
+    });
+  } catch (error) {
+    const status = error?.statusCode || 500;
+    console.error("❌ removeCompanyDraftOrder:", error?.message || error);
+    return res.status(status).json({
+      success: false,
+      status,
+      message: error?.message || "Failed to delete draft order",
+      error: error?.message || "Failed to delete draft order",
+    });
+  }
+}
+
 module.exports = {
   companyCreate,
   getMyBranches,
@@ -638,4 +852,7 @@ module.exports = {
   getQueueStatus,
   enqueueQueueJob,
   clearCompanyQueue,
+  addCompanyDraftOrder,
+  updateCompanyDraftOrder,
+  removeCompanyDraftOrder,
 };

@@ -183,6 +183,9 @@ const {
   getQueueStatus,
   enqueueQueueJob,
   clearCompanyQueue,
+  addCompanyDraftOrder,
+  updateCompanyDraftOrder,
+  removeCompanyDraftOrder,
 } = require("../controllers/company");
 const {
   transactionBulkCreate,
@@ -441,6 +444,17 @@ router.delete("/company/queue/:module", clearCompanyQueue);
 router.get("/company/remove-cache", removeCache);
 router.delete("/company/remove-cache", removeCache);
 router.post("/company/remove-cache", removeCache);
+
+// POS draft orders on company.draft_orders
+router.post("/company/draft-orders/:companyId", addCompanyDraftOrder);
+router.patch(
+  "/company/draft-orders/:companyId/:draftId",
+  updateCompanyDraftOrder,
+);
+router.delete(
+  "/company/draft-orders/:companyId/:draftId",
+  removeCompanyDraftOrder,
+);
 
 // Product warehouse inventory management routes
 // router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);

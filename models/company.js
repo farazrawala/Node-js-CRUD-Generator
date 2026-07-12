@@ -213,6 +213,25 @@ const modelSchema = new mongoose.Schema(
       field_name: "Last Product Sync At",
     },
 
+    /** POS cart drafts (subdocs get Mongo `_id` automatically). */
+    draft_orders: [
+      {
+        payload: {
+          type: mongoose.Schema.Types.Mixed,
+          field_name: "Draft Payload",
+        },
+        label: {
+          type: String,
+          field_name: "Draft Label",
+        },
+        updated_at: {
+          type: Date,
+          default: Date.now,
+          field_name: "Updated At",
+        },
+      },
+    ],
+
     // default fields
     /** Parent company `_id` when this row is a branch/subsidiary; omit for root tenant companies. */
     company_id: {
