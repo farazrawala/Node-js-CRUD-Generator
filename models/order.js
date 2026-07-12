@@ -255,6 +255,19 @@ const modelSchema = new mongoose.Schema(
       enum: ["offline", "online"],
       default: "offline",
     },
+    local_sms: {
+      type: String,
+      field_name: "Local SMS",
+    },
+    api_sms: {
+      type: String,
+      field_name: "API SMS",
+    },
+    email_alerts: {
+      type: String,
+      field_name: "Email Alerts",
+    },
+
     /**
      * Sales lifecycle (mixed semantics historically). Prefer `ORDER_STATUS_GROUPS` +
      * `classifyOrderStatus` for stock and revenue rules instead of ad-hoc string checks.

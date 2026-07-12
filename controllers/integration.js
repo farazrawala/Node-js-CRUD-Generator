@@ -2038,6 +2038,226 @@ function buildVariantDescription(baseDescription, attributes = []) {
   }
   // test api to find product relations
 
+  function formatStoreVariationAttributes(attributes) {
+    if (!Array.isArray(attributes) || attributes.length === 0) {
+      return [];
+    }
+    return attributes
+      .map((attr) => {
+        const name = String(attr?.name || attr?.option || "").trim();
+        const option = String(attr?.option || attr?.value || "").trim();
+        if (!name && !option) return null;
+        if (name && option && name !== option) {
+          return { name, option, label: `${name}: ${option}` };
+        }
+        return { name: name || option, option: option || name, label: option || name };
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * List remote product variations for linking a POS child product.
+   * GET /integration/store-product-variations/:id/:remoteProductId
+   * Returns reference_id as parentId:variationId for both WooCommerce and Shopify.
+   */
+  async function listStoreProductVariations(req, res) {
+    const remoteProductId = String(req.params.remoteProductId || "").trim();
+    if (!remoteProductId || !/^\d+$/.test(remoteProductId)) {
+      return res.status(400).json({
+        success: false,
+        message: "A numeric remote product id is required",
+      });
+    }
+
+    const integrationResponse = await handleGenericGetById(req, "integration", {
+      excludeFields: [],
+    });
+    if (!integrationResponse?.data) {
+      return res.status(integrationResponse?.status || 404).json({
+        success: false,
+        message: integrationResponse?.error || "Integration not found",
+      });
+    }
+
+    const store = integrationResponse.data;
+    const storeType = String(store.store_type || "").toLowerCase();
+
+    try {
+      if (storeType === "woocommerce") {
+        if (!store.url || !store.key || !store.secret) {
+          return res.status(400).json({
+            success: false,
+            message: "WooCommerce integration is missing url, key, or secret",
+          });
+        }
+
+        const woocommerce = new WooCommerceRestApi({
+          url: store.url,
+          consumerKey: store.key,
+          consumerSecret: store.secret,
+          version: "wc/v3",
+        });
+
+        const parentResponse = await woocommerce.get(`products/${remoteProductId}`);
+        const parent = parentResponse?.data || null;
+        const parentName = String(parent?.name || "").trim();
+
+        let page = 1;
+        const variations = [];
+        while (page <= 20) {
+          const response = await woocommerce.get(
+            `products/${remoteProductId}/variations`,
+            {
+              per_page: 100,
+              page,
+              orderby: "id",
+              order: "asc",
+            },
+          );
+          const batch = Array.isArray(response?.data) ? response.data : [];
+          variations.push(...batch);
+          if (batch.length < 100) break;
+          page += 1;
+        }
+
+        const data = variations.map((variation) => {
+          const variationId = String(variation?.id || "").trim();
+          const attrs = formatStoreVariationAttributes(variation?.attributes);
+          const attrLabel = attrs.map((a) => a.option || a.label).filter(Boolean).join(" - ");
+          return {
+            id: variationId,
+            parent_id: remoteProductId,
+            reference_id: `${remoteProductId}:${variationId}`,
+            sku: String(variation?.sku || "").trim(),
+            price: variation?.price ?? variation?.regular_price ?? "",
+            name: attrLabel
+              ? parentName
+                ? `${parentName} [${attrLabel}]`
+                : attrLabel
+              : parentName || `Variation ${variationId}`,
+            attributes: attrs,
+            status: variation?.status || "",
+          };
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: data.length
+            ? "Store product variations fetched successfully"
+            : "No variations found for this product",
+          data,
+          parent: {
+            id: remoteProductId,
+            name: parentName,
+            type: parent?.type || "",
+          },
+          store_type: "woocommerce",
+        });
+      }
+
+      if (storeType === "shopify") {
+        let shopDomain = String(store.url || "")
+          .trim()
+          .replace(/^https?:\/\//i, "")
+          .replace(/\/$/, "");
+        if (/^[a-z0-9][a-z0-9-]*$/i.test(shopDomain)) {
+          shopDomain = `${shopDomain}.myshopify.com`;
+        }
+        if (!shopDomain || !/\.myshopify\.com$/i.test(shopDomain)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid Shopify shop domain on integration",
+          });
+        }
+        if (!store.token) {
+          return res.status(400).json({
+            success: false,
+            message: "Missing Shopify access token on integration",
+          });
+        }
+
+        const shopify = shopifyApi({
+          apiKey: store.key,
+          apiSecretKey: store.secret,
+          adminApiAccessToken: store.token,
+          scopes: ["read_products"],
+          hostName: shopDomain,
+          apiVersion: ApiVersion.October24,
+          isCustomStoreApp: true,
+        });
+        const session = shopify.session.customAppSession(shopDomain);
+        session.accessToken = store.token;
+        const client = new shopify.clients.Rest({ session });
+        const productResponse = await client.get({
+          path: `products/${remoteProductId}`,
+        });
+        const product = productResponse?.body?.product || null;
+        if (!product) {
+          return res.status(404).json({
+            success: false,
+            message: "Shopify product not found",
+          });
+        }
+
+        const parentName = String(product?.title || "").trim();
+        const variants = Array.isArray(product?.variants) ? product.variants : [];
+        const data = variants.map((variant) => {
+          const variationId = String(variant?.id || "").trim();
+          const title = String(variant?.title || "").trim();
+          const optionParts = [variant?.option1, variant?.option2, variant?.option3]
+            .map((part) => String(part || "").trim())
+            .filter((part) => part && part !== "Default Title");
+          const optionLabel = optionParts.join(" - ") || (title !== "Default Title" ? title : "");
+          return {
+            id: variationId,
+            parent_id: remoteProductId,
+            reference_id: `${remoteProductId}:${variationId}`,
+            sku: String(variant?.sku || "").trim(),
+            price: variant?.price ?? "",
+            name: optionLabel
+              ? parentName
+                ? `${parentName} [${optionLabel}]`
+                : optionLabel
+              : parentName || `Variant ${variationId}`,
+            attributes: optionLabel
+              ? [{ name: "Variant", option: optionLabel, label: optionLabel }]
+              : [],
+            status: "",
+          };
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: data.length
+            ? "Store product variations fetched successfully"
+            : "No variations found for this product",
+          data,
+          parent: {
+            id: remoteProductId,
+            name: parentName,
+            type: data.length > 1 ? "variable" : "simple",
+          },
+          store_type: "shopify",
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: `Store type "${storeType || "unknown"}" does not support variation listing`,
+      });
+    } catch (error) {
+      const errorPayload =
+        error?.response?.data ||
+        error?.response?.body ||
+        (typeof error?.message === "string" ? error.message : "Failed to fetch variations");
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch store product variations",
+        error: errorPayload,
+      });
+    }
+  }
+
 
   
 
@@ -2179,6 +2399,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
     syncStoreCategory,
     // syncStoreBrand,
     syncProductRelations,
+    listStoreProductVariations,
     syncStoreProduct,
     queueStoreProductFetch,
   };

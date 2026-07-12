@@ -116,6 +116,7 @@ const {
   syncStoreCategory,
   // syncStoreBrand,
   syncProductRelations,
+  listStoreProductVariations,
   syncStoreProduct,
   queueStoreProductFetch,
 } = require("../controllers/integration");
@@ -403,6 +404,10 @@ router.post(
   queueStoreProductFetch,
 );
 router.get("/integration/find-product-relations/:id", syncProductRelations);
+router.get(
+  "/integration/store-product-variations/:id/:remoteProductId",
+  listStoreProductVariations,
+);
 
 // Process routes (GET or POST — some clients/proxies use POST)
 router.get("/process/queue-form", processQueueFormSchema);

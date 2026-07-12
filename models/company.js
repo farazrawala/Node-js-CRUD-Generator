@@ -202,6 +202,17 @@ const modelSchema = new mongoose.Schema(
       ref: "warehouse",
       field_name: "Default Store",
     },
+
+    // sync timestamps
+    last_order_fetch_at: {
+      type: Date,
+      field_name: "Last Order Fetch At",
+    },
+    last_product_sync_at: {
+      type: Date,
+      field_name: "Last Product Sync At",
+    },
+
     // default fields
     /** Parent company `_id` when this row is a branch/subsidiary; omit for root tenant companies. */
     company_id: {
