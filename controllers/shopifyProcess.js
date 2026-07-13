@@ -12,6 +12,7 @@ const OrderItem = require("../models/order_item");
 const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
 const WarehouseInventory = require("../models/warehouse_inventory");
+const { generateTransactionNumber } = require("../utils/transactionNumber");
 require("@shopify/shopify-api/adapters/node");
 const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
 const {
@@ -54,6 +55,8 @@ const {
   logFetchOrderImported,
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
+  findOrCreatePosCustomerFromBilling,
+  mapRemoteOrderAddressFields,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -570,13 +573,26 @@ async function resolveCompanyDefaultWarehouseId(companyId) {
     status: "active",
     deletedAt: null,
   })
-    .select("warehouse_id")
+    .select("warehouse_id default_account_receivable_account")
     .lean();
   const wid = company?.warehouse_id;
   if (wid != null && mongoose.Types.ObjectId.isValid(String(wid))) {
     return coalesceObjectId(wid);
   }
   return null;
+}
+
+async function resolveCompanyDefaultArAccountId(companyId) {
+  const cid = coalesceObjectId(companyId);
+  if (!cid) return null;
+  const company = await Company.findOne({
+    _id: cid,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("default_account_receivable_account")
+    .lean();
+  return coalesceObjectId(company?.default_account_receivable_account);
 }
 
 /** Set POS warehouse qty to match Shopify (absolute sync, not delta-only on create). */
@@ -2116,6 +2132,11 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     .filter(Boolean)
     .join(" ")
     .trim();
+  const resolvedName =
+    customerName ||
+    [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim();
+  const customerEmail = remoteOrder?.email || customer.email || billing.email || "";
+  const customerPhone = billing.phone || customer.phone || "";
 
   const discount = Number(remoteOrder?.total_discounts) || 0;
   const shipment =
@@ -2123,23 +2144,27 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     Number(remoteOrder?.total_shipping_price_set?.presentment_money?.amount) ||
     0;
 
-  const order = await Order.create({
+  const customerId = await findOrCreatePosCustomerFromBilling({
+    name: resolvedName,
+    email: customerEmail,
+    phone: customerPhone,
+    companyId,
+    createdBy: process.created_by?._id || process.created_by,
+  });
+
+  const addressFields = mapRemoteOrderAddressFields(remoteOrder, "shopify");
+
+  const orderPayload = {
     name:
-      customerName ||
-      [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim() ||
+      resolvedName ||
       `Shopify #${remoteOrder?.order_number || remoteId}`,
-    email: remoteOrder?.email || customer.email || billing.email || "",
-    phone: billing.phone || customer.phone || "",
-    address: [
-      billing.address1,
-      billing.address2,
-      billing.city,
-      billing.province,
-      billing.zip,
-      billing.country,
-    ]
-      .filter(Boolean)
-      .join(", "),
+    email: customerEmail,
+    phone: customerPhone,
+    address: addressFields.address,
+    city: addressFields.city,
+    state: addressFields.state,
+    zip: addressFields.zip,
+    country: addressFields.country,
     description: externalRef,
     integration_order_id: integrationOrderId,
     discount,
@@ -2150,13 +2175,24 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       remoteOrder?.financial_status,
       remoteOrder?.fulfillment_status,
     ),
+    order_type: "online",
+    transaction_number: generateTransactionNumber(),
     integration_id: integrationId,
     company_id: companyId,
     created_by: coalesceObjectId(
       process.created_by?._id || process.created_by,
     ),
     status: "active",
-  });
+  };
+  const arAccountId = await resolveCompanyDefaultArAccountId(companyId);
+  if (arAccountId) {
+    orderPayload.payment_method_accounts_id = arAccountId;
+  }
+  if (customerId) {
+    orderPayload.customer_id = customerId;
+  }
+
+  const order = await Order.create(orderPayload);
 
   for (const item of orderItemsPayload) {
     await OrderItem.create({ ...item, order_id: order._id });
@@ -2205,7 +2241,7 @@ async function fetch_order(req, res, process) {
         limit,
         status: "any",
         fields:
-          "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,customer",
+          "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,shipping_address,customer",
         order: "id asc",
       };
       if (offset > 0) {
@@ -2316,7 +2352,7 @@ async function fetch_latest_order(req, res, process) {
           limit: perPage,
           status: "any",
           fields:
-            "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,subtotal_price,total_discounts,total_shipping_price_set,billing_address,customer",
+            "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,subtotal_price,total_discounts,total_shipping_price_set,billing_address,shipping_address,customer",
           order: "id desc",
         },
       });

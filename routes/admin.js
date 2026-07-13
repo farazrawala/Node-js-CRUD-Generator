@@ -128,6 +128,7 @@ const userAdminCRUD = adminCrudGenerator(
           { key: "categories", label: "Categories" },
           { key: "brands", label: "Brands" },
           { key: "integration", label: "Integration" },
+          { key: "courier-integration", label: "Courier Integration" },
           { key: "process", label: "Process" },
           { key: "warehouse", label: "Warehouse" },
           { key: "warehouse-inventory", label: "Warehouse Inventory" },

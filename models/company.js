@@ -203,6 +203,22 @@ const modelSchema = new mongoose.Schema(
       field_name: "Default Store",
     },
 
+    /**
+     * Preferred courier for CourierService / CourierFactory.
+     * Values: TCS | Leopard | BlueEX | M&P | Call Courier | Trax
+     */
+    preferred_courier: {
+      type: String,
+      field_name: "Preferred Courier",
+      default: "TCS",
+    },
+    /** JSON/object shipping prefs (cost center overrides, default cities, etc.). */
+    shipping_settings: {
+      type: mongoose.Schema.Types.Mixed,
+      field_name: "Shipping Settings",
+      default: {},
+    },
+
     // sync timestamps
     last_order_fetch_at: {
       type: Date,

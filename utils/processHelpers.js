@@ -3,6 +3,7 @@ const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Product = require("../models/product");
 const Order = require("../models/order");
+const User = require("../models/user");
 const { createApplicationLog } = require("./applicationLogs");
 const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
@@ -10,8 +11,162 @@ const SyncProduct = require("../models/sync_product");
 const { coalesceObjectId } = require("./modelHelper");
 const { releaseProcessFromQueue } = require("./processQueue");
 
+/** Same default as POS add-customer UI. */
+const POS_DEFAULT_CUSTOMER_PASSWORD = "123456";
+
 function escapeRegex(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function digitsOnlyPhone(phone) {
+  return String(phone || "").replace(/\D/g, "");
+}
+
+/**
+ * POS customer email: use trimmed input if present; otherwise `{digits}@gmail.com` from phone.
+ */
+function resolvePosCustomerEmail(email, phone) {
+  const trimmed = String(email || "").trim().toLowerCase();
+  if (trimmed) return trimmed;
+  const digits = digitsOnlyPhone(phone);
+  if (digits) return `${digits}@gmail.com`;
+  return `customer_${Date.now()}@gmail.com`;
+}
+
+function phoneToStoredValue(phone) {
+  const digits = digitsOnlyPhone(phone);
+  if (!digits) return undefined;
+  const asNum = Number(digits);
+  return Number.isFinite(asNum) ? asNum : undefined;
+}
+
+/**
+ * Find or create a POS customer user for an imported online order.
+ * Match by company + email first, then company + phone (CUSTOMER role).
+ * Returns user `_id` or null (order import should continue without customer_id).
+ */
+/**
+ * Map remote store shipping/billing into POS order address fields.
+ * Prefers shipping address; falls back to billing.
+ * Street stays in `address`; city/state/zip/country are separate columns.
+ *
+ * @param {object} remoteOrder
+ * @param {"shopify"|"woocommerce"} store
+ * @returns {{ address: string, city: string, state: string, zip: string, country: string }}
+ */
+function mapRemoteOrderAddressFields(remoteOrder, store) {
+  const storeKey = String(store || "").toLowerCase();
+  let street1 = "";
+  let street2 = "";
+  let city = "";
+  let state = "";
+  let zip = "";
+  let country = "";
+
+  if (storeKey === "shopify") {
+    const shipping = remoteOrder?.shipping_address || {};
+    const billing = remoteOrder?.billing_address || {};
+    const src =
+      shipping.address1 || shipping.city || shipping.zip ? shipping : billing;
+    street1 = String(src.address1 || "").trim();
+    street2 = String(src.address2 || "").trim();
+    city = String(src.city || "").trim();
+    state = String(src.province || src.province_code || "").trim();
+    zip = String(src.zip || "").trim();
+    country = String(src.country || src.country_code || "").trim();
+  } else {
+    // WooCommerce (and default)
+    const shipping = remoteOrder?.shipping || {};
+    const billing = remoteOrder?.billing || {};
+    const src =
+      shipping.address_1 || shipping.city || shipping.postcode ?
+        shipping
+      : billing;
+    street1 = String(src.address_1 || "").trim();
+    street2 = String(src.address_2 || "").trim();
+    city = String(src.city || "").trim();
+    state = String(src.state || "").trim();
+    zip = String(src.postcode || "").trim();
+    country = String(src.country || "").trim();
+  }
+
+  const address = [street1, street2].filter(Boolean).join(", ");
+  return { address, city, state, zip, country };
+}
+
+async function findOrCreatePosCustomerFromBilling({
+  name,
+  email,
+  phone,
+  companyId,
+  createdBy,
+}) {
+  const company_id = coalesceObjectId(companyId);
+  if (!company_id) return null;
+
+  const resolvedEmail = resolvePosCustomerEmail(email, phone);
+  const phoneDigits = digitsOnlyPhone(phone);
+  const phoneValue = phoneToStoredValue(phone);
+  const displayName =
+    String(name || "").trim() ||
+    resolvedEmail.split("@")[0] ||
+    "Online customer";
+  const actor = coalesceObjectId(createdBy);
+
+  let existing = await User.findOne({
+    company_id,
+    email: resolvedEmail,
+    deletedAt: null,
+  })
+    .select("_id")
+    .lean();
+
+  if (!existing && phoneDigits) {
+    const phoneOr = [{ phone: phoneDigits }];
+    if (phoneValue != null) phoneOr.push({ phone: phoneValue });
+    existing = await User.findOne({
+      company_id,
+      deletedAt: null,
+      role: "CUSTOMER",
+      $or: phoneOr,
+    })
+      .select("_id")
+      .lean();
+  }
+
+  if (existing?._id) return existing._id;
+
+  try {
+    const payload = {
+      name: displayName,
+      email: resolvedEmail,
+      password: POS_DEFAULT_CUSTOMER_PASSWORD,
+      role: ["CUSTOMER"],
+      company_id,
+      status: "active",
+    };
+    if (phoneValue != null) payload.phone = phoneValue;
+    if (actor) payload.created_by = actor;
+
+    const created = await User.create(payload);
+    return created._id;
+  } catch (err) {
+    if (err?.code === 11000) {
+      const again = await User.findOne({
+        company_id,
+        email: resolvedEmail,
+        deletedAt: null,
+      })
+        .select("_id")
+        .lean();
+      return again?._id || null;
+    }
+    console.error(
+      "[fetch_order] Failed to create POS customer:",
+      err?.message || err,
+    );
+    return null;
+  }
 }
 
 function categorySlugFromName(name) {
@@ -1561,4 +1716,7 @@ module.exports = {
   recordProcessFailure,
   attachProcessFailureHooks,
   coalesceObjectId,
+  findOrCreatePosCustomerFromBilling,
+  mapRemoteOrderAddressFields,
+  resolvePosCustomerEmail,
 };

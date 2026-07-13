@@ -12,6 +12,8 @@ const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
 const Attribute = require("../models/attribute");
 const WarehouseInventory = require("../models/warehouse_inventory");
+const Company = require("../models/company");
+const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   categorySlugFromName,
   resolveCompanyId,
@@ -52,6 +54,8 @@ const {
   logFetchOrderImported,
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
+  findOrCreatePosCustomerFromBilling,
+  mapRemoteOrderAddressFields,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -100,6 +104,19 @@ async function resolveProductStockTotals(productIds, companyId) {
     );
     return new Map();
   }
+}
+
+async function resolveCompanyDefaultArAccountId(companyId) {
+  const cid = coalesceObjectId(companyId);
+  if (!cid) return null;
+  const company = await Company.findOne({
+    _id: cid,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("default_account_receivable_account")
+    .lean();
+  return coalesceObjectId(company?.default_account_receivable_account);
 }
 
 async function recordBrandSyncMapping(
@@ -2807,23 +2824,30 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     .filter(Boolean)
     .join(" ")
     .trim();
+  const customerEmail = billing.email || "";
+  const customerPhone = billing.phone || "";
 
-  const order = await Order.create({
+  const customerId = await findOrCreatePosCustomerFromBilling({
+    name: customerName,
+    email: customerEmail,
+    phone: customerPhone,
+    companyId,
+    createdBy: process.created_by?._id || process.created_by,
+  });
+
+  const addressFields = mapRemoteOrderAddressFields(remoteOrder, "woocommerce");
+
+  const orderPayload = {
     name:
       customerName ||
       `WooCommerce #${remoteOrder?.number || remoteId}`,
-    email: billing.email || "",
-    phone: billing.phone || "",
-    address: [
-      billing.address_1,
-      billing.address_2,
-      billing.city,
-      billing.state,
-      billing.postcode,
-      billing.country,
-    ]
-      .filter(Boolean)
-      .join(", "),
+    email: customerEmail,
+    phone: customerPhone,
+    address: addressFields.address,
+    city: addressFields.city,
+    state: addressFields.state,
+    zip: addressFields.zip,
+    country: addressFields.country,
     description: externalRef,
     integration_order_id: integrationOrderId,
     discount: Number(remoteOrder?.discount_total) || 0,
@@ -2831,13 +2855,24 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     lines_subtotal: linesSubtotal,
     amount_received: Number(remoteOrder?.total) || 0,
     order_status: mapWooOrderStatus(remoteOrder?.status),
+    order_type: "online",
+    transaction_number: generateTransactionNumber(),
     integration_id: integrationId,
     company_id: companyId,
     created_by: coalesceObjectId(
       process.created_by?._id || process.created_by,
     ),
     status: "active",
-  });
+  };
+  const arAccountId = await resolveCompanyDefaultArAccountId(companyId);
+  if (arAccountId) {
+    orderPayload.payment_method_accounts_id = arAccountId;
+  }
+  if (customerId) {
+    orderPayload.customer_id = customerId;
+  }
+
+  const order = await Order.create(orderPayload);
 
   for (const item of orderItemsPayload) {
     await OrderItem.create({ ...item, order_id: order._id });

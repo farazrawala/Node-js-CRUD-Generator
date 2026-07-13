@@ -39,6 +39,101 @@ const {
 } = require("../utils/reportPeriodRange");
 const { profitByOrderItem } = require("./order_item");
 
+let CourierShipmentModel = null;
+function getCourierShipmentModel() {
+  if (CourierShipmentModel) return CourierShipmentModel;
+  try {
+    CourierShipmentModel = require("../src/models/courier_shipment.model");
+  } catch {
+    CourierShipmentModel = null;
+  }
+  return CourierShipmentModel;
+}
+
+/** Public track page for known Pakistani couriers (UI link when API has no tracking_url). */
+function buildPublicCourierTrackingUrl(provider, trackingId) {
+  const id = trackingId != null ? String(trackingId).trim() : "";
+  if (!id) return "";
+  const key = String(provider || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  if (key === "tcs") {
+    return `https://www.tcsexpress.com/track/?consignmentNo=${encodeURIComponent(id)}`;
+  }
+  if (key === "leopard" || key === "leopards" || key === "lcs") {
+    return `https://www.leopardscourier.com/tracking/?cn=${encodeURIComponent(id)}`;
+  }
+  if (key === "blueex") {
+    return `https://www.blue-ex.com/tracking?cn=${encodeURIComponent(id)}`;
+  }
+  if (key === "m&p" || key === "mnp" || key === "mp") {
+    return `https://www.mulphilog.com/tracking/${encodeURIComponent(id)}`;
+  }
+  if (key === "callcourier") {
+    return `https://callcourier.com.pk/tracking/?tc=${encodeURIComponent(id)}`;
+  }
+  if (key === "trax") {
+    return `https://sonic.pk/tracking?tracking_number=${encodeURIComponent(id)}`;
+  }
+  return "";
+}
+
+/**
+ * Attach latest courier shipment tracking_id / tracking_url onto order list rows.
+ * @param {Array<object>} orders
+ * @returns {Promise<Array<object>>}
+ */
+async function attachCourierTrackingToOrders(orders) {
+  const CourierShipment = getCourierShipmentModel();
+  if (!CourierShipment || !Array.isArray(orders) || orders.length === 0) {
+    return orders;
+  }
+
+  const orderIds = orders.map((o) => o?._id).filter(Boolean);
+  if (orderIds.length === 0) return orders;
+
+  const shipments = await CourierShipment.find({
+    order_id: { $in: orderIds },
+    deletedAt: null,
+    tracking_number: { $nin: [null, ""] },
+    shipment_status: { $nin: ["Cancelled", "Failed"] },
+  })
+    .sort({ created_at: -1 })
+    .select("order_id tracking_number courier label_url shipment_status")
+    .lean();
+
+  const byOrderId = new Map();
+  for (const shipment of shipments) {
+    const key = String(shipment.order_id);
+    if (byOrderId.has(key)) continue;
+    byOrderId.set(key, shipment);
+  }
+
+  return orders.map((order) => {
+    const shipment = byOrderId.get(String(order._id));
+    if (!shipment) return order;
+    const tracking_id = shipment.tracking_number || null;
+    const tracking_url =
+      shipment.label_url ||
+      buildPublicCourierTrackingUrl(shipment.courier, tracking_id) ||
+      null;
+    return {
+      ...order,
+      tracking_id,
+      tracking_number: tracking_id,
+      tracking_url,
+      courier_provider: shipment.courier || null,
+      courier_shipment: {
+        tracking_number: tracking_id,
+        courier: shipment.courier || null,
+        label_url: shipment.label_url || null,
+        shipment_status: shipment.shipment_status || null,
+      },
+    };
+  });
+}
+
 const ORDER_TRANSACTION_ERROR_LOG = {
   action: "POST ORDER TRANSACTION ERROR",
   tags: ["api", "order", "transaction", "error"],
@@ -285,14 +380,12 @@ function sumParsedLinesSubtotal(lines) {
 /** Company default store from populated `req.user.company_id.warehouse_id`. */
 function resolveDefaultWarehouseId(req) {
   const company = req.user?.company_id;
-  if (!company) return "";
-  const raw =
-    company && typeof company === "object" && company.warehouse_id != null ?
-      company.warehouse_id
-    : company;
-  if (raw instanceof mongoose.Types.ObjectId) return String(raw);
-  const s = String(raw ?? "").trim();
-  return mongoose.Types.ObjectId.isValid(s) ? s : "";
+  if (!company || typeof company !== "object") return "";
+  const oid = coalesceObjectId(company.warehouse_id);
+  if (oid != null && mongoose.Types.ObjectId.isValid(String(oid))) {
+    return String(oid);
+  }
+  return "";
 }
 
 /** Per-line warehouse, else company default store (POS). */
@@ -332,6 +425,7 @@ async function sumWarehouseInventoryQtyForProduct(
 /**
  * Pick a warehouse with enough on-hand for this line (`warehouse_inventory.quantity`).
  * Prefers line/default warehouse when sufficient; otherwise highest available qty that can fulfill the sale.
+ * When `allowInsufficientStock` is true, returns preferred / best available / fallback instead of throwing.
  */
 async function resolveWarehouseForOutboundLine({
   productId,
@@ -339,6 +433,8 @@ async function resolveWarehouseForOutboundLine({
   qtyNeeded,
   preferredWarehouseId,
   mongoSession = null,
+  allowInsufficientStock = false,
+  fallbackWarehouseId = null,
 }) {
   const qty = Number(qtyNeeded);
   if (!Number.isFinite(qty) || qty <= 0) {
@@ -383,12 +479,10 @@ async function resolveWarehouseForOutboundLine({
     avail.set(wid, onHand);
   }
 
+  const prefOid = coalesceObjectId(preferredWarehouseId);
   const pref =
-    (
-      preferredWarehouseId &&
-      mongoose.Types.ObjectId.isValid(String(preferredWarehouseId))
-    ) ?
-      String(preferredWarehouseId)
+    prefOid && mongoose.Types.ObjectId.isValid(String(prefOid)) ?
+      String(prefOid)
     : null;
 
   if (pref && !avail.has(pref)) {
@@ -405,6 +499,19 @@ async function resolveWarehouseForOutboundLine({
 
   if (candidates.length > 0) {
     return candidates[0][0];
+  }
+
+  if (allowInsufficientStock) {
+    if (pref) return pref;
+    const bestAvailable = [...avail.entries()].sort((a, b) => b[1] - a[1]);
+    if (bestAvailable.length > 0) return bestAvailable[0][0];
+    const fallbackOid = coalesceObjectId(fallbackWarehouseId);
+    if (
+      fallbackOid &&
+      mongoose.Types.ObjectId.isValid(String(fallbackOid))
+    ) {
+      return String(fallbackOid);
+    }
   }
 
   const warehouseStock = [...avail.entries()]
@@ -450,6 +557,66 @@ async function resolveWarehouseForOutboundLine({
 
 function orderSessionOpts(mongoSession) {
   return mongoSession ? { session: mongoSession } : {};
+}
+
+/** Company `default_account_receivable_account` from populated `req.user` or a company doc. */
+function companyDefaultAccountReceivable(userOrCompany) {
+  if (!userOrCompany) return null;
+  if (
+    userOrCompany.company_id != null &&
+    typeof userOrCompany.company_id === "object"
+  ) {
+    const fromPopulated = coalesceObjectId(
+      userOrCompany.company_id.default_account_receivable_account,
+    );
+    if (fromPopulated) return fromPopulated;
+  }
+  return coalesceObjectId(userOrCompany.default_account_receivable_account);
+}
+
+/**
+ * Resolve Mode-of-Payment account: `posPayMethod` → `payment_method_accounts_id` →
+ * company `default_account_receivable_account`. Writes the result onto the body.
+ */
+function resolveOrderPaymentMethodAccount(body, user) {
+  const b = body || {};
+  const chosen =
+    coalesceObjectId(b.posPayMethod) ||
+    coalesceObjectId(b.payment_method_accounts_id) ||
+    companyDefaultAccountReceivable(user);
+  if (chosen) {
+    b.payment_method_accounts_id = chosen;
+    if (!coalesceObjectId(b.posPayMethod)) {
+      b.posPayMethod = chosen;
+    }
+  }
+  return chosen;
+}
+
+/**
+ * Orders from fetch/import (or drafts) may lack `transaction_number`.
+ * GL bulk insert requires it — generate and persist when missing.
+ * @returns {Promise<string>}
+ */
+async function ensureOrderTransactionNumber(orderLike, { session = null } = {}) {
+  const existing = String(orderLike?.transaction_number ?? "").trim();
+  if (existing) return existing;
+
+  const txnNo = generateTransactionNumber();
+  const oid = coalesceObjectId(orderLike?._id);
+  if (oid && mongoose.Types.ObjectId.isValid(String(oid))) {
+    let q = Order.findByIdAndUpdate(
+      oid,
+      { $set: { transaction_number: txnNo } },
+      { new: false },
+    );
+    if (session) q = q.session(session);
+    await q;
+  }
+  if (orderLike && typeof orderLike === "object") {
+    orderLike.transaction_number = txnNo;
+  }
+  return txnNo;
 }
 
 /** Soft-delete active GL rows for one `transaction_number` (order update / line replace). */
@@ -508,7 +675,9 @@ async function rebuildOrderGlTransactions({
   mongoSession = null,
   postUpdateTransactions = null,
 }) {
-  const transaction_number = record?.transaction_number;
+  const transaction_number = await ensureOrderTransactionNumber(record, {
+    session: mongoSession,
+  });
   const orderTotal =
     lines.length > 0 ?
       Number(
@@ -566,7 +735,9 @@ async function rebuildOrderGlTransactions({
       {
         account_id:
           orderReq.body?.posPayMethod ??
-          orderReq.body?.payment_method_accounts_id,
+          orderReq.body?.payment_method_accounts_id ??
+          record?.payment_method_accounts_id ??
+          companyDefaultAccountReceivable(orderReq.user),
         type: "debit",
         amount: record?.amount_received,
         reference_user_id: record?.customer_id,
@@ -877,6 +1048,8 @@ async function applyOrderLineReplaceInventory({
           preferredWarehouseId:
             resolveOrderLineWarehouseId(line, req) || undefined,
           mongoSession,
+          allowInsufficientStock,
+          fallbackWarehouseId: resolveDefaultWarehouseId(req) || undefined,
         });
       } catch (warehouseResolveErr) {
         if (warehouseResolveErr.clientPayload) {
@@ -1392,6 +1565,44 @@ function normalizeOrderNumericFields(obj) {
   return out;
 }
 
+/** Coerce POS address fields to trimmed strings (zip often arrives as a number). */
+function normalizeOrderAddressFields(obj) {
+  const out = { ...obj };
+  for (const key of ["address", "city", "state", "zip", "country"]) {
+    if (!(key in out)) continue;
+    const v = out[key];
+    if (v === null || v === undefined) {
+      delete out[key];
+      continue;
+    }
+    out[key] = String(v).trim();
+  }
+  return out;
+}
+
+/**
+ * Header-only updates that only touch contact/address must not tear down GL.
+ * Rebuild GL only when money / payment fields change.
+ */
+function orderUpdateTouchesFinancialFields(body) {
+  if (!body || typeof body !== "object") return false;
+  const keys = [
+    "discount",
+    "discount_percentage",
+    "shipment",
+    "lines_subtotal",
+    "total_amount",
+    "amount_received",
+    "change_given",
+    "payment_method_accounts_id",
+    "posPayMethod",
+    "payment_method_id",
+  ];
+  return keys.some((k) =>
+    Object.prototype.hasOwnProperty.call(body, k),
+  );
+}
+
 /** Unit cost snapshot for the line: `wholesale_price` from product at time of sale. */
 function costPriceAtSaleFromProduct(product) {
   if (!product || typeof product !== "object") return 0;
@@ -1765,11 +1976,18 @@ async function findSales(req, res) {
 //   return res.status(response.status).json(response);
 // }
 
-async function getOrderByorderItem(req, res) {
+/**
+ * Shared list: active orders + line items (same response as get-order-by-order-item).
+ * @param {import("express").Request} req
+ * @param {import("express").Response} res
+ * @param {Record<string, unknown>} [extraFilter]
+ */
+async function getOrdersWithItems(req, res, extraFilter = {}) {
   const filter = {
     status: "active",
     deletedAt: null,
     company_id: req.user?.company_id,
+    ...extraFilter,
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (
@@ -1820,24 +2038,36 @@ async function getOrderByorderItem(req, res) {
     itemsByOrderId.get(key).push(item);
   }
 
-  const data = response.data.map((order) => {
-    const order_items = itemsByOrderId.get(String(order._id)) || [];
-    const order_items_total = order_items.reduce((sum, item) => {
-      const sub = Number(item.subtotal);
-      return sum + (Number.isFinite(sub) ? sub : 0);
-    }, 0);
-    return {
-      ...order,
-      order_items,
-      no_of_items: order_items.length,
-      order_items_total,
-    };
-  });
+  const data = await attachCourierTrackingToOrders(
+    response.data.map((order) => {
+      const order_items = itemsByOrderId.get(String(order._id)) || [];
+      const order_items_total = order_items.reduce((sum, item) => {
+        const sub = Number(item.subtotal);
+        return sum + (Number.isFinite(sub) ? sub : 0);
+      }, 0);
+      return {
+        ...order,
+        order_items,
+        no_of_items: order_items.length,
+        order_items_total,
+      };
+    }),
+  );
 
   return res.status(response.status).json({
     ...response,
     data,
   });
+}
+
+/** GET /api/order/get-order-by-order-item */
+async function getOrderByorderItem(req, res) {
+  return getOrdersWithItems(req, res);
+}
+
+/** GET /api/order/get-online-order-by-order-item — same as above, `order_type: "online"` only. */
+async function getOnlineOrders(req, res) {
+  return getOrdersWithItems(req, res, { order_type: "online" });
 }
 
 /**
@@ -1885,7 +2115,7 @@ async function order_save(req, res) {
   req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
 
   const transaction_number = generateTransactionNumber();
-  req.body.payment_method_accounts_id = req.body?.posPayMethod;
+  resolveOrderPaymentMethodAccount(req.body, req.user);
   req.body.transaction_number = transaction_number;
   // step 1 end
 
@@ -2000,8 +2230,11 @@ async function order_save(req, res) {
               },
             },
             {
-              // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
-              account_id: orderReq.body?.posPayMethod,
+              // Debit cash/bank (or payment method account); falls back to A/R when unset.
+              account_id:
+                orderReq.body?.posPayMethod ??
+                orderReq.body?.payment_method_accounts_id ??
+                companyDefaultAccountReceivable(orderReq.user),
               type: "debit",
               amount: lines_subtotal + shipment - discount - remainingAmountDue,
               reference_user_id: record?.customer_id,
@@ -2351,8 +2584,16 @@ async function order_update(req, res) {
   // step 1 start — parse lines + normalize header for `handleGenericUpdate`
   const lines = parseOrderLineItems(req.body);
   const originalBody = req.body;
-  req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
+  const clientTouchedFinancial = orderUpdateTouchesFinancialFields(originalBody);
+  req.body = normalizeOrderAddressFields(
+    normalizeOrderNumericFields(stripLineItemKeys(originalBody)),
+  );
   delete req.body._id;
+  // Never blank an existing GL key from the client; generate later if still missing.
+  if (!String(req.body.transaction_number ?? "").trim()) {
+    delete req.body.transaction_number;
+  }
+  resolveOrderPaymentMethodAccount(req.body, req.user);
 
   const recordId = String(req.params?.id || "").trim();
   if (lines.length > 0) {
@@ -2391,9 +2632,12 @@ async function order_update(req, res) {
     response = await handleGenericUpdate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
       afterUpdate: async (record, orderReq, _existing, sess) => {
-        // Header-only: step 3 — line replace runs teardown + GL rebuild in the line block.
-        if (lines.length === 0) {
+        // Header-only: rebuild GL only when the client sent financial fields
+        // (not for address/contact-only saves). Payment-method defaults injected
+        // server-side must not count as a client financial change.
+        if (lines.length === 0 && clientTouchedFinancial) {
           // step 3 start — GL soft-delete + insert ×4
+          await ensureOrderTransactionNumber(record, { session: sess });
           await softDeleteActiveOrderRelatedRecords({
             orderId: record._id,
             transactionNumber: record?.transaction_number,
@@ -2466,9 +2710,13 @@ async function order_update(req, res) {
         : null;
 
       // step 6 start — teardown: snapshot movements (kept active), soft-delete GL, remove line items
+      const transaction_number = await ensureOrderTransactionNumber(
+        response.data,
+        { session: mongoSession },
+      );
       const { oldOutMovements } = await teardownOrderForLineReplace({
         orderId,
-        transactionNumber: response.data.transaction_number,
+        transactionNumber: transaction_number,
         companyId: companyIdForStock,
         mongoSession,
         userId: req.user?._id,
@@ -2477,7 +2725,6 @@ async function order_update(req, res) {
 
       // step 7 start — transaction insert ×5 (GL after teardown)
       const updatedOrder = response.data;
-      const transaction_number = updatedOrder?.transaction_number;
       const lines_subtotal = req.body.lines_subtotal;
       const discount = updatedOrder?.discount ?? req.body.discount;
       const shipment = updatedOrder?.shipment ?? req.body.shipment;
@@ -2558,8 +2805,12 @@ async function order_update(req, res) {
             },
           },
           {
-            // Debit cash/bank (or payment method account); `posPayMethod` is the account id on the incoming body.
-            account_id: req.body?.posPayMethod,
+            // Debit cash/bank (or payment method account); falls back to A/R when unset.
+            account_id:
+              req.body?.posPayMethod ??
+              req.body?.payment_method_accounts_id ??
+              updatedOrder?.payment_method_accounts_id ??
+              companyDefaultAccountReceivable(req.user),
             type: "debit",
             amount: lines_subtotal + shipment - discount,
             reference_user_id: updatedOrder?.customer_id,
@@ -2932,6 +3183,11 @@ async function getOrderByOrderNo(req, res) {
 }
 
 async function invoiceUpdate(req, res) {
+  if (req.body && typeof req.body === "object") {
+    req.body = normalizeOrderAddressFields(
+      normalizeOrderNumericFields(req.body),
+    );
+  }
   const response = await handleGenericUpdate(req, "order", {
     afterUpdate: async (record, req, existingUser) => {
       console.log("✅ Record updated successfully:", record);
@@ -4635,6 +4891,7 @@ module.exports = {
   order_update,
   order_delete,
   getOrderByorderItem,
+  getOnlineOrders,
   findProfitByOrderItem,
   findSales,
   findTotalSalesByOrder,

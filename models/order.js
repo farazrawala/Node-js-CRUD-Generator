@@ -203,6 +203,22 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
+    city: {
+      type: String,
+      // required: true,
+    },
+    state: {
+      type: String,
+      // required: true,
+    },
+    zip: {
+      type: String,
+      // required: true,
+    },
+    country: {
+      type: String,
+      // required: true,
+    },
     description: {
       type: String,
       // required: true
@@ -402,15 +418,28 @@ modelSchema.pre("validate", async function (next) {
   }
 });
 
-/** Trim string contact fields on partial updates (findByIdAndUpdate bypasses document pre-validate). */
+/** Trim string contact/address fields on partial updates (findByIdAndUpdate bypasses document pre-validate). */
 modelSchema.pre(["findOneAndUpdate", "findByIdAndUpdate"], function (next) {
   const raw = this.getUpdate();
   if (!raw || Array.isArray(raw)) return next();
-  const trimKeys = ["name", "email", "phone"];
+  const trimKeys = [
+    "name",
+    "email",
+    "phone",
+    "address",
+    "city",
+    "state",
+    "zip",
+    "country",
+  ];
   const trimObj = (obj) => {
     if (!obj || typeof obj !== "object") return;
     for (const k of trimKeys) {
+      if (obj[k] == null) continue;
       if (typeof obj[k] === "string") obj[k] = trimOrEmpty(obj[k]);
+      else if (typeof obj[k] === "number" || typeof obj[k] === "boolean") {
+        obj[k] = String(obj[k]).trim();
+      }
     }
   };
   if (raw.$set && typeof raw.$set === "object") trimObj(raw.$set);

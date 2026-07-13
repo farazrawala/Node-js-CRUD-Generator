@@ -215,6 +215,7 @@ Plus dynamic CRUD: `/alerts/*`.
 | `PATCH` | `/order/order_update/:id` | Yes | Update order |
 | `DELETE` | `/order/order_delete/:id` | Yes | Delete order |
 | `GET` | `/order/get-order-by-order-item` | Yes | Order by order item query |
+| `GET` | `/order/get-online-order-by-order-item` | Yes | Same as get-order-by-order-item, `order_type=online` only |
 | `GET` | `/order/get-order-by-order-no/:id` | Yes | Order by order number |
 | `GET` | `/order/public-get-order-by-order-no/:id` | No | Public order by number |
 | `PATCH` | `/order/invoice-update/:id` | Yes | Invoice update |
@@ -241,6 +242,31 @@ Plus dynamic CRUD: `/alerts/*`.
 
 Dynamic CRUD: `/order/*`, `/orders/*`.  
 `order_item` dynamic CRUD is excluded (custom analytics routes only above).
+
+## Courier (provider module)
+
+Shipments are created with **orderId only** — the service loads customer, address, COD, weight, and company courier settings from the database. Controllers never select TCS vs Leopard; `CourierFactory` + company `preferred_courier` decide.
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `POST` | `/courier/create/:orderId` | Yes | Book shipment via preferred (or `?provider=` / body.provider) courier |
+| `GET` | `/courier/tracking/:trackingNo` | Yes | Live tracking + append history |
+| `GET` | `/courier/order/:orderId/tracking` | Yes | Tracking by order |
+| `POST` | `/courier/cancel/:orderId` | Yes | Cancel active shipment |
+| `GET` | `/courier/label/:orderId` | Yes | Label URL |
+| `GET` | `/courier/providers` | Yes | Registered provider keys |
+| `POST` | `/courier/sync` | Yes | Manual open-shipment tracking sync |
+
+Programmatic API:
+
+```js
+const { CourierService } = require("./src");
+await CourierService.createShipment(orderId);
+await CourierService.getTracking(orderId);
+await CourierService.getTrackingByTrackingNumber(trackingNumber);
+```
+
+To add a courier: implement `BaseCourier`, then `CourierFactory.register("BlueEX", BlueExCourier)`.
 
 ---
 

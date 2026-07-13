@@ -24,6 +24,7 @@ const PERMISSION_MODULE_KEYS = [
   "categories",
   "brands",
   "integration",
+  "courier-integration",
   "process",
   "warehouse",
   "warehouse-inventory",

@@ -89,6 +89,7 @@ const {
   order_update,
   order_delete,
   getOrderByorderItem,
+  getOnlineOrders,
   getOrderByOrderNo,
   findProfitByOrderItem,
   findSales,
@@ -517,6 +518,7 @@ router.post("/order/order_save", order_save);
 router.patch("/order/order_update/:id", order_update);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
+router.get("/order/get-online-order-by-order-item", getOnlineOrders);
 router.get("/order/profit-by-order-item", findProfitByOrderItem);
 router.get("/order_item/profit-by-order-item", profitByOrderItem);
 router.get(
@@ -703,6 +705,10 @@ const categoryController =
 // router.get("/category/get-all", categoryController.getAll);
 // router.get("/category/get-all-active", categoryController.getAllActive);
 // router.delete("/category/delete/:id", categoryController.delete);
+
+/** Courier Integration Module (provider pattern — TCS, Leopard, …). */
+const courierRoutes = require("../src/routes/courier.routes");
+router.use("/courier", courierRoutes);
 
 /** Unmatched /api/* — JSON 404 + best-effort row in `logs` (never reaches controllers). */
 router.use(async (req, res) => {

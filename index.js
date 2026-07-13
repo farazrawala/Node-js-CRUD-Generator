@@ -63,6 +63,11 @@ modelFiles.forEach((file) => {
   require(modelPath);
 });
 
+// Courier Integration Module models (src/)
+require("./src/models/courier_provider.model");
+require("./src/models/courier_shipment.model");
+require("./src/models/courier_tracking.model");
+
 const app = express();
 const BASE_PATH = getBasePath();
 const port = Number(process.env.PORT) || 8000;
@@ -412,4 +417,7 @@ app.listen(port, () => {
 
   const { startProcessQueueWorker } = require("./utils/processQueueWorker");
   startProcessQueueWorker();
+
+  const { startCourierModule } = require("./src");
+  startCourierModule();
 });
