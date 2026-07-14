@@ -20,7 +20,8 @@ const {
  * @param {number} [options.timeoutMs]
  * @param {number} [options.retries]
  * @param {string} [options.provider]
- * @returns {Promise<{ status: number, data: *, headers: Headers }>}
+ * @param {'auto'|'json'|'text'|'buffer'} [options.responseType]
+ * @returns {Promise<{ status: number, data: *, headers: Headers, contentType: string }>}
  */
 async function httpRequest(url, options = {}) {
   const {
@@ -30,6 +31,7 @@ async function httpRequest(url, options = {}) {
     timeoutMs = Number(process.env.COURIER_HTTP_TIMEOUT_MS || 30000),
     retries = Number(process.env.COURIER_HTTP_RETRIES || 2),
     provider = "courier",
+    responseType = "auto",
   } = options;
 
   let lastError;
@@ -56,12 +58,29 @@ async function httpRequest(url, options = {}) {
       }
 
       const res = await fetch(url, init);
-      const text = await res.text();
+      const contentType = String(res.headers.get("content-type") || "").toLowerCase();
+      const wantsBuffer =
+        responseType === "buffer" ||
+        (responseType === "auto" &&
+          (contentType.includes("application/pdf") ||
+            contentType.includes("octet-stream") ||
+            contentType.includes("application/zip")));
+
       let data = null;
-      try {
-        data = text ? JSON.parse(text) : null;
-      } catch {
-        data = text;
+      if (wantsBuffer) {
+        const ab = await res.arrayBuffer();
+        data = Buffer.from(ab);
+      } else {
+        const text = await res.text();
+        if (responseType === "text") {
+          data = text;
+        } else {
+          try {
+            data = text ? JSON.parse(text) : null;
+          } catch {
+            data = text;
+          }
+        }
       }
 
       if (res.status === 429) {
@@ -91,13 +110,13 @@ async function httpRequest(url, options = {}) {
         lastError = fromProviderMessage(`HTTP ${res.status}`, {
           provider,
           httpStatus: res.status,
-          details: data,
+          details: Buffer.isBuffer(data) ? { bytes: data.length } : data,
           retryable: true,
         });
         continue;
       }
 
-      return { status: res.status, data, headers: res.headers };
+      return { status: res.status, data, headers: res.headers, contentType };
     } catch (err) {
       if (err.name === "AbortError" || err.code === "NETWORK_TIMEOUT") {
         lastError = networkTimeout(provider);

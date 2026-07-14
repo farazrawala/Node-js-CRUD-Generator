@@ -91,9 +91,23 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     api_key: settings.api_key || null,
     secret: settings.secret || null,
     account_no: legacy.account_no || settings.account_no || null,
-    pickup_location: settings.pickup_location || null,
-    service_type: settings.service_type || null,
-    settings,
+    pickup_location:
+      legacy.cost_center ||
+      legacy.pickup_location ||
+      settings.costcentercode ||
+      settings.cost_center ||
+      settings.pickup_location ||
+      null,
+    service_type: legacy.service_type || settings.service_type || null,
+    settings: {
+      ...settings,
+      costcentercode:
+        settings.costcentercode ||
+        legacy.cost_center ||
+        settings.cost_center ||
+        legacy.pickup_location ||
+        null,
+    },
     _legacy: true,
     _legacy_id: legacy._id,
   };
@@ -240,8 +254,9 @@ async function createShipment(orderId, options = {}) {
 
   let driver;
   let providerKey;
+  let config;
   try {
-    ({ driver, providerKey } = await resolveDriver(
+    ({ driver, providerKey, config } = await resolveDriver(
       company,
       options.provider,
       options.courierId,
@@ -298,9 +313,16 @@ async function createShipment(orderId, options = {}) {
     });
 
     try {
-      await mongoose.model("order").findByIdAndUpdate(order._id, {
+      const courierRef =
+        options.courierId || config?._legacy_id || config?._id || null;
+      const orderUpdate = {
         order_status: "shipped",
-      });
+        courier_tracking_number: String(result.trackingNumber || ""),
+      };
+      if (courierRef) {
+        orderUpdate.courier_id = courierRef;
+      }
+      await mongoose.model("order").findByIdAndUpdate(order._id, orderUpdate);
     } catch {
       /* non-fatal */
     }
@@ -559,7 +581,11 @@ async function printLabel(orderId, options = {}) {
 
   const company = await mongoose.model("company").findById(shipment.company_id).lean();
   const { driver } = await resolveDriver(company, shipment.courier);
-  const result = await driver.printLabel(shipment.toObject());
+  const result = await driver.printLabel(shipment.toObject(), {
+    printtype: options.printtype,
+    shipperDetails: options.shipperDetails,
+    accounttype: options.accounttype,
+  });
 
   if (result.labelUrl) {
     shipment.label_url = result.labelUrl;
@@ -568,8 +594,11 @@ async function printLabel(orderId, options = {}) {
 
   return {
     success: true,
-    label_url: result.labelUrl || shipment.label_url,
+    label_url: result.labelUrl || shipment.label_url || null,
+    label_base64: result.labelBase64 || null,
+    content_type: result.contentType || "application/pdf",
     tracking_number: shipment.tracking_number,
+    printtype: result.printtype ?? options.printtype ?? null,
   };
 }
 

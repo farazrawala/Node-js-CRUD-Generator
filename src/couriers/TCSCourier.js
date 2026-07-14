@@ -238,9 +238,203 @@ class TCSCourier extends BaseCourier {
   }
 
   /**
-   * @param {import('../utils/orderContextLoader').OrderContext} order
+   * Resolve a valid TCS cost center code.
+   * Uses courier config first; otherwise inquiries TCS; optionally creates one for sandbox.
+   * @param {string} accessToken
+   * @param {string} accountNo
+   * @param {object} [order]
+   * @returns {Promise<string>}
    */
-  buildBookingPayload(order, accessToken) {
+  async resolveCostCenterCode(accessToken, accountNo, order = {}) {
+    const settings = this.config.settings || {};
+    const configured = String(
+      settings.costcentercode ||
+        this.config.pickup_location ||
+        settings.cost_center ||
+        this.config.cost_center ||
+        "",
+    ).trim();
+
+    if (configured && !/^default$/i.test(configured)) {
+      return configured.slice(0, 20);
+    }
+
+    const inquired = await this.inquireCostCenters(accessToken, accountNo);
+    if (inquired.length > 0) {
+      const code = String(
+        inquired[0].costcentercode ||
+          inquired[0].costCenterCode ||
+          inquired[0].code ||
+          "",
+      ).trim();
+      if (code) {
+        this.config.settings = {
+          ...settings,
+          costcentercode: code,
+        };
+        return code.slice(0, 20);
+      }
+    }
+
+    // Sandbox: create a cost center when the account has none yet.
+    if (this.isSandbox) {
+      const created = await this.createCostCenter(accessToken, accountNo, order);
+      if (created) {
+        this.config.settings = {
+          ...(this.config.settings || {}),
+          costcentercode: created,
+        };
+        return created.slice(0, 20);
+      }
+    }
+
+    throw fromProviderMessage(
+      "No TCS Cost Center found. Set Cost Center on the courier integration (or create one in TCS Envio).",
+      {
+        provider: this.providerName,
+        code: "CONFIG_MISSING",
+        httpStatus: 400,
+        details: { accountNo, inquired },
+      },
+    );
+  }
+
+  /**
+   * @param {string} accessToken
+   * @param {string} accountNo
+   * @returns {Promise<object[]>}
+   */
+  async inquireCostCenters(accessToken, accountNo) {
+    const headers = await this.authHeaders();
+    const qs = new URLSearchParams({
+      accesstoken: String(accessToken),
+      accessToken: String(accessToken),
+      customerno: String(accountNo),
+    });
+    // Swagger: GET /ecom/api/inquiry/costcenterinquiry?accesstoken=&customerno=
+    const url = `${this.baseUrl}/ecom/api/inquiry/costcenterinquiry?${qs.toString()}`;
+
+    try {
+      const res = await httpRequest(url, {
+        method: "GET",
+        provider: this.providerName,
+        headers: {
+          ...headers,
+          accesstoken: String(accessToken),
+        },
+      });
+
+      courierLogger.log("info", "cost_center_inquiry", {
+        provider: this.providerName,
+        accountNo,
+        httpStatus: res.status,
+        response: res.data,
+      });
+
+      if (Array.isArray(res.data?.detail)) return res.data.detail;
+      if (Array.isArray(res.data?.result)) return res.data.result;
+      if (Array.isArray(res.data?.costcenters)) return res.data.costcenters;
+      if (Array.isArray(res.data)) return res.data;
+      return [];
+    } catch (err) {
+      courierLogger.apiError({
+        provider: this.providerName,
+        step: "cost_center_inquiry",
+        error: err.message,
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Create a sandbox cost center for booking.
+   * @param {string} accessToken
+   * @param {string} accountNo
+   * @param {object} [order]
+   * @returns {Promise<string|null>}
+   */
+  async createCostCenter(accessToken, accountNo, order = {}) {
+    const settings = this.config.settings || {};
+    const company = order.company || {};
+    const code = String(settings.create_costcentercode || "Test-01").slice(0, 20);
+    const city =
+      order.warehouse?.city ||
+      settings.shipper_city ||
+      settings.costcentercityname ||
+      "Karachi";
+    const address = String(
+      order.warehouse?.address ||
+        company.company_address ||
+        settings.shipper_address ||
+        "Warehouse",
+    ).slice(0, 120);
+
+    const headers = await this.authHeaders();
+    // Swagger createCostCenterCodeReq (additionalProperties: false) —
+    // field names must be lowercase: accountnumber, phonenumber.
+    const body = {
+      accesstoken: accessToken,
+      costcentercityname: String(city).slice(0, 50),
+      costcentercode: code,
+      costcentername: String(
+        settings.costcentername || company.company_name || "POS Cost Center",
+      ).slice(0, 100),
+      pickupaddress: address.slice(0, 360),
+      returnaddress: address.slice(0, 360),
+      islabelprint: "yes",
+      accountnumber: String(accountNo).slice(0, 12),
+      phonenumber: this.normalizePkMobile(
+        order.warehouse?.phone || company.company_phone || settings.shipper_phone,
+      ),
+      email: String(company.company_email || settings.email || "test@abc.com").slice(
+        0,
+        50,
+      ),
+    };
+
+    const url = `${this.baseUrl}/ecom/api/booking/createcostcentercode`;
+    try {
+      const res = await httpRequest(url, {
+        method: "POST",
+        provider: this.providerName,
+        headers,
+        body,
+      });
+
+      courierLogger.log("info", "cost_center_create", {
+        provider: this.providerName,
+        accountNo,
+        httpStatus: res.status,
+        response: res.data,
+      });
+
+      const msg = String(res.data?.message || res.data?.Message || "");
+      if (/success/i.test(msg) || res.status < 400) {
+        return (
+          res.data?.costcentercode ||
+          res.data?.result?.costcentercode ||
+          code
+        );
+      }
+      // Already exists — reuse requested code
+      if (/exist|already/i.test(msg)) return code;
+      return null;
+    } catch (err) {
+      courierLogger.apiError({
+        provider: this.providerName,
+        step: "cost_center_create",
+        error: err.message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * @param {import('../utils/orderContextLoader').OrderContext} order
+   * @param {string} accessToken
+   * @param {string} costCenter
+   */
+  buildBookingPayload(order, accessToken, costCenter) {
     const settings = this.config.settings || {};
     const shipper = order.warehouse || {};
     const company = order.company || {};
@@ -288,11 +482,16 @@ class TCSCourier extends BaseCourier {
       );
     }
 
-    const costCenter =
-      settings.costcentercode ||
-      this.config.pickup_location ||
-      settings.cost_center ||
-      "DEFAULT";
+    if (!costCenter) {
+      throw fromProviderMessage(
+        "No TCS Cost Center found. Set Cost Center on the courier integration.",
+        {
+          provider: this.providerName,
+          code: "CONFIG_MISSING",
+          httpStatus: 400,
+        },
+      );
+    }
 
     const consigneeMobile = this.normalizePkMobile(
       shipping.phone || order.phone || customer.phone,
@@ -404,7 +603,18 @@ class TCSCourier extends BaseCourier {
   async createShipment(order) {
     const accessToken = await this.getAccessToken();
     const headers = await this.authHeaders();
-    const payload = this.buildBookingPayload(order, accessToken);
+    const accountNo = String(
+      this.config.account_no ||
+        this.config.settings?.tcsaccount ||
+        this.config.settings?.account_no ||
+        "",
+    ).trim();
+    const costCenter = await this.resolveCostCenterCode(
+      accessToken,
+      accountNo,
+      order,
+    );
+    const payload = this.buildBookingPayload(order, accessToken, costCenter);
     const url = `${this.baseUrl}/ecom/api/booking/create`;
 
     courierLogger.shipmentRequest({
@@ -439,9 +649,12 @@ class TCSCourier extends BaseCourier {
       res.data?.Message ||
       res.data?.result?.message ||
       "";
+    // TCS sandbox returns camelCase `consignmentNo`; some envs use lowercase.
     const consignmentNo =
+      res.data?.consignmentNo ||
       res.data?.consignmentno ||
       res.data?.ConsignmentNo ||
+      res.data?.result?.consignmentNo ||
       res.data?.result?.consignmentno ||
       res.data?.result?.ConsignmentNo;
 
@@ -455,7 +668,7 @@ class TCSCourier extends BaseCourier {
     const ok =
       res.status < 400 &&
       consignmentNo &&
-      !/fail/i.test(String(message));
+      (/success/i.test(String(message)) || !/fail/i.test(String(message)));
 
     if (!ok) {
       const failMsg =
@@ -582,24 +795,195 @@ class TCSCourier extends BaseCourier {
     };
   }
 
-  async printLabel(shipment) {
+  async printLabel(shipment, options = {}) {
+    const accessToken = await this.getAccessToken();
     const headers = await this.authHeaders();
-    const cn = shipment.tracking_number;
-    const url = `${this.baseUrl}/ecom/api/print/label?consignmentno=${encodeURIComponent(cn)}`;
+    const cn = String(
+      shipment.tracking_number || shipment.trackingNumber || shipment.consignmentno || "",
+    ).trim();
+    if (!cn) {
+      throw fromProviderMessage("Missing TCS consignment number for label print", {
+        provider: this.providerName,
+      });
+    }
+
+    // TCS CNPrint — https://devconnect.tcscourier.com/ecom/index.html
+    // GET /ecom/api/print/label
+    const printtype = Number(options.printtype ?? options.printType ?? 6) || 6;
+    const shipperDetails =
+      options.shipperDetails === true || options.shipperDetails === "true";
+    const accounttype = Number(options.accounttype ?? options.accountType ?? 1) || 1;
+
+    const qs = new URLSearchParams({
+      accesstoken: String(accessToken),
+      consignmentno: cn,
+      shipperDetails: shipperDetails ? "true" : "false",
+      printtype: String(printtype),
+      accounttype: String(accounttype),
+    });
+    const url = `${this.baseUrl}/ecom/api/print/label?${qs.toString()}`;
 
     const res = await httpRequest(url, {
       method: "GET",
       provider: this.providerName,
-      headers,
+      responseType: "buffer",
+      headers: {
+        ...headers,
+        Accept: "application/pdf, application/json, */*",
+      },
     });
 
-    const labelUrl =
-      res.data?.labelurl ||
-      res.data?.labelUrl ||
-      res.data?.result?.labelurl ||
-      url;
+    if (res.status >= 400) {
+      let msg = `TCS label print failed (HTTP ${res.status})`;
+      if (Buffer.isBuffer(res.data)) {
+        try {
+          const parsed = JSON.parse(res.data.toString("utf8"));
+          msg = parsed?.message || parsed?.Message || msg;
+        } catch {
+          /* keep default */
+        }
+      } else if (res.data && typeof res.data === "object") {
+        msg = res.data.message || res.data.Message || msg;
+      }
+      throw fromProviderMessage(String(msg), {
+        provider: this.providerName,
+        details: Buffer.isBuffer(res.data)
+          ? { bytes: res.data.length, preview: res.data.toString("utf8").slice(0, 300) }
+          : res.data,
+        httpStatus: res.status,
+      });
+    }
 
-    return { labelUrl, raw: res.data };
+    // Binary PDF (correct path — do NOT read as text)
+    if (Buffer.isBuffer(res.data)) {
+      const buf = res.data;
+      const head = buf.slice(0, 8).toString("utf8");
+      if (head.startsWith("%PDF")) {
+        return {
+          labelUrl: null,
+          labelBase64: buf.toString("base64"),
+          contentType: "application/pdf",
+          printtype,
+          raw: { message: "pdf_binary", bytes: buf.length },
+        };
+      }
+
+      // Buffer may actually be JSON (some gateways ignore Accept)
+      const asText = buf.toString("utf8").trim();
+      let json = null;
+      try {
+        json = JSON.parse(asText);
+      } catch {
+        json = null;
+      }
+      if (json && typeof json === "object") {
+        const fromJson = this._extractTcsLabelPayload(json, printtype);
+        if (fromJson) return fromJson;
+      }
+
+      if (/^https?:\/\//i.test(asText)) {
+        return {
+          labelUrl: asText,
+          labelBase64: null,
+          contentType: "application/pdf",
+          printtype,
+          raw: { labelurl: asText },
+        };
+      }
+
+      throw fromProviderMessage(
+        "TCS label response was not a valid PDF (blank/corrupt). Check CN and printtype.",
+        {
+          provider: this.providerName,
+          details: {
+            bytes: buf.length,
+            contentType: res.contentType,
+            preview: asText.slice(0, 300),
+          },
+        },
+      );
+    }
+
+    if (res.data && typeof res.data === "object") {
+      const fromJson = this._extractTcsLabelPayload(res.data, printtype);
+      if (fromJson) return fromJson;
+    }
+
+    if (typeof res.data === "string") {
+      const text = res.data.trim();
+      if (/^https?:\/\//i.test(text)) {
+        return {
+          labelUrl: text,
+          labelBase64: null,
+          contentType: "application/pdf",
+          printtype,
+          raw: { labelurl: text },
+        };
+      }
+      try {
+        const json = JSON.parse(text);
+        const fromJson = this._extractTcsLabelPayload(json, printtype);
+        if (fromJson) return fromJson;
+      } catch {
+        /* ignore */
+      }
+    }
+
+    throw fromProviderMessage("TCS label print returned no PDF / label URL", {
+      provider: this.providerName,
+      details: res.data,
+    });
+  }
+
+  /**
+   * Pull label URL / base64 from TCS JSON CNPrint responses.
+   * @private
+   */
+  _extractTcsLabelPayload(json, printtype) {
+    if (!json || typeof json !== "object") return null;
+    const labelUrl =
+      json.labelurl ||
+      json.labelUrl ||
+      json.LabelUrl ||
+      json.result?.labelurl ||
+      json.result?.labelUrl ||
+      json.pdfurl ||
+      json.pdfUrl ||
+      json.fileurl ||
+      json.fileUrl ||
+      null;
+    let base64 =
+      json.pdfBase64 ||
+      json.pdf_base64 ||
+      json.fileBase64 ||
+      json.base64 ||
+      json.result?.pdfBase64 ||
+      json.result?.base64 ||
+      null;
+
+    if (typeof base64 === "string") {
+      base64 = base64.replace(/^data:application\/pdf;base64,/i, "").replace(/\s+/g, "");
+      // Reject empty / non-PDF payloads that produced blank blob pages
+      try {
+        const decoded = Buffer.from(base64, "base64");
+        if (decoded.length < 20 || !decoded.slice(0, 5).toString("utf8").startsWith("%PDF")) {
+          base64 = null;
+        }
+      } catch {
+        base64 = null;
+      }
+    }
+
+    if (labelUrl || base64) {
+      return {
+        labelUrl: labelUrl || null,
+        labelBase64: base64 || null,
+        contentType: "application/pdf",
+        printtype,
+        raw: json,
+      };
+    }
+    return null;
   }
 
   async validateAddress(address = {}) {

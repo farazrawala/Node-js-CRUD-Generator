@@ -45,6 +45,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Account No",
     },
+    /** TCS cost center code (shipmentinfo.costcentercode). */
+    cost_center: {
+      type: String,
+      field_name: "Cost Center",
+    },
     sandbox: {
       type: Boolean,
       default: true,

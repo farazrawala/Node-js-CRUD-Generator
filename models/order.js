@@ -199,6 +199,15 @@ const modelSchema = new mongoose.Schema(
       ref: "user",
       field_name: "Customer",
     },
+    courier_tracking_number: {
+      type: String,
+      field_name: "Courier Tracking Number",
+    },
+    courier_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "courier",
+      field_name: "Courier",
+    },
     address: {
       type: String,
       // required: true,

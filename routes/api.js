@@ -96,6 +96,7 @@ const {
   findTotalSalesByOrder,
   findSalesDayWise,
   findSalesLast30Days,
+  findSalesMonthWise,
   findTopSellingProducts,
   findPeakSalesHours,
   findSalesByCategory,
@@ -527,6 +528,8 @@ router.get(
 );
 router.get("/order/sales", findSales);
 router.get("/order/sales-day-wise", findSalesDayWise);
+router.get("/order/sales-month-wise", findSalesMonthWise);
+router.get("/orders/sales-month-wise", findSalesMonthWise);
 router.get("/order/sales-last-30-days", findSalesLast30Days);
 router.get("/orders/sales-last-30-days", findSalesLast30Days);
 router.get("/order/top-selling-products", findTopSellingProducts);

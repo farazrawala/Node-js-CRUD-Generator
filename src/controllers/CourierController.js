@@ -141,11 +141,15 @@ async function cancelShipment(req, res) {
 
 /**
  * GET /courier/label/:orderId
+ * Query: printtype, shipperDetails, accounttype (TCS CNPrint)
  */
 async function printLabel(req, res) {
   try {
     const result = await CourierService.printLabel(req.params.orderId, {
       companyId: companyIdFromReq(req),
+      printtype: req.query?.printtype ?? req.query?.printType,
+      shipperDetails: req.query?.shipperDetails,
+      accounttype: req.query?.accounttype ?? req.query?.accountType,
     });
     return res.status(200).json(result);
   } catch (err) {
