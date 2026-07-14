@@ -237,6 +237,21 @@ const {
   warehousedelete,
 } = require("../controllers/warehouse");
 
+const {
+  sendConnectionRequest,
+  listSentConnections,
+  listReceivedConnections,
+  listAllConnections,
+  listConnectedCompanies,
+  getConnectionById,
+  approveConnection,
+  rejectConnection,
+  cancelConnection,
+  disconnectConnection,
+  listConnectionLogs,
+  getPartnerProducts,
+} = require("../controllers/big_commerce");
+
 // Note: Company routes are now handled dynamically
 // const {
 //   companyCreate,
@@ -458,6 +473,26 @@ router.delete(
   removeCompanyDraftOrder,
 );
 
+// Big Commerce — B2B company connection
+router.post("/big-commerce/connection/request", sendConnectionRequest);
+router.post("/big-commerce/requests", sendConnectionRequest);
+router.get("/big-commerce/requests/sent", listSentConnections);
+router.get("/big-commerce/requests/received", listReceivedConnections);
+router.get("/big-commerce/connection/sent", listSentConnections);
+router.get("/big-commerce/connection/received", listReceivedConnections);
+router.get("/big-commerce/connection/get-all", listAllConnections);
+router.get("/big-commerce/connection/connected", listConnectedCompanies);
+router.get("/big-commerce/connection/get/:id", getConnectionById);
+router.post("/big-commerce/connection/approve/:id", approveConnection);
+router.post("/big-commerce/request/:id/approve", approveConnection);
+router.post("/big-commerce/connection/reject/:id", rejectConnection);
+router.post("/big-commerce/request/:id/reject", rejectConnection);
+router.post("/big-commerce/connection/cancel/:id", cancelConnection);
+router.post("/big-commerce/request/:id/cancel", cancelConnection);
+router.delete("/big-commerce/request/:id", disconnectConnection);
+router.get("/big-commerce/connection/:id/logs", listConnectionLogs);
+router.get("/big-commerce/products/:companyId", getPartnerProducts);
+
 // Product warehouse inventory management routes
 // router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
 // router.get("/product/:id/warehouse-inventory", getProductWarehouseInventory);
@@ -589,6 +624,9 @@ registerAllModelRoutes(router, {
     "product", // Product has custom warehouse inventory routes
     "order_item", // Keep custom routes if needed
     "url", // URL has custom routes
+    // Big Commerce uses custom connection + product-share APIs
+    "company_connection",
+    "company_connection_log",
     // 'purchase_order' removed - we want BOTH dynamic routes AND custom routes
   ],
   modelConfigs: {

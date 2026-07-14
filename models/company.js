@@ -102,6 +102,12 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Printer Settings",
     },
+
+    bigcommerce_settings: {
+      type: String,
+      field_name: "BigCommerce Settings",
+    },
+    /** Product Settings */
     product_settings: {
       // JSON string of product feature flags. Defaults to allowing oversell
       // (add-to-cart / sell when on-hand is insufficient) so new companies can
