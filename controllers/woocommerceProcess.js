@@ -3,6 +3,10 @@ const {
   extractWooImageUrls,
   syncFetchProductImages,
 } = require("../utils/fetchProductImages");
+const {
+  extractWooBarcode,
+  resolveFetchProductBarcode,
+} = require("../utils/fetchProductBarcode");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Product = require("../models/product");
@@ -656,6 +660,17 @@ async function upsertWooProductRow({
     payload.parent_product_id = coalesceObjectId(parentProductId);
   } else if (productType === "Variable") {
     payload.parent_product_id = null;
+  }
+
+  const barcode = await resolveFetchProductBarcode({
+    remoteBarcode: extractWooBarcode(remote),
+    existingProduct: existing,
+    companyId,
+    stats,
+  });
+  const existingHasBarcode = Boolean(String(existing?.barcode || "").trim());
+  if (barcode && (!existing || !existingHasBarcode)) {
+    payload.barcode = barcode;
   }
 
   let posId;
