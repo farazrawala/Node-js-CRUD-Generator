@@ -37,6 +37,7 @@ const {
   resolveReportPeriodRange,
   periodResponse: reportPeriodResponse,
 } = require("../utils/reportPeriodRange");
+const { resolveReportCreatedAtFilter } = require("../utils/reportHeaderTotals");
 const { profitByOrderItem } = require("./order_item");
 
 let CourierShipmentModel = null;
@@ -1981,16 +1982,23 @@ async function findSales(req, res) {
 
 /**
  * Shared list: active orders + line items (same response as get-order-by-order-item).
+ * Query: optional `startDate` / `endDate` (or `from` / `to`, `start_date` / `end_date`) on order `createdAt`.
  * @param {import("express").Request} req
  * @param {import("express").Response} res
  * @param {Record<string, unknown>} [extraFilter]
  */
 async function getOrdersWithItems(req, res, extraFilter = {}) {
+  const dateResolved = resolveReportCreatedAtFilter(req.query || {}, false);
+  if (dateResolved.error) {
+    return res.status(dateResolved.error.status).json(dateResolved.error.body);
+  }
+
   const filter = {
     status: "active",
     deletedAt: null,
     company_id: req.user?.company_id,
     ...extraFilter,
+    ...(dateResolved.createdAt ? { createdAt: dateResolved.createdAt } : {}),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (

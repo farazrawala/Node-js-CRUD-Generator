@@ -58,6 +58,9 @@ function resolveReportCreatedAtFilter(query = {}, defaultRangeDays = DEFAULT_REP
   const hasTo = rawTo != null && String(rawTo).trim() !== "";
 
   if (!hasFrom && !hasTo) {
+    if (defaultRangeDays == null || defaultRangeDays === false) {
+      return {};
+    }
     const toDate = new Date();
     const fromDate = new Date(toDate);
     fromDate.setDate(fromDate.getDate() - defaultRangeDays);
