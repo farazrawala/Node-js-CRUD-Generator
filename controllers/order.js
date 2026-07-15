@@ -34,6 +34,13 @@ const {
   allowAddToCartWhenStockInsufficient,
 } = require("../utils/companyProductSettings");
 const {
+  parseWhatsappLocalSettings,
+  shouldQueueWhatsappForOrder,
+  buildWhatsappOrderMessage,
+} = require("../utils/companyWhatsappSettings");
+const WhatsappMessage = require("../models/whatsapp_message");
+const User = require("../models/user");
+const {
   resolveReportPeriodRange,
   periodResponse: reportPeriodResponse,
 } = require("../utils/reportPeriodRange");
@@ -2082,6 +2089,85 @@ async function getOnlineOrders(req, res) {
 }
 
 /**
+ * When company whatsapp_local_settings allow it, queue a `whatsapp_message`
+ * for the order phone (status: not_started).
+ *
+ * Uses `send_whatsapp_on_order_message` and optional
+ * `send_whatsapp_greater_than` / `send_whatsapp_greater_than_amount`.
+ * Errors are logged and do not fail order_save.
+ */
+async function maybeQueueWhatsappOnOrderSave(req, order) {
+  try {
+    const company =
+      req.user?.company_id && typeof req.user.company_id === "object" ?
+        req.user.company_id
+      : null;
+
+    if (!shouldQueueWhatsappForOrder(company, order)) {
+      return null;
+    }
+
+    let phone = order?.phone != null ? String(order.phone).trim() : "";
+    if (!phone && order?.customer_id) {
+      const customer = await User.findById(order.customer_id)
+        .select("phone")
+        .lean();
+      phone = customer?.phone != null ? String(customer.phone).trim() : "";
+    }
+
+    if (!phone) {
+      console.warn(
+        "[order_save] whatsapp skipped: no phone on order/customer",
+        order?._id,
+      );
+      return null;
+    }
+
+    const settings = parseWhatsappLocalSettings(company);
+    const message = buildWhatsappOrderMessage(settings, order);
+
+    const companyId =
+      coalesceObjectId(order?.company_id) ||
+      coalesceObjectId(req.user?.company_id);
+
+    const row = await WhatsappMessage.create({
+      number: phone,
+      message,
+      status: "not_started",
+      company_id: companyId,
+      created_by: coalesceObjectId(req.user?._id),
+    });
+
+    console.log(
+      "[order_save] whatsapp_message queued:",
+      row._id,
+      "number:",
+      row.number,
+    );
+    return row;
+  } catch (err) {
+    console.error(
+      "[order_save] whatsapp_message insert failed:",
+      err?.message || err,
+    );
+    try {
+      await logControllerError(
+        req,
+        `whatsapp_message insert failed after order_save: ${err?.message || err} (order_id=${order?._id || ""})`,
+        {
+          action: "WHATSAPP QUEUE ERROR",
+          tags: ["api", "error", "whatsapp"],
+          fallbackUrl: "/api/order/order_save",
+        },
+      );
+    } catch (_) {
+      /* ignore */
+    }
+    return null;
+  }
+}
+
+/**
  * POST /api/order/order_save — create order, GL, line items, outbound inventory, header sync.
  *
  * Flow: (1) pre-txn prep + line validation, (2–6) txn body (order → GL → items → stock/movements → header sync),
@@ -2550,6 +2636,10 @@ async function order_save(req, res) {
     orderFresh || response.data,
     insertedItemsPlain,
   );
+
+  // Best-effort WhatsApp queue: never fails the order response
+  await maybeQueueWhatsappOnOrderSave(req, orderFresh || response.data);
+
   return res.status(201).json({
     success: true,
     status: 201,

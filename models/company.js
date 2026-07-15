@@ -209,6 +209,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "Default Store",
     },
 
+    whatsapp_local_settings: {
+      type: String,
+      field_name: "Whatsapp Local Settings",
+    },
+
     /**
      * Preferred courier for CourierService / CourierFactory.
      * Values: TCS | Leopard | BlueEX | M&P | Call Courier | Trax
