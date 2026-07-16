@@ -53,6 +53,50 @@ const PRODUCT_LIST_POPULATE = [
   },
 ];
 
+function normalizeProductTypeQuery(raw) {
+  if (raw == null || String(raw).trim() === "") return null;
+  const value = String(raw).trim().toLowerCase();
+  if (value === "single") return "Single";
+  if (value === "variable" || value === "variant") return "Variable";
+  if (value === "all") return null;
+  // Accept exact enum casing from clients that already send Single / Variable
+  if (raw === "Single" || raw === "Variable") return raw;
+  return null;
+}
+
+function applyProductTypeFilter(filter, query = {}) {
+  const productType = normalizeProductTypeQuery(
+    query.product_type ?? query.productType,
+  );
+  if (productType) {
+    filter.product_type = productType;
+  }
+  return filter;
+}
+
+/**
+ * POS list status filter.
+ * Default: active only (matches endpoint name + POS "Active" dropdown).
+ * `?status=inactive` → inactive only
+ * `?include_inactive=true` (or status=all) → all non-deleted statuses
+ */
+function applyPosProductStatusFilter(filter, query = {}) {
+  const includeInactive =
+    query.include_inactive === "true" || query.include_inactive === "1";
+  const rawStatus = String(query.status ?? "").trim().toLowerCase();
+
+  if (includeInactive || rawStatus === "all") {
+    return filter;
+  }
+  if (rawStatus === "inactive") {
+    filter.status = "inactive";
+    return filter;
+  }
+  // Default and status=active
+  filter.status = "active";
+  return filter;
+}
+
 function buildParentProductListFilter(req, { status } = {}) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
   const filter = {
@@ -66,6 +110,7 @@ function buildParentProductListFilter(req, { status } = {}) {
   if (status) {
     filter.status = status;
   }
+  applyProductTypeFilter(filter, req.query || {});
   return filter;
 }
 
@@ -2411,6 +2456,9 @@ async function getAllActiveProductsPOS(req, res) {
     // `category_id` on product is an array; equality matches docs that include this id.
     filter.category_id = categoryOid;
   }
+
+  applyProductTypeFilter(filter, req.query || {});
+  applyPosProductStatusFilter(filter, req.query || {});
 
   const warehouseInventoryMatch = {
     status: "active",
