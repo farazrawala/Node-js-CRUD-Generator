@@ -154,14 +154,22 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
 }
 
 async function obtainAndPersistShopifyToken(integration, process) {
-  const plain = toPlainIntegration(integration);
   const integrationId =
-    resolveIntegrationId(process) || plain?._id || plain?.id || null;
-  const refreshed = await refreshShopifyAccessToken(plain, integrationId);
-  const next = { ...plain, token: refreshed.access_token };
+    resolveIntegrationId(process) || integration?._id || integration?.id || null;
+  const refreshed = await refreshShopifyAccessToken(integration, integrationId);
+  const next =
+    refreshed.integration ||
+    {
+      ...(typeof integration?.toObject === "function" ?
+        integration.toObject()
+      : integration),
+      token: refreshed.access_token,
+    };
 
   if (process?.integration_id && typeof process.integration_id === "object") {
     process.integration_id.token = refreshed.access_token;
+    if (next.key) process.integration_id.key = next.key;
+    if (next.secret) process.integration_id.secret = next.secret;
   }
 
   console.warn(
