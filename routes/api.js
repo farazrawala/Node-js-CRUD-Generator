@@ -193,6 +193,7 @@ const {
 const {
   transactionBulkCreate,
   getTransactionsListWithDebitCreditSummary,
+  getDeletedTransactions,
   getMyLedgerTransactions,
 } = require("../controllers/transaction");
 const {
@@ -608,6 +609,8 @@ router.get(
   "/transactions/list-with-summary",
   getTransactionsListWithDebitCreditSummary,
 );
+router.get("/transaction/get-deleted", getDeletedTransactions);
+router.get("/transactions/get-deleted", getDeletedTransactions);
 
 // Assets routes
 router.post("/assets/save", assetsSave);

@@ -356,6 +356,8 @@ Dynamic CRUD: `/expense/*`.
 | `POST` | `/transactions/bulk-create` | Yes | Alias |
 | `GET` | `/transaction/list-with-summary` | Yes | List + debit/credit summary |
 | `GET` | `/transactions/list-with-summary` | Yes | Alias |
+| `GET` | `/transaction/get-deleted` | Yes | Soft-deleted transactions |
+| `GET` | `/transactions/get-deleted` | Yes | Alias |
 | `GET` | `/transaction/get-my-ledger-transaction` | Yes | My ledger transactions |
 | `POST` | `/amount_transfer/save` | Yes | Amount transfer create |
 | `PATCH` | `/amount_transfer/update_record/:id` | Yes | Amount transfer update |
