@@ -2576,6 +2576,169 @@ function buildVariantDescription(baseDescription, attributes = []) {
       });
     }
   }
+
+  /**
+   * GET/POST /api/integration/generate-tokens-cron
+   *
+   * Cron entrypoint: load all Shopify integrations and regenerate each token
+   * (same effect as calling /integration/generate-token/:id one by one).
+   *
+   * Query/body optional:
+   * - company_id — limit to one tenant
+   * - status — default "active" (pass "all" to include inactive)
+   */
+  async function generateShopifyIntegrationTokensCron(req, res) {
+    try {
+      const {
+        refreshShopifyAccessToken,
+        isShopifyAccessToken,
+        resolveShopifyClientCredentials,
+        normalizeShopifyDomain,
+      } = require("../utils/shopifyTokenRefresh");
+      const Integration = require("../models/integration");
+      const { coalesceObjectId } = require("../utils/modelHelper");
+
+      const companyId = coalesceObjectId(
+        req.body?.company_id || req.query?.company_id || req.user?.company_id,
+      );
+      const statusRaw = String(
+        req.body?.status ?? req.query?.status ?? "active",
+      ).trim().toLowerCase();
+
+      const filter = {
+        store_type: "shopify",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      };
+      if (companyId) {
+        filter.company_id = companyId;
+      }
+      if (statusRaw && statusRaw !== "all") {
+        filter.status = statusRaw;
+      }
+
+      const integrations = await Integration.find(filter)
+        .sort({ createdAt: 1 })
+        .lean();
+
+      const refreshed = [];
+      const repaired = [];
+      const skipped = [];
+      const failed = [];
+
+      for (const integration of integrations) {
+        const integrationId = String(integration._id);
+        const shopDomain = normalizeShopifyDomain(integration.url);
+        const name = integration.name || null;
+
+        if (!shopDomain) {
+          skipped.push({
+            integration_id: integrationId,
+            name,
+            reason: "invalid_or_missing_shop_url",
+          });
+          continue;
+        }
+
+        try {
+          const resolved = resolveShopifyClientCredentials(integration);
+
+          // Same repair path as single generate-token when secret is shpat_.
+          if (
+            isShopifyAccessToken(integration.secret) &&
+            !resolved.canRefreshWithClientCredentials
+          ) {
+            const accessToken =
+              resolved.accessToken || String(integration.secret).trim();
+            await Integration.findByIdAndUpdate(integrationId, {
+              $set: { token: accessToken },
+            });
+            repaired.push({
+              integration_id: integrationId,
+              name,
+              shop: shopDomain,
+              token_masked:
+                accessToken.length > 8 ?
+                  `${accessToken.slice(0, 6)}…${accessToken.slice(-4)}`
+                : "[set]",
+              note: "secret held access token; copied to token (no client_credentials)",
+            });
+            continue;
+          }
+
+          if (!resolved.clientId || !resolved.clientSecret) {
+            skipped.push({
+              integration_id: integrationId,
+              name,
+              shop: shopDomain,
+              reason: "missing_client_id_or_client_secret",
+            });
+            continue;
+          }
+
+          if (isShopifyAccessToken(resolved.clientSecret)) {
+            skipped.push({
+              integration_id: integrationId,
+              name,
+              shop: shopDomain,
+              reason: "secret_looks_like_access_token",
+            });
+            continue;
+          }
+
+          const result = await refreshShopifyAccessToken(
+            integration,
+            integration._id,
+          );
+          const token = result.access_token;
+          refreshed.push({
+            integration_id: integrationId,
+            name,
+            shop: shopDomain,
+            token_masked:
+              token && token.length > 8 ?
+                `${token.slice(0, 6)}…${token.slice(-4)}`
+              : "[set]",
+            scope: result.scope || null,
+            expires_in: result.expires_in || null,
+            repaired_from_secret: Boolean(result.repaired_from_secret),
+          });
+        } catch (err) {
+          failed.push({
+            integration_id: integrationId,
+            name,
+            shop: shopDomain || null,
+            error: err.message || "Token refresh failed",
+          });
+        }
+      }
+
+      const summary = {
+        total: integrations.length,
+        refreshed: refreshed.length,
+        repaired: repaired.length,
+        skipped: skipped.length,
+        failed: failed.length,
+      };
+
+      return res.status(failed.length && !refreshed.length && !repaired.length ? 500 : 200).json({
+        success: failed.length === 0 || refreshed.length > 0 || repaired.length > 0,
+        message: `Shopify token cron finished: refreshed ${summary.refreshed}, repaired ${summary.repaired}, skipped ${summary.skipped}, failed ${summary.failed} of ${summary.total}.`,
+        data: {
+          summary,
+          refreshed,
+          repaired,
+          skipped,
+          failed,
+        },
+      });
+    } catch (error) {
+      console.error("❌ generateShopifyIntegrationTokensCron:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to run Shopify token cron",
+      });
+    }
+  }
   
   module.exports = {
   
@@ -2587,5 +2750,6 @@ function buildVariantDescription(baseDescription, attributes = []) {
     syncStoreProduct,
     queueStoreProductFetch,
     generateShopifyIntegrationToken,
+    generateShopifyIntegrationTokensCron,
   };
   

@@ -167,6 +167,8 @@ async function checkHeaderAuthentication(req, res, next) {
     "/api/integration/generate-token",
     /^\/integration\/generate-token\/.*/,
     /^\/api\/integration\/generate-token\/.*/,
+    "/integration/generate-tokens-cron",
+    "/api/integration/generate-tokens-cron",
     /^\/uploads\/.*/,
     /^\/api\/uploads\/.*/,
   ];
