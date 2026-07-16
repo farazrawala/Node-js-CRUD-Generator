@@ -72,10 +72,19 @@ const {
 const {
   isShopifyAuthError,
   formatShopifyErrorPayload,
+  resolveShopifyClientCredentials,
   refreshShopifyAccessToken,
 } = require("../utils/shopifyTokenRefresh");
 
-function buildShopifyClient(integration) {
+function toPlainIntegration(integration) {
+  if (!integration) return null;
+  if (typeof integration.toObject === "function") {
+    return integration.toObject();
+  }
+  return { ...integration };
+}
+
+function buildShopifyClient(integration, { requireToken = true } = {}) {
   const rawUrl =
     typeof integration.url === "string" ? integration.url.trim() : "";
   let shopDomain = rawUrl.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -105,17 +114,24 @@ function buildShopifyClient(integration) {
   const accessToken =
     integration.token || integration.access_token || integration.password;
 
-  if (!apiKey || !apiSecret || !accessToken) {
+  if (!apiKey || !apiSecret) {
     return {
       error:
-        "Incomplete Shopify credentials. Please verify key, secret, and access token.",
+        "Incomplete Shopify credentials. Please verify key and secret (client_id / client_secret).",
+    };
+  }
+
+  if (requireToken && !accessToken) {
+    return {
+      error:
+        "Incomplete Shopify credentials. Please verify access token, or ensure key/secret can refresh it.",
     };
   }
 
   const shopify = shopifyApi({
     apiKey,
     apiSecretKey: apiSecret,
-    adminApiAccessToken: accessToken,
+    adminApiAccessToken: accessToken || "pending-refresh",
     scopes: [
       "read_products",
       "write_products",
@@ -131,54 +147,83 @@ function buildShopifyClient(integration) {
   session.accessToken = accessToken;
 
   return {
-    client: new shopify.clients.Rest({ session }),
+    client: accessToken ? new shopify.clients.Rest({ session }) : null,
     shopDomain,
+    accessToken: accessToken || null,
   };
 }
 
+async function obtainAndPersistShopifyToken(integration, process) {
+  const plain = toPlainIntegration(integration);
+  const integrationId =
+    resolveIntegrationId(process) || plain?._id || plain?.id || null;
+  const refreshed = await refreshShopifyAccessToken(plain, integrationId);
+  const next = { ...plain, token: refreshed.access_token };
+
+  if (process?.integration_id && typeof process.integration_id === "object") {
+    process.integration_id.token = refreshed.access_token;
+  }
+
+  console.warn(
+    `Shopify access token refreshed and saved on integration ${integrationId}.`,
+  );
+
+  return next;
+}
+
 /**
- * Run a Shopify Admin API call; on auth failure refresh token in DB and retry once.
+ * Run a Shopify Admin API call; on missing/expired token refresh in DB and retry once.
  */
 async function runWithShopifyClient(integration, process, handler) {
-  let activeIntegration = integration;
+  let activeIntegration = toPlainIntegration(integration);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const hasToken = !!(
+      activeIntegration?.token ||
+      activeIntegration?.access_token ||
+      activeIntegration?.password
+    );
+    const { clientId, clientSecret } =
+      resolveShopifyClientCredentials(activeIntegration);
+
+    if (!hasToken && clientId && clientSecret) {
+      try {
+        activeIntegration = await obtainAndPersistShopifyToken(
+          activeIntegration,
+          process,
+        );
+      } catch (refreshError) {
+        throw new Error(
+          `Shopify token missing and refresh failed: ${refreshError.message || refreshError}`,
+        );
+      }
+    }
+
     const { client, error } = buildShopifyClient(activeIntegration);
-    if (error) {
-      throw new Error(error);
+    if (error || !client) {
+      throw new Error(error || "Failed to build Shopify client.");
     }
 
     try {
       return await handler(client, activeIntegration);
     } catch (apiError) {
-      if (attempt === 0 && isShopifyAuthError(apiError)) {
-        const integrationId =
-          resolveIntegrationId(process) ||
-          activeIntegration?._id ||
-          activeIntegration?.id;
+      if (attempt === 0 && isShopifyAuthError(apiError) && clientId && clientSecret) {
         try {
-          const refreshed = await refreshShopifyAccessToken(
+          activeIntegration = await obtainAndPersistShopifyToken(
             activeIntegration,
-            integrationId,
+            process,
           );
-          activeIntegration = {
-            ...activeIntegration,
-            token: refreshed.access_token,
-          };
-          if (
-            process?.integration_id &&
-            typeof process.integration_id === "object"
-          ) {
-            process.integration_id.token = refreshed.access_token;
-          }
           console.warn(
-            `Shopify access token refreshed for integration ${integrationId}; retrying request.`,
+            "Shopify auth failed; obtained a new access token and retrying request.",
           );
           continue;
         } catch (refreshError) {
           console.error(
             "Shopify token refresh failed:",
             refreshError.message || refreshError,
+          );
+          throw new Error(
+            `Shopify auth failed and token refresh failed: ${refreshError.message || refreshError}`,
           );
         }
       }
@@ -1336,6 +1381,7 @@ async function syncShopifyVariableProductToStore(
       const resp = await client.get({ path: `products/${shopifyProductId}` });
       remoteParent = resp?.body?.product || null;
     } catch (err) {
+      if (isShopifyAuthError(err)) throw err;
       console.warn(
         `Shopify parent ${shopifyProductId} not found; will try SKU lookup:`,
         describeShopifyError(err),
@@ -1548,6 +1594,7 @@ async function sync_product(req, res, process) {
             integrationId,
           });
         } catch (error) {
+          if (isShopifyAuthError(error)) throw error;
           const detail = describeShopifyError(error);
           console.error(
             `Shopify variable product sync failed for "${rootProduct.product_name}":`,
@@ -1581,7 +1628,7 @@ async function sync_product(req, res, process) {
         String(syncRow.refference_id).trim()
       : null;
 
-    if (remoteId) {
+      if (remoteId) {
       try {
         step = `GET products/${remoteId}`;
         const productResponse = await client.get({
@@ -1589,6 +1636,7 @@ async function sync_product(req, res, process) {
         });
         remoteProduct = productResponse?.body?.product || null;
       } catch (fetchErr) {
+        if (isShopifyAuthError(fetchErr)) throw fetchErr;
         console.warn(
           `Shopify product ${remoteId} not found; will try SKU lookup:`,
           describeShopifyError(fetchErr),
@@ -1616,6 +1664,7 @@ async function sync_product(req, res, process) {
           });
           remoteProduct = productResponse?.body?.product || null;
         } catch (fetchErr) {
+          if (isShopifyAuthError(fetchErr)) throw fetchErr;
           console.warn(
             "Failed to load Shopify product by variant SKU:",
             describeShopifyError(fetchErr),
@@ -1775,6 +1824,7 @@ async function sync_product(req, res, process) {
       message: `Product Name : ${product.product_name} synced to Shopify successfully.`,
     });
   } catch (error) {
+    if (isShopifyAuthError(error)) throw error;
     const detail = describeShopifyError(error);
     console.error(
       `Shopify product sync failed [step: ${step}] for "${product.product_name}" (sku=${sku}):`,

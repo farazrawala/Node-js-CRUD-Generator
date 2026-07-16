@@ -370,6 +370,67 @@ Call repeatedly until `progress` is `completed` or `failed`.
 
 ---
 
+### 5b. Restart a process
+
+Resets a completed, failed, inactive, or stuck process so it can run again from the start. Re-enqueues the job when the queue is enabled.
+
+|            |                                                                   |
+| ---------- | ----------------------------------------------------------------- |
+| **Method** | `GET` or `POST`                                                   |
+| **Paths**  | `/api/process/restart-process` · `/api/process/restart-process/:id` |
+| **Auth**   | Yes                                                               |
+
+**What it resets**
+
+| Field | Value |
+| ----- | ----- |
+| `status` | `active` |
+| `progress` | `not_started` |
+| `page` | `1` |
+| `offset` | `0` |
+| `count` | `0` |
+| `hits` | `0` |
+| `remarks` | Restart note (or custom `remarks`) |
+
+**Parameters**
+
+| Param | Where | Description |
+| ----- | ----- | ----------- |
+| `id` / `process_id` | path, body, or query | Process to restart (required) |
+| `execute` | body or query | `true` / `1` — run one `execute-process` batch immediately after restart |
+| `remarks` | body or query | Optional custom remarks |
+| `company_id` | body, query, or auth | Tenant scope (from auth user when omitted) |
+
+**Example**
+
+```http
+POST /api/process/restart-process/6789abcdef012345678901234
+Authorization: Bearer <token>
+```
+
+```http
+POST /api/process/restart-process/6789abcdef012345678901234?execute=1
+Authorization: Bearer <token>
+```
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "message": "Process restarted and enqueued. Call execute-process or run-queue-worker to run.",
+  "data": {
+    "process": { "_id": "...", "status": "active", "progress": "not_started" },
+    "previous": { "status": "failed", "progress": "failed" },
+    "queue": { "queued": true },
+    "execute_process_url": "/api/process/execute-process/<id>",
+    "run_queue_worker_url": "/api/process/run-queue-worker/<id>"
+  }
+}
+```
+
+---
+
 ### 6. Run queue worker (drain queue)
 
 Runs multiple `execute-process` batches in a loop until the queue is empty, a job finishes, or `max_batches` is reached.
@@ -662,6 +723,8 @@ When a POS product is saved in Admin, the server may auto-create `sync_product` 
 | `GET/POST` | `/api/process/fetch-product-queue`              | Create/reuse fetch_product job       |
 | `GET/POST` | `/api/process/execute-process`                  | Run one batch (public)               |
 | `GET/POST` | `/api/process/execute-process/:id`              | Run one batch for specific process   |
+| `GET/POST` | `/api/process/restart-process`                  | Reset process + re-enqueue           |
+| `GET/POST` | `/api/process/restart-process/:id`              | Reset one process by id              |
 | `GET/POST` | `/api/process/run-queue-worker`                 | Drain queue automatically            |
 | `GET/POST` | `/api/process/run-queue-worker/:id`             | Drain one process until done         |
 | `GET`      | `/api/process/queue-worker-status`              | Worker enabled / draining state      |

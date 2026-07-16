@@ -47,13 +47,14 @@ function isShopifyAuthError(error) {
   const status =
     error?.response?.code ??
     error?.response?.statusCode ??
+    error?.statusCode ??
     error?.status ??
     null;
 
   if (status === 401 || status === 403) return true;
 
   const text = shopifyErrorText(error);
-  return /invalid api key|access token|unrecognized login|wrong password|unauthorized/i.test(
+  return /invalid api key|access token|unrecognized login|wrong password|unauthorized|authentication|expired.*token|token.*expired/i.test(
     text,
   );
 }
@@ -63,12 +64,7 @@ function formatShopifyErrorPayload(error, fallback = "Shopify request failed") {
   return text || fallback;
 }
 
-/**
- * Request a new Admin API access token via Shopify client credentials grant.
- * Updates integration.token in MongoDB when integrationId is provided.
- */
-async function refreshShopifyAccessToken(integration, integrationId = null) {
-  const shopDomain = normalizeShopifyDomain(integration?.url);
+function resolveShopifyClientCredentials(integration) {
   const clientId =
     integration?.key || integration?.api_key || integration?.public_key;
   const clientSecret =
@@ -76,6 +72,17 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
     integration?.secret_key ||
     integration?.private_key ||
     integration?.client_secret;
+  return { clientId, clientSecret };
+}
+
+/**
+ * Request a new Admin API access token via Shopify client credentials grant.
+ * Updates integration.token in MongoDB when integrationId is provided.
+ */
+async function refreshShopifyAccessToken(integration, integrationId = null) {
+  const shopDomain = normalizeShopifyDomain(integration?.url);
+  const { clientId, clientSecret } =
+    resolveShopifyClientCredentials(integration);
 
   if (!shopDomain) {
     throw new Error("Shopify store URL is missing or invalid for token refresh.");
@@ -87,17 +94,19 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
   }
 
   const tokenUrl = `https://${shopDomain}/admin/oauth/access_token`;
+  const formBody = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: String(clientId),
+    client_secret: String(clientSecret),
+  });
+
   const response = await fetch(tokenUrl, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
     },
-    body: JSON.stringify({
-      grant_type: "client_credentials",
-      client_id: clientId,
-      client_secret: clientSecret,
-    }),
+    body: formBody.toString(),
   });
 
   const raw = await response.text();
@@ -119,9 +128,18 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
     throw new Error("Shopify token refresh returned no access_token.");
   }
 
-  const id = integrationId || integration?._id;
+  const id = integrationId || integration?._id || integration?.id;
   if (id) {
-    await Integration.findByIdAndUpdate(id, { $set: { token: accessToken } });
+    const updated = await Integration.findByIdAndUpdate(
+      id,
+      { $set: { token: accessToken } },
+      { new: true },
+    ).select("_id token");
+    if (!updated) {
+      throw new Error(
+        `Shopify token refresh succeeded but integration ${id} was not found to update.`,
+      );
+    }
   }
 
   return {
@@ -135,5 +153,6 @@ module.exports = {
   normalizeShopifyDomain,
   isShopifyAuthError,
   formatShopifyErrorPayload,
+  resolveShopifyClientCredentials,
   refreshShopifyAccessToken,
 };

@@ -946,6 +946,135 @@ function getQueueWorkerStatus(req, res) {
   });
 }
 
+/**
+ * POST/GET /api/process/restart-process/:id
+ * Reset a completed/failed/inactive (or stuck) process so it can run again.
+ *
+ * Body/query optional:
+ * - execute=true → run one execute-process batch after restart
+ * - remarks → custom restart remarks
+ */
+async function processRestart(req, res) {
+  try {
+    const processId = coalesceObjectId(
+      req.params?.id ||
+        req.body?.process_id ||
+        req.body?.id ||
+        req.query?.process_id ||
+        req.query?.id,
+    );
+
+    if (!processId) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "process_id is required. Use /process/restart-process/:id or pass process_id.",
+      });
+    }
+
+    const companyId = coalesceObjectId(
+      req.body?.company_id || req.query?.company_id || req.user?.company_id,
+    );
+
+    const filter = {
+      _id: processId,
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (companyId) {
+      const companyCriteria = buildCompanyIdCriteria(companyId);
+      if (companyCriteria) {
+        filter.$and.push(companyCriteria);
+      }
+    }
+
+    const existing = await ProcessModel.findOne(filter).lean();
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: companyId
+          ? "Process not found for this company, or it was deleted."
+          : "Process not found, or it was deleted.",
+      });
+    }
+
+    const customRemarks = String(
+      req.body?.remarks ?? req.query?.remarks ?? "",
+    ).trim();
+    const remarks =
+      customRemarks ||
+      `Restarted from progress=${existing.progress || "n/a"}, status=${existing.status || "n/a"}.`;
+
+    const updated = await ProcessModel.findByIdAndUpdate(
+      processId,
+      {
+        $set: {
+          status: "active",
+          progress: "not_started",
+          page: 1,
+          offset: 0,
+          count: 0,
+          hits: 0,
+          remarks,
+          ...(req.user?._id ? { updated_by: coalesceObjectId(req.user._id) } : {}),
+        },
+      },
+      { new: true },
+    )
+      .populate([
+        "company_id",
+        "integration_id",
+        "product_id",
+        "category_id",
+        "brand_id",
+      ])
+      .lean();
+
+    // findByIdAndUpdate does not fire post("save"); enqueue explicitly.
+    await releaseProcessFromQueue(updated);
+    const queue = await enqueueProcess(updated);
+
+    const shouldExecute =
+      req.body?.execute === true ||
+      req.body?.execute === "1" ||
+      req.body?.execute === 1 ||
+      req.query?.execute === "true" ||
+      req.query?.execute === "1";
+
+    if (shouldExecute) {
+      req.params = { ...(req.params || {}), id: String(processId) };
+      req.query = { ...(req.query || {}), process_id: String(processId) };
+      return execute_process(req, res);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message:
+        queue.queued ?
+          "Process restarted and enqueued. Call execute-process or run-queue-worker to run."
+        : "Process restarted. Call execute-process to run (queue enqueue skipped or unavailable).",
+      data: {
+        process: updated,
+        previous: {
+          status: existing.status,
+          progress: existing.progress,
+          page: existing.page,
+          offset: existing.offset,
+          count: existing.count,
+          hits: existing.hits,
+        },
+        queue,
+        execute_process_url: `/api/process/execute-process/${processId}`,
+        run_queue_worker_url: `/api/process/run-queue-worker/${processId}`,
+      },
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      message: err.message || "Failed to restart process",
+    });
+  }
+}
+
 module.exports = {
   execute_process,
   runProcessExecution,
@@ -956,4 +1085,5 @@ module.exports = {
   processEnqueueAll,
   processFetchProductQueue,
   processQueueFormSchema,
+  processRestart,
 };

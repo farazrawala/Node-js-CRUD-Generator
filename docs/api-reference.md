@@ -428,6 +428,8 @@ Related: [woocommerce_to_local_product_sync.md](./woocommerce_to_local_product_s
 | `POST` | `/processs/bulk-create` | Yes | Typo alias |
 | `GET` / `POST` | `/process/execute-process` | No | Execute next / batch |
 | `GET` / `POST` | `/process/execute-process/:id` | No | Execute one process |
+| `GET` / `POST` | `/process/restart-process` | Yes | Restart failed/completed process |
+| `GET` / `POST` | `/process/restart-process/:id` | Yes | Restart one process by id |
 | `POST` / `GET` | `/process/run-queue-worker` | Yes | Drain queue worker |
 | `POST` / `GET` | `/process/run-queue-worker/:id` | Yes | Drain for company/id |
 | `GET` | `/process/queue-worker-status` | Yes | Worker status |
