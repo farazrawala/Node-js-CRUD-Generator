@@ -2398,6 +2398,13 @@ function buildVariantDescription(baseDescription, attributes = []) {
    *
    * Uses integration.url + key (client_id) + secret (client_secret) to request a
    * Shopify client_credentials access token, then saves it to integration.token.
+   *
+   * Optional body/query overrides (also saved on the integration):
+   * - key / client_id
+   * - secret / client_secret
+   *
+   * If `secret` currently holds an Admin API token (shpat_/shpca_) and no real
+   * client_secret override is passed, that value is moved into `token` so sync works.
    */
   async function generateShopifyIntegrationToken(req, res) {
     try {
@@ -2438,7 +2445,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
         filter.company_id = companyId;
       }
 
-      const integration = await Integration.findOne(filter).lean();
+      let integration = await Integration.findOne(filter).lean();
       if (!integration) {
         return res.status(404).json({
           success: false,
@@ -2464,12 +2471,64 @@ function buildVariantDescription(baseDescription, attributes = []) {
         });
       }
 
+      const overrideKey = String(
+        req.body?.key ??
+          req.body?.client_id ??
+          req.query?.key ??
+          req.query?.client_id ??
+          "",
+      ).trim();
+      const overrideSecret = String(
+        req.body?.secret ??
+          req.body?.client_secret ??
+          req.query?.secret ??
+          req.query?.client_secret ??
+          "",
+      ).trim();
+
+      const credentialPatch = {};
+      if (overrideKey) credentialPatch.key = overrideKey;
+      if (overrideSecret) credentialPatch.secret = overrideSecret;
+
+      if (Object.keys(credentialPatch).length > 0) {
+        integration = await Integration.findByIdAndUpdate(
+          integrationId,
+          { $set: credentialPatch },
+          { new: true },
+        ).lean();
+      }
+
       const resolved = resolveShopifyClientCredentials(integration);
-      if (isShopifyAccessToken(integration.secret)) {
-        return res.status(400).json({
-          success: false,
+      const secretLooksLikeAccessToken = isShopifyAccessToken(
+        integration.secret,
+      );
+
+      // Misfiled Admin API token in `secret`, and no real client_secret override:
+      // move it to `token` so sync_product can use it.
+      if (secretLooksLikeAccessToken && !isShopifyAccessToken(overrideSecret) && !overrideSecret) {
+        const accessToken = resolved.accessToken || String(integration.secret).trim();
+        await Integration.findByIdAndUpdate(integrationId, {
+          $set: { token: accessToken },
+        });
+
+        const masked =
+          accessToken.length > 8 ?
+            `${accessToken.slice(0, 6)}…${accessToken.slice(-4)}`
+          : "[set]";
+
+        return res.status(200).json({
+          success: true,
           message:
-            "integration.secret currently looks like an Admin API access token (shpat_/shpca_). Put the Client Secret (shpss_…) in secret and Client ID in key, then call this API again.",
+            "integration.secret held an Admin API access token — copied it to integration.token. To generate a fresh token via client_credentials, put Client Secret (shpss_…) in secret (or pass client_secret on this request) and call again.",
+          data: {
+            integration_id: String(integrationId),
+            shop: shopDomain,
+            token_masked: masked,
+            scope: null,
+            expires_in: null,
+            grant_type: null,
+            repaired_from_secret: true,
+          },
         });
       }
 
@@ -2477,7 +2536,15 @@ function buildVariantDescription(baseDescription, attributes = []) {
         return res.status(400).json({
           success: false,
           message:
-            "integration.key (client_id) and integration.secret (client_secret) are required to generate a Shopify token.",
+            "integration.key (client_id) and integration.secret (client_secret / shpss_…) are required to generate a Shopify token.",
+        });
+      }
+
+      if (isShopifyAccessToken(resolved.clientSecret)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "client_secret still looks like an Admin API access token. Pass a real Client Secret (shpss_…).",
         });
       }
 
@@ -2498,6 +2565,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
           scope: result.scope || null,
           expires_in: result.expires_in || null,
           grant_type: "client_credentials",
+          repaired_from_secret: Boolean(result.repaired_from_secret),
         },
       });
     } catch (error) {
