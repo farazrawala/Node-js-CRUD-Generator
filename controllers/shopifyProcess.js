@@ -104,27 +104,24 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
     }
   }
 
-  const apiKey =
-    integration.key || integration.api_key || integration.public_key;
-  const apiSecret =
-    integration.secret ||
-    integration.secret_key ||
-    integration.private_key ||
-    integration.client_secret;
-  const accessToken =
-    integration.token || integration.access_token || integration.password;
+  const resolved = resolveShopifyClientCredentials(integration);
+  const apiKey = resolved.clientId;
+  // Rest custom-app calls only need the access token; keep a placeholder if
+  // secret was misfiled as the Admin API token so the SDK can still init.
+  const apiSecret = resolved.clientSecret || "unused-when-using-admin-token";
+  const accessToken = resolved.accessToken;
 
-  if (!apiKey || !apiSecret) {
+  if (!apiKey) {
     return {
       error:
-        "Incomplete Shopify credentials. Please verify key and secret (client_id / client_secret).",
+        "Incomplete Shopify credentials. Please verify key (Client ID / API key).",
     };
   }
 
   if (requireToken && !accessToken) {
     return {
       error:
-        "Incomplete Shopify credentials. Please verify access token, or ensure key/secret can refresh it.",
+        "Incomplete Shopify credentials. Set Admin API access token in integration.token (or put Client Secret in secret so it can be refreshed).",
     };
   }
 
@@ -160,20 +157,22 @@ async function obtainAndPersistShopifyToken(integration, process) {
   const next =
     refreshed.integration ||
     {
-      ...(typeof integration?.toObject === "function" ?
-        integration.toObject()
-      : integration),
+      ...toPlainIntegration(integration),
       token: refreshed.access_token,
     };
 
   if (process?.integration_id && typeof process.integration_id === "object") {
     process.integration_id.token = refreshed.access_token;
     if (next.key) process.integration_id.key = next.key;
-    if (next.secret) process.integration_id.secret = next.secret;
+    if (Object.prototype.hasOwnProperty.call(next, "secret")) {
+      process.integration_id.secret = next.secret;
+    }
   }
 
   console.warn(
-    `Shopify access token refreshed and saved on integration ${integrationId}.`,
+    refreshed.repaired_from_secret ?
+      `Shopify access token recovered from integration.secret and saved on integration ${integrationId}.`
+    : `Shopify access token refreshed and saved on integration ${integrationId}.`,
   );
 
   return next;
@@ -186,15 +185,16 @@ async function runWithShopifyClient(integration, process, handler) {
   let activeIntegration = toPlainIntegration(integration);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const hasToken = !!(
-      activeIntegration?.token ||
-      activeIntegration?.access_token ||
-      activeIntegration?.password
-    );
-    const { clientId, clientSecret } =
-      resolveShopifyClientCredentials(activeIntegration);
+    const resolved = resolveShopifyClientCredentials(activeIntegration);
+    activeIntegration = {
+      ...activeIntegration,
+      token: resolved.accessToken || activeIntegration.token,
+      // Prefer real client secret when available for refresh; keep original otherwise.
+      secret: resolved.clientSecret || activeIntegration.secret,
+      key: resolved.clientId || activeIntegration.key,
+    };
 
-    if (!hasToken && clientId && clientSecret) {
+    if (!resolved.accessToken && resolved.canRefreshWithClientCredentials) {
       try {
         activeIntegration = await obtainAndPersistShopifyToken(
           activeIntegration,
@@ -205,6 +205,12 @@ async function runWithShopifyClient(integration, process, handler) {
           `Shopify token missing and refresh failed: ${refreshError.message || refreshError}`,
         );
       }
+    } else if (!resolved.accessToken && resolved.secretHeldAccessToken) {
+      // Should be covered by resolve, but keep a safe path.
+      activeIntegration = await obtainAndPersistShopifyToken(
+        activeIntegration,
+        process,
+      );
     }
 
     const { client, error } = buildShopifyClient(activeIntegration);
@@ -215,14 +221,14 @@ async function runWithShopifyClient(integration, process, handler) {
     try {
       return await handler(client, activeIntegration);
     } catch (apiError) {
-      if (attempt === 0 && isShopifyAuthError(apiError) && clientId && clientSecret) {
+      if (attempt === 0 && isShopifyAuthError(apiError)) {
         try {
           activeIntegration = await obtainAndPersistShopifyToken(
             activeIntegration,
             process,
           );
           console.warn(
-            "Shopify auth failed; obtained a new access token and retrying request.",
+            "Shopify auth failed; obtained/repaired access token and retrying request.",
           );
           continue;
         } catch (refreshError) {

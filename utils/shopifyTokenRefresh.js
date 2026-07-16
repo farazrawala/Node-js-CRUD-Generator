@@ -70,20 +70,67 @@ function trimCredential(value) {
   return text || null;
 }
 
+function isShopifyAccessToken(value) {
+  return /^shpat_|^shpca_/i.test(String(value || ""));
+}
+
+function isShopifyClientSecret(value) {
+  const text = String(value || "");
+  if (!text) return false;
+  if (isShopifyAccessToken(text)) return false;
+  // API secret key from custom apps / Dev Dashboard
+  if (/^shpss_/i.test(text)) return true;
+  // Opaque secrets are still valid client secrets
+  return true;
+}
+
+/**
+ * Normalize integration credentials, including a common misconfig:
+ * Admin API access token stored in `secret` instead of `token`.
+ */
 function resolveShopifyClientCredentials(integration) {
   const clientId = trimCredential(
     integration?.key || integration?.api_key || integration?.public_key,
   );
-  const clientSecret = trimCredential(
+
+  const rawSecret = trimCredential(
     integration?.secret ||
       integration?.secret_key ||
       integration?.private_key ||
       integration?.client_secret,
   );
-  const accessToken = trimCredential(
+  const rawToken = trimCredential(
     integration?.token || integration?.access_token || integration?.password,
   );
-  return { clientId, clientSecret, accessToken };
+
+  let accessToken = rawToken;
+  let clientSecret = rawSecret;
+  let secretHeldAccessToken = false;
+
+  // Misfiled: secret is actually the Admin API access token.
+  if (isShopifyAccessToken(rawSecret)) {
+    secretHeldAccessToken = true;
+    if (!accessToken || !isShopifyAccessToken(accessToken)) {
+      accessToken = rawSecret;
+    }
+    clientSecret = null;
+  } else if (rawSecret && !isShopifyClientSecret(rawSecret)) {
+    clientSecret = null;
+  }
+
+  // Token field sometimes holds the API secret by mistake.
+  if (accessToken && /^shpss_/i.test(accessToken) && !clientSecret) {
+    clientSecret = accessToken;
+    accessToken = isShopifyAccessToken(rawSecret) ? rawSecret : null;
+  }
+
+  return {
+    clientId,
+    clientSecret,
+    accessToken,
+    secretHeldAccessToken,
+    canRefreshWithClientCredentials: Boolean(clientId && clientSecret),
+  };
 }
 
 /**
@@ -110,16 +157,29 @@ async function loadFreshShopifyIntegration(integration, integrationId = null) {
 
   if (!doc) return null;
 
-  const { clientId, clientSecret, accessToken } =
-    resolveShopifyClientCredentials(doc);
+  const resolved = resolveShopifyClientCredentials(doc);
 
   return {
     ...doc,
-    key: clientId || doc.key,
-    secret: clientSecret || doc.secret,
-    token: accessToken || doc.token || null,
-    _resolved: { clientId, clientSecret, accessToken },
+    key: resolved.clientId || doc.key,
+    // Keep original secret in doc for reference; resolved secret is the real client secret.
+    secret: resolved.clientSecret || (resolved.secretHeldAccessToken ? null : doc.secret),
+    token: resolved.accessToken || doc.token || null,
+    _resolved: resolved,
   };
+}
+
+/**
+ * If access token was stored under `secret`, copy it into `token` once.
+ */
+async function repairMisfiledShopifyAccessToken(integrationId, accessToken) {
+  if (!integrationId || !accessToken) return false;
+  const updated = await Integration.findByIdAndUpdate(
+    integrationId,
+    { $set: { token: accessToken } },
+    { new: true },
+  ).select("_id token");
+  return Boolean(updated);
 }
 
 function describeCredentialShape(value) {
@@ -189,7 +249,6 @@ async function postShopifyTokenRequest(shopDomain, clientId, clientSecret) {
       data,
     };
 
-    // Retry alternate encoding only for request-format style failures.
     const desc = String(data?.error_description || data?.error || raw || "");
     if (
       response.status === 400 &&
@@ -207,23 +266,55 @@ async function postShopifyTokenRequest(shopDomain, clientId, clientSecret) {
 /**
  * Request a new Admin API access token via Shopify client credentials grant.
  * Updates integration.token in MongoDB when integrationId is provided.
+ *
+ * If `secret` holds an access token (common misconfig), copies it to `token`
+ * and returns that instead of calling client-credentials.
  */
 async function refreshShopifyAccessToken(integration, integrationId = null) {
   const fresh = await loadFreshShopifyIntegration(integration, integrationId);
   const shopDomain = normalizeShopifyDomain(fresh?.url);
-  const { clientId, clientSecret } = resolveShopifyClientCredentials(fresh);
+  const resolved =
+    fresh?._resolved || resolveShopifyClientCredentials(fresh);
+  const id = integrationId || fresh?._id || fresh?.id;
 
   if (!shopDomain) {
     throw new Error("Shopify store URL is missing or invalid for token refresh.");
   }
+
+  // Recover from misfiled Admin API token in `secret`.
+  if (resolved.secretHeldAccessToken && resolved.accessToken) {
+    if (id) {
+      await repairMisfiledShopifyAccessToken(id, resolved.accessToken);
+      console.warn(
+        `Shopify integration ${id}: moved Admin API access token from secret → token.`,
+      );
+    }
+    return {
+      access_token: resolved.accessToken,
+      scope: null,
+      expires_in: null,
+      repaired_from_secret: true,
+      integration: {
+        ...fresh,
+        token: resolved.accessToken,
+      },
+    };
+  }
+
+  const { clientId, clientSecret, accessToken } = resolved;
+
   if (!clientId || !clientSecret) {
+    if (accessToken) {
+      throw new Error(
+        "Shopify Admin API token is present but client-credentials refresh is unavailable (integration.secret is missing or is not a Client Secret). For legacy custom apps, paste a fresh Admin API access token into integration.token. For Dev Dashboard apps, put Client ID in key and Client Secret (shpss_…) in secret.",
+      );
+    }
     throw new Error(
       "Shopify client_id (integration.key) and client_secret (integration.secret) are required for token refresh. Update them from Shopify Dev Dashboard → Settings (or Develop apps → API credentials).",
     );
   }
 
-  // Access tokens must never be sent as client_secret.
-  if (/^shpat_|^shpca_/i.test(clientSecret)) {
+  if (isShopifyAccessToken(clientSecret)) {
     throw new Error(
       "integration.secret looks like an Admin API access token. Put the Client Secret / API secret key in `secret`, and the Admin API access token in `token`.",
     );
@@ -244,7 +335,7 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
     );
     const hint =
       /missing or invalid client secret|invalid_client/i.test(desc) ?
-        ` Check Admin → Integration: key=${describeCredentialShape(clientId)}, secret=${describeCredentialShape(clientSecret)}. Use Client ID in key and Client Secret (often shpss_…) in secret from Shopify Dev Dashboard / custom app API credentials — not the Admin API access token.`
+        ` Check Admin → Integration: key=${describeCredentialShape(clientId)}, secret=${describeCredentialShape(clientSecret)}. Use Client ID in key and Client Secret (often shpss_…) in secret — not the Admin API access token.`
       : /shop_not_permitted|client credentials/i.test(desc) ?
         " This shop may not allow client-credentials refresh (legacy custom apps often use a static Admin API token). Paste a fresh Admin API access token into integration.token instead."
       : "";
@@ -254,16 +345,15 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
     );
   }
 
-  const accessToken = result.data.access_token;
-  if (!accessToken) {
+  const newAccessToken = result.data.access_token;
+  if (!newAccessToken) {
     throw new Error("Shopify token refresh returned no access_token.");
   }
 
-  const id = integrationId || fresh?._id || fresh?.id;
   if (id) {
     const updated = await Integration.findByIdAndUpdate(
       id,
-      { $set: { token: accessToken } },
+      { $set: { token: newAccessToken } },
       { new: true },
     ).select("_id token");
     if (!updated) {
@@ -274,12 +364,12 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
   }
 
   return {
-    access_token: accessToken,
+    access_token: newAccessToken,
     scope: result.data.scope || null,
     expires_in: result.data.expires_in || null,
     integration: {
       ...fresh,
-      token: accessToken,
+      token: newAccessToken,
     },
   };
 }
@@ -288,7 +378,9 @@ module.exports = {
   normalizeShopifyDomain,
   isShopifyAuthError,
   formatShopifyErrorPayload,
+  isShopifyAccessToken,
   resolveShopifyClientCredentials,
   loadFreshShopifyIntegration,
+  repairMisfiledShopifyAccessToken,
   refreshShopifyAccessToken,
 };
