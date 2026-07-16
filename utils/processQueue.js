@@ -36,7 +36,7 @@ function shouldReleaseProcess(process) {
   return false;
 }
 
-async function enqueueProcess(process) {
+async function enqueueProcess(process, options = {}) {
   if (!shouldQueueProcess(process)) {
     return { queued: false, backend: "none" };
   }
@@ -55,7 +55,8 @@ async function enqueueProcess(process) {
     enqueuedAt,
   });
 
-  if (queueResult.queued) {
+  const scheduleDrain = options.scheduleDrain !== false;
+  if (queueResult.queued && scheduleDrain) {
     try {
       const { scheduleProcessQueueDrain } = require("./processQueueWorker");
       scheduleProcessQueueDrain();

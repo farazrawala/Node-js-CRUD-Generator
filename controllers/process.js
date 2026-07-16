@@ -949,6 +949,7 @@ function getQueueWorkerStatus(req, res) {
 /**
  * POST/GET /api/process/restart-process/:id
  * Reset a completed/failed/inactive (or stuck) process so it can run again.
+ * Always sets progress → not_started and status → active.
  *
  * Body/query optional:
  * - execute=true → run one execute-process batch after restart
@@ -997,13 +998,24 @@ async function processRestart(req, res) {
       });
     }
 
+    const previous = {
+      status: existing.status,
+      progress: existing.progress,
+      page: existing.page,
+      offset: existing.offset,
+      count: existing.count,
+      hits: existing.hits,
+    };
+
+    // Clear remarks so the next execute writes a fresh outcome message.
+    // Optional body/query `remarks` still allows an explicit override.
     const customRemarks = String(
       req.body?.remarks ?? req.query?.remarks ?? "",
     ).trim();
-    const remarks =
-      customRemarks ||
-      `Restarted from progress=${existing.progress || "n/a"}, status=${existing.status || "n/a"}.`;
+    const remarks = customRemarks || "";
 
+    // Use findByIdAndUpdate (not save) so post("save") does not auto-drain
+    // the queue worker and immediately overwrite progress again.
     const updated = await ProcessModel.findByIdAndUpdate(
       processId,
       {
@@ -1015,23 +1027,29 @@ async function processRestart(req, res) {
           count: 0,
           hits: 0,
           remarks,
-          ...(req.user?._id ? { updated_by: coalesceObjectId(req.user._id) } : {}),
+          ...(req.user?._id ?
+            { updated_by: coalesceObjectId(req.user._id) }
+          : {}),
         },
       },
-      { new: true },
-    )
-      .populate([
-        "company_id",
-        "integration_id",
-        "product_id",
-        "category_id",
-        "brand_id",
-      ])
-      .lean();
+      { new: true, runValidators: true },
+    ).lean();
 
-    // findByIdAndUpdate does not fire post("save"); enqueue explicitly.
+    if (
+      !updated ||
+      updated.progress !== "not_started" ||
+      updated.status !== "active"
+    ) {
+      return res.status(500).json({
+        success: false,
+        message:
+          "Process restart did not persist progress=not_started / status=active.",
+        data: { process: updated, previous },
+      });
+    }
+
     await releaseProcessFromQueue(updated);
-    const queue = await enqueueProcess(updated);
+    const queue = await enqueueProcess(updated, { scheduleDrain: false });
 
     const shouldExecute =
       req.body?.execute === true ||
@@ -1050,18 +1068,24 @@ async function processRestart(req, res) {
       success: true,
       message:
         queue.queued ?
-          "Process restarted and enqueued. Call execute-process or run-queue-worker to run."
-        : "Process restarted. Call execute-process to run (queue enqueue skipped or unavailable).",
+          "Process restarted: progress set to not_started, status active, and enqueued. Call execute-process or run-queue-worker to run."
+        : "Process restarted: progress set to not_started and status active. Call execute-process to run.",
       data: {
-        process: updated,
-        previous: {
-          status: existing.status,
-          progress: existing.progress,
-          page: existing.page,
-          offset: existing.offset,
-          count: existing.count,
-          hits: existing.hits,
+        progress: updated.progress,
+        status: updated.status,
+        process: {
+          _id: updated._id,
+          action: updated.action,
+          status: updated.status,
+          progress: updated.progress,
+          page: updated.page,
+          offset: updated.offset,
+          count: updated.count,
+          hits: updated.hits,
+          remarks: updated.remarks,
+          priority: updated.priority,
         },
+        previous,
         queue,
         execute_process_url: `/api/process/execute-process/${processId}`,
         run_queue_worker_url: `/api/process/run-queue-worker/${processId}`,
