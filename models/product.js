@@ -231,7 +231,6 @@ modelSchema.pre("validate", function (next) {
 });
 
 // Pre-save hook to ensure slug is always generated from product_name if empty (backup)
-// Also ensure parent_product_id always exists
 modelSchema.pre("save", function (next) {
   if (
     !this.product_type ||
@@ -252,21 +251,14 @@ modelSchema.pre("save", function (next) {
     this.product_slug = newSlug;
   }
 
-  // Ensure parent_product_id always exists
-  // For single products, set to product's own ID (will be set after save if new)
-  // For variant products, parent_product_id should already be set
+  // Standalone/parent products keep parent_product_id null.
+  // Only variants should set parent_product_id to another product's _id.
   if (
-    !this.parent_product_id ||
-    this.parent_product_id === "" ||
-    this.parent_product_id === null
+    this.parent_product_id &&
+    this._id &&
+    String(this.parent_product_id) === String(this._id)
   ) {
-    if (this.product_type === "Single" || !this.product_type) {
-      // For single products, set to own ID (if exists) or null (will be updated in post-save)
-      if (this._id) {
-        this.parent_product_id = this._id;
-      }
-      // else: post-save hook sets parent_product_id after _id exists
-    }
+    this.parent_product_id = null;
   }
 
   next();
@@ -292,34 +284,6 @@ modelSchema.pre("save", async function (next) {
     this._syncingThumbnails = false;
     next(error);
   }
-});
-
-// Post-save hook to ensure parent_product_id is set to own ID for single products
-modelSchema.post("save", function (doc, next) {
-  // If parent_product_id is still null/empty and it's a single product, set it to own ID
-  // Skip if _id is not yet available or if parent_product_id is already set
-  if (
-    doc._id &&
-    (!doc.parent_product_id ||
-      doc.parent_product_id === "" ||
-      doc.parent_product_id === null) &&
-    (doc.product_type === "Single" || !doc.product_type) &&
-    !doc._settingParentId
-  ) {
-    // Prevent infinite loop
-    doc._settingParentId = true; // Flag to prevent recursive saves
-    doc.parent_product_id = doc._id;
-    doc
-      .save({ validateBeforeSave: false })
-      .then(() => {
-        doc._settingParentId = false;
-      })
-      .catch((err) => {
-        console.error("❌ Error setting parent_product_id in post-save:", err);
-        doc._settingParentId = false;
-      });
-  }
-  next();
 });
 
 // Tenant-scoped uniqueness for POS lookup (only non-empty values, active rows)

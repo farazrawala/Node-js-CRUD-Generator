@@ -1303,9 +1303,8 @@ async function productCreate(req, res) {
     console.log("🏷️ Generated new EAN13 barcode:", req.body.barcode);
   }
 
-  // Ensure parent_product_id is set for single products
-  // If product_type is Single and parent_product_id is not provided, it will be set in the model hook
-  // For variant products, parent_product_id should be explicitly provided
+  // Standalone Single products leave parent_product_id null.
+  // Variants must pass parent_product_id explicitly.
 
   const response = await handleGenericCreate(req, "product", {
     afterCreate: async (record, req) => {
