@@ -163,6 +163,10 @@ async function checkHeaderAuthentication(req, res, next) {
     "/api/process/execute-process",
     /^\/process\/execute-process\/.*/,
     /^\/api\/process\/execute-process\/.*/,
+    "/integration/generate-token",
+    "/api/integration/generate-token",
+    /^\/integration\/generate-token\/.*/,
+    /^\/api\/integration\/generate-token\/.*/,
     /^\/uploads\/.*/,
     /^\/api\/uploads\/.*/,
   ];

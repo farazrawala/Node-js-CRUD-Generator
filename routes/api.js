@@ -121,6 +121,7 @@ const {
   listStoreProductVariations,
   syncStoreProduct,
   queueStoreProductFetch,
+  generateShopifyIntegrationToken,
 } = require("../controllers/integration");
 
 const {
@@ -416,6 +417,10 @@ router.delete("/product/delete/:id", productDelete);
 
 // Integration routes
 router.get("/integration/check-active/:id", checkIntegrationActive);
+router.post("/integration/generate-token/:id", generateShopifyIntegrationToken);
+router.get("/integration/generate-token/:id", generateShopifyIntegrationToken);
+router.post("/integration/generate-token", generateShopifyIntegrationToken);
+router.get("/integration/generate-token", generateShopifyIntegrationToken);
 router.get("/integration/sync-store-category/:id", syncStoreCategory);
 // router.get("/integration/sync-store-brand/:id", syncStoreBrand);
 router.get("/integration/sync-store-product/:id", syncStoreProduct);

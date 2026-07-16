@@ -2391,7 +2391,123 @@ function buildVariantDescription(baseDescription, attributes = []) {
       });
     }
   }
-  
+
+  /**
+   * POST/GET /api/integration/generate-token/:id
+   * Also: /api/integration/generate-token?integration_id=...
+   *
+   * Uses integration.url + key (client_id) + secret (client_secret) to request a
+   * Shopify client_credentials access token, then saves it to integration.token.
+   */
+  async function generateShopifyIntegrationToken(req, res) {
+    try {
+      const {
+        refreshShopifyAccessToken,
+        isShopifyAccessToken,
+        resolveShopifyClientCredentials,
+        normalizeShopifyDomain,
+      } = require("../utils/shopifyTokenRefresh");
+      const Integration = require("../models/integration");
+      const { coalesceObjectId } = require("../utils/modelHelper");
+
+      const integrationId = coalesceObjectId(
+        req.params?.id ||
+          req.body?.integration_id ||
+          req.body?.id ||
+          req.query?.integration_id ||
+          req.query?.id,
+      );
+
+      if (!integrationId) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "integration_id is required. Use /integration/generate-token/:id or pass integration_id.",
+        });
+      }
+
+      const companyId = coalesceObjectId(
+        req.body?.company_id || req.query?.company_id || req.user?.company_id,
+      );
+
+      const filter = {
+        _id: integrationId,
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      };
+      if (companyId) {
+        filter.company_id = companyId;
+      }
+
+      const integration = await Integration.findOne(filter).lean();
+      if (!integration) {
+        return res.status(404).json({
+          success: false,
+          message: companyId
+            ? "Integration not found for this company, or it was deleted."
+            : "Integration not found, or it was deleted.",
+        });
+      }
+
+      if (String(integration.store_type || "").toLowerCase() !== "shopify") {
+        return res.status(400).json({
+          success: false,
+          message: `Token generation is only supported for Shopify integrations (got store_type=${integration.store_type || "n/a"}).`,
+        });
+      }
+
+      const shopDomain = normalizeShopifyDomain(integration.url);
+      if (!shopDomain) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Integration url is missing or invalid. Use a myshopify.com domain.",
+        });
+      }
+
+      const resolved = resolveShopifyClientCredentials(integration);
+      if (isShopifyAccessToken(integration.secret)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "integration.secret currently looks like an Admin API access token (shpat_/shpca_). Put the Client Secret (shpss_…) in secret and Client ID in key, then call this API again.",
+        });
+      }
+
+      if (!resolved.clientId || !resolved.clientSecret) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "integration.key (client_id) and integration.secret (client_secret) are required to generate a Shopify token.",
+        });
+      }
+
+      const result = await refreshShopifyAccessToken(integration, integrationId);
+      const token = result.access_token;
+      const masked =
+        token && token.length > 8 ?
+          `${token.slice(0, 6)}…${token.slice(-4)}`
+        : "[set]";
+
+      return res.status(200).json({
+        success: true,
+        message: "Shopify access token generated and saved on integration.token.",
+        data: {
+          integration_id: String(integrationId),
+          shop: shopDomain,
+          token_masked: masked,
+          scope: result.scope || null,
+          expires_in: result.expires_in || null,
+          grant_type: "client_credentials",
+        },
+      });
+    } catch (error) {
+      console.error("❌ generateShopifyIntegrationToken:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to generate Shopify access token",
+      });
+    }
+  }
   
   module.exports = {
   
@@ -2402,5 +2518,6 @@ function buildVariantDescription(baseDescription, attributes = []) {
     listStoreProductVariations,
     syncStoreProduct,
     queueStoreProductFetch,
+    generateShopifyIntegrationToken,
   };
   

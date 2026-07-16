@@ -34,6 +34,8 @@ Authorization: Bearer <token>
 | `GET` | `/order/public-get-order-by-order-no/:id` | Public order lookup |
 | `GET` / `POST` | `/process/execute-process` | Cron-friendly process runner |
 | `GET` / `POST` | `/process/execute-process/:id` | Run one process by id |
+| `GET` / `POST` | `/integration/generate-token` | Generate Shopify token (by integration_id) |
+| `GET` / `POST` | `/integration/generate-token/:id` | Generate Shopify token for integration |
 | `POST` | `/test` | Smoke test |
 
 Uploads under `/api/uploads/*` are also public.
@@ -407,6 +409,8 @@ Full queue docs: [queue-apis.md](./queue-apis.md).
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | `GET` | `/integration/check-active/:id` | Yes | Check integration active |
+| `GET` / `POST` | `/integration/generate-token/:id` | No | Generate Shopify token → save on integration |
+| `GET` / `POST` | `/integration/generate-token` | No | Same via `integration_id` |
 | `GET` | `/integration/sync-store-category/:id` | Yes | Sync categories |
 | `GET` / `POST` | `/integration/sync-store-product/:id` | Yes | Sync / fetch products |
 | `GET` / `POST` | `/integration/sync-store-product/:id/queue` | Yes | Queue product fetch |
