@@ -359,6 +359,42 @@ async function getMyBranches(req, res) {
 }
 
 /**
+ * GET `/api/company/get-all-for-listing`
+ * Other active companies (not the authenticated tenant) with
+ * `bigcommerce_settings.show_store_for_listing === true`
+ * (`bigcommerce_settings` is a JSON string on company).
+ */
+async function getAllForListing(req, res) {
+  const currentCompanyId = tenantCompanyIdFromUser(req.user);
+  if (!currentCompanyId) {
+    return res.status(403).json({
+      success: false,
+      status: 403,
+      message: "Company context is required",
+    });
+  }
+
+  const response = await handleGenericGetAll(req, "company", {
+    filter: {
+      status: "active",
+      deletedAt: null,
+      _id: { $ne: currentCompanyId },
+      company_id: { $ne: currentCompanyId },
+      // Stored as JSON string — match show_store_for_listing: true
+      bigcommerce_settings: {
+        $regex: /"show_store_for_listing"\s*:\s*true/,
+      },
+    },
+    excludeFields: [],
+    populate: [],
+    sort: { company_name: 1 },
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
+    skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
+  });
+  return res.status(response.status).json(response);
+}
+
+/**
  * DELETE/POST — clear all list-cache entries for the authenticated user's company.
  * Pattern: `{companyId}:*` (warehouse, product, inventory_movements, etc.).
  */
@@ -846,6 +882,7 @@ async function removeCompanyDraftOrder(req, res) {
 module.exports = {
   companyCreate,
   getMyBranches,
+  getAllForListing,
   removeCache,
   listAllCache,
   listAllQueues,

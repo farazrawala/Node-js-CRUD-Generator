@@ -183,6 +183,7 @@ const {
 const {
   companyCreate,
   getMyBranches,
+  getAllForListing,
   removeCache,
   listAllCache,
   listAllQueues,
@@ -484,6 +485,7 @@ router.get("/process/queue-worker-status", getQueueWorkerStatus);
 
 // Company routes
 router.get("/company/get-my-branches", getMyBranches);
+router.get("/company/get-all-for-listing", getAllForListing);
 
 router.get("/company/list-cache", listAllCache);
 
