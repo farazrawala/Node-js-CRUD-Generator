@@ -34,7 +34,7 @@ const modelSchema = new mongoose.Schema(
     status: {
       type: String,
       required: true,
-      enum: ["not_started", "inprocess", "done"],
+      enum: ["not_started", "inprocess", "sent", "not_available"],
       default: "not_started",
       field_name: "Status",
       index: true,

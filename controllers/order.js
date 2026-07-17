@@ -1994,15 +1994,21 @@ async function findSales(req, res) {
  * @param {import("express").Response} res
  * @param {Record<string, unknown>} [extraFilter]
  */
-async function getOrdersWithItems(req, res, extraFilter = {}) {
+async function getOrdersWithItems(
+  req,
+  res,
+  extraFilter = {},
+  { deletedOnly = false } = {},
+) {
   const dateResolved = resolveReportCreatedAtFilter(req.query || {}, false);
   if (dateResolved.error) {
     return res.status(dateResolved.error.status).json(dateResolved.error.body);
   }
 
   const filter = {
-    status: "active",
-    deletedAt: null,
+    ...(deletedOnly ?
+      { deletedAt: { $exists: true, $ne: null } }
+    : { status: "active", deletedAt: null }),
     company_id: req.user?.company_id,
     ...extraFilter,
     ...(dateResolved.createdAt ? { createdAt: dateResolved.createdAt } : {}),
@@ -2019,7 +2025,7 @@ async function getOrdersWithItems(req, res, extraFilter = {}) {
   const response = await handleGenericGetAll(req, "order", {
     filter,
     excludeFields: [],
-    sort: { createdAt: -1 },
+    sort: deletedOnly ? { deletedAt: -1, createdAt: -1 } : { createdAt: -1 },
     populate,
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
@@ -2036,8 +2042,9 @@ async function getOrdersWithItems(req, res, extraFilter = {}) {
 
   const itemFilter = {
     order_id: { $in: orderIds },
-    status: "active",
-    deletedAt: null,
+    ...(deletedOnly ?
+      { deletedAt: { $exists: true, $ne: null } }
+    : { status: "active", deletedAt: null }),
   };
   const items = await OrderItem.find(itemFilter)
     .populate("product_id")
@@ -2086,6 +2093,16 @@ async function getOrderByorderItem(req, res) {
 /** GET /api/order/get-online-order-by-order-item — same as above, `order_type: "online"` only. */
 async function getOnlineOrders(req, res) {
   return getOrdersWithItems(req, res, { order_type: "online" });
+}
+
+/**
+ * GET /api/order/get-deleted-order-by-order-item
+ * Aliases: /order/get-deleted, /orders/get-deleted
+ *
+ * Same as get-order-by-order-item, but soft-deleted orders + line items only.
+ */
+async function getDeletedOrders(req, res) {
+  return getOrdersWithItems(req, res, {}, { deletedOnly: true });
 }
 
 /**
@@ -5308,6 +5325,7 @@ module.exports = {
   order_delete,
   getOrderByorderItem,
   getOnlineOrders,
+  getDeletedOrders,
   findProfitByOrderItem,
   findSales,
   findTotalSalesByOrder,

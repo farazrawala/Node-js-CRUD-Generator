@@ -44,7 +44,7 @@ function parsePoNumericSuffix(purchaseOrderNo) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-/** Highest `PO-####` suffix for this company (active, non-deleted rows only). */
+/** Highest `PO-####` suffix for this company (includes soft-deleted so numbers are never reused). */
 async function getMaxPurchaseOrderSeqForCompany(companyId) {
   if (!companyId) return 0;
   const cid =
@@ -52,23 +52,36 @@ async function getMaxPurchaseOrderSeqForCompany(companyId) {
       companyId
     : new mongoose.Types.ObjectId(String(companyId));
   const PurchaseOrder = mongoose.model("purchase_order");
-  const rows = await PurchaseOrder.find({
-    company_id: cid,
-    deletedAt: null,
-    purchase_order_no: /^PO-\d+$/i,
-  })
-    .select("purchase_order_no")
-    .lean();
-  let max = 0;
-  for (const row of rows) {
-    max = Math.max(max, parsePoNumericSuffix(row.purchase_order_no));
-  }
-  return max;
+  const [row] = await PurchaseOrder.aggregate([
+    {
+      $match: {
+        company_id: cid,
+        purchase_order_no: { $regex: /^PO-\d+$/i },
+      },
+    },
+    {
+      $project: {
+        seq: {
+          $convert: {
+            input: {
+              $arrayElemAt: [{ $split: ["$purchase_order_no", "-"] }, 1],
+            },
+            to: "int",
+            onError: 0,
+            onNull: 0,
+          },
+        },
+      },
+    },
+    { $group: { _id: null, maxSeq: { $max: "$seq" } } },
+  ]);
+  return row?.maxSeq || 0;
 }
 
 /**
  * Allocate next `PO-####` for one tenant. Syncs the counter to the DB max first so failed
  * saves (duplicate index, rollback) do not burn sequence numbers.
+ * Soft-deleted POs count toward max (delete PO-008 → next is PO-009).
  */
 async function allocatePurchaseOrderNoForCompany(companyId) {
   const counterKey =
@@ -478,7 +491,7 @@ modelSchema.statics.syncHeaderTotalsFromLineItems = async function (
   );
 };
 
-// Unique PO number per tenant among non-deleted rows only (soft-deleted reuse allowed).
+// Unique PO number per tenant among non-deleted rows (allocator still skips past soft-deleted numbers).
 modelSchema.index(
   { company_id: 1, purchase_order_no: 1 },
   {
@@ -502,10 +515,10 @@ modelSchema.pre("save", async function (next) {
         const candidate = await allocatePurchaseOrderNoForCompany(
           this.company_id,
         );
+        // Treat soft-deleted numbers as taken so PO-008 deleted → next is PO-009
         const exists = await PurchaseOrder.exists({
           company_id: this.company_id,
           purchase_order_no: candidate,
-          deletedAt: null,
         });
         if (!exists) {
           this.purchase_order_no = candidate;

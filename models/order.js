@@ -123,25 +123,37 @@ function toCompanyObjectId(companyId) {
 }
 
 /**
- * Next `ORD-####` for one tenant: load the latest standard order, then suffix + 1.
- * Uses one `findOne` sorted by `_id` (aligns with shard key `{ company_id, _id }`).
+ * Next `ORD-####` for one tenant: max numeric suffix across all rows (including soft-deleted) + 1.
+ * So deleting ORD-008 still yields ORD-009 (numbers are never reused).
  */
 async function allocateOrderNoForCompany(companyId) {
   const Order = mongoose.model("order");
-  const filter = {
-    deletedAt: null,
-    order_no: /^ORD-\d+$/i,
+  const match = {
+    order_no: { $regex: /^ORD-\d+$/i },
   };
   const cid = toCompanyObjectId(companyId);
-  if (cid) filter.company_id = cid;
+  if (cid) match.company_id = cid;
 
-  const last = await Order.findOne(filter)
-    .sort({ _id: -1 })
-    .select("order_no")
-    .lean();
+  const [row] = await Order.aggregate([
+    { $match: match },
+    {
+      $project: {
+        seq: {
+          $convert: {
+            input: {
+              $arrayElemAt: [{ $split: ["$order_no", "-"] }, 1],
+            },
+            to: "int",
+            onError: 0,
+            onNull: 0,
+          },
+        },
+      },
+    },
+    { $group: { _id: null, maxSeq: { $max: "$seq" } } },
+  ]);
 
-  const nextSeq = parseOrdNumericSuffix(last?.order_no) + 1;
-  return formatOrderNo(nextSeq);
+  return formatOrderNo((row?.maxSeq || 0) + 1);
 }
 
 /** Cross-tenant guard: optional POS `customer_id` must reference a user with the same `company_id`. */
@@ -354,7 +366,7 @@ modelSchema.statics.classifyOrderStatus = function (status) {
   return "unknown";
 };
 
-// Unique order_no per tenant among non-deleted rows only (soft-deleted reuse allowed).
+// Unique order_no per tenant among non-deleted rows (allocator still skips past soft-deleted numbers).
 modelSchema.index(
   { company_id: 1, order_no: 1 },
   {
@@ -644,10 +656,10 @@ modelSchema.pre("save", async function (next) {
       const Order = this.constructor;
       for (let attempt = 0; attempt < 5; attempt++) {
         const candidate = await allocateOrderNoForCompany(this.company_id);
+        // Treat soft-deleted numbers as taken so ORD-008 deleted → next is ORD-009
         const exists = await Order.exists({
           company_id: this.company_id,
           order_no: candidate,
-          deletedAt: null,
         });
         if (!exists) {
           this.order_no = candidate;

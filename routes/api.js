@@ -90,6 +90,7 @@ const {
   order_delete,
   getOrderByorderItem,
   getOnlineOrders,
+  getDeletedOrders,
   getOrderByOrderNo,
   findProfitByOrderItem,
   findSales,
@@ -221,6 +222,11 @@ const {
   adjustmentCreate,
   adjustmentUpdate,
 } = require("../controllers/adjustment");
+const {
+  fetchRandomWhatsappMessage,
+  markWhatsappMessageSent,
+  markWhatsappMessageNotAvailable,
+} = require("../controllers/whatsapp_message");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
 // const {
@@ -439,6 +445,20 @@ router.get(
   listStoreProductVariations,
 );
 
+// WhatsApp message worker routes
+router.get("/whatsapp_message/fetch-random", fetchRandomWhatsappMessage);
+router.get("/whatsapp_messages/fetch-random", fetchRandomWhatsappMessage);
+router.get("/whatsapp_message/mark-sent/:id", markWhatsappMessageSent);
+router.get("/whatsapp_messages/mark-sent/:id", markWhatsappMessageSent);
+router.get(
+  "/whatsapp_message/mark-not-available/:id",
+  markWhatsappMessageNotAvailable,
+);
+router.get(
+  "/whatsapp_messages/mark-not-available/:id",
+  markWhatsappMessageNotAvailable,
+);
+
 // Process routes (GET or POST — some clients/proxies use POST)
 router.get("/process/queue-form", processQueueFormSchema);
 router.post("/process/queue-create", processQueueCreate);
@@ -569,6 +589,10 @@ router.patch("/order/order_update/:id", order_update);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/get-online-order-by-order-item", getOnlineOrders);
+router.get("/order/get-deleted-order-by-order-item", getDeletedOrders);
+router.get("/orders/get-deleted-order-by-order-item", getDeletedOrders);
+router.get("/order/get-deleted", getDeletedOrders);
+router.get("/orders/get-deleted", getDeletedOrders);
 router.get("/order/profit-by-order-item", findProfitByOrderItem);
 router.get("/order_item/profit-by-order-item", profitByOrderItem);
 router.get(
