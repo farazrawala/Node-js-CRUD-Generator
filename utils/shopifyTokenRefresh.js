@@ -172,13 +172,19 @@ async function loadFreshShopifyIntegration(integration, integrationId = null) {
 /**
  * If access token was stored under `secret`, copy it into `token` once.
  */
+/** Shopify client-credentials tokens are treated as valid for 12 hours from issue/repair. */
+function buildShopifyTokenExpiry(fromDate = new Date()) {
+  return new Date(fromDate.getTime() + 12 * 60 * 60 * 1000);
+}
+
 async function repairMisfiledShopifyAccessToken(integrationId, accessToken) {
   if (!integrationId || !accessToken) return false;
+  const token_expiry = buildShopifyTokenExpiry();
   const updated = await Integration.findByIdAndUpdate(
     integrationId,
-    { $set: { token: accessToken } },
+    { $set: { token: accessToken, token_expiry } },
     { new: true },
-  ).select("_id token");
+  ).select("_id token token_expiry");
   return Boolean(updated);
 }
 
@@ -283,6 +289,7 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
 
   // Recover from misfiled Admin API token in `secret`.
   if (resolved.secretHeldAccessToken && resolved.accessToken) {
+    const token_expiry = buildShopifyTokenExpiry();
     if (id) {
       await repairMisfiledShopifyAccessToken(id, resolved.accessToken);
       console.warn(
@@ -293,10 +300,12 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
       access_token: resolved.accessToken,
       scope: null,
       expires_in: null,
+      token_expiry,
       repaired_from_secret: true,
       integration: {
         ...fresh,
         token: resolved.accessToken,
+        token_expiry,
       },
     };
   }
@@ -350,12 +359,14 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
     throw new Error("Shopify token refresh returned no access_token.");
   }
 
+  const token_expiry = buildShopifyTokenExpiry();
+
   if (id) {
     const updated = await Integration.findByIdAndUpdate(
       id,
-      { $set: { token: newAccessToken } },
+      { $set: { token: newAccessToken, token_expiry } },
       { new: true },
-    ).select("_id token");
+    ).select("_id token token_expiry");
     if (!updated) {
       throw new Error(
         `Shopify token refresh succeeded but integration ${id} was not found to update.`,
@@ -367,9 +378,11 @@ async function refreshShopifyAccessToken(integration, integrationId = null) {
     access_token: newAccessToken,
     scope: result.data.scope || null,
     expires_in: result.data.expires_in || null,
+    token_expiry,
     integration: {
       ...fresh,
       token: newAccessToken,
+      token_expiry,
     },
   };
 }
@@ -383,4 +396,5 @@ module.exports = {
   loadFreshShopifyIntegration,
   repairMisfiledShopifyAccessToken,
   refreshShopifyAccessToken,
+  buildShopifyTokenExpiry,
 };

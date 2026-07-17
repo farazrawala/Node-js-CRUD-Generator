@@ -50,6 +50,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
+    token_expiry: {
+      type: Date,
+      default: null,
+      field_name: "Token Expiry",
+    },
     description: {
       type: String,
       required: true,

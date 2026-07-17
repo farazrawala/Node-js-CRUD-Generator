@@ -2507,8 +2507,9 @@ function buildVariantDescription(baseDescription, attributes = []) {
       // move it to `token` so sync_product can use it.
       if (secretLooksLikeAccessToken && !isShopifyAccessToken(overrideSecret) && !overrideSecret) {
         const accessToken = resolved.accessToken || String(integration.secret).trim();
+        const token_expiry = new Date(Date.now() + 12 * 60 * 60 * 1000);
         await Integration.findByIdAndUpdate(integrationId, {
-          $set: { token: accessToken },
+          $set: { token: accessToken, token_expiry },
         });
 
         const masked =
@@ -2526,6 +2527,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
             token_masked: masked,
             scope: null,
             expires_in: null,
+            token_expiry,
             grant_type: null,
             repaired_from_secret: true,
           },
@@ -2564,6 +2566,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
           token_masked: masked,
           scope: result.scope || null,
           expires_in: result.expires_in || null,
+          token_expiry: result.token_expiry || null,
           grant_type: "client_credentials",
           repaired_from_secret: Boolean(result.repaired_from_secret),
         },
@@ -2649,8 +2652,9 @@ function buildVariantDescription(baseDescription, attributes = []) {
           ) {
             const accessToken =
               resolved.accessToken || String(integration.secret).trim();
+            const token_expiry = new Date(Date.now() + 12 * 60 * 60 * 1000);
             await Integration.findByIdAndUpdate(integrationId, {
-              $set: { token: accessToken },
+              $set: { token: accessToken, token_expiry },
             });
             repaired.push({
               integration_id: integrationId,
@@ -2660,6 +2664,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
                 accessToken.length > 8 ?
                   `${accessToken.slice(0, 6)}…${accessToken.slice(-4)}`
                 : "[set]",
+              token_expiry,
               note: "secret held access token; copied to token (no client_credentials)",
             });
             continue;
@@ -2700,6 +2705,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
               : "[set]",
             scope: result.scope || null,
             expires_in: result.expires_in || null,
+            token_expiry: result.token_expiry || null,
             repaired_from_secret: Boolean(result.repaired_from_secret),
           });
         } catch (err) {
