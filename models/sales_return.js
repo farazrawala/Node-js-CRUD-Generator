@@ -35,16 +35,7 @@ async function getNextSequence(name) {
   return counter.seq;
 }
 
-/** Numeric suffix from standard tenant format `SR-####`. */
-function parseSrNumericSuffix(salesReturnNo) {
-  const m = String(salesReturnNo ?? "")
-    .trim()
-    .match(/^SR-(\d+)$/i);
-  if (!m) return 0;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
+/** Highest `SR-####` suffix for this company (includes soft-deleted so numbers are never reused). */
 async function getMaxSalesReturnSeqForCompany(companyId) {
   if (!companyId) return 0;
   const cid =
@@ -52,20 +43,33 @@ async function getMaxSalesReturnSeqForCompany(companyId) {
       companyId
     : new mongoose.Types.ObjectId(String(companyId));
   const SalesReturn = mongoose.model("sales_return");
-  const rows = await SalesReturn.find({
-    company_id: cid,
-    deletedAt: null,
-    sales_return_no: /^SR-\d+$/i,
-  })
-    .select("sales_return_no")
-    .lean();
-  let max = 0;
-  for (const row of rows) {
-    max = Math.max(max, parseSrNumericSuffix(row.sales_return_no));
-  }
-  return max;
+  const [row] = await SalesReturn.aggregate([
+    {
+      $match: {
+        company_id: cid,
+        sales_return_no: { $regex: /^SR-\d+$/i },
+      },
+    },
+    {
+      $project: {
+        seq: {
+          $convert: {
+            input: {
+              $arrayElemAt: [{ $split: ["$sales_return_no", "-"] }, 1],
+            },
+            to: "int",
+            onError: 0,
+            onNull: 0,
+          },
+        },
+      },
+    },
+    { $group: { _id: null, maxSeq: { $max: "$seq" } } },
+  ]);
+  return row?.maxSeq || 0;
 }
 
+/** Soft-deleted SRs count toward max (delete SR-008 → next is SR-009). */
 async function allocateSalesReturnNoForCompany(companyId) {
   const counterKey =
     companyId ?
@@ -545,7 +549,6 @@ modelSchema.pre("save", async function (next) {
         const exists = await SalesReturn.exists({
           company_id: this.company_id,
           sales_return_no: candidate,
-          deletedAt: null,
         });
         if (!exists) {
           this.sales_return_no = candidate;

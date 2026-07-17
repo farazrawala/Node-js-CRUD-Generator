@@ -35,16 +35,7 @@ async function getNextSequence(name) {
   return counter.seq;
 }
 
-/** Numeric suffix from standard tenant format `PR-####`. */
-function parsePrNumericSuffix(purchaseReturnNo) {
-  const m = String(purchaseReturnNo ?? "")
-    .trim()
-    .match(/^PR-(\d+)$/i);
-  if (!m) return 0;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
+/** Highest `PR-####` suffix for this company (includes soft-deleted so numbers are never reused). */
 async function getMaxPurchaseReturnSeqForCompany(companyId) {
   if (!companyId) return 0;
   const cid =
@@ -52,20 +43,33 @@ async function getMaxPurchaseReturnSeqForCompany(companyId) {
       companyId
     : new mongoose.Types.ObjectId(String(companyId));
   const PurchaseReturn = mongoose.model("purchase_return");
-  const rows = await PurchaseReturn.find({
-    company_id: cid,
-    deletedAt: null,
-    purchase_return_no: /^PR-\d+$/i,
-  })
-    .select("purchase_return_no")
-    .lean();
-  let max = 0;
-  for (const row of rows) {
-    max = Math.max(max, parsePrNumericSuffix(row.purchase_return_no));
-  }
-  return max;
+  const [row] = await PurchaseReturn.aggregate([
+    {
+      $match: {
+        company_id: cid,
+        purchase_return_no: { $regex: /^PR-\d+$/i },
+      },
+    },
+    {
+      $project: {
+        seq: {
+          $convert: {
+            input: {
+              $arrayElemAt: [{ $split: ["$purchase_return_no", "-"] }, 1],
+            },
+            to: "int",
+            onError: 0,
+            onNull: 0,
+          },
+        },
+      },
+    },
+    { $group: { _id: null, maxSeq: { $max: "$seq" } } },
+  ]);
+  return row?.maxSeq || 0;
 }
 
+/** Soft-deleted PRs count toward max (delete PR-008 → next is PR-009). */
 async function allocatePurchaseReturnNoForCompany(companyId) {
   const counterKey =
     companyId ?
@@ -551,7 +555,6 @@ modelSchema.pre("save", async function (next) {
         const exists = await PurchaseReturn.exists({
           company_id: this.company_id,
           purchase_return_no: candidate,
-          deletedAt: null,
         });
         if (!exists) {
           this.purchase_return_no = candidate;
