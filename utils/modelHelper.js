@@ -1530,6 +1530,26 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       });
     }
 
+    // Multipart/form-data always sends strings — coerce Boolean schema fields.
+    Object.keys(updateData).forEach((key) => {
+      const fieldConfig = modelSchema[key];
+      if (!fieldConfig || fieldConfig.type !== Boolean) return;
+      const value = updateData[key];
+      if (value === true || value === "true" || value === "1" || value === 1) {
+        updateData[key] = true;
+      } else if (
+        value === false ||
+        value === "false" ||
+        value === "0" ||
+        value === 0 ||
+        value === ""
+      ) {
+        updateData[key] = false;
+      } else {
+        updateData[key] = Boolean(value);
+      }
+    });
+
     // Process map fields (e.g., permissions[integration][view]) — same as handleGenericCreate
     Object.keys(req.body).forEach((key) => {
       const mapMatch = key.match(/^(.+)\[([^\]]+)\]\[([^\]]+)\]$/);

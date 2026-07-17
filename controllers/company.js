@@ -361,8 +361,8 @@ async function getMyBranches(req, res) {
 /**
  * GET `/api/company/get-all-for-listing`
  * Other active companies (not the authenticated tenant) with
- * `bigcommerce_settings.show_store_for_listing === true`
- * (`bigcommerce_settings` is a JSON string on company).
+ * `display_store_on_bigcommerce === true`
+ * (legacy: also matches `bigcommerce_settings.show_store_for_listing`).
  */
 async function getAllForListing(req, res) {
   const currentCompanyId = tenantCompanyIdFromUser(req.user);
@@ -380,10 +380,15 @@ async function getAllForListing(req, res) {
       deletedAt: null,
       _id: { $ne: currentCompanyId },
       company_id: { $ne: currentCompanyId },
-      // Stored as JSON string — match show_store_for_listing: true
-      bigcommerce_settings: {
-        $regex: /"show_store_for_listing"\s*:\s*true/,
-      },
+      $or: [
+        { display_store_on_bigcommerce: true },
+        // Legacy JSON flag inside bigcommerce_settings string
+        {
+          bigcommerce_settings: {
+            $regex: /"show_store_for_listing"\s*:\s*true/,
+          },
+        },
+      ],
     },
     excludeFields: [],
     populate: [],

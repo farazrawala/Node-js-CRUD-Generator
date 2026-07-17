@@ -107,6 +107,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "BigCommerce Settings",
     },
+    display_store_on_bigcommerce: {
+      type: Boolean,
+      field_name: "Display Store on BigCommerce",
+      default: false,
+    },
     /** Product Settings */
     product_settings: {
       // JSON string of product feature flags. Defaults to allowing oversell
