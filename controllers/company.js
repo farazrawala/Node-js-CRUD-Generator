@@ -361,8 +361,7 @@ async function getMyBranches(req, res) {
 /**
  * GET `/api/company/get-all-for-listing`
  * Other active companies (not the authenticated tenant) with
- * `display_store_on_bigcommerce === true`
- * (legacy: also matches `bigcommerce_settings.show_store_for_listing`).
+ * `display_store_on_bigcommerce === true`.
  */
 async function getAllForListing(req, res) {
   const currentCompanyId = tenantCompanyIdFromUser(req.user);
@@ -380,15 +379,7 @@ async function getAllForListing(req, res) {
       deletedAt: null,
       _id: { $ne: currentCompanyId },
       company_id: { $ne: currentCompanyId },
-      $or: [
-        { display_store_on_bigcommerce: true },
-        // Legacy JSON flag inside bigcommerce_settings string
-        {
-          bigcommerce_settings: {
-            $regex: /"show_store_for_listing"\s*:\s*true/,
-          },
-        },
-      ],
+      display_store_on_bigcommerce: true,
     },
     excludeFields: [],
     populate: [],
@@ -500,7 +491,11 @@ async function listAllCache(req, res) {
       ...data,
     });
   } catch (error) {
-    console.error("❌ listAllCache:", error?.message || error, error?.stack || "");
+    console.error(
+      "❌ listAllCache:",
+      error?.message || error,
+      error?.stack || "",
+    );
     return res.status(500).json({
       success: false,
       status: 500,
@@ -537,7 +532,11 @@ async function listAllQueues(req, res) {
       ...data,
     });
   } catch (error) {
-    console.error("❌ listAllQueues:", error?.message || error, error?.stack || "");
+    console.error(
+      "❌ listAllQueues:",
+      error?.message || error,
+      error?.stack || "",
+    );
     return res.status(500).json({
       success: false,
       status: 500,
@@ -698,7 +697,11 @@ function parseDraftPayload(body) {
       throw err;
     }
   }
-  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) {
+  if (
+    payload == null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
     const err = new Error("payload is required and must be an object");
     err.statusCode = 400;
     throw err;
