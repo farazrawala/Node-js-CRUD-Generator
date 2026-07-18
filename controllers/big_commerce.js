@@ -657,8 +657,10 @@ const PARTNER_PRODUCT_SELECT = [
 
 /**
  * GET /big-commerce/products/:companyId
- * After approval: requester (A) can browse target (B) products — read-only.
- * Validation: only when connection.status === "approved"; otherwise 403 Forbidden.
+ * Browse another company's active products when:
+ * - connection.status === "approved", OR
+ * - target company has display_store_on_bigcommerce === true (public marketplace store)
+ * Own-company catalog: use product/get-all-active-pos instead.
  */
 async function getPartnerProducts(req, res) {
   try {
@@ -677,7 +679,21 @@ async function getPartnerProducts(req, res) {
     }
 
     const connection = await findBrowseConnection(myCompanyId, partnerCompanyId);
-    if (!connection || connection.status !== "approved") {
+    const approved = connection && connection.status === "approved";
+
+    let marketplaceListed = false;
+    if (!approved) {
+      const partnerCompany = await Company.findOne({
+        _id: partnerCompanyId,
+        status: "active",
+        deletedAt: null,
+      })
+        .select("display_store_on_bigcommerce")
+        .lean();
+      marketplaceListed = Boolean(partnerCompany?.display_store_on_bigcommerce);
+    }
+
+    if (!approved && !marketplaceListed) {
       return jsonError(res, 403, "Forbidden");
     }
 
@@ -715,6 +731,18 @@ async function getPartnerProducts(req, res) {
       ];
     }
 
+    const categoryId = coalesceObjectId(
+      req.query.category_id ?? req.query.categoryId,
+    );
+    if (categoryId) {
+      filter.category_id = categoryId;
+    }
+
+    const brandId = coalesceObjectId(req.query.brand_id ?? req.query.brandId);
+    if (brandId) {
+      filter.brand_id = brandId;
+    }
+
     const [data, total] = await Promise.all([
       Product.find(filter)
         .select(PARTNER_PRODUCT_SELECT)
@@ -729,8 +757,8 @@ async function getPartnerProducts(req, res) {
 
     return jsonSuccess(res, 200, data, null, {
       partner_company_id: partnerCompanyId,
-      connection_id: connection._id,
-      access: "read_only",
+      connection_id: connection?._id || null,
+      access: approved ? "read_only" : "marketplace",
       total,
       limit,
       skip,
