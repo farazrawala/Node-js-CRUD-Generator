@@ -783,18 +783,30 @@ async function getPartnerProducts(req, res) {
 
     // Include branch companies so catalog isn't limited to the root row only.
     const companyIds = await resolveMarketplaceCatalogCompanyIds(partnerCompanyId);
+    const companyIdValues = [];
+    for (const id of companyIds) {
+      if (!id) continue;
+      companyIdValues.push(id);
+      const asString = String(id);
+      if (!companyIdValues.some((v) => String(v) === asString)) {
+        companyIdValues.push(asString);
+      }
+    }
 
+    // Same baseline as `product/get-all-active-pos` (no parent-only filter).
+    // Parent-only was hiding most of the catalog when variations/legacy rows exist.
     const filter = {
-      company_id: companyIds.length === 1 ? companyIds[0] : { $in: companyIds },
+      company_id:
+        companyIdValues.length === 1 ? companyIdValues[0] : { $in: companyIdValues },
       status: "active",
-      ...activeNotDeletedCriteria(),
+      deletedAt: null,
     };
 
-    if (req.query.include_variations !== "true") {
+    // Opt-in: parents only (POS-style parent list).
+    if (req.query.parents_only === "true" || req.query.parents_only === "1") {
       filter.$and = [
         ...(filter.$and || []),
         {
-          // Match POS parent-product lists — do not query `""` (ObjectId cast error).
           $or: [
             { parent_product_id: null },
             { parent_product_id: { $exists: false } },
