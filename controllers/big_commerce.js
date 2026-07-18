@@ -794,10 +794,10 @@ async function getPartnerProducts(req, res) {
       filter.$and = [
         ...(filter.$and || []),
         {
+          // Match POS parent-product lists — do not query `""` (ObjectId cast error).
           $or: [
             { parent_product_id: null },
             { parent_product_id: { $exists: false } },
-            { parent_product_id: "" },
           ],
         },
       ];
