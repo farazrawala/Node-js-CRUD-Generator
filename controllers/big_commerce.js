@@ -636,6 +636,43 @@ async function findBrowseConnection(myCompanyId, partnerCompanyId) {
   }).lean();
 }
 
+/**
+ * Root company + active branches — products may be stored on either.
+ */
+async function resolveMarketplaceCatalogCompanyIds(rootCompanyId) {
+  const rootId = coalesceObjectId(rootCompanyId);
+  if (!rootId) return [];
+
+  const ids = [rootId];
+  const branches = await Company.find({
+    company_id: rootId,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("_id")
+    .lean();
+
+  for (const branch of branches) {
+    const branchId = coalesceObjectId(branch?._id);
+    if (branchId) ids.push(branchId);
+  }
+
+  // If the store id is itself a branch, also include its parent tenant catalog.
+  const self = await Company.findOne({
+    _id: rootId,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("company_id")
+    .lean();
+  const parentId = coalesceObjectId(self?.company_id);
+  if (parentId && !ids.some((id) => String(id) === String(parentId))) {
+    ids.push(parentId);
+  }
+
+  return ids;
+}
+
 /** Public catalog fields only — no cost/internal fields; read-only browse. */
 const PARTNER_PRODUCT_SELECT = [
   "_id",
@@ -654,6 +691,53 @@ const PARTNER_PRODUCT_SELECT = [
   "parent_product_id",
   "createdAt",
 ].join(" ");
+
+/**
+ * GET /big-commerce/company/:companyId
+ * Marketplace company profile (not tenant-scoped company/get).
+ * Allowed when:
+ * - viewing own company, OR
+ * - connection.status === "approved", OR
+ * - target has display_store_on_bigcommerce === true
+ */
+async function getPartnerCompany(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Forbidden");
+    }
+
+    const partnerCompanyId = coalesceObjectId(req.params.companyId);
+    if (!partnerCompanyId || !isValidObjectId(partnerCompanyId)) {
+      return jsonError(res, 400, "Invalid company id");
+    }
+
+    const company = await Company.findOne({
+      _id: partnerCompanyId,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (!company) {
+      return jsonError(res, 404, "Company not found");
+    }
+
+    const isOwn = String(myCompanyId) === String(partnerCompanyId);
+    if (!isOwn) {
+      const connection = await findBrowseConnection(myCompanyId, partnerCompanyId);
+      const approved = connection && connection.status === "approved";
+      const marketplaceListed = Boolean(company.display_store_on_bigcommerce);
+      if (!approved && !marketplaceListed) {
+        return jsonError(res, 403, "Forbidden");
+      }
+    }
+
+    return jsonSuccess(res, 200, company);
+  } catch (error) {
+    console.error("[big_commerce] getPartnerCompany:", error);
+    return jsonError(res, 500, error.message || "Failed to load company");
+  }
+}
 
 /**
  * GET /big-commerce/products/:companyId
@@ -697,8 +781,11 @@ async function getPartnerProducts(req, res) {
       return jsonError(res, 403, "Forbidden");
     }
 
+    // Include branch companies so catalog isn't limited to the root row only.
+    const companyIds = await resolveMarketplaceCatalogCompanyIds(partnerCompanyId);
+
     const filter = {
-      company_id: partnerCompanyId,
+      company_id: companyIds.length === 1 ? companyIds[0] : { $in: companyIds },
       status: "active",
       ...activeNotDeletedCriteria(),
     };
@@ -710,6 +797,7 @@ async function getPartnerProducts(req, res) {
           $or: [
             { parent_product_id: null },
             { parent_product_id: { $exists: false } },
+            { parent_product_id: "" },
           ],
         },
       ];
@@ -757,6 +845,7 @@ async function getPartnerProducts(req, res) {
 
     return jsonSuccess(res, 200, data, null, {
       partner_company_id: partnerCompanyId,
+      catalog_company_ids: companyIds.map((id) => String(id)),
       connection_id: connection?._id || null,
       access: approved ? "read_only" : "marketplace",
       total,
@@ -781,5 +870,6 @@ module.exports = {
   cancelConnection,
   disconnectConnection,
   listConnectionLogs,
+  getPartnerCompany,
   getPartnerProducts,
 };

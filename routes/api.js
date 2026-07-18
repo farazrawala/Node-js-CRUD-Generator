@@ -260,6 +260,7 @@ const {
   cancelConnection,
   disconnectConnection,
   listConnectionLogs,
+  getPartnerCompany,
   getPartnerProducts,
 } = require("../controllers/big_commerce");
 
@@ -527,6 +528,7 @@ router.post("/big-commerce/connection/cancel/:id", cancelConnection);
 router.post("/big-commerce/request/:id/cancel", cancelConnection);
 router.delete("/big-commerce/request/:id", disconnectConnection);
 router.get("/big-commerce/connection/:id/logs", listConnectionLogs);
+router.get("/big-commerce/company/:companyId", getPartnerCompany);
 router.get("/big-commerce/products/:companyId", getPartnerProducts);
 
 // Product warehouse inventory management routes

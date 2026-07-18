@@ -6,6 +6,7 @@ const {
   handleGenericUpdate,
   handleGenericGetById,
   handleGenericGetAll,
+  applyIncludeExcludeIdQueryFilter,
   coalesceObjectId,
 } = require("../utils/modelHelper");
 const {
@@ -373,14 +374,18 @@ async function getAllForListing(req, res) {
     });
   }
 
+  let filter = {
+    status: "active",
+    deletedAt: null,
+    _id: { $ne: currentCompanyId },
+    company_id: { $ne: currentCompanyId },
+    display_store_on_bigcommerce: true,
+  };
+  // `include_id` lets storefronts resolve one listed company without scanning pages.
+  filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+
   const response = await handleGenericGetAll(req, "company", {
-    filter: {
-      status: "active",
-      deletedAt: null,
-      _id: { $ne: currentCompanyId },
-      company_id: { $ne: currentCompanyId },
-      display_store_on_bigcommerce: true,
-    },
+    filter,
     excludeFields: [],
     populate: [],
     sort: { company_name: 1 },
