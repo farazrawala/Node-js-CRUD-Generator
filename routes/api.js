@@ -262,6 +262,8 @@ const {
   listConnectionLogs,
   getPartnerCompany,
   getPartnerProducts,
+  getPartnerCategories,
+  getPartnerBrands,
 } = require("../controllers/big_commerce");
 
 // Note: Company routes are now handled dynamically
@@ -530,6 +532,8 @@ router.delete("/big-commerce/request/:id", disconnectConnection);
 router.get("/big-commerce/connection/:id/logs", listConnectionLogs);
 router.get("/big-commerce/company/:companyId", getPartnerCompany);
 router.get("/big-commerce/products/:companyId", getPartnerProducts);
+router.get("/big-commerce/categories/:companyId", getPartnerCategories);
+router.get("/big-commerce/brands/:companyId", getPartnerBrands);
 
 // Product warehouse inventory management routes
 // router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);

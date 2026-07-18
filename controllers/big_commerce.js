@@ -3,6 +3,8 @@ const CompanyConnection = require("../models/company_connection");
 const CompanyConnectionLog = require("../models/company_connection_log");
 const Company = require("../models/company");
 const Product = require("../models/product");
+const Category = require("../models/category");
+const Brand = require("../models/brands");
 const {
   coalesceObjectId,
   activeNotDeletedCriteria,
@@ -673,6 +675,76 @@ async function resolveMarketplaceCatalogCompanyIds(rootCompanyId) {
   return ids;
 }
 
+/** ObjectId + string forms for company_id queries (legacy string ids). */
+function companyIdQueryValues(companyIds) {
+  const values = [];
+  for (const id of companyIds) {
+    if (!id) continue;
+    values.push(id);
+    const asString = String(id);
+    if (!values.some((v) => String(v) === asString)) {
+      values.push(asString);
+    }
+  }
+  return values;
+}
+
+/**
+ * Shared access check for marketplace browse of another (or own) company.
+ * @returns {Promise<{ ok: true, myCompanyId, partnerCompanyId, approved, access } | { ok: false, status, message }>}
+ */
+async function resolveMarketplaceBrowseAccess(req, companyIdParam) {
+  const myCompanyId = tenantCompanyId(req);
+  if (!myCompanyId) {
+    return { ok: false, status: 403, message: "Forbidden" };
+  }
+
+  const partnerCompanyId = coalesceObjectId(companyIdParam);
+  if (!partnerCompanyId || !isValidObjectId(partnerCompanyId)) {
+    return { ok: false, status: 400, message: "Invalid company id" };
+  }
+
+  if (String(myCompanyId) === String(partnerCompanyId)) {
+    return {
+      ok: true,
+      myCompanyId,
+      partnerCompanyId,
+      approved: true,
+      access: "own",
+      isOwn: true,
+    };
+  }
+
+  const connection = await findBrowseConnection(myCompanyId, partnerCompanyId);
+  const approved = connection && connection.status === "approved";
+
+  let marketplaceListed = false;
+  if (!approved) {
+    const partnerCompany = await Company.findOne({
+      _id: partnerCompanyId,
+      status: "active",
+      deletedAt: null,
+    })
+      .select("display_store_on_bigcommerce")
+      .lean();
+    marketplaceListed = Boolean(partnerCompany?.display_store_on_bigcommerce);
+  }
+
+  if (!approved && !marketplaceListed) {
+    return { ok: false, status: 403, message: "Forbidden" };
+  }
+
+  return {
+    ok: true,
+    myCompanyId,
+    partnerCompanyId,
+    connection,
+    approved: Boolean(approved),
+    access: approved ? "read_only" : "marketplace",
+    isOwn: false,
+  };
+}
+
 /** Public catalog fields only — no cost/internal fields; read-only browse. */
 const PARTNER_PRODUCT_SELECT = [
   "_id",
@@ -748,53 +820,22 @@ async function getPartnerCompany(req, res) {
  */
 async function getPartnerProducts(req, res) {
   try {
-    const myCompanyId = tenantCompanyId(req);
-    if (!myCompanyId) {
-      return jsonError(res, 403, "Forbidden");
+    const access = await resolveMarketplaceBrowseAccess(req, req.params.companyId);
+    if (!access.ok) {
+      return jsonError(res, access.status, access.message);
     }
 
-    const partnerCompanyId = coalesceObjectId(req.params.companyId);
-    if (!partnerCompanyId || !isValidObjectId(partnerCompanyId)) {
-      return jsonError(res, 400, "Invalid partner company id");
-    }
-
-    if (String(myCompanyId) === String(partnerCompanyId)) {
+    if (access.isOwn) {
       return jsonError(res, 400, "Use product endpoints to list your own catalog");
     }
 
-    const connection = await findBrowseConnection(myCompanyId, partnerCompanyId);
-    const approved = connection && connection.status === "approved";
-
-    let marketplaceListed = false;
-    if (!approved) {
-      const partnerCompany = await Company.findOne({
-        _id: partnerCompanyId,
-        status: "active",
-        deletedAt: null,
-      })
-        .select("display_store_on_bigcommerce")
-        .lean();
-      marketplaceListed = Boolean(partnerCompany?.display_store_on_bigcommerce);
-    }
-
-    if (!approved && !marketplaceListed) {
-      return jsonError(res, 403, "Forbidden");
-    }
+    const { partnerCompanyId, connection, approved, access: accessMode } = access;
 
     // Include branch companies so catalog isn't limited to the root row only.
     const companyIds = await resolveMarketplaceCatalogCompanyIds(partnerCompanyId);
-    const companyIdValues = [];
-    for (const id of companyIds) {
-      if (!id) continue;
-      companyIdValues.push(id);
-      const asString = String(id);
-      if (!companyIdValues.some((v) => String(v) === asString)) {
-        companyIdValues.push(asString);
-      }
-    }
+    const companyIdValues = companyIdQueryValues(companyIds);
 
     // Same baseline as `product/get-all-active-pos` (no parent-only filter).
-    // Parent-only was hiding most of the catalog when variations/legacy rows exist.
     const filter = {
       company_id:
         companyIdValues.length === 1 ? companyIdValues[0] : { $in: companyIdValues },
@@ -859,7 +900,7 @@ async function getPartnerProducts(req, res) {
       partner_company_id: partnerCompanyId,
       catalog_company_ids: companyIds.map((id) => String(id)),
       connection_id: connection?._id || null,
-      access: approved ? "read_only" : "marketplace",
+      access: accessMode,
       total,
       limit,
       skip,
@@ -867,6 +908,78 @@ async function getPartnerProducts(req, res) {
   } catch (error) {
     console.error("[big_commerce] getPartnerProducts:", error);
     return jsonError(res, 500, error.message || "Failed to load partner products");
+  }
+}
+
+/**
+ * GET /big-commerce/categories/:companyId
+ * Categories belonging to the store company (not the viewer tenant).
+ */
+async function getPartnerCategories(req, res) {
+  try {
+    const access = await resolveMarketplaceBrowseAccess(req, req.params.companyId);
+    if (!access.ok) {
+      return jsonError(res, access.status, access.message);
+    }
+
+    const companyIds = await resolveMarketplaceCatalogCompanyIds(access.partnerCompanyId);
+    const companyIdValues = companyIdQueryValues(companyIds);
+    const filter = {
+      company_id:
+        companyIdValues.length === 1 ? companyIdValues[0] : { $in: companyIdValues },
+      status: "active",
+      deletedAt: null,
+    };
+
+    const data = await Category.find(filter)
+      .select("_id name slug description image icon color sort_order parent_id company_id isActive status")
+      .sort({ sort_order: 1, name: 1 })
+      .lean();
+
+    return jsonSuccess(res, 200, data, null, {
+      partner_company_id: access.partnerCompanyId,
+      total: data.length,
+      access: access.access,
+    });
+  } catch (error) {
+    console.error("[big_commerce] getPartnerCategories:", error);
+    return jsonError(res, 500, error.message || "Failed to load categories");
+  }
+}
+
+/**
+ * GET /big-commerce/brands/:companyId
+ * Brands belonging to the store company (not the viewer tenant).
+ */
+async function getPartnerBrands(req, res) {
+  try {
+    const access = await resolveMarketplaceBrowseAccess(req, req.params.companyId);
+    if (!access.ok) {
+      return jsonError(res, access.status, access.message);
+    }
+
+    const companyIds = await resolveMarketplaceCatalogCompanyIds(access.partnerCompanyId);
+    const companyIdValues = companyIdQueryValues(companyIds);
+    const filter = {
+      company_id:
+        companyIdValues.length === 1 ? companyIdValues[0] : { $in: companyIdValues },
+      status: "active",
+      deletedAt: null,
+    };
+
+    const data = await Brand.find(filter)
+      .select("_id name slug description image parent_id company_id status")
+      .sort({ name: 1 })
+      .lean();
+
+    return jsonSuccess(res, 200, data, null, {
+      partner_company_id: access.partnerCompanyId,
+      total: data.length,
+      access: access.access,
+    });
+  } catch (error) {
+    console.error("[big_commerce] getPartnerBrands:", error);
+    return jsonError(res, 500, error.message || "Failed to load brands");
   }
 }
 
@@ -884,4 +997,6 @@ module.exports = {
   listConnectionLogs,
   getPartnerCompany,
   getPartnerProducts,
+  getPartnerCategories,
+  getPartnerBrands,
 };
