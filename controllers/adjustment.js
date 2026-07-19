@@ -450,7 +450,26 @@ async function loadCompanyDefaults(adjustmentReq, session = null) {
   };
 }
 
-async function resolveAdjustmentLineAmount(record, session = null) {
+/**
+ * Unit cost for adjustment GL / inventory movement.
+ * Prefer product.wholesale_price; then body override; then product_price.
+ * Body keys: unit_cost | cost | wholesale_price
+ */
+function resolveAdjustmentUnitCostFromBody(body) {
+  if (!body || typeof body !== "object") return null;
+  for (const key of ["unit_cost", "cost", "wholesale_price"]) {
+    if (body[key] == null || body[key] === "") continue;
+    const n = Number(body[key]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+async function resolveAdjustmentLineAmount(
+  record,
+  session = null,
+  adjustmentReq = null,
+) {
   const qty = Number(record?.quantity ?? 0);
   if (!Number.isFinite(qty) || qty <= 0) {
     const err = new Error("Adjustment quantity must be greater than zero");
@@ -479,7 +498,11 @@ async function resolveAdjustmentLineAmount(record, session = null) {
     String(record.product_id || "").trim() ||
     "product";
 
-  const unitCost = Number(product.wholesale_price ?? 0);
+  const wholesale = Number(product.wholesale_price ?? 0);
+  const retail = Number(product.product_price ?? 0);
+  let unitCost = Number.isFinite(wholesale) ? wholesale : NaN;
+  let costSource = "wholesale_price";
+
   if (!Number.isFinite(unitCost) || unitCost < 0) {
     const err = new Error(
       `Product "${productLabel}" has an invalid wholesale_price. Set a cost on the product before creating an adjustment.`,
@@ -487,12 +510,25 @@ async function resolveAdjustmentLineAmount(record, session = null) {
     err.statusCode = 400;
     throw err;
   }
+
   if (unitCost === 0) {
-    const err = new Error(
-      `Product "${productLabel}" has wholesale_price of 0. Set wholesale_price (cost) on the product before creating an adjustment, or receive stock via purchase order to update cost.`,
+    const bodyCost = resolveAdjustmentUnitCostFromBody(
+      adjustmentReq?.body || record,
     );
-    err.statusCode = 400;
-    throw err;
+    if (bodyCost != null) {
+      unitCost = bodyCost;
+      costSource = "body";
+    } else if (Number.isFinite(retail) && retail > 0) {
+      // Frontend often has no unit_cost field — use selling price as seed cost.
+      unitCost = retail;
+      costSource = "product_price";
+    } else {
+      const err = new Error(
+        `Product "${productLabel}" has wholesale_price of 0 and product_price of 0. Set wholesale_price (cost) on the product, pass unit_cost in the adjustment body, or receive stock via purchase order to update cost.`,
+      );
+      err.statusCode = 400;
+      throw err;
+    }
   }
 
   const amount = Math.round(qty * unitCost * 100) / 100;
@@ -504,7 +540,17 @@ async function resolveAdjustmentLineAmount(record, session = null) {
     throw err;
   }
 
-  return { amount, unitCost, qty, productName };
+  // Seed product.wholesale_price when it was 0 so later PO/adjustment WAC works.
+  if (costSource === "body" || costSource === "product_price") {
+    const updateOpts = session ? { session } : {};
+    await Product.findByIdAndUpdate(
+      record.product_id,
+      { $set: { wholesale_price: unitCost } },
+      updateOpts,
+    );
+  }
+
+  return { amount, unitCost, qty, productName, costSource };
 }
 
 function buildAdjustmentGlItems(
@@ -784,7 +830,11 @@ async function postAdjustmentSideEffects(
     }
 
     step = "line_amount";
-    const lineAmount = await resolveAdjustmentLineAmount(record, session);
+    const lineAmount = await resolveAdjustmentLineAmount(
+      record,
+      session,
+      adjustmentReq,
+    );
 
     step = "inventory_movement";
     await postAdjustmentInventoryMovement(
