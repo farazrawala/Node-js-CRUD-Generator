@@ -451,6 +451,26 @@ async function loadCompanyDefaults(adjustmentReq, session = null) {
 }
 
 /**
+ * Coerce product cost fields that may be String / Decimal128 / junk on live data.
+ * Returns a finite number, or null when unusable.
+ */
+function coerceProductMoney(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "object" && value !== null) {
+    // Mongo Decimal128 / similar
+    if (typeof value.toString === "function") {
+      const fromObj = Number(String(value.toString()).trim());
+      return Number.isFinite(fromObj) ? fromObj : null;
+    }
+    return null;
+  }
+  const n = Number(
+    typeof value === "string" ? value.trim().replace(/,/g, "") : value,
+  );
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * Unit cost for adjustment GL / inventory movement.
  * Prefer product.wholesale_price; then body override; then product_price.
  * Body keys: unit_cost | cost | wholesale_price
@@ -498,18 +518,12 @@ async function resolveAdjustmentLineAmount(
     String(record.product_id || "").trim() ||
     "product";
 
-  const wholesale = Number(product.wholesale_price ?? 0);
-  const retail = Number(product.product_price ?? 0);
-  let unitCost = Number.isFinite(wholesale) ? wholesale : NaN;
+  const wholesaleRaw = coerceProductMoney(product.wholesale_price);
+  const retailRaw = coerceProductMoney(product.product_price);
+  // Treat missing / non-numeric / negative wholesale as 0 so body/retail fallbacks apply.
+  let unitCost =
+    wholesaleRaw != null && wholesaleRaw >= 0 ? wholesaleRaw : 0;
   let costSource = "wholesale_price";
-
-  if (!Number.isFinite(unitCost) || unitCost < 0) {
-    const err = new Error(
-      `Product "${productLabel}" has an invalid wholesale_price. Set a cost on the product before creating an adjustment.`,
-    );
-    err.statusCode = 400;
-    throw err;
-  }
 
   if (unitCost === 0) {
     const bodyCost = resolveAdjustmentUnitCostFromBody(
@@ -518,9 +532,9 @@ async function resolveAdjustmentLineAmount(
     if (bodyCost != null) {
       unitCost = bodyCost;
       costSource = "body";
-    } else if (Number.isFinite(retail) && retail > 0) {
+    } else if (retailRaw != null && retailRaw > 0) {
       // Frontend often has no unit_cost field — use selling price as seed cost.
-      unitCost = retail;
+      unitCost = retailRaw;
       costSource = "product_price";
     } else {
       const err = new Error(
@@ -540,7 +554,7 @@ async function resolveAdjustmentLineAmount(
     throw err;
   }
 
-  // Seed product.wholesale_price when it was 0 so later PO/adjustment WAC works.
+  // Seed product.wholesale_price when it was missing/0/invalid so later PO/adjustment WAC works.
   if (costSource === "body" || costSource === "product_price") {
     const updateOpts = session ? { session } : {};
     await Product.findByIdAndUpdate(
