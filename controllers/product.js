@@ -14,6 +14,7 @@ const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
+const { generateUniqueProductBarcode } = require("../utils/fetchProductBarcode");
 const {
   logRollbackFailure,
   serializeErrorForLog,
@@ -2504,6 +2505,178 @@ async function updateStockByWarehouse(req, res) {
   }
 }
 
+/**
+ * POST/PATCH /api/product/generate-barcode/:id
+ * Generate a company-unique EAN13 barcode and save it on the product.
+ * Body optional — only product id (path) is required.
+ */
+async function productGenerateUniqueBarcode(req, res) {
+  try {
+    const productId = coalesceObjectId(
+      req.params?.id || req.body?.product_id || req.body?.id || req.query?.id,
+    );
+    if (!productId || !mongoose.Types.ObjectId.isValid(String(productId))) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "Valid product id is required",
+        error: "Valid product id is required",
+      });
+    }
+
+    const companyId = coalesceObjectId(req.user?.company_id);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
+        error: "company_id is required",
+      });
+    }
+
+    const product = await Product.findOne({
+      _id: productId,
+      company_id: companyId,
+      deletedAt: null,
+    }).select(
+      "product_name product_code sku barcode company_id wholesale_price product_price status",
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Product not found",
+        error: "Product not found",
+      });
+    }
+
+    const previousBarcode = String(product.barcode || "").trim() || null;
+    const barcode = await generateUniqueProductBarcode(companyId, {
+      excludeId: product._id,
+    });
+
+    const userId = coalesceObjectId(req.user?._id ?? req.user?.id);
+    product.barcode = barcode;
+    if (userId) product.updated_by = userId;
+    await product.save();
+
+    await invalidateProductListCache(req);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Unique barcode generated and updated",
+      data: {
+        product_id: String(product._id),
+        product_name: product.product_name,
+        previous_barcode: previousBarcode,
+        barcode,
+        company_id: String(companyId),
+      },
+    });
+  } catch (error) {
+    console.error("❌ productGenerateUniqueBarcode:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      status: error.statusCode || 500,
+      message: error.message || "Failed to generate unique barcode",
+      error: error.message || "Failed to generate unique barcode",
+    });
+  }
+}
+
+/**
+ * GET /api/product/duplicate-barcodes
+ * List barcodes that appear on more than one non-deleted product in the company.
+ */
+async function findProductsWithDuplicateBarcodes(req, res) {
+  try {
+    const companyId = coalesceObjectId(req.user?.company_id);
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
+        error: "company_id is required",
+      });
+    }
+
+    const companyOid =
+      companyId instanceof mongoose.Types.ObjectId ?
+        companyId
+      : new mongoose.Types.ObjectId(String(companyId));
+
+    const groups = await Product.aggregate([
+      {
+        $match: {
+          company_id: companyOid,
+          deletedAt: null,
+          barcode: { $exists: true, $nin: [null, ""] },
+        },
+      },
+      {
+        $addFields: {
+          barcode_normalized: {
+            $trim: { input: { $toString: { $ifNull: ["$barcode", ""] } } },
+          },
+        },
+      },
+      { $match: { barcode_normalized: { $ne: "" } } },
+      {
+        $group: {
+          _id: "$barcode_normalized",
+          count: { $sum: 1 },
+          products: {
+            $push: {
+              _id: "$_id",
+              product_name: "$product_name",
+              product_code: "$product_code",
+              sku: "$sku",
+              barcode: "$barcode",
+              status: "$status",
+              product_type: "$product_type",
+              createdAt: "$createdAt",
+            },
+          },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+      { $sort: { count: -1, _id: 1 } },
+      {
+        $project: {
+          _id: 0,
+          barcode: "$_id",
+          count: 1,
+          products: 1,
+        },
+      },
+    ]);
+
+    const duplicate_product_count = groups.reduce(
+      (sum, row) => sum + (Number(row.count) || 0),
+      0,
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      company_id: String(companyOid),
+      duplicate_barcode_count: groups.length,
+      duplicate_product_count,
+      data: groups,
+    });
+  } catch (error) {
+    console.error("❌ findProductsWithDuplicateBarcodes:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to load duplicate barcodes",
+      error: error.message || "Failed to load duplicate barcodes",
+    });
+  }
+}
+
 module.exports = {
   productCreate,
   productImportFromFile,
@@ -2512,6 +2685,8 @@ module.exports = {
   shopifyProductImportFormSchema,
   productBarcodeUpdateFromFile,
   productBarcodeUpdateFormSchema,
+  productGenerateUniqueBarcode,
+  findProductsWithDuplicateBarcodes,
   productUpdate,
   productById,
   getAllProducts,

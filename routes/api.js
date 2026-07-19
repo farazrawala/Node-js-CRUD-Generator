@@ -55,6 +55,8 @@ const {
   shopifyProductImportFormSchema,
   productBarcodeUpdateFromFile,
   productBarcodeUpdateFormSchema,
+  productGenerateUniqueBarcode,
+  findProductsWithDuplicateBarcodes,
   productUpdate,
   productById,
   getAllProducts,
@@ -409,6 +411,9 @@ router.post("/product/shopify-product-import", shopifyProductImportFromFile);
 
 router.get("/product/update-barcode-form", productBarcodeUpdateFormSchema);
 router.post("/product/update-barcode", productBarcodeUpdateFromFile);
+router.get("/product/duplicate-barcodes", findProductsWithDuplicateBarcodes);
+router.post("/product/generate-barcode/:id", productGenerateUniqueBarcode);
+router.patch("/product/generate-barcode/:id", productGenerateUniqueBarcode);
 
 router.post("/product/create", productCreate);
 router.patch("/product/update/:id", productUpdate);
