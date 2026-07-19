@@ -32,6 +32,9 @@ function displayInventoryValue(qty, wac) {
 /**
  * Replay an ordered list of ledger events from transaction #1.
  *
+ * While on-hand is negative, inbound layers freeze WAC (qty moves; avg stays).
+ * That matches `computeWeightedAverageCost` and prevents negative wholesale.
+ *
  * @param {Array<{ type: string, qty: number, unitCost?: number }>} events
  * @returns {{ qty: number, wac: number, grandTotal: number, inventoryValue: number, eventCount: number }}
  */
@@ -47,6 +50,19 @@ function replayWacLedger(events) {
 
     if (WAC_INBOUND_TYPES.has(type)) {
       const unitCost = Number(ev.unitCost) || 0;
+      // Freeze WAC while recovering from negative on-hand.
+      if (round2(qty) < 0) {
+        qty += moveQty;
+        if (round2(qty) === 0) {
+          qty = 0;
+          grandTotal = 0;
+          // Keep `avg` so a later non-zero balance still has the frozen cost;
+          // the next inbound from qty===0 recalculates from the purchase cost.
+        } else {
+          grandTotal = qty * avg;
+        }
+        continue;
+      }
       grandTotal += moveQty * unitCost;
       qty += moveQty;
       avg = qty !== 0 ? grandTotal / qty : 0;

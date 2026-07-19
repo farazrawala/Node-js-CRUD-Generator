@@ -145,35 +145,36 @@ function createProductionLedger() {
 
 const EXPECTED = [
   { case: 1, label: "1. Purchase 100 @ 100", qty: 100, avg: 100, value: 10000 },
-  { case: 2, label: "2. Purchase 50 @ 120", qty: 150, avg: 106.67, value: 16000 },
-  { case: 3, label: "3. Edit Purchase #2 Qty (50 → 40)", qty: 140, avg: 104.29, value: 14600 },
-  { case: 4, label: "4. Edit Purchase #2 Price (120 → 140)", qty: 140, avg: 110, value: 15400 },
-  { case: 5, label: "5. Sale 50", qty: 90, avg: 110, value: 9900 },
-  { case: 6, label: "6. Edit Sale #5 (50 → 45)", qty: 95, avg: 110, value: 10450 },
-  { case: 7, label: "7. Sales Return 10", qty: 105, avg: 110, value: 11550 },
-  { case: 8, label: "8. Delete Sales Return #7", qty: 95, avg: 110, value: 10450 },
-  { case: 9, label: "9. Purchase 60 @ 150", qty: 155, avg: 125.48, value: 19450 },
-  { case: 10, label: "10. Purchase Return 20", qty: 135, avg: 125.48, value: 16940.32 },
-  { case: 11, label: "11. Delete Purchase Return #10", qty: 155, avg: 125.48, value: 19450 },
-  { case: 12, label: "12. Sale 180 (Negative Stock)", qty: -25, avg: 125.48, value: -3137.1 },
-  { case: 13, label: "13. Purchase 80 @ 200 (Recover Negative)", qty: 55, avg: 233.87, value: 12862.9 },
-  { case: 14, label: "14. Edit Purchase #13 Qty (80 → 70)", qty: 45, avg: 236.95, value: 10662.9 },
-  { case: 15, label: "15. Edit Purchase #13 Price (200 → 220)", qty: 45, avg: 268.06, value: 12062.9 },
-  { case: 16, label: "16. Sale 30", qty: 15, avg: 268.06, value: 4020.97 },
-  { case: 17, label: "17. Sales Return 15", qty: 30, avg: 268.06, value: 8041.94 },
-  { case: 18, label: "18. Delete Sale #16", qty: 60, avg: 268.06, value: 16083.88 },
-  { case: 19, label: "19. Delete Sales Return #17", qty: 45, avg: 268.06, value: 12062.91 },
-  { case: 20, label: "20. Delete Original Purchase #2 (replay history)", qty: 45, avg: 268.06, value: 12062.91 },
-  { case: 21, label: "21. Purchase Return 10", qty: 35, avg: 268.06, value: 9382.26 },
-  { case: 22, label: "22. Purchase 25 @ 300", qty: 60, avg: 281.37, value: 16882.26 },
-  { case: 23, label: "23. Sale 80", qty: -20, avg: 281.37, value: -5627.42 },
-  { case: 24, label: "24. Purchase 30 @ 280", qty: 10, avg: 277.26, value: 2772.58 },
-  { case: 25, label: "25. Purchase 20 @ 320", qty: 30, avg: 305.75, value: 9172.58 },
-  { case: 26, label: "26. Delete Purchase #24 (replay history)", qty: 30, avg: 305.75, value: 9172.58 },
-  { case: 27, label: "27. Edit Purchase #25 Price (320 → 350)", qty: 30, avg: 305.75, value: 9172.58 },
-  { case: 28, label: "28. Delete Purchase #22 (replay history)", qty: 30, avg: 305.75, value: 9172.58 },
-  { case: 29, label: "29. Delete Purchase #25 (replay history)", qty: 10, avg: 305.75, value: 3057.53 },
-  { case: 30, label: "30. Final Validation", qty: 10, avg: 305.75, value: 3057.53 },
+  { case: 2, label: "2. Purchase 50 @ 120", qty: 150, avg: 106.67, value: 16000.5 },
+  { case: 3, label: "3. Edit Purchase #2 Qty (50 → 40)", qty: 140, avg: 105.71, value: 14799.4 },
+  { case: 4, label: "4. Edit Purchase #2 Price (120 → 140)", qty: 140, avg: 111.43, value: 15600.2 },
+  { case: 5, label: "5. Sale 50", qty: 90, avg: 111.43, value: 10028.7 },
+  { case: 6, label: "6. Edit Sale #5 (50 → 45)", qty: 95, avg: 111.43, value: 10585.85 },
+  { case: 7, label: "7. Sales Return 10", qty: 105, avg: 111.43, value: 11700.15 },
+  { case: 8, label: "8. Delete Sales Return #7", qty: 95, avg: 111.43, value: 10585.85 },
+  { case: 9, label: "9. Purchase 60 @ 150", qty: 155, avg: 126.36, value: 19585.8 },
+  { case: 10, label: "10. Purchase Return 20", qty: 135, avg: 126.36, value: 17058.6 },
+  { case: 11, label: "11. Delete Purchase Return #10", qty: 155, avg: 126.36, value: 19585.8 },
+  { case: 12, label: "12. Sale 180 (Negative Stock)", qty: -25, avg: 126.36, value: -3159 },
+  // WAC frozen while recovering from negative on-hand
+  { case: 13, label: "13. Purchase 80 @ 200 (Recover Negative)", qty: 55, avg: 126.36, value: 6949.8 },
+  { case: 14, label: "14. Edit Purchase #13 Qty (80 → 70)", qty: 45, avg: 126.36, value: 5686.2 },
+  { case: 15, label: "15. Edit Purchase #13 Price (200 → 220)", qty: 45, avg: 126.36, value: 5686.2 },
+  { case: 16, label: "16. Sale 30", qty: 15, avg: 126.36, value: 1895.4 },
+  { case: 17, label: "17. Sales Return 15", qty: 30, avg: 126.36, value: 3790.8 },
+  { case: 18, label: "18. Delete Sale #16", qty: 60, avg: 126.36, value: 7581.6 },
+  { case: 19, label: "19. Delete Sales Return #17", qty: 45, avg: 126.36, value: 5686.2 },
+  { case: 20, label: "20. Delete Original Purchase #2 (replay history)", qty: 45, avg: 126.36, value: 5686.2 },
+  { case: 21, label: "21. Purchase Return 10", qty: 35, avg: 126.36, value: 4422.6 },
+  { case: 22, label: "22. Purchase 25 @ 300", qty: 60, avg: 198.71, value: 11922.6 },
+  { case: 23, label: "23. Sale 80", qty: -20, avg: 198.71, value: -3974.2 },
+  { case: 24, label: "24. Purchase 30 @ 280", qty: 10, avg: 198.71, value: 1987.1 },
+  { case: 25, label: "25. Purchase 20 @ 320", qty: 30, avg: 279.57, value: 8387.1 },
+  { case: 26, label: "26. Delete Purchase #24 (replay history)", qty: 30, avg: 279.57, value: 8387.1 },
+  { case: 27, label: "27. Edit Purchase #25 Price (320 → 350)", qty: 30, avg: 279.57, value: 8387.1 },
+  { case: 28, label: "28. Delete Purchase #22 (replay history)", qty: 30, avg: 279.57, value: 8387.1 },
+  { case: 29, label: "29. Delete Purchase #25 (replay history)", qty: 10, avg: 279.57, value: 2795.7 },
+  { case: 30, label: "30. Final Validation", qty: 10, avg: 279.57, value: 2795.7 },
 ];
 
 function compareRow(actual, exp, valueTolerance = 1) {
@@ -266,23 +267,30 @@ if (process.argv.includes("--report")) {
   process.exit(0);
 }
 
-test("30-step scenario: final WAC is 305.75", () => {
+test("30-step scenario: final WAC is 279.57 (frozen through negative recovery)", () => {
   const report = buildReport();
   const final = report[report.length - 1].actual;
   console.log(printReport(report));
   assert.equal(final.qty, 10);
-  assert.ok(Math.abs(round2(final.avg) - 305.75) <= 2, `WAC ${final.avg} expected ~305.75`);
-  assert.ok(Math.abs(final.inventoryValue - 3057.53) <= 20);
+  assert.ok(Math.abs(round2(final.avg) - 279.57) <= 2, `WAC ${final.avg} expected ~279.57`);
+  assert.ok(Math.abs(final.inventoryValue - 2795.7) <= 20);
 });
 
 test("30-step scenario: case #22 WAC after PO create post-delete", () => {
   const report = buildReport();
   const row = report.find((r) => r.case === 22);
-  assert.ok(Math.abs(round2(row.actual.avg) - 281.37) <= 2.5);
+  assert.ok(Math.abs(round2(row.actual.avg) - 198.71) <= 2.5);
 });
 
 test("30-step scenario: case #27 WAC preserved on edit after diverged ledger", () => {
   const report = buildReport();
   const row = report.find((r) => r.case === 27);
-  assert.ok(Math.abs(round2(row.actual.avg) - 305.75) <= 2);
+  assert.ok(Math.abs(round2(row.actual.avg) - 279.57) <= 2);
+});
+
+test("30-step scenario: negative recovery freezes WAC (case #13)", () => {
+  const report = buildReport();
+  const row = report.find((r) => r.case === 13);
+  assert.equal(row.actual.qty, 55);
+  assert.equal(round2(row.actual.avg), 126.36);
 });

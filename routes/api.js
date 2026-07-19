@@ -24,7 +24,10 @@ const {
   paymentReceiptCreate,
   paymentReceiptUpdate,
 } = require("../controllers/payment_receipt");
-const { checkProductAlert, getLowStockAlerts } = require("../controllers/alerts");
+const {
+  checkProductAlert,
+  getLowStockAlerts,
+} = require("../controllers/alerts");
 const {
   // handleUserSignup,
 
@@ -432,8 +435,14 @@ router.post("/integration/generate-token/:id", generateShopifyIntegrationToken);
 router.get("/integration/generate-token/:id", generateShopifyIntegrationToken);
 router.post("/integration/generate-token", generateShopifyIntegrationToken);
 router.get("/integration/generate-token", generateShopifyIntegrationToken);
-router.post("/integration/generate-tokens-cron", generateShopifyIntegrationTokensCron);
-router.get("/integration/generate-tokens-cron", generateShopifyIntegrationTokensCron);
+router.post(
+  "/integration/generate-tokens-cron",
+  generateShopifyIntegrationTokensCron,
+);
+router.get(
+  "/integration/generate-tokens-cron",
+  generateShopifyIntegrationTokensCron,
+);
 router.get("/integration/sync-store-category/:id", syncStoreCategory);
 // router.get("/integration/sync-store-brand/:id", syncStoreBrand);
 router.get("/integration/sync-store-product/:id", syncStoreProduct);
@@ -625,12 +634,18 @@ router.get("/orders/average-order-value", findAverageOrderValue);
 router.get("/order/daily-orders", findDailyOrders);
 router.get("/orders/daily-orders", findDailyOrders);
 router.get("/order/accounts-receivable-summary", findAccountsReceivableSummary);
-router.get("/orders/accounts-receivable-summary", findAccountsReceivableSummary);
+router.get(
+  "/orders/accounts-receivable-summary",
+  findAccountsReceivableSummary,
+);
 router.get("/ledger/receivables-summary", getReceivablesSummary);
 router.get("/ledger/receivables-aging", getReceivablesAging);
 router.get("/sales_return/sales", findSalesReturnSales);
 router.get("/purchase_order/purchases", findPurchaseOrderPurchases);
-router.get("/purchase_order/purchases-summary", findPurchaseOrderPurchasesSummary);
+router.get(
+  "/purchase_order/purchases-summary",
+  findPurchaseOrderPurchasesSummary,
+);
 router.get("/purchase_return/purchases", findPurchaseReturnPurchases);
 router.get("/order/total-sales-current-month", findTotalSalesByOrder);
 router.get("/order/get-order-by-order-no/:id", getOrderByOrderNo);

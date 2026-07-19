@@ -10,9 +10,10 @@ const { coalesceObjectId } = require("./modelHelper");
  * (purchase orders, purchase-return reversal, sales return, stock adjustment
  * increase, opening stock, manufacturing output, inventory import, …).
  *
- * Negative existing inventory is fully supported: quantities are signed and are
- * NEVER clamped with `Math.max(0, qty)`. Clamping was the historical bug that
- * produced an incorrect average whenever on-hand went negative.
+ * Negative on-hand is allowed (signed qty, never `Math.max(0, qty)`), but WAC is
+ * **frozen** while existing qty is negative: inbound layers do not recalculate
+ * `wholesale_price` until on-hand is non-negative again. That prevents bogus
+ * negative averages when recovering from oversell.
  */
 
 /** Round money / cost to 2 decimals (project convention). */
@@ -36,7 +37,7 @@ function toFiniteNumber(value, fallback = 0) {
  * Edge cases:
  *  - incomingQty <= 0  → stock-in only; returns existing cost unchanged (skipped).
  *  - existingQty == 0  → newCost = incomingCost.
- *  - existingQty < 0   → contributes to the average (NOT ignored).
+ *  - existingQty < 0   → WAC frozen (keep existingCost); qty still moves.
  *  - newQty == 0       → division-by-zero guard; keeps previous WAC.
  *
  * @param {object} params
@@ -72,6 +73,18 @@ function computeWeightedAverageCost({
   const existingValue = exQty * exCost;
   const incomingValue = inQty * inCost;
   const newQty = exQty + inQty;
+
+  // Freeze WAC while on-hand is negative (oversell recovery must not drag cost < 0).
+  if (round2(exQty) < 0) {
+    return {
+      skipped: false,
+      reason: "wac_frozen_negative_qty",
+      newQty: round2(newQty),
+      newCost: round2(exCost),
+      existingValue: round2(existingValue),
+      incomingValue: round2(incomingValue),
+    };
+  }
 
   // Division-by-zero guard: keep previous WAC (Case 4).
   if (round2(newQty) === 0) {
@@ -134,6 +147,15 @@ function computeReverseWeightedAverageCost({
     return {
       skipped: false,
       reason: "remaining_qty_zero_keep_previous",
+      newCost: round2(curCost),
+    };
+  }
+
+  // Freeze while remaining on-hand is negative (matches forward freeze policy).
+  if (round2(remQty) < 0) {
+    return {
+      skipped: false,
+      reason: "wac_frozen_negative_qty",
       newCost: round2(curCost),
     };
   }

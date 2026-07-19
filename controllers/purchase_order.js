@@ -1124,8 +1124,8 @@ async function applyWholesalePriceRemoveForPoLines({
     );
     const grandTotalAfter = roundPoMoney(grandTotalBefore - removedCost);
     // Reverse the inbound layer via the centralized WAC helper. `warehouseQty`
-    // is the signed on-hand AFTER the reversed qty was removed; negative on-hand
-    // is preserved (not clamped) so the average stays correct.
+    // is the signed on-hand AFTER the reversed qty was removed; WAC stays frozen
+    // while remaining on-hand is negative.
     const removedUnitCost = removedQty !== 0 ? removedCost / removedQty : 0;
     const averageCost = computeReverseWeightedAverageCost({
       remainingQty: warehouseQty,
@@ -1226,8 +1226,7 @@ async function applyWholesalePriceWeightedAverageForPoLines({
     const totalQty = roundPoMoney(warehouseQty + currentQty);
     const grandTotal = roundPoMoney(previousTotal + newTotal);
     // Centralized weighted average. `warehouseQty` is the signed on-hand BEFORE
-    // this inbound layer; negative on-hand contributes to the average instead of
-    // being clamped to zero.
+    // this inbound layer; WAC is frozen while on-hand is negative (not blended).
     const inboundUnitCost = currentQty !== 0 ? newTotal / currentQty : 0;
     const averageCost = computeWeightedAverageCost({
       existingQty: warehouseQty,

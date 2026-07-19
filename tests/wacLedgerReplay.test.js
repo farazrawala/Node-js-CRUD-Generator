@@ -82,7 +82,8 @@ test("replayWacLedger: delete purchase removes layer from replay log", () => {
     { type: "purchase", qty: 70, unitCost: 220 },
   ]);
   assert.equal(before.qty, 45);
-  assert.equal(before.wac, round2(before.grandTotal / before.qty));
+  // Sale 180 drove qty negative before the 70 @ 220 recover — WAC frozen at pre-negative avg
+  assert.equal(round2(before.wac), 126.36);
 
   const afterDeletePo2 = replayWacLedger([
     { type: "purchase", qty: 100, unitCost: 100 },
@@ -93,7 +94,16 @@ test("replayWacLedger: delete purchase removes layer from replay log", () => {
   ]);
   assert.notEqual(afterDeletePo2.wac, before.wac);
   assert.equal(afterDeletePo2.qty, 5);
-  // PO delete replay-history preserves stored WAC (case #20) — do not persist replay.wac
-  assert.equal(round2(before.wac), 272.02);
-  assert.equal(round2(afterDeletePo2.wac), 1440.87);
+  assert.equal(round2(afterDeletePo2.wac), 126.09);
+});
+
+test("replayWacLedger: freeze prevents negative wholesale on cheap recovery", () => {
+  const r = replayWacLedger([
+    { type: "purchase", qty: 10, unitCost: 700 },
+    { type: "sale", qty: 17 },
+    { type: "purchase", qty: 10, unitCost: 100 },
+  ]);
+  assert.equal(r.qty, 3);
+  assert.equal(r.wac, 700);
+  assert.ok(r.wac > 0);
 });

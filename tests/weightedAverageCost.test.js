@@ -39,18 +39,16 @@ test("Case 2: zero existing stock -> incoming cost", () => {
   assert.equal(wac(0, 999, 8, 120), 120);
 });
 
-test("Case 3: negative existing stock contributes (NOT ignored)", () => {
-  // -5 @ 100 + 10 @ 130 = (-500 + 1300) / 5 = 160
-  assert.equal(wac(-5, 100, 10, 130), 160);
+test("Case 3: negative existing stock freezes WAC", () => {
+  // -5 @ 100 + 10 @ 130 → qty 5, WAC stays 100 (frozen while existing was negative)
+  assert.equal(wac(-5, 100, 10, 130), 100);
 });
 
-test("Case 3b: larger negative inventory", () => {
-  // -20 @ 50 + 30 @ 80 = (-1000 + 2400) / 10 = 140
-  assert.equal(wac(-20, 50, 30, 80), 140);
+test("Case 3b: larger negative inventory freezes WAC", () => {
+  assert.equal(wac(-20, 50, 30, 80), 50);
 });
 
-test("Case 3c: spec recovery example must be 140 (not 120)", () => {
-  // Existing -5 @ 100, receive 10 @ 120 => (-500 + 1200) / 5 = 140
+test("Case 3c: recovery from negative keeps frozen WAC (not blended)", () => {
   const r = computeWeightedAverageCost({
     existingQty: -5,
     existingCost: 100,
@@ -58,30 +56,36 @@ test("Case 3c: spec recovery example must be 140 (not 120)", () => {
     incomingCost: 120,
   });
   assert.equal(r.newQty, 5);
-  assert.equal(r.newCost, 140);
-  assert.notEqual(r.newCost, 120);
+  assert.equal(r.newCost, 100);
+  assert.equal(r.reason, "wac_frozen_negative_qty");
 });
 
-test("Case 3d: negative inventory recovery -15 @ 240 + 50 @ 350 -> 397.14 (NOT 350)", () => {
-  // Existing -15 @ 240, receive 50 @ 350:
-  //   existingValue = -15 * 240 = -3,600
-  //   incomingValue =  50 * 350 = 17,500
-  //   newQty        = -15 + 50  = 35
-  //   newValue      = -3,600 + 17,500 = 13,900
-  //   newCost       = 13,900 / 35 = 397.142857 -> 397.14
+test("Case 3d: negative recovery freezes WAC (does not produce 397.14)", () => {
+  // Existing -15 @ 240, receive 50 @ 350 → qty 35, WAC stays 240
   const r = computeWeightedAverageCost({
     existingQty: -15,
     existingCost: 240,
     incomingQty: 50,
     incomingCost: 350,
   });
-  assert.equal(r.existingValue, -3600); // existing qty NOT clamped to zero
+  assert.equal(r.existingValue, -3600);
   assert.equal(r.incomingValue, 17500);
   assert.equal(r.newQty, 35);
-  // New inventory value = existingValue + incomingValue (pre-rounding of WAC).
-  assert.equal(r.existingValue + r.incomingValue, 13900);
-  assert.equal(r.newCost, 397.14);
-  assert.notEqual(r.newCost, 350); // 350 would mean existingQty was clamped
+  assert.equal(r.newCost, 240);
+  assert.equal(r.reason, "wac_frozen_negative_qty");
+});
+
+test("Case 3e: cheap inbound while negative must not produce negative WAC", () => {
+  // Historical bug: (-7*700 + 10*100)/3 = -1300 — freeze keeps 700
+  const r = computeWeightedAverageCost({
+    existingQty: -7,
+    existingCost: 700,
+    incomingQty: 10,
+    incomingCost: 100,
+  });
+  assert.equal(r.newQty, 3);
+  assert.equal(r.newCost, 700);
+  assert.ok(r.newCost > 0);
 });
 
 test("Case 4: inventory returns to exactly zero -> keep previous WAC (no div/0)", () => {
@@ -148,15 +152,15 @@ test("Case 10: sequential inbound layers", () => {
   assert.equal(cost, 104);
 });
 
-test("Case 11: negative recovery to positive", () => {
-  // -8 @ 120 + 20 @ 150 = (-960 + 3000) / 12 = 170
-  assert.equal(wac(-8, 120, 20, 150), 170);
+test("Case 11: negative recovery freezes WAC", () => {
+  // -8 @ 120 + 20 @ 150 → qty 12, WAC stays 120
+  assert.equal(wac(-8, 120, 20, 150), 120);
 });
 
-test("Case 12: stock-out below zero then restock", () => {
+test("Case 12: stock-out below zero then restock freezes WAC", () => {
   // Start 5 @ 100, sell 12 (on-hand -7, cost unchanged 100),
-  // then restock 10 @ 130: (-7*100 + 10*130)/3 = (-700 + 1300)/3 = 200
-  assert.equal(wac(-7, 100, 10, 130), 200);
+  // then restock 10 @ 130: WAC stays 100 (frozen)
+  assert.equal(wac(-7, 100, 10, 130), 100);
 });
 
 // ---------------------------------------------------------------------------
@@ -197,16 +201,16 @@ test("Reverse: non-positive removed qty is skipped", () => {
   assert.equal(r.newCost, 110);
 });
 
-test("Reverse: works with negative remaining qty", () => {
-  // qtyBefore = -3 + 5 = 2; value = 2*120 - 5*150 = 240 - 750 = -510;
-  // newCost = -510 / -3 = 170
+test("Reverse: negative remaining qty freezes WAC", () => {
+  // Remaining -3 after reversing an inbound — keep current cost
   const r = computeReverseWeightedAverageCost({
     remainingQty: -3,
     currentCost: 120,
     removedQty: 5,
     removedCost: 150,
   });
-  assert.equal(r.newCost, 170);
+  assert.equal(r.newCost, 120);
+  assert.equal(r.reason, "wac_frozen_negative_qty");
 });
 
 // ---------------------------------------------------------------------------
@@ -293,29 +297,29 @@ test("Scenario: full PO/sale/return ledger reproduces spec table", () => {
   assert.equal(avg, 160);
   assert.equal(value(), -1600);
 
-  // #6 Purchase 20 @ 200 (negative recovery -> WAC must be 240)
+  // #6 Purchase 20 @ 200 (negative recovery → WAC frozen at 160)
   stockIn(20, 200);
   assert.equal(qty, 10);
-  assert.equal(avg, 240);
-  assert.equal(value(), 2400);
+  assert.equal(avg, 160);
+  assert.equal(value(), 1600);
 
   // #7 Purchase Return 5 (removed at current WAC -> WAC unchanged)
-  reverseIn(5, 240);
+  reverseIn(5, 160);
   assert.equal(qty, 5);
-  assert.equal(avg, 240);
-  assert.equal(value(), 1200);
+  assert.equal(avg, 160);
+  assert.equal(value(), 800);
 
   // #8 Sales Return 10 (restored at sale cost -> WAC unchanged)
-  stockIn(10, 240);
+  stockIn(10, 160);
   assert.equal(qty, 15);
-  assert.equal(avg, 240);
-  assert.equal(value(), 3600);
+  assert.equal(avg, 160);
+  assert.equal(value(), 2400);
 
   // #9 Sale 30 (inventory goes negative again)
   sale(30);
   assert.equal(qty, -15);
-  assert.equal(avg, 240);
-  assert.equal(value(), -3600);
+  assert.equal(avg, 160);
+  assert.equal(value(), -2400);
 });
 
 test("Round-trip: forward inbound then reverse returns original cost", () => {
