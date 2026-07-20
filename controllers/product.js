@@ -2653,6 +2653,61 @@ async function findProductsWithDuplicateBarcodes(req, res) {
       },
     ]);
 
+    const productIds = [];
+    for (const group of groups) {
+      for (const product of group.products || []) {
+        if (product?._id) productIds.push(product._id);
+      }
+    }
+
+    /** productId → { stock, warehouse_inventory[] } (same source as product list). */
+    const stockByProductId = new Map();
+    if (productIds.length > 0) {
+      const inventoryRows = await WarehouseInventory.find({
+        product_id: { $in: productIds },
+        company_id: companyOid,
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      })
+        .select("product_id warehouse_id quantity status")
+        .populate({ path: "warehouse_id", select: "name code" })
+        .lean();
+
+      for (const row of inventoryRows) {
+        const pid = String(row.product_id || "");
+        if (!pid) continue;
+        const qty = Number(row.quantity);
+        const safeQty = Number.isFinite(qty) ? qty : 0;
+        const existing = stockByProductId.get(pid) || {
+          stock: 0,
+          warehouse_inventory: [],
+        };
+        existing.stock += safeQty;
+        existing.warehouse_inventory.push({
+          _id: row._id,
+          warehouse_id: row.warehouse_id,
+          quantity: safeQty,
+          status: row.status,
+        });
+        stockByProductId.set(pid, existing);
+      }
+    }
+
+    for (const group of groups) {
+      for (const product of group.products || []) {
+        const stockInfo = stockByProductId.get(String(product._id));
+        if (stockInfo) {
+          product.qty = stockInfo.stock;
+          product.stock = stockInfo.stock;
+          product.warehouse_inventory = stockInfo.warehouse_inventory;
+        } else {
+          product.qty = null;
+          product.stock = null;
+          product.warehouse_inventory = [];
+        }
+      }
+    }
+
     const duplicate_product_count = groups.reduce(
       (sum, row) => sum + (Number(row.count) || 0),
       0,

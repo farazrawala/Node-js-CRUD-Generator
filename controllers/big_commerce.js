@@ -5,9 +5,11 @@ const Company = require("../models/company");
 const Product = require("../models/product");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const {
   coalesceObjectId,
   activeNotDeletedCriteria,
+  parseSearchFieldsFromQuery,
 } = require("../utils/modelHelper");
 
 const ACTIVE_STATUSES = ["pending", "approved"];
@@ -764,6 +766,261 @@ const PARTNER_PRODUCT_SELECT = [
   "createdAt",
 ].join(" ");
 
+/** POS-style Big Commerce list fields (includes sku/barcode for search). */
+const BIG_COMMERCE_POS_PRODUCT_SELECT = [
+  "_id",
+  "product_name",
+  "product_code",
+  "sku",
+  "barcode",
+  "product_price",
+  "wholesale_price",
+  "product_description",
+  "product_image",
+  "product_image_thumbnail_url",
+  "multi_images",
+  "brand_id",
+  "category_id",
+  "status",
+  "product_type",
+  "company_id",
+  "parent_product_id",
+  "createdAt",
+].join(" ");
+
+const DEFAULT_BC_POS_SEARCH_FIELDS = [
+  "product_name",
+  "product_code",
+  "sku",
+  "barcode",
+];
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseMinStockQuery(query = {}) {
+  const raw = query.stock ?? query.min_stock ?? query.minStock;
+  if (raw == null || String(raw).trim() === "") return null;
+  const n = Number(String(raw).trim());
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+/**
+ * Product ids whose summed active warehouse qty is >= minStock (company-scoped).
+ */
+async function findProductIdsWithMinStock(companyIds, minStock) {
+  const companyOids = (companyIds || [])
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
+  if (!companyOids.length || !(minStock > 0)) return [];
+
+  const rows = await WarehouseInventory.aggregate([
+    {
+      $match: {
+        company_id: { $in: companyOids },
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      },
+    },
+    {
+      $group: {
+        _id: "$product_id",
+        total_qty: { $sum: { $ifNull: ["$quantity", 0] } },
+      },
+    },
+    { $match: { total_qty: { $gte: minStock } } },
+    { $project: { _id: 1 } },
+  ]);
+
+  return rows.map((row) => row._id).filter(Boolean);
+}
+
+function applyBigCommercePosStatusFilter(filter, query = {}) {
+  const includeInactive =
+    query.include_inactive === "true" || query.include_inactive === "1";
+  const rawStatus = String(query.status ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (includeInactive || rawStatus === "all") return filter;
+  if (rawStatus === "inactive") {
+    filter.status = "inactive";
+    return filter;
+  }
+  filter.status = "active";
+  return filter;
+}
+
+function applyBigCommercePosProductTypeFilter(filter, query = {}) {
+  const raw = String(query.product_type ?? query.productType ?? "").trim();
+  if (!raw) return filter;
+  const lower = raw.toLowerCase();
+  if (lower === "all") return filter;
+  if (lower === "single") filter.product_type = "Single";
+  else if (lower === "variable" || lower === "variant") filter.product_type = "Variable";
+  else if (raw === "Single" || raw === "Variable") filter.product_type = raw;
+  return filter;
+}
+
+/**
+ * GET /big-commerce/get-all-active-ecommerce-products/:companyId
+ * POS-style product list for a marketplace / connected company catalog.
+ *
+ * Query (same spirit as product/get-all-active-pos):
+ * - search, searchFields (default product_name,product_code,sku,barcode)
+ * - status (default active), category_id, brand_id, product_type
+ * - stock | min_stock — minimum total warehouse qty (e.g. stock=5)
+ * - limit, skip, parents_only
+ */
+async function getBigCommerceProductsActivePos(req, res) {
+  try {
+    const access = await resolveMarketplaceBrowseAccess(req, req.params.companyId);
+    if (!access.ok) {
+      return jsonError(res, access.status, access.message);
+    }
+
+    const { partnerCompanyId, connection, access: accessMode, isOwn } = access;
+    const companyIds = await resolveMarketplaceCatalogCompanyIds(partnerCompanyId);
+    const companyIdValues = companyIdQueryValues(companyIds);
+    const companyOids = companyIds
+      .map((id) => coalesceObjectId(id))
+      .filter(Boolean);
+
+    const filter = {
+      company_id:
+        companyIdValues.length === 1 ? companyIdValues[0] : { $in: companyIdValues },
+      deletedAt: null,
+    };
+
+    applyBigCommercePosStatusFilter(filter, req.query || {});
+    applyBigCommercePosProductTypeFilter(filter, req.query || {});
+
+    if (req.query.parents_only === "true" || req.query.parents_only === "1") {
+      filter.$and = [
+        ...(filter.$and || []),
+        {
+          $or: [
+            { parent_product_id: null },
+            { parent_product_id: { $exists: false } },
+          ],
+        },
+      ];
+    }
+
+    const rawCategory = req.query.category_id ?? req.query.categoryId;
+    if (rawCategory != null && String(rawCategory).trim() !== "") {
+      const categoryOid = coalesceObjectId(rawCategory);
+      if (!categoryOid || !isValidObjectId(categoryOid)) {
+        return jsonError(res, 400, "category_id must be a valid 24-character ObjectId");
+      }
+      filter.category_id = categoryOid;
+    }
+
+    const brandId = coalesceObjectId(req.query.brand_id ?? req.query.brandId);
+    if (brandId) {
+      filter.brand_id = brandId;
+    }
+
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    if (search) {
+      const fields =
+        parseSearchFieldsFromQuery(req.query.searchFields) ||
+        DEFAULT_BC_POS_SEARCH_FIELDS;
+      const regex = { $regex: escapeRegex(search), $options: "i" };
+      filter.$and = [
+        ...(filter.$and || []),
+        { $or: fields.map((field) => ({ [field]: regex })) },
+      ];
+    }
+
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+    const minStock = parseMinStockQuery(req.query || {});
+
+    if (minStock != null && minStock > 0) {
+      const stockProductIds = await findProductIdsWithMinStock(
+        companyOids,
+        minStock,
+      );
+      if (!Array.isArray(stockProductIds) || stockProductIds.length === 0) {
+        return jsonSuccess(res, 200, [], null, {
+          partner_company_id: partnerCompanyId,
+          catalog_company_ids: companyIds.map((id) => String(id)),
+          connection_id: connection?._id || null,
+          access: accessMode,
+          is_own: Boolean(isOwn),
+          stock_min: minStock,
+          total: 0,
+          limit,
+          skip,
+        });
+      }
+      filter._id = { $in: stockProductIds };
+    }
+
+    const warehouseInventoryMatch = {
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      company_id:
+        companyOids.length === 1 ? companyOids[0] : { $in: companyOids },
+    };
+
+    const [data, total] = await Promise.all([
+      Product.find(filter)
+        .select(BIG_COMMERCE_POS_PRODUCT_SELECT)
+        .populate("brand_id", "name")
+        .populate("category_id", "name")
+        .populate("parent_product_id", "product_name")
+        .populate({
+          path: "warehouse_inventory",
+          match: warehouseInventoryMatch,
+          select: "warehouse_id quantity status company_id",
+          populate: {
+            path: "warehouse_id",
+            select: "name code",
+          },
+        })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean({ virtuals: true }),
+      Product.countDocuments(filter),
+    ]);
+
+    const enriched = (data || []).map((row) => {
+      const inv = Array.isArray(row.warehouse_inventory)
+        ? row.warehouse_inventory
+        : [];
+      const total_stock = inv.reduce(
+        (sum, line) => sum + (Number(line?.quantity) || 0),
+        0,
+      );
+      return { ...row, total_stock: Math.round(total_stock * 100) / 100 };
+    });
+
+    return jsonSuccess(res, 200, enriched, null, {
+      partner_company_id: partnerCompanyId,
+      catalog_company_ids: companyIds.map((id) => String(id)),
+      connection_id: connection?._id || null,
+      access: accessMode,
+      is_own: Boolean(isOwn),
+      stock_min: minStock,
+      total,
+      limit,
+      skip,
+    });
+  } catch (error) {
+    console.error("[big_commerce] getBigCommerceProductsActivePos:", error);
+    return jsonError(
+      res,
+      500,
+      error.message || "Failed to load Big Commerce products",
+    );
+  }
+}
+
 /**
  * GET /big-commerce/company/:companyId
  * Marketplace company profile (not tenant-scoped company/get).
@@ -997,6 +1254,7 @@ module.exports = {
   listConnectionLogs,
   getPartnerCompany,
   getPartnerProducts,
+  getBigCommerceProductsActivePos,
   getPartnerCategories,
   getPartnerBrands,
 };

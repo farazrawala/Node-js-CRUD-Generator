@@ -267,6 +267,7 @@ const {
   listConnectionLogs,
   getPartnerCompany,
   getPartnerProducts,
+  getBigCommerceProductsActivePos,
   getPartnerCategories,
   getPartnerBrands,
 } = require("../controllers/big_commerce");
@@ -545,6 +546,10 @@ router.post("/big-commerce/request/:id/cancel", cancelConnection);
 router.delete("/big-commerce/request/:id", disconnectConnection);
 router.get("/big-commerce/connection/:id/logs", listConnectionLogs);
 router.get("/big-commerce/company/:companyId", getPartnerCompany);
+router.get(
+  "/big-commerce/get-all-active-ecommerce-products/:companyId",
+  getBigCommerceProductsActivePos,
+);
 router.get("/big-commerce/products/:companyId", getPartnerProducts);
 router.get("/big-commerce/categories/:companyId", getPartnerCategories);
 router.get("/big-commerce/brands/:companyId", getPartnerBrands);
