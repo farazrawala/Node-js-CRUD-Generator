@@ -799,24 +799,107 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function parseMinStockQuery(query = {}) {
-  const raw = query.stock ?? query.min_stock ?? query.minStock;
-  if (raw == null || String(raw).trim() === "") return null;
-  const n = Number(String(raw).trim());
-  if (!Number.isFinite(n) || n < 0) return null;
-  return n;
+/** Default threshold: in_stock > N, low_stock is 0 < qty < N. */
+const DEFAULT_STOCK_THRESHOLD = 10;
+
+/**
+ * Parse stock filter from query.
+ *
+ * Preferred:
+ * - stock_status=in_stock|low_stock|out_of_stock
+ * - stock_threshold=10 (optional; default 10)
+ *
+ * Legacy:
+ * - stock / min_stock = N  → total_qty >= N (same as in_stock with gte)
+ *
+ * @returns {{ mode: string, threshold: number, min?: number|null, max?: number|null } | null}
+ */
+function parseStockFilterQuery(query = {}) {
+  const thresholdRaw =
+    query.stock_threshold ?? query.stockThreshold ?? query.threshold;
+  let threshold = DEFAULT_STOCK_THRESHOLD;
+  if (thresholdRaw != null && String(thresholdRaw).trim() !== "") {
+    const n = Number(String(thresholdRaw).trim());
+    if (Number.isFinite(n) && n >= 0) threshold = n;
+  }
+
+  const statusRaw = String(
+    query.stock_status ?? query.stockStatus ?? query.stock_filter ?? "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (
+    statusRaw === "in_stock" ||
+    statusRaw === "instock" ||
+    statusRaw === "in"
+  ) {
+    // in stock: qty > threshold (e.g. > 10)
+    return { mode: "in_stock", threshold, min: threshold, exclusiveMin: true };
+  }
+  if (
+    statusRaw === "low_stock" ||
+    statusRaw === "lowstock" ||
+    statusRaw === "low"
+  ) {
+    // low stock: 0 < qty < threshold (e.g. < 10 and > 0)
+    return {
+      mode: "low_stock",
+      threshold,
+      min: 0,
+      exclusiveMin: true,
+      max: threshold,
+      exclusiveMax: true,
+    };
+  }
+  if (
+    statusRaw === "out_of_stock" ||
+    statusRaw === "outofstock" ||
+    statusRaw === "out" ||
+    statusRaw === "oos"
+  ) {
+    // out of stock: qty == 0 (or missing inventory)
+    return { mode: "out_of_stock", threshold, max: 0 };
+  }
+
+  // Legacy: stock=5 / min_stock=5 → qty >= 5
+  const legacy = query.stock ?? query.min_stock ?? query.minStock;
+  if (legacy != null && String(legacy).trim() !== "") {
+    const legacyStatus = String(legacy).trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (
+      ["in_stock", "instock", "in", "low_stock", "lowstock", "low", "out_of_stock", "outofstock", "out", "oos"].includes(
+        legacyStatus,
+      )
+    ) {
+      return parseStockFilterQuery({
+        ...query,
+        stock_status: legacyStatus,
+        stock: undefined,
+        min_stock: undefined,
+        minStock: undefined,
+      });
+    }
+    const n = Number(String(legacy).trim());
+    if (Number.isFinite(n) && n >= 0) {
+      return { mode: "min_stock", threshold: n, min: n };
+    }
+  }
+
+  return null;
 }
 
 /**
- * Product ids whose summed active warehouse qty is >= minStock (company-scoped).
+ * Aggregate active warehouse qty by product for a company set.
+ * @returns {Promise<Array<{ _id: import("mongoose").Types.ObjectId, total_qty: number }>>}
  */
-async function findProductIdsWithMinStock(companyIds, minStock) {
+async function aggregateProductStockTotals(companyIds) {
   const companyOids = (companyIds || [])
     .map((id) => coalesceObjectId(id))
     .filter(Boolean);
-  if (!companyOids.length || !(minStock > 0)) return [];
+  if (!companyOids.length) return [];
 
-  const rows = await WarehouseInventory.aggregate([
+  return WarehouseInventory.aggregate([
     {
       $match: {
         company_id: { $in: companyOids },
@@ -830,11 +913,57 @@ async function findProductIdsWithMinStock(companyIds, minStock) {
         total_qty: { $sum: { $ifNull: ["$quantity", 0] } },
       },
     },
-    { $match: { total_qty: { $gte: minStock } } },
-    { $project: { _id: 1 } },
   ]);
+}
 
-  return rows.map((row) => row._id).filter(Boolean);
+/**
+ * Resolve product id constraint for a stock filter.
+ * @returns {Promise<null | { ids: any[], match?: object }>}
+ * - `{ ids }` → apply `_id: { $in: ids }`
+ * - `{ match }` → apply custom `$and` clause (out_of_stock with missing inventory)
+ */
+async function resolveStockFilterConstraint(companyIds, stockFilter) {
+  if (!stockFilter) return null;
+
+  const totals = await aggregateProductStockTotals(companyIds);
+  const inventoryIds = [];
+  const matched = [];
+
+  for (const row of totals) {
+    if (!row?._id) continue;
+    inventoryIds.push(row._id);
+    const qty = Number(row.total_qty) || 0;
+
+    if (stockFilter.mode === "in_stock") {
+      if (qty > stockFilter.threshold) matched.push(row._id);
+    } else if (stockFilter.mode === "low_stock") {
+      if (qty > 0 && qty < stockFilter.threshold) matched.push(row._id);
+    } else if (stockFilter.mode === "out_of_stock") {
+      if (qty <= 0) matched.push(row._id);
+    } else if (stockFilter.mode === "min_stock") {
+      if (qty >= stockFilter.min) matched.push(row._id);
+    }
+  }
+
+  if (stockFilter.mode === "out_of_stock") {
+    // qty == 0 rows OR products with no warehouse_inventory at all
+    if (!inventoryIds.length) {
+      // No inventory rows in company → every product is out of stock (no id constraint)
+      return { ids: null, match: null, empty: false };
+    }
+    return {
+      ids: null,
+      match: {
+        $or: [
+          ...(matched.length ? [{ _id: { $in: matched } }] : []),
+          { _id: { $nin: inventoryIds } },
+        ],
+      },
+      empty: false,
+    };
+  }
+
+  return { ids: matched, match: null, empty: matched.length === 0 };
 }
 
 function applyBigCommercePosStatusFilter(filter, query = {}) {
@@ -871,7 +1000,9 @@ function applyBigCommercePosProductTypeFilter(filter, query = {}) {
  * Query (same spirit as product/get-all-active-pos):
  * - search, searchFields (default product_name,product_code,sku,barcode)
  * - status (default active), category_id, brand_id, product_type
- * - stock | min_stock — minimum total warehouse qty (e.g. stock=5)
+ * - stock_status=in_stock|low_stock|out_of_stock
+ * - stock_threshold=10 (default 10; in_stock = qty > N, low_stock = 0 < qty < N)
+ * - stock | min_stock = N (legacy: qty >= N)
  * - limit, skip, parents_only
  */
 async function getBigCommerceProductsActivePos(req, res) {
@@ -937,27 +1068,32 @@ async function getBigCommerceProductsActivePos(req, res) {
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
-    const minStock = parseMinStockQuery(req.query || {});
+    const stockFilter = parseStockFilterQuery(req.query || {});
 
-    if (minStock != null && minStock > 0) {
-      const stockProductIds = await findProductIdsWithMinStock(
+    if (stockFilter) {
+      const stockConstraint = await resolveStockFilterConstraint(
         companyOids,
-        minStock,
+        stockFilter,
       );
-      if (!Array.isArray(stockProductIds) || stockProductIds.length === 0) {
+      if (stockConstraint?.empty) {
         return jsonSuccess(res, 200, [], null, {
           partner_company_id: partnerCompanyId,
           catalog_company_ids: companyIds.map((id) => String(id)),
           connection_id: connection?._id || null,
           access: accessMode,
           is_own: Boolean(isOwn),
-          stock_min: minStock,
+          stock_status: stockFilter.mode,
+          stock_threshold: stockFilter.threshold,
           total: 0,
           limit,
           skip,
         });
       }
-      filter._id = { $in: stockProductIds };
+      if (stockConstraint?.match) {
+        filter.$and = [...(filter.$and || []), stockConstraint.match];
+      } else if (Array.isArray(stockConstraint?.ids)) {
+        filter._id = { $in: stockConstraint.ids };
+      }
     }
 
     const warehouseInventoryMatch = {
@@ -1006,7 +1142,8 @@ async function getBigCommerceProductsActivePos(req, res) {
       connection_id: connection?._id || null,
       access: accessMode,
       is_own: Boolean(isOwn),
-      stock_min: minStock,
+      stock_status: stockFilter?.mode ?? null,
+      stock_threshold: stockFilter?.threshold ?? null,
       total,
       limit,
       skip,
