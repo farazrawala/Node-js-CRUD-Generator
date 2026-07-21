@@ -270,6 +270,9 @@ const {
   getBigCommerceProductsActivePos,
   getPartnerCategories,
   getPartnerBrands,
+  duplicatePartnerProduct,
+  getFetchedProducts,
+  softDeleteFetchedProduct,
 } = require("../controllers/big_commerce");
 
 // Note: Company routes are now handled dynamically
@@ -550,7 +553,21 @@ router.get(
   "/big-commerce/get-all-active-ecommerce-products/:companyId",
   getBigCommerceProductsActivePos,
 );
+router.get("/big-commerce/fetched-products", getFetchedProducts);
+router.get("/big-commerce/fetched-products/:companyId", getFetchedProducts);
+router.delete(
+  "/big-commerce/fetched-products/:productId/delete",
+  softDeleteFetchedProduct,
+);
 router.get("/big-commerce/products/:companyId", getPartnerProducts);
+router.post(
+  "/big-commerce/products/:productId/duplicate",
+  duplicatePartnerProduct,
+);
+router.post(
+  "/big-commerce/products/fetch/:productId",
+  duplicatePartnerProduct,
+);
 router.get("/big-commerce/categories/:companyId", getPartnerCategories);
 router.get("/big-commerce/brands/:companyId", getPartnerBrands);
 

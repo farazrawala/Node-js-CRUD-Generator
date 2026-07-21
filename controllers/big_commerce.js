@@ -1377,6 +1377,428 @@ async function getPartnerBrands(req, res) {
   }
 }
 
+/** Fields copied when fetching a partner product into the caller's catalog. */
+const FETCH_PRODUCT_COPY_FIELDS = [
+  "product_name",
+  "product_code",
+  "alert_qty",
+  "unit",
+  "weight",
+  "length",
+  "width",
+  "height",
+  "dimension",
+  "price_before_tax",
+  "tax_rate",
+  "sku",
+  "barcode",
+  "product_type",
+  "product_slug",
+  "wholesale_price",
+  "product_price",
+  "product_description",
+  "product_image",
+  "product_image_thumbnail_url",
+  "multi_images",
+  "multi_image_thumbnails",
+  "status",
+];
+
+/**
+ * Build a new product document payload for company `targetCompanyId`
+ * sourced from a partner product.
+ */
+function buildFetchedProductPayload(source, {
+  targetCompanyId,
+  createdBy,
+  parentProductId = null,
+}) {
+  const payload = {
+    company_id: targetCompanyId,
+    fetch_from_product_id: source._id,
+    fetch_from_company_id: source.company_id,
+    parent_product_id: parentProductId,
+    brand_id: null,
+    category_id: [],
+    product_relations: [],
+    created_by: createdBy || null,
+    updated_by: createdBy || null,
+    deletedAt: null,
+  };
+
+  for (const field of FETCH_PRODUCT_COPY_FIELDS) {
+    if (source[field] !== undefined) {
+      payload[field] = source[field];
+    }
+  }
+
+  // Fetching a variant alone becomes a standalone product under the new company.
+  if (!parentProductId && source.parent_product_id) {
+    payload.parent_product_id = null;
+    if (!payload.product_type) payload.product_type = "Single";
+  }
+
+  return payload;
+}
+
+/**
+ * POST /big-commerce/products/:productId/duplicate
+ * POST /big-commerce/products/fetch/:productId
+ *
+ * Company B duplicates Company A's product into B's catalog:
+ * - new row with company_id = B
+ * - fetch_from_product_id = A's product _id
+ * - fetch_from_company_id = A's company_id
+ *
+ * Variable parents also copy active variants.
+ * Access: same as marketplace browse (approved connection OR marketplace store).
+ * Idempotent: if already fetched, returns the existing copy.
+ */
+async function duplicatePartnerProduct(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Forbidden");
+    }
+
+    const productId = coalesceObjectId(
+      req.params.productId ?? req.body?.product_id ?? req.body?.productId,
+    );
+    if (!productId || !isValidObjectId(productId)) {
+      return jsonError(res, 400, "Invalid product id");
+    }
+
+    const source = await Product.findOne({
+      _id: productId,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (!source) {
+      return jsonError(res, 404, "Product not found");
+    }
+
+    const sourceCompanyId = coalesceObjectId(source.company_id);
+    if (!sourceCompanyId) {
+      return jsonError(res, 400, "Source product has no company");
+    }
+
+    if (String(sourceCompanyId) === String(myCompanyId)) {
+      return jsonError(res, 400, "Cannot fetch your own product");
+    }
+
+    const access = await resolveMarketplaceBrowseAccess(req, sourceCompanyId);
+    if (!access.ok) {
+      return jsonError(res, access.status, access.message);
+    }
+    if (access.isOwn) {
+      return jsonError(res, 400, "Cannot fetch your own product");
+    }
+
+    // Ensure the product sits in the partner's catalog tree (root + branches).
+    const catalogCompanyIds = await resolveMarketplaceCatalogCompanyIds(
+      access.partnerCompanyId,
+    );
+    const inCatalog = catalogCompanyIds.some(
+      (id) => String(id) === String(sourceCompanyId),
+    );
+    if (!inCatalog) {
+      return jsonError(res, 403, "Product is not in the partner catalog");
+    }
+
+    const existing = await Product.findOne({
+      company_id: myCompanyId,
+      fetch_from_product_id: source._id,
+      deletedAt: null,
+    }).lean();
+
+    if (existing) {
+      return jsonSuccess(
+        res,
+        200,
+        existing,
+        "Product already fetched into your catalog",
+        {
+          already_fetched: true,
+          fetch_from_product_id: source._id,
+          fetch_from_company_id: sourceCompanyId,
+        },
+      );
+    }
+
+    const createdBy = userId(req);
+    const parentPayload = buildFetchedProductPayload(source, {
+      targetCompanyId: myCompanyId,
+      createdBy,
+      parentProductId: null,
+    });
+
+    const createdParent = await Product.create(parentPayload);
+
+    const variants = await Product.find({
+      parent_product_id: source._id,
+      status: "active",
+      deletedAt: null,
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const createdVariants = [];
+    for (const variant of variants) {
+      const alreadyVariant = await Product.findOne({
+        company_id: myCompanyId,
+        fetch_from_product_id: variant._id,
+        deletedAt: null,
+      }).lean();
+
+      if (alreadyVariant) {
+        createdVariants.push(alreadyVariant);
+        continue;
+      }
+
+      const variantPayload = buildFetchedProductPayload(variant, {
+        targetCompanyId: myCompanyId,
+        createdBy,
+        parentProductId: createdParent._id,
+      });
+      const createdVariant = await Product.create(variantPayload);
+      createdVariants.push(createdVariant.toObject());
+    }
+
+    return jsonSuccess(
+      res,
+      201,
+      {
+        ...createdParent.toObject(),
+        variants: createdVariants,
+      },
+      "Product fetched into your catalog",
+      {
+        already_fetched: false,
+        fetch_from_product_id: source._id,
+        fetch_from_company_id: sourceCompanyId,
+        variants_count: createdVariants.length,
+      },
+    );
+  } catch (error) {
+    console.error("[big_commerce] duplicatePartnerProduct:", error);
+    if (error?.code === 11000) {
+      return jsonError(
+        res,
+        409,
+        "A product with the same SKU or barcode already exists in your catalog",
+      );
+    }
+    return jsonError(
+      res,
+      500,
+      error.message || "Failed to duplicate partner product",
+    );
+  }
+}
+
+/**
+ * GET /big-commerce/fetched-products
+ * GET /big-commerce/fetched-products/:companyId
+ *
+ * Company 2 browsing Company 1's store → list of products Company 2 already
+ * added from Company 1 (own catalog rows where fetch_from_company_id matches).
+ *
+ * Query:
+ * - fetch_from_company_id (optional; ignored if :companyId is in path)
+ * - search, status (default active), product_type, parents_only
+ * - limit, skip
+ */
+async function getFetchedProducts(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Forbidden");
+    }
+
+    const filter = {
+      company_id: myCompanyId,
+      fetch_from_company_id: { $exists: true, $ne: null },
+      deletedAt: null,
+    };
+
+    // Prefer path param when browsing a specific partner store.
+    const pathCompanyId = coalesceObjectId(req.params.companyId);
+    const queryCompanyId = coalesceObjectId(
+      req.query.fetch_from_company_id ?? req.query.fetchFromCompanyId,
+    );
+    const sourceCompanyId = pathCompanyId || queryCompanyId;
+
+    let sourceCompanyIds = null;
+    if (sourceCompanyId) {
+      if (!isValidObjectId(sourceCompanyId)) {
+        return jsonError(res, 400, "Invalid company id");
+      }
+      if (String(sourceCompanyId) === String(myCompanyId)) {
+        return jsonError(
+          res,
+          400,
+          "Use product endpoints to list your own catalog",
+        );
+      }
+
+      // Include partner root + branches (same catalog tree used when browsing).
+      sourceCompanyIds = await resolveMarketplaceCatalogCompanyIds(
+        sourceCompanyId,
+      );
+      const sourceValues = companyIdQueryValues(sourceCompanyIds);
+      filter.fetch_from_company_id =
+        sourceValues.length === 1 ? sourceValues[0] : { $in: sourceValues };
+    }
+
+    applyBigCommercePosStatusFilter(filter, req.query || {});
+    applyBigCommercePosProductTypeFilter(filter, req.query || {});
+
+    if (req.query.parents_only === "true" || req.query.parents_only === "1") {
+      filter.$and = [
+        ...(filter.$and || []),
+        {
+          $or: [
+            { parent_product_id: null },
+            { parent_product_id: { $exists: false } },
+          ],
+        },
+      ];
+    }
+
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    if (search) {
+      const fields =
+        parseSearchFieldsFromQuery(req.query.searchFields) ||
+        DEFAULT_BC_POS_SEARCH_FIELDS;
+      const regex = { $regex: escapeRegex(search), $options: "i" };
+      filter.$and = [
+        ...(filter.$and || []),
+        { $or: fields.map((field) => ({ [field]: regex })) },
+      ];
+    }
+
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+
+    const selectFields = [
+      BIG_COMMERCE_POS_PRODUCT_SELECT,
+      "fetch_from_product_id",
+      "fetch_from_company_id",
+    ].join(" ");
+
+    const [data, total] = await Promise.all([
+      Product.find(filter)
+        .select(selectFields)
+        .populate("brand_id", "name")
+        .populate("category_id", "name")
+        .populate("parent_product_id", "product_name")
+        .populate(
+          "fetch_from_product_id",
+          "product_name product_code sku product_image company_id",
+        )
+        .populate(
+          "fetch_from_company_id",
+          "company_name company_email company_logo",
+        )
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Product.countDocuments(filter),
+    ]);
+
+    return jsonSuccess(res, 200, data, null, {
+      total,
+      limit,
+      skip,
+      fetch_from_company_id: sourceCompanyId || null,
+      catalog_company_ids: sourceCompanyIds
+        ? sourceCompanyIds.map((id) => String(id))
+        : null,
+    });
+  } catch (error) {
+    console.error("[big_commerce] getFetchedProducts:", error);
+    return jsonError(
+      res,
+      500,
+      error.message || "Failed to load fetched products",
+    );
+  }
+}
+
+/**
+ * DELETE /big-commerce/fetched-products/:productId
+ * Soft-delete a product you previously fetched from a partner store.
+ * Only works on your catalog rows that have fetch_from_company_id set.
+ * Variable parents also soft-delete their active child variants.
+ */
+async function softDeleteFetchedProduct(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Forbidden");
+    }
+
+    const productId = coalesceObjectId(req.params.productId);
+    if (!productId || !isValidObjectId(productId)) {
+      return jsonError(res, 400, "Invalid product id");
+    }
+
+    const product = await Product.findOne({
+      _id: productId,
+      company_id: myCompanyId,
+      fetch_from_company_id: { $exists: true, $ne: null },
+      deletedAt: null,
+    });
+
+    if (!product) {
+      return jsonError(
+        res,
+        404,
+        "Fetched product not found in your catalog",
+      );
+    }
+
+    const now = new Date();
+    const softDeleteSet = {
+      deletedAt: now,
+      status: "inactive",
+      updated_by: userId(req) || null,
+    };
+
+    await Product.updateOne({ _id: product._id }, { $set: softDeleteSet });
+
+    const variantResult = await Product.updateMany(
+      {
+        parent_product_id: product._id,
+        company_id: myCompanyId,
+        deletedAt: null,
+      },
+      { $set: softDeleteSet },
+    );
+
+    return jsonSuccess(
+      res,
+      200,
+      {
+        _id: product._id,
+        deletedAt: now,
+        status: "inactive",
+        variants_deleted: variantResult.modifiedCount || 0,
+      },
+      "Fetched product soft deleted",
+    );
+  } catch (error) {
+    console.error("[big_commerce] softDeleteFetchedProduct:", error);
+    return jsonError(
+      res,
+      500,
+      error.message || "Failed to soft delete fetched product",
+    );
+  }
+}
+
 module.exports = {
   sendConnectionRequest,
   listSentConnections,
@@ -1394,4 +1816,7 @@ module.exports = {
   getBigCommerceProductsActivePos,
   getPartnerCategories,
   getPartnerBrands,
+  duplicatePartnerProduct,
+  getFetchedProducts,
+  softDeleteFetchedProduct,
 };
