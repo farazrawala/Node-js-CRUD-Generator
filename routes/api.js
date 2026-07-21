@@ -233,6 +233,7 @@ const {
   markWhatsappMessageSent,
   markWhatsappMessageNotAvailable,
 } = require("../controllers/whatsapp_message");
+const { chatCreate, fetchRandomChat, markChatSent, markChatNotAvailable } = require("../controllers/chat");
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
 // const {
@@ -472,6 +473,19 @@ router.get("/whatsapp_message/fetch-random", fetchRandomWhatsappMessage);
 router.get("/whatsapp_messages/fetch-random", fetchRandomWhatsappMessage);
 router.get("/whatsapp_message/mark-sent/:id", markWhatsappMessageSent);
 router.get("/whatsapp_messages/mark-sent/:id", markWhatsappMessageSent);
+
+// Chat insert via POS auth token in URL (no Authorization header required)
+router.post("/chat/create/:pos_auth_token", chatCreate);
+router.post("/chats/create/:pos_auth_token", chatCreate);
+
+// Chat worker routes (public, scoped by company_id — same pattern as whatsapp_message)
+router.get("/chat/fetch-random", fetchRandomChat);
+router.get("/chats/fetch-random", fetchRandomChat);
+router.get("/chat/mark-sent/:id", markChatSent);
+router.get("/chats/mark-sent/:id", markChatSent);
+router.get("/chat/mark-not-available/:id", markChatNotAvailable);
+router.get("/chats/mark-not-available/:id", markChatNotAvailable);
+
 router.get(
   "/whatsapp_message/mark-not-available/:id",
   markWhatsappMessageNotAvailable,

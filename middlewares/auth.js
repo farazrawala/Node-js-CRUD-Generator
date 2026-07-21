@@ -181,6 +181,24 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/whatsapp_message\/mark-not-available\/.*/,
     /^\/whatsapp_messages\/mark-not-available\/.*/,
     /^\/api\/whatsapp_messages\/mark-not-available\/.*/,
+    // Chat insert authenticates via :pos_auth_token in the URL
+    /^\/chat\/create\/[^/]+$/,
+    /^\/api\/chat\/create\/[^/]+$/,
+    /^\/chats\/create\/[^/]+$/,
+    /^\/api\/chats\/create\/[^/]+$/,
+    // Chat worker routes (public, company_id query)
+    "/chat/fetch-random",
+    "/api/chat/fetch-random",
+    "/chats/fetch-random",
+    "/api/chats/fetch-random",
+    /^\/chat\/mark-sent\/.*/,
+    /^\/api\/chat\/mark-sent\/.*/,
+    /^\/chats\/mark-sent\/.*/,
+    /^\/api\/chats\/mark-sent\/.*/,
+    /^\/chat\/mark-not-available\/.*/,
+    /^\/api\/chat\/mark-not-available\/.*/,
+    /^\/chats\/mark-not-available\/.*/,
+    /^\/api\/chats\/mark-not-available\/.*/,
     /^\/uploads\/.*/,
     /^\/api\/uploads\/.*/,
   ];
@@ -295,4 +313,5 @@ module.exports = {
   checkHeaderAuthentication,
   checkForAuthentication,
   restrictTo,
+  hydrateUserFromToken,
 };
