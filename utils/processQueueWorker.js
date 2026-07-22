@@ -66,8 +66,11 @@ function setCurrentRun(partial = {}) {
       progress: null,
       status: null,
       product_id: null,
+      product_name: null,
       category_id: null,
+      category_name: null,
       brand_id: null,
+      brand_name: null,
       integration_id: null,
       page: null,
       hits: null,
@@ -94,10 +97,33 @@ function idFromRef(value) {
   return String(value);
 }
 
+function nameFromProductRef(value) {
+  if (!value || typeof value !== "object") return null;
+  return (
+    value.product_name ||
+    value.name ||
+    value.sku ||
+    null
+  );
+}
+
+function nameFromCategoryRef(value) {
+  if (!value || typeof value !== "object") return null;
+  return value.name || value.category_name || null;
+}
+
+function nameFromBrandRef(value) {
+  if (!value || typeof value !== "object") return null;
+  return value.name || value.brand_name || null;
+}
+
 function applyProcessToCurrentRun(process) {
   if (!process) return;
   const processId = idFromRef(process._id) || currentRun?.process_id || null;
   const page = process.page ?? currentRun?.page ?? null;
+  const productId = idFromRef(process.product_id);
+  const categoryId = idFromRef(process.category_id);
+  const brandId = idFromRef(process.brand_id);
 
   if (processId && processId === timingStats.last_process_id) {
     timingStats.same_process_batches += 1;
@@ -120,21 +146,91 @@ function applyProcessToCurrentRun(process) {
   }
   timingStats.last_page = page;
 
+  const productName =
+    nameFromProductRef(process.product_id) ||
+    (productId && productId === currentRun?.product_id ?
+      currentRun?.product_name
+    : null) ||
+    null;
+  const categoryName =
+    nameFromCategoryRef(process.category_id) ||
+    (categoryId && categoryId === currentRun?.category_id ?
+      currentRun?.category_name
+    : null) ||
+    null;
+  const brandName =
+    nameFromBrandRef(process.brand_id) ||
+    (brandId && brandId === currentRun?.brand_id ?
+      currentRun?.brand_name
+    : null) ||
+    null;
+
   setCurrentRun({
     process_id: processId,
     company_id: idFromRef(process.company_id) || currentRun?.company_id || null,
     action: process.action || currentRun?.action || null,
     progress: process.progress || currentRun?.progress || null,
     status: process.status || currentRun?.status || null,
-    product_id: idFromRef(process.product_id),
-    category_id: idFromRef(process.category_id),
-    brand_id: idFromRef(process.brand_id),
+    product_id: productId,
+    product_name: productName,
+    category_id: categoryId,
+    category_name: categoryName,
+    brand_id: brandId,
+    brand_name: brandName,
     integration_id: idFromRef(process.integration_id),
     page,
     hits: process.hits ?? currentRun?.hits ?? null,
     remarks:
       process.remarks != null ? String(process.remarks) : currentRun?.remarks || null,
   });
+}
+
+async function hydrateCurrentRunNames() {
+  if (!currentRun) return;
+
+  try {
+    if (currentRun.product_id && !currentRun.product_name) {
+      const Product = require("../models/product");
+      const product = await Product.findById(currentRun.product_id)
+        .select("product_name name sku")
+        .lean();
+      if (product) {
+        setCurrentRun({
+          product_name:
+            product.product_name || product.name || product.sku || null,
+        });
+      }
+    }
+
+    if (currentRun.category_id && !currentRun.category_name) {
+      const Category = require("../models/category");
+      const category = await Category.findById(currentRun.category_id)
+        .select("name category_name")
+        .lean();
+      if (category) {
+        setCurrentRun({
+          category_name: category.name || category.category_name || null,
+        });
+      }
+    }
+
+    if (currentRun.brand_id && !currentRun.brand_name) {
+      const Brand = require("../models/brands");
+      const brand = await Brand.findById(currentRun.brand_id)
+        .select("name brand_name")
+        .lean();
+      if (brand) {
+        setCurrentRun({
+          brand_name: brand.name || brand.brand_name || null,
+        });
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[process-queue-worker] name hydrate failed:",
+      err?.message || err,
+    );
+  }
 }
 
 function formatRunningFor(startedAt) {
@@ -405,8 +501,11 @@ async function getWorkerStatus(options = {}) {
     current_progress: currentRun?.progress || null,
     current_status: currentRun?.status || null,
     current_product_id: currentRun?.product_id || null,
+    current_product_name: currentRun?.product_name || null,
     current_category_id: currentRun?.category_id || null,
+    current_category_name: currentRun?.category_name || null,
     current_brand_id: currentRun?.brand_id || null,
+    current_brand_name: currentRun?.brand_name || null,
     current_integration_id: currentRun?.integration_id || null,
     current_page: currentRun?.page ?? null,
     current_hits: currentRun?.hits ?? null,
@@ -519,6 +618,7 @@ async function drainProcessQueue(options = {}) {
         const activeProcess = await loadActiveProcess(probeReq);
         if (activeProcess) {
           applyProcessToCurrentRun(activeProcess);
+          await hydrateCurrentRunNames();
           processIdForBatch =
             idFromRef(activeProcess._id) || processIdForBatch;
         } else if (scopedProcessId) {
@@ -597,8 +697,16 @@ async function drainProcessQueue(options = {}) {
               .select(
                 "action progress status company_id product_id category_id brand_id integration_id page hits remarks",
               )
+              .populate([
+                { path: "product_id", select: "product_name name sku" },
+                { path: "category_id", select: "name category_name" },
+                { path: "brand_id", select: "name brand_name" },
+              ])
               .lean();
-            if (row) applyProcessToCurrentRun(row);
+            if (row) {
+              applyProcessToCurrentRun(row);
+              await hydrateCurrentRunNames();
+            }
           } catch (_) {
             /* ignore refresh errors */
           }
