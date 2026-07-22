@@ -4,6 +4,9 @@ let draining = false;
 let debounceTimer = null;
 let pollTimer = null;
 
+/** Currently executing batch (cleared when drain finishes). */
+let currentRun = null;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -18,11 +21,62 @@ function isProcessQueueWorkerEnabled() {
   return isQueueEnabled();
 }
 
+function clearCurrentRun() {
+  currentRun = null;
+}
+
+function setCurrentRun(partial = {}) {
+  const now = Date.now();
+  if (!currentRun) {
+    currentRun = {
+      process_id: null,
+      company_id: null,
+      action: null,
+      progress: null,
+      status: null,
+      started_at: now,
+      batch_index: 0,
+      ...partial,
+    };
+    return;
+  }
+  currentRun = { ...currentRun, ...partial };
+}
+
+function formatRunningFor(startedAt) {
+  if (!startedAt) return null;
+  const ms = Math.max(0, Date.now() - startedAt);
+  const totalSec = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  const human =
+    hours > 0 ?
+      `${hours}h ${minutes}m ${seconds}s`
+    : minutes > 0 ? `${minutes}m ${seconds}s`
+    : `${seconds}s`;
+  return { ms, seconds: totalSec, human };
+}
+
 function getWorkerStatus() {
+  const running_for =
+    currentRun?.started_at ? formatRunningFor(currentRun.started_at) : null;
+
   return {
     enabled: isProcessQueueWorkerEnabled(),
     draining,
     queue_enabled: isQueueEnabled(),
+    current_process_id: currentRun?.process_id || null,
+    current_company_id: currentRun?.company_id || null,
+    current_action: currentRun?.action || null,
+    current_progress: currentRun?.progress || null,
+    current_status: currentRun?.status || null,
+    started_at:
+      currentRun?.started_at ?
+        new Date(currentRun.started_at).toISOString()
+      : null,
+    running_for,
+    batch_index: currentRun?.batch_index ?? null,
   };
 }
 
@@ -47,6 +101,8 @@ function summarizeBatchResult(result) {
     success: result?.success,
     statusCode: result?.statusCode,
     process_id: data.process_id || result?.body?.process_id || null,
+    company_id: data.company_id || null,
+    action: data.action || null,
     progress: data.progress || null,
     status: data.status || null,
     message: result?.body?.message || result?.body?.error || null,
@@ -74,8 +130,17 @@ async function drainProcessQueue(options = {}) {
   }
 
   draining = true;
+  setCurrentRun({
+    process_id: options.processId ? String(options.processId) : null,
+    company_id: options.companyId ? String(options.companyId) : null,
+    started_at: Date.now(),
+    batch_index: 0,
+  });
+
   const results = [];
-  const batchDelay = Number(process.env.PROCESS_QUEUE_WORKER_BATCH_DELAY_MS || 1000);
+  const batchDelay = Number(
+    process.env.PROCESS_QUEUE_WORKER_BATCH_DELAY_MS || 1000,
+  );
   const maxBatches = Number(
     options.maxBatches ||
       process.env.PROCESS_QUEUE_WORKER_MAX_BATCHES ||
@@ -88,6 +153,57 @@ async function drainProcessQueue(options = {}) {
     const { runProcessExecution } = require("../controllers/process");
 
     for (let i = 0; i < maxBatches; i += 1) {
+      setCurrentRun({ batch_index: i + 1 });
+
+      // Prefer known process before the batch so status is accurate while it runs.
+      try {
+        if (scopedProcessId) {
+          setCurrentRun({
+            process_id: String(scopedProcessId),
+            company_id:
+              scopedCompanyId ?
+                String(scopedCompanyId)
+              : currentRun?.company_id || null,
+          });
+        } else {
+          const next = await peekNextProcessJob(
+            scopedCompanyId ? String(scopedCompanyId) : null,
+          );
+          if (next?.jobId) {
+            setCurrentRun({
+              process_id: String(next.jobId),
+              company_id:
+                next.companyId != null ?
+                  String(next.companyId)
+                : currentRun?.company_id || null,
+            });
+          }
+        }
+
+        if (currentRun?.process_id) {
+          const ProcessModel = require("../models/process");
+          const row = await ProcessModel.findById(currentRun.process_id)
+            .select("action progress status company_id")
+            .lean();
+          if (row) {
+            setCurrentRun({
+              action: row.action || null,
+              progress: row.progress || null,
+              status: row.status || null,
+              company_id:
+                row.company_id != null ?
+                  String(row.company_id)
+                : currentRun.company_id,
+            });
+          }
+        }
+      } catch (peekErr) {
+        console.warn(
+          "[process-queue-worker] pre-batch status peek failed:",
+          peekErr?.message || peekErr,
+        );
+      }
+
       const req = buildWorkerReq({
         companyId: scopedCompanyId,
         processId: scopedProcessId,
@@ -96,7 +212,24 @@ async function drainProcessQueue(options = {}) {
 
       try {
         const result = await runProcessExecution(req);
-        results.push(summarizeBatchResult(result));
+        const summary = summarizeBatchResult(result);
+        results.push(summary);
+
+        if (summary.process_id || summary.progress || summary.status) {
+          setCurrentRun({
+            process_id:
+              summary.process_id != null ?
+                String(summary.process_id)
+              : currentRun?.process_id || null,
+            company_id:
+              summary.company_id != null ?
+                String(summary.company_id)
+              : currentRun?.company_id || null,
+            action: summary.action || currentRun?.action || null,
+            progress: summary.progress || currentRun?.progress || null,
+            status: summary.status || currentRun?.status || null,
+          });
+        }
 
         if (shouldStopDrain(result)) {
           break;
@@ -121,7 +254,9 @@ async function drainProcessQueue(options = {}) {
         results.push({
           success: false,
           statusCode: err?.response?.status || 500,
-          process_id: null,
+          process_id: currentRun?.process_id || null,
+          company_id: currentRun?.company_id || null,
+          action: currentRun?.action || null,
           progress: null,
           status: null,
           message: err?.response?.data?.message || err?.message || String(err),
@@ -135,6 +270,7 @@ async function drainProcessQueue(options = {}) {
   } catch (err) {
     console.warn("[process-queue-worker] drain failed:", err?.message || err);
     draining = false;
+    clearCurrentRun();
     return {
       status: "error",
       error: err?.message || String(err),
@@ -144,6 +280,7 @@ async function drainProcessQueue(options = {}) {
     };
   } finally {
     draining = false;
+    clearCurrentRun();
   }
 
   return {
