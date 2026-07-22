@@ -2626,9 +2626,24 @@ function getDefaultSearchFieldsFromModel(Model) {
 
 /**
  * Build one $or branch for a schema field (regex on strings; digit substring on numbers).
+ * ObjectId fields (`_id`, refs) use exact match when the term is a 24-char hex id.
  */
 function buildSearchOrClause(field, searchTerm, escaped, schemaPath) {
+  const mongoose = require("mongoose");
   const inst = schemaPath?.instance;
+  const isObjectIdField =
+    field === "_id" ||
+    inst === "ObjectId" ||
+    inst === "ObjectID";
+
+  if (isObjectIdField) {
+    const str = String(searchTerm ?? "").trim();
+    if (!(mongoose.Types.ObjectId.isValid(str) && str.length === 24)) {
+      return [];
+    }
+    return [{ [field]: new mongoose.Types.ObjectId(str) }];
+  }
+
   if (SEARCHABLE_NUMBER_INSTANCES.has(inst)) {
     const clauses = [
       {
@@ -2651,15 +2666,29 @@ function buildSearchOrClause(field, searchTerm, escaped, schemaPath) {
 
 /**
  * AND-combines an existing filter with a case-insensitive $or across string/number fields.
+ * When the search term is a Mongo ObjectId, also matches `_id` (and listed ObjectId fields).
  */
 function mergeSearchIntoFilter(filter, searchTerm, searchFields, Model = null) {
   if (!searchTerm || !searchFields.length) {
     return { ...filter };
   }
+  const mongoose = require("mongoose");
   const escaped = escapeRegexForSearch(searchTerm);
   const paths = Model?.schema?.paths || {};
   const orClauses = [];
-  for (const field of searchFields) {
+  const fields = [...searchFields];
+
+  // Always allow document lookup by id when the term looks like an ObjectId.
+  const trimmed = String(searchTerm ?? "").trim();
+  if (
+    mongoose.Types.ObjectId.isValid(trimmed) &&
+    trimmed.length === 24 &&
+    !fields.includes("_id")
+  ) {
+    fields.push("_id");
+  }
+
+  for (const field of fields) {
     orClauses.push(
       ...buildSearchOrClause(field, searchTerm, escaped, paths[field]),
     );
