@@ -363,6 +363,7 @@ const handleImageUpload = async (
       "image/png",
       "image/gif",
       "image/webp",
+      "image/avif",
     ];
 
     const {
