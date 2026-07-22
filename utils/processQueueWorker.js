@@ -34,6 +34,12 @@ function setCurrentRun(partial = {}) {
       action: null,
       progress: null,
       status: null,
+      product_id: null,
+      category_id: null,
+      brand_id: null,
+      integration_id: null,
+      page: null,
+      hits: null,
       started_at: now,
       batch_index: 0,
       ...partial,
@@ -41,6 +47,36 @@ function setCurrentRun(partial = {}) {
     return;
   }
   currentRun = { ...currentRun, ...partial };
+}
+
+function idFromRef(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "object") {
+    if (value._id != null) return String(value._id);
+    if (typeof value.toString === "function") {
+      const asString = String(value);
+      if (asString && asString !== "[object Object]") return asString;
+    }
+    return null;
+  }
+  return String(value);
+}
+
+function applyProcessToCurrentRun(process) {
+  if (!process) return;
+  setCurrentRun({
+    process_id: idFromRef(process._id) || currentRun?.process_id || null,
+    company_id: idFromRef(process.company_id) || currentRun?.company_id || null,
+    action: process.action || currentRun?.action || null,
+    progress: process.progress || currentRun?.progress || null,
+    status: process.status || currentRun?.status || null,
+    product_id: idFromRef(process.product_id),
+    category_id: idFromRef(process.category_id),
+    brand_id: idFromRef(process.brand_id),
+    integration_id: idFromRef(process.integration_id),
+    page: process.page ?? currentRun?.page ?? null,
+    hits: process.hits ?? currentRun?.hits ?? null,
+  });
 }
 
 function formatRunningFor(startedAt) {
@@ -62,17 +98,58 @@ async function getWorkerStatus(options = {}) {
   const running_for =
     currentRun?.started_at ? formatRunningFor(currentRun.started_at) : null;
 
-  let remaining = 0;
+  let remaining_in_queue = 0;
+  let remaining_in_db = 0;
   let remaining_by_company = [];
+
   try {
     const queueRemaining = await getProcessQueueRemaining(
       options.companyId || null,
     );
-    remaining = queueRemaining.remaining;
-    remaining_by_company = queueRemaining.companies;
+    remaining_in_queue = queueRemaining.remaining;
   } catch (err) {
     console.warn(
-      "[process-queue-worker] remaining count failed:",
+      "[process-queue-worker] queue remaining count failed:",
+      err?.message || err,
+    );
+  }
+
+  try {
+    const ProcessModel = require("../models/process");
+    const { activeNotDeletedCriteria, coalesceObjectId } = require("./modelHelper");
+    const companyId = coalesceObjectId(options.companyId);
+
+    // Match admin "remaining work": not completed/failed in DB (queue may be empty
+    // while thousands of not_started rows still exist — worker falls back to Mongo).
+    const dbMatch = {
+      progress: { $in: ["not_started", "started"] },
+      status: { $in: ["active", "pending"] },
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (companyId) {
+      dbMatch.$and.push({
+        $or: [{ company_id: companyId }, { company_id: String(companyId) }],
+      });
+    }
+
+    const [total, byCompany] = await Promise.all([
+      ProcessModel.countDocuments(dbMatch),
+      ProcessModel.aggregate([
+        { $match: dbMatch },
+        { $group: { _id: "$company_id", remaining: { $sum: 1 } } },
+        { $sort: { remaining: -1 } },
+        { $limit: 50 },
+      ]),
+    ]);
+
+    remaining_in_db = total;
+    remaining_by_company = byCompany.map((row) => ({
+      company_id: row._id != null ? String(row._id) : null,
+      remaining: row.remaining,
+    }));
+  } catch (err) {
+    console.warn(
+      "[process-queue-worker] db remaining count failed:",
       err?.message || err,
     );
   }
@@ -86,13 +163,22 @@ async function getWorkerStatus(options = {}) {
     current_action: currentRun?.action || null,
     current_progress: currentRun?.progress || null,
     current_status: currentRun?.status || null,
+    current_product_id: currentRun?.product_id || null,
+    current_category_id: currentRun?.category_id || null,
+    current_brand_id: currentRun?.brand_id || null,
+    current_integration_id: currentRun?.integration_id || null,
+    current_page: currentRun?.page ?? null,
+    current_hits: currentRun?.hits ?? null,
     started_at:
       currentRun?.started_at ?
         new Date(currentRun.started_at).toISOString()
       : null,
     running_for,
     batch_index: currentRun?.batch_index ?? null,
-    remaining_processes: remaining,
+    // Primary: Mongo remaining (matches Processes admin list, e.g. 5209 not_started)
+    remaining_processes: remaining_in_db,
+    remaining_in_db,
+    remaining_in_queue,
     remaining_by_company,
   };
 }
@@ -122,6 +208,9 @@ function summarizeBatchResult(result) {
     action: data.action || null,
     progress: data.progress || null,
     status: data.status || null,
+    product_id: data.product_id || null,
+    category_id: data.category_id || null,
+    brand_id: data.brand_id || null,
     message: result?.body?.message || result?.body?.error || null,
   };
 }
@@ -167,14 +256,29 @@ async function drainProcessQueue(options = {}) {
   const scopedCompanyId = options.companyId || null;
 
   try {
-    const { runProcessExecution } = require("../controllers/process");
+    const {
+      runProcessExecution,
+      loadActiveProcess,
+    } = require("../controllers/process");
 
     for (let i = 0; i < maxBatches; i += 1) {
       setCurrentRun({ batch_index: i + 1 });
 
-      // Prefer known process before the batch so status is accurate while it runs.
+      // Resolve the same process execute-process will run (queue OR Mongo fallback)
+      // BEFORE awaiting the batch, so status shows ids while a long batch runs.
+      let processIdForBatch = scopedProcessId || null;
       try {
-        if (scopedProcessId) {
+        const probeReq = buildWorkerReq({
+          companyId: scopedCompanyId,
+          processId: scopedProcessId,
+          user: options.user,
+        });
+        const activeProcess = await loadActiveProcess(probeReq);
+        if (activeProcess) {
+          applyProcessToCurrentRun(activeProcess);
+          processIdForBatch =
+            idFromRef(activeProcess._id) || processIdForBatch;
+        } else if (scopedProcessId) {
           setCurrentRun({
             process_id: String(scopedProcessId),
             company_id:
@@ -182,48 +286,17 @@ async function drainProcessQueue(options = {}) {
                 String(scopedCompanyId)
               : currentRun?.company_id || null,
           });
-        } else {
-          const next = await peekNextProcessJob(
-            scopedCompanyId ? String(scopedCompanyId) : null,
-          );
-          if (next?.jobId) {
-            setCurrentRun({
-              process_id: String(next.jobId),
-              company_id:
-                next.companyId != null ?
-                  String(next.companyId)
-                : currentRun?.company_id || null,
-            });
-          }
-        }
-
-        if (currentRun?.process_id) {
-          const ProcessModel = require("../models/process");
-          const row = await ProcessModel.findById(currentRun.process_id)
-            .select("action progress status company_id")
-            .lean();
-          if (row) {
-            setCurrentRun({
-              action: row.action || null,
-              progress: row.progress || null,
-              status: row.status || null,
-              company_id:
-                row.company_id != null ?
-                  String(row.company_id)
-                : currentRun.company_id,
-            });
-          }
         }
       } catch (peekErr) {
         console.warn(
-          "[process-queue-worker] pre-batch status peek failed:",
+          "[process-queue-worker] pre-batch process resolve failed:",
           peekErr?.message || peekErr,
         );
       }
 
       const req = buildWorkerReq({
         companyId: scopedCompanyId,
-        processId: scopedProcessId,
+        processId: processIdForBatch,
         user: options.user,
       });
 
@@ -245,7 +318,34 @@ async function drainProcessQueue(options = {}) {
             action: summary.action || currentRun?.action || null,
             progress: summary.progress || currentRun?.progress || null,
             status: summary.status || currentRun?.status || null,
+            product_id:
+              summary.product_id != null ?
+                String(summary.product_id)
+              : currentRun?.product_id || null,
+            category_id:
+              summary.category_id != null ?
+                String(summary.category_id)
+              : currentRun?.category_id || null,
+            brand_id:
+              summary.brand_id != null ?
+                String(summary.brand_id)
+              : currentRun?.brand_id || null,
           });
+        }
+
+        // Refresh from DB after batch so page/hits/progress stay current
+        if (currentRun?.process_id) {
+          try {
+            const ProcessModel = require("../models/process");
+            const row = await ProcessModel.findById(currentRun.process_id)
+              .select(
+                "action progress status company_id product_id category_id brand_id integration_id page hits",
+              )
+              .lean();
+            if (row) applyProcessToCurrentRun(row);
+          } catch (_) {
+            /* ignore refresh errors */
+          }
         }
 
         if (shouldStopDrain(result)) {

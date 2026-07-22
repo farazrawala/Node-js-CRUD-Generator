@@ -1264,6 +1264,7 @@ async function processRestart(req, res) {
 module.exports = {
   execute_process,
   runProcessExecution,
+  loadActiveProcess,
   runQueueWorker,
   getQueueWorkerStatus,
   processBulkCreate,
