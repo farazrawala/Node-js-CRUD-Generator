@@ -1001,10 +1001,11 @@ async function restartProcessDocument(existing, req, { remarks = "" } = {}) {
 
 /**
  * POST/GET /api/process/restart-all
- * Restart every process for a company with progress failed or not_started.
+ * Restart processes with progress failed or not_started.
+ * If company_id is omitted, restarts matching processes for ALL companies.
  *
- * Body/query optional:
- * - company_id (defaults to auth user company)
+ * Body/query/path optional:
+ * - company_id / :companyId — scope to one company; omit to restart all
  * - action, integration_id filters
  * - remarks → custom restart remarks
  * - execute=true → run one execute-process batch after restarting all
@@ -1012,22 +1013,14 @@ async function restartProcessDocument(existing, req, { remarks = "" } = {}) {
 async function processRestartAll(req, res) {
   try {
     const body = normalizeProcessQueueBody(req.body);
+    // Only explicit company_id scopes the restart; no auth-user fallback
+    // so omitting company_id truly means "all companies".
     const companyId = coalesceObjectId(
       req.params?.companyId ||
         req.params?.company_id ||
-        req.params?.id ||
         body.company_id ||
-        req.query?.company_id ||
-        req.user?.company_id,
+        req.query?.company_id,
     );
-
-    if (!companyId) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "company_id is required. Use /process/restart-process-all/:companyId or pass company_id.",
-      });
-    }
 
     const action = String(body.action || req.query?.action || "").trim();
     if (action && !PROCESS_ACTIONS.has(action)) {
@@ -1041,13 +1034,15 @@ async function processRestartAll(req, res) {
       body.integration_id || req.query?.integration_id,
     );
 
-    const companyCriteria = buildCompanyIdCriteria(companyId);
     const filter = {
       progress: { $in: ["failed", "not_started"] },
       $and: [activeNotDeletedCriteria()],
     };
-    if (companyCriteria) {
-      filter.$and.push(companyCriteria);
+    if (companyId) {
+      const companyCriteria = buildCompanyIdCriteria(companyId);
+      if (companyCriteria) {
+        filter.$and.push(companyCriteria);
+      }
     }
     if (action) {
       filter.action = action;
@@ -1078,6 +1073,7 @@ async function processRestartAll(req, res) {
         restarted.push({
           _id: updated._id,
           action: updated.action,
+          company_id: updated.company_id,
           status: updated.status,
           progress: updated.progress,
           previous,
@@ -1087,6 +1083,7 @@ async function processRestartAll(req, res) {
         failed.push({
           _id: doc._id,
           action: doc.action,
+          company_id: doc.company_id,
           error: err.message || "Restart failed",
         });
       }
@@ -1106,12 +1103,14 @@ async function processRestartAll(req, res) {
     const statusCode =
       failed.length > 0 && restarted.length === 0 ? 500 : 200;
 
+    const scopeLabel = companyId ? "this company/filter" : "any company";
+
     return res.status(statusCode).json({
       success: restarted.length > 0 || failed.length === 0,
       message:
         restarted.length > 0 ?
-          `Restarted ${restarted.length} process(es) (failed/not_started → not_started + active). Call execute-process or run-queue-worker to run.`
-        : "No failed or not_started process records found for this company/filter.",
+          `Restarted ${restarted.length} process(es) (failed/not_started → not_started + active)${companyId ? "" : " across all companies"}. Call execute-process or run-queue-worker to run.`
+        : `No failed or not_started process records found for ${scopeLabel}.`,
       data: {
         summary: {
           total: processDocs.length,
@@ -1119,7 +1118,8 @@ async function processRestartAll(req, res) {
           failed: failed.length,
         },
         filters: {
-          company_id: companyId,
+          company_id: companyId || null,
+          all_companies: !companyId,
           action: action || null,
           integration_id: integrationId || null,
           progress: ["failed", "not_started"],
@@ -1127,7 +1127,8 @@ async function processRestartAll(req, res) {
         restarted,
         failed,
         queue_enabled: isQueueEnabled(),
-        queue_key: `${String(companyId).toLowerCase()}:process`,
+        queue_key:
+          companyId ? `${String(companyId).toLowerCase()}:process` : null,
         execute_process_url: "/api/process/execute-process",
         run_queue_worker_url: "/api/process/run-queue-worker",
       },
