@@ -14,8 +14,8 @@ const {
 
 const ACTIVE_STATUSES = ["pending", "approved"];
 const CONNECTION_POPULATE = [
-  { path: "company_id", select: "company_name company_email company_phone company_logo status" },
-  { path: "target_company_id", select: "company_name company_email company_phone company_logo status" },
+  { path: "company_id", select: "company_name company_email company_phone company_logo company_banner status" },
+  { path: "target_company_id", select: "company_name company_email company_phone company_logo company_banner status" },
   { path: "requested_by", select: "name email" },
   { path: "approved_by", select: "name email" },
 ];
@@ -1699,7 +1699,7 @@ async function getFetchedProducts(req, res) {
         )
         .populate(
           "fetch_from_company_id",
-          "company_name company_email company_logo",
+          "company_name company_email company_logo company_banner",
         )
         .sort({ createdAt: -1 })
         .skip(skip)

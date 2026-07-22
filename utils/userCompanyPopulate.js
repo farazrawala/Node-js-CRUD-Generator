@@ -21,6 +21,7 @@ const ACCOUNT_SELECT = "name account_number company_id account_type status";
 /** Scalar company fields the client expects on login / auth even when unset in MongoDB. */
 const COMPANY_CLIENT_SCALAR_FIELDS = [
   "company_logo",
+  "company_banner",
   "barcode_settings",
   "printer_settings",
 ];

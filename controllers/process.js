@@ -947,6 +947,194 @@ function getQueueWorkerStatus(req, res) {
 }
 
 /**
+ * Shared reset used by single + bulk restart.
+ * Sets progress → not_started, status → active, clears counters, re-enqueues.
+ */
+async function restartProcessDocument(existing, req, { remarks = "" } = {}) {
+  const processId = existing._id;
+  const previous = {
+    status: existing.status,
+    progress: existing.progress,
+    page: existing.page,
+    offset: existing.offset,
+    count: existing.count,
+    hits: existing.hits,
+  };
+
+  const updated = await ProcessModel.findByIdAndUpdate(
+    processId,
+    {
+      $set: {
+        status: "active",
+        progress: "not_started",
+        page: 1,
+        offset: 0,
+        count: 0,
+        hits: 0,
+        remarks,
+        ...(req.user?._id ?
+          { updated_by: coalesceObjectId(req.user._id) }
+        : {}),
+      },
+    },
+    { new: true, runValidators: true },
+  ).lean();
+
+  if (
+    !updated ||
+    updated.progress !== "not_started" ||
+    updated.status !== "active"
+  ) {
+    const err = new Error(
+      "Process restart did not persist progress=not_started / status=active.",
+    );
+    err.statusCode = 500;
+    err.data = { process: updated, previous };
+    throw err;
+  }
+
+  await releaseProcessFromQueue(updated);
+  const queue = await enqueueProcess(updated, { scheduleDrain: false });
+
+  return { updated, previous, queue };
+}
+
+/**
+ * POST/GET /api/process/restart-all
+ * Restart every process for a company with progress failed or not_started.
+ *
+ * Body/query optional:
+ * - company_id (defaults to auth user company)
+ * - action, integration_id filters
+ * - remarks → custom restart remarks
+ * - execute=true → run one execute-process batch after restarting all
+ */
+async function processRestartAll(req, res) {
+  try {
+    const body = normalizeProcessQueueBody(req.body);
+    const companyId = coalesceObjectId(
+      body.company_id || req.query?.company_id || req.user?.company_id,
+    );
+
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required (from auth user or request).",
+      });
+    }
+
+    const action = String(body.action || req.query?.action || "").trim();
+    if (action && !PROCESS_ACTIONS.has(action)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid action filter: ${action}`,
+      });
+    }
+
+    const integrationId = coalesceObjectId(
+      body.integration_id || req.query?.integration_id,
+    );
+
+    const companyCriteria = buildCompanyIdCriteria(companyId);
+    const filter = {
+      progress: { $in: ["failed", "not_started"] },
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (companyCriteria) {
+      filter.$and.push(companyCriteria);
+    }
+    if (action) {
+      filter.action = action;
+    }
+    if (integrationId) {
+      filter.integration_id = integrationId;
+    }
+
+    const processDocs = await ProcessModel.find(filter)
+      .sort({ priority: 1, createdAt: 1 })
+      .lean();
+
+    const customRemarks = String(
+      body.remarks ?? req.query?.remarks ?? "",
+    ).trim();
+    const remarks = customRemarks || "";
+
+    const restarted = [];
+    const failed = [];
+
+    for (const doc of processDocs) {
+      try {
+        const { updated, previous, queue } = await restartProcessDocument(
+          doc,
+          req,
+          { remarks },
+        );
+        restarted.push({
+          _id: updated._id,
+          action: updated.action,
+          status: updated.status,
+          progress: updated.progress,
+          previous,
+          queue,
+        });
+      } catch (err) {
+        failed.push({
+          _id: doc._id,
+          action: doc.action,
+          error: err.message || "Restart failed",
+        });
+      }
+    }
+
+    const shouldExecute =
+      body.execute === true ||
+      body.execute === "1" ||
+      body.execute === 1 ||
+      req.query?.execute === "true" ||
+      req.query?.execute === "1";
+
+    if (shouldExecute && restarted.length > 0) {
+      return execute_process(req, res);
+    }
+
+    const statusCode =
+      failed.length > 0 && restarted.length === 0 ? 500 : 200;
+
+    return res.status(statusCode).json({
+      success: restarted.length > 0 || failed.length === 0,
+      message:
+        restarted.length > 0 ?
+          `Restarted ${restarted.length} process(es) (failed/not_started → not_started + active). Call execute-process or run-queue-worker to run.`
+        : "No failed or not_started process records found for this company/filter.",
+      data: {
+        summary: {
+          total: processDocs.length,
+          restarted: restarted.length,
+          failed: failed.length,
+        },
+        filters: {
+          company_id: companyId,
+          action: action || null,
+          integration_id: integrationId || null,
+          progress: ["failed", "not_started"],
+        },
+        restarted,
+        failed,
+        queue_enabled: isQueueEnabled(),
+        queue_key: `${String(companyId).toLowerCase()}:process`,
+        execute_process_url: "/api/process/execute-process",
+        run_queue_worker_url: "/api/process/run-queue-worker",
+      },
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      message: err.message || "Failed to restart processes",
+    });
+  }
+}
+
+/**
  * POST/GET /api/process/restart-process/:id
  * Reset a completed/failed/inactive (or stuck) process so it can run again.
  * Always sets progress → not_started and status → active.
@@ -998,15 +1186,6 @@ async function processRestart(req, res) {
       });
     }
 
-    const previous = {
-      status: existing.status,
-      progress: existing.progress,
-      page: existing.page,
-      offset: existing.offset,
-      count: existing.count,
-      hits: existing.hits,
-    };
-
     // Clear remarks so the next execute writes a fresh outcome message.
     // Optional body/query `remarks` still allows an explicit override.
     const customRemarks = String(
@@ -1016,40 +1195,11 @@ async function processRestart(req, res) {
 
     // Use findByIdAndUpdate (not save) so post("save") does not auto-drain
     // the queue worker and immediately overwrite progress again.
-    const updated = await ProcessModel.findByIdAndUpdate(
-      processId,
-      {
-        $set: {
-          status: "active",
-          progress: "not_started",
-          page: 1,
-          offset: 0,
-          count: 0,
-          hits: 0,
-          remarks,
-          ...(req.user?._id ?
-            { updated_by: coalesceObjectId(req.user._id) }
-          : {}),
-        },
-      },
-      { new: true, runValidators: true },
-    ).lean();
-
-    if (
-      !updated ||
-      updated.progress !== "not_started" ||
-      updated.status !== "active"
-    ) {
-      return res.status(500).json({
-        success: false,
-        message:
-          "Process restart did not persist progress=not_started / status=active.",
-        data: { process: updated, previous },
-      });
-    }
-
-    await releaseProcessFromQueue(updated);
-    const queue = await enqueueProcess(updated, { scheduleDrain: false });
+    const { updated, previous, queue } = await restartProcessDocument(
+      existing,
+      req,
+      { remarks },
+    );
 
     const shouldExecute =
       req.body?.execute === true ||
@@ -1095,6 +1245,7 @@ async function processRestart(req, res) {
     return res.status(err.statusCode || 500).json({
       success: false,
       message: err.message || "Failed to restart process",
+      ...(err.data ? { data: err.data } : {}),
     });
   }
 }
@@ -1110,4 +1261,5 @@ module.exports = {
   processFetchProductQueue,
   processQueueFormSchema,
   processRestart,
+  processRestartAll,
 };

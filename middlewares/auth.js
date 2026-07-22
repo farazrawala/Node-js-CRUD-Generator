@@ -163,6 +163,17 @@ async function checkHeaderAuthentication(req, res, next) {
     "/api/process/execute-process",
     /^\/process\/execute-process\/.*/,
     /^\/api\/process\/execute-process\/.*/,
+    // Bulk restart failed/not_started processes (public; pass company_id)
+    "/process/restart-all",
+    "/api/process/restart-all",
+    "/process/restart-process-all",
+    "/api/process/restart-process-all",
+    // Single process restart (public)
+    "/process/restart-process",
+    "/api/process/restart-process",
+    /^\/process\/restart-process\/.*/,
+    /^\/api\/process\/restart-process\/.*/,
+
     "/integration/generate-token",
     "/api/integration/generate-token",
     /^\/integration\/generate-token\/.*/,

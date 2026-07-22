@@ -315,6 +315,7 @@ const companyAdminCRUD = adminCrudGenerator(
     "company_email",
     "company_address",
     "company_logo",
+    "company_banner",
     "default_cash_account",
     "default_sales_account",
     "default_purchase_account",
@@ -336,6 +337,7 @@ const companyAdminCRUD = adminCrudGenerator(
       "company_email",
       "company_address",
       "company_logo",
+      "company_banner",
       "default_cash_account",
       "default_sales_account",
       "default_purchase_account",
@@ -355,6 +357,7 @@ const companyAdminCRUD = adminCrudGenerator(
     softDelete: true, // Enable soft delete functionality
     fieldTypes: {
       company_logo: "file",
+      company_banner: "file",
       status: "select",
       deletedAt: "hidden",
       warehouse_id: "select",
@@ -371,6 +374,7 @@ const companyAdminCRUD = adminCrudGenerator(
     },
     fieldLabels: {
       company_logo: "Logo Image",
+      company_banner: "Banner Image",
       company_name: "Company Name",
       company_phone: "Phone",
       company_email: "Email",

@@ -139,6 +139,7 @@ const {
   processFetchProductQueue,
   processQueueFormSchema,
   processRestart,
+  processRestartAll,
   runQueueWorker,
   getQueueWorkerStatus,
 } = require("../controllers/process");
@@ -512,6 +513,10 @@ router.post("/process/restart-process", processRestart);
 router.get("/process/restart-process", processRestart);
 router.post("/process/restart-process/:id", processRestart);
 router.get("/process/restart-process/:id", processRestart);
+router.post("/process/restart-all", processRestartAll);
+router.get("/process/restart-all", processRestartAll);
+router.post("/process/restart-process-all", processRestartAll);
+router.get("/process/restart-process-all", processRestartAll);
 router.post("/process/run-queue-worker", runQueueWorker);
 router.get("/process/run-queue-worker", runQueueWorker);
 router.post("/process/run-queue-worker/:id", runQueueWorker);

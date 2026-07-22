@@ -94,6 +94,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "Logo Image",
       field_type: "image",
     },
+    company_banner: {
+      type: String,
+      field_name: "Banner Image",
+      field_type: "image",
+    },
     barcode_settings: {
       type: String,
       field_name: "Barcode Settings",
