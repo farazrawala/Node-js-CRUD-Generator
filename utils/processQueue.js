@@ -88,6 +88,40 @@ async function peekNextProcessJob(companyId) {
   return peekNextJob(PROCESS_MODULE, { companyId: companyId || undefined });
 }
 
+/**
+ * Count remaining process jobs in Redis/memory queues.
+ * Optional companyId scopes to one tenant; omit for all tenants.
+ */
+async function getProcessQueueRemaining(companyId = null) {
+  const {
+    getQueueLength,
+    listQueueTenants,
+    normalizeCompanyId: normalizeTenant,
+  } = require("./redisQueue");
+
+  const scoped = companyId ? normalizeTenant(companyId) : null;
+  if (scoped) {
+    const length = await getQueueLength(scoped, PROCESS_MODULE);
+    return {
+      remaining: length,
+      companies: length > 0 ? [{ company_id: scoped, remaining: length }] : [],
+    };
+  }
+
+  const tenants = await listQueueTenants(PROCESS_MODULE);
+  const companies = [];
+  let remaining = 0;
+  for (const tenant of tenants) {
+    const length = await getQueueLength(tenant, PROCESS_MODULE);
+    if (length > 0) {
+      companies.push({ company_id: tenant, remaining: length });
+      remaining += length;
+    }
+  }
+  companies.sort((a, b) => b.remaining - a.remaining);
+  return { remaining, companies };
+}
+
 async function syncProcessQueueOnSave(doc) {
   if (shouldReleaseProcess(doc)) {
     await releaseProcessFromQueue(doc);
@@ -106,6 +140,7 @@ module.exports = {
   enqueueProcess,
   releaseProcessFromQueue,
   peekNextProcessJob,
+  getProcessQueueRemaining,
   syncProcessQueueOnSave,
   shouldQueueProcess,
   shouldReleaseProcess,

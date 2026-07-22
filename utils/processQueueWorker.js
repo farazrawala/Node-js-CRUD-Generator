@@ -1,4 +1,4 @@
-const { peekNextProcessJob, isQueueEnabled } = require("./processQueue");
+const { peekNextProcessJob, isQueueEnabled, getProcessQueueRemaining } = require("./processQueue");
 
 let draining = false;
 let debounceTimer = null;
@@ -58,9 +58,24 @@ function formatRunningFor(startedAt) {
   return { ms, seconds: totalSec, human };
 }
 
-function getWorkerStatus() {
+async function getWorkerStatus(options = {}) {
   const running_for =
     currentRun?.started_at ? formatRunningFor(currentRun.started_at) : null;
+
+  let remaining = 0;
+  let remaining_by_company = [];
+  try {
+    const queueRemaining = await getProcessQueueRemaining(
+      options.companyId || null,
+    );
+    remaining = queueRemaining.remaining;
+    remaining_by_company = queueRemaining.companies;
+  } catch (err) {
+    console.warn(
+      "[process-queue-worker] remaining count failed:",
+      err?.message || err,
+    );
+  }
 
   return {
     enabled: isProcessQueueWorkerEnabled(),
@@ -77,6 +92,8 @@ function getWorkerStatus() {
       : null,
     running_for,
     batch_index: currentRun?.batch_index ?? null,
+    remaining_processes: remaining,
+    remaining_by_company,
   };
 }
 
@@ -126,7 +143,7 @@ function shouldStopDrain(result) {
  */
 async function drainProcessQueue(options = {}) {
   if (draining) {
-    return { status: "busy", ...getWorkerStatus() };
+    return { status: "busy", ...(await getWorkerStatus()) };
   }
 
   draining = true;
@@ -276,7 +293,7 @@ async function drainProcessQueue(options = {}) {
       error: err?.message || String(err),
       batches_run: results.length,
       results,
-      ...getWorkerStatus(),
+      ...(await getWorkerStatus()),
     };
   } finally {
     draining = false;
@@ -287,7 +304,7 @@ async function drainProcessQueue(options = {}) {
     status: "done",
     batches_run: results.length,
     results,
-    ...getWorkerStatus(),
+    ...(await getWorkerStatus()),
   };
 }
 

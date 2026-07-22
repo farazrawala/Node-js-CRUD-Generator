@@ -904,7 +904,9 @@ async function runQueueWorker(req, res) {
     drainProcessQueue,
     getWorkerStatus,
   } = require("../utils/processQueueWorker");
-  const status = getWorkerStatus();
+  const status = await getWorkerStatus({
+    companyId: req.query.company_id || null,
+  });
 
   if (status.draining) {
     return res.status(409).json({
@@ -938,11 +940,13 @@ async function runQueueWorker(req, res) {
   });
 }
 
-function getQueueWorkerStatus(req, res) {
+async function getQueueWorkerStatus(req, res) {
   const { getWorkerStatus } = require("../utils/processQueueWorker");
   return res.status(200).json({
     success: true,
-    data: getWorkerStatus(),
+    data: await getWorkerStatus({
+      companyId: req.query?.company_id || req.params?.companyId || null,
+    }),
   });
 }
 
