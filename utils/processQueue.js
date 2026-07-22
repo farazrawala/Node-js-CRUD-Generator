@@ -19,7 +19,11 @@ function shouldQueueProcess(process) {
   if (!process) return false;
   if (process.deletedAt) return false;
   if (process.status !== "active") return false;
-  if (["completed", "failed"].includes(String(process.progress || ""))) {
+  if (
+    ["completed", "failed", "added_new"].includes(
+      String(process.progress || ""),
+    )
+  ) {
     return false;
   }
   return true;
@@ -30,7 +34,11 @@ function shouldReleaseProcess(process) {
   if (["completed", "failed", "inactive"].includes(String(process.status || ""))) {
     return true;
   }
-  if (["completed", "failed"].includes(String(process.progress || ""))) {
+  if (
+    ["completed", "failed", "added_new"].includes(
+      String(process.progress || ""),
+    )
+  ) {
     return true;
   }
   return false;

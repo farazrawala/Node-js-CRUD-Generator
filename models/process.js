@@ -83,7 +83,7 @@ const modelSchema = new mongoose.Schema(
     progress: {
       type: String,
       required: true,
-      enum: ["not_started", "started", "completed", "failed"],
+      enum: ["not_started", "started", "completed", "failed","added_new"],
       default: "not_started",
       field_name: "Progress",
     },
@@ -119,6 +119,54 @@ const modelSchema = new mongoose.Schema(
   },
   { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
+
+/**
+ * On insert: if the same product_id already has progress not_started,
+ * mark those rows as added_new (superseded) then allow the new insert.
+ */
+modelSchema.pre("save", async function markSupersededNotStarted() {
+  if (!this.isNew || !this.product_id) {
+    return;
+  }
+
+  const filter = {
+    product_id: this.product_id,
+    progress: "not_started",
+    deletedAt: null,
+  };
+  if (this.company_id) {
+    filter.company_id = this.company_id;
+  }
+  if (this._id) {
+    filter._id = { $ne: this._id };
+  }
+
+  const existing = await this.constructor
+    .find(filter)
+    .select("_id company_id")
+    .lean();
+
+  if (!existing.length) {
+    return;
+  }
+
+  await this.constructor.updateMany(
+    { _id: { $in: existing.map((row) => row._id) } },
+    { $set: { progress: "added_new" } },
+  );
+
+  try {
+    const { releaseProcessFromQueue } = require("../utils/processQueue");
+    await Promise.all(
+      existing.map((row) => releaseProcessFromQueue(row).catch(() => false)),
+    );
+  } catch (err) {
+    console.warn(
+      "[process] release superseded not_started:",
+      err?.message || err,
+    );
+  }
+});
 
 modelSchema.post("save", function onProcessSaved(doc) {
   const { syncProcessQueueOnSave } = require("../utils/processQueue");
