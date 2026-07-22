@@ -1013,13 +1013,19 @@ async function processRestartAll(req, res) {
   try {
     const body = normalizeProcessQueueBody(req.body);
     const companyId = coalesceObjectId(
-      body.company_id || req.query?.company_id || req.user?.company_id,
+      req.params?.companyId ||
+        req.params?.company_id ||
+        req.params?.id ||
+        body.company_id ||
+        req.query?.company_id ||
+        req.user?.company_id,
     );
 
     if (!companyId) {
       return res.status(400).json({
         success: false,
-        message: "company_id is required (from auth user or request).",
+        message:
+          "company_id is required. Use /process/restart-process-all/:companyId or pass company_id.",
       });
     }
 
