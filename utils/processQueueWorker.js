@@ -1,27 +1,31 @@
-const { peekNextProcessJob, isQueueEnabled, getProcessQueueRemaining } = require("./processQueue");
+const {
+  isQueueEnabled,
+  getProcessQueueRemaining,
+  PROCESS_MODULE,
+} = require("./processQueue");
+const {
+  normalizeCompanyId,
+  listQueueTenants,
+  getQueueLength,
+} = require("./redisQueue");
 
-let draining = false;
-let debounceTimer = null;
+/** @type {Map<string, { companyId: string, draining: boolean, currentRun: object|null, timingStats: object }>} */
+const lanes = new Map();
+
+/** @type {Map<string, NodeJS.Timeout>} */
+const debounceTimers = new Map();
+
 let pollTimer = null;
 
-/** Currently executing batch (cleared when drain finishes). */
-let currentRun = null;
-
-/** Timing / slow-run diagnostics for the active (or last) drain. */
-let timingStats = {
-  batch_started_at: null,
-  last_batch_ms: null,
-  last_batch_success: null,
-  last_batch_message: null,
-  batch_durations_ms: [],
-  same_process_batches: 0,
-  last_process_id: null,
-  last_page: null,
-  page_unchanged_batches: 0,
-};
-
 const SLOW_BATCH_MS = Number(process.env.PROCESS_QUEUE_SLOW_BATCH_MS || 30000);
-const STUCK_BATCH_MS = Number(process.env.PROCESS_QUEUE_STUCK_BATCH_MS || 120000);
+const STUCK_BATCH_MS = Number(
+  process.env.PROCESS_QUEUE_STUCK_BATCH_MS || 120000,
+);
+
+function getMaxParallelCompanies() {
+  const n = Number(process.env.PROCESS_QUEUE_MAX_PARALLEL_COMPANIES || 10);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,8 +41,8 @@ function isProcessQueueWorkerEnabled() {
   return isQueueEnabled();
 }
 
-function resetTimingStats() {
-  timingStats = {
+function createEmptyTimingStats() {
+  return {
     batch_started_at: null,
     last_batch_ms: null,
     last_batch_success: null,
@@ -51,17 +55,55 @@ function resetTimingStats() {
   };
 }
 
-function clearCurrentRun() {
-  currentRun = null;
-  timingStats.batch_started_at = null;
+function getOrCreateLane(companyId) {
+  const key = normalizeCompanyId(companyId);
+  if (!key) return null;
+  let lane = lanes.get(key);
+  if (!lane) {
+    lane = {
+      companyId: key,
+      draining: false,
+      currentRun: null,
+      timingStats: createEmptyTimingStats(),
+    };
+    lanes.set(key, lane);
+  }
+  return lane;
 }
 
-function setCurrentRun(partial = {}) {
+function isCompanyDraining(companyId) {
+  const key = normalizeCompanyId(companyId);
+  if (!key) return false;
+  return Boolean(lanes.get(key)?.draining);
+}
+
+function countDrainingCompanies() {
+  let n = 0;
+  for (const lane of lanes.values()) {
+    if (lane.draining) n += 1;
+  }
+  return n;
+}
+
+function listDrainingLanes() {
+  return [...lanes.values()].filter((lane) => lane.draining);
+}
+
+function resetTimingStats(lane) {
+  lane.timingStats = createEmptyTimingStats();
+}
+
+function clearCurrentRun(lane) {
+  lane.currentRun = null;
+  lane.timingStats.batch_started_at = null;
+}
+
+function setCurrentRun(lane, partial = {}) {
   const now = Date.now();
-  if (!currentRun) {
-    currentRun = {
+  if (!lane.currentRun) {
+    lane.currentRun = {
       process_id: null,
-      company_id: null,
+      company_id: lane.companyId || null,
       action: null,
       progress: null,
       status: null,
@@ -81,7 +123,7 @@ function setCurrentRun(partial = {}) {
     };
     return;
   }
-  currentRun = { ...currentRun, ...partial };
+  lane.currentRun = { ...lane.currentRun, ...partial };
 }
 
 function idFromRef(value) {
@@ -99,12 +141,7 @@ function idFromRef(value) {
 
 function nameFromProductRef(value) {
   if (!value || typeof value !== "object") return null;
-  return (
-    value.product_name ||
-    value.name ||
-    value.sku ||
-    null
-  );
+  return value.product_name || value.name || value.sku || null;
 }
 
 function nameFromCategoryRef(value) {
@@ -117,8 +154,10 @@ function nameFromBrandRef(value) {
   return value.name || value.brand_name || null;
 }
 
-function applyProcessToCurrentRun(process) {
-  if (!process) return;
+function applyProcessToCurrentRun(lane, process) {
+  if (!process || !lane) return;
+  const timingStats = lane.timingStats;
+  const currentRun = lane.currentRun;
   const processId = idFromRef(process._id) || currentRun?.process_id || null;
   const page = process.page ?? currentRun?.page ?? null;
   const productId = idFromRef(process.product_id);
@@ -165,9 +204,13 @@ function applyProcessToCurrentRun(process) {
     : null) ||
     null;
 
-  setCurrentRun({
+  setCurrentRun(lane, {
     process_id: processId,
-    company_id: idFromRef(process.company_id) || currentRun?.company_id || null,
+    company_id:
+      idFromRef(process.company_id) ||
+      currentRun?.company_id ||
+      lane.companyId ||
+      null,
     action: process.action || currentRun?.action || null,
     progress: process.progress || currentRun?.progress || null,
     status: process.status || currentRun?.status || null,
@@ -181,12 +224,15 @@ function applyProcessToCurrentRun(process) {
     page,
     hits: process.hits ?? currentRun?.hits ?? null,
     remarks:
-      process.remarks != null ? String(process.remarks) : currentRun?.remarks || null,
+      process.remarks != null ?
+        String(process.remarks)
+      : currentRun?.remarks || null,
   });
 }
 
-async function hydrateCurrentRunNames() {
-  if (!currentRun) return;
+async function hydrateCurrentRunNames(lane) {
+  if (!lane?.currentRun) return;
+  const currentRun = lane.currentRun;
 
   try {
     if (currentRun.product_id && !currentRun.product_name) {
@@ -195,7 +241,7 @@ async function hydrateCurrentRunNames() {
         .select("product_name name sku")
         .lean();
       if (product) {
-        setCurrentRun({
+        setCurrentRun(lane, {
           product_name:
             product.product_name || product.name || product.sku || null,
         });
@@ -208,7 +254,7 @@ async function hydrateCurrentRunNames() {
         .select("name category_name")
         .lean();
       if (category) {
-        setCurrentRun({
+        setCurrentRun(lane, {
           category_name: category.name || category.category_name || null,
         });
       }
@@ -220,7 +266,7 @@ async function hydrateCurrentRunNames() {
         .select("name brand_name")
         .lean();
       if (brand) {
-        setCurrentRun({
+        setCurrentRun(lane, {
           brand_name: brand.name || brand.brand_name || null,
         });
       }
@@ -241,8 +287,7 @@ function formatRunningFor(startedAt) {
   const minutes = Math.floor((totalSec % 3600) / 60);
   const seconds = totalSec % 60;
   const human =
-    hours > 0 ?
-      `${hours}h ${minutes}m ${seconds}s`
+    hours > 0 ? `${hours}h ${minutes}m ${seconds}s`
     : minutes > 0 ? `${minutes}m ${seconds}s`
     : `${seconds}s`;
   return { ms, seconds: totalSec, human };
@@ -253,8 +298,11 @@ function average(nums) {
   return Math.round(nums.reduce((a, b) => a + b, 0) / nums.length);
 }
 
-function buildWhySlow({ remaining_in_db, remaining_in_queue }) {
+function buildWhySlow(lane, { remaining_in_db, remaining_in_queue }) {
   const reasons = [];
+  const timingStats = lane?.timingStats || createEmptyTimingStats();
+  const currentRun = lane?.currentRun || null;
+  const draining = Boolean(lane?.draining);
   const batchDelay = Number(
     process.env.PROCESS_QUEUE_WORKER_BATCH_DELAY_MS || 1000,
   );
@@ -431,9 +479,115 @@ function buildWhySlow({ remaining_in_db, remaining_in_queue }) {
   };
 }
 
-async function getWorkerStatus(options = {}) {
+function serializeLaneStatus(lane) {
+  const currentRun = lane?.currentRun || null;
   const running_for =
     currentRun?.started_at ? formatRunningFor(currentRun.started_at) : null;
+  return {
+    company_id: lane?.companyId || currentRun?.company_id || null,
+    draining: Boolean(lane?.draining),
+    current_process_id: currentRun?.process_id || null,
+    current_company_id: currentRun?.company_id || lane?.companyId || null,
+    current_action: currentRun?.action || null,
+    current_progress: currentRun?.progress || null,
+    current_status: currentRun?.status || null,
+    current_product_id: currentRun?.product_id || null,
+    current_product_name: currentRun?.product_name || null,
+    current_category_id: currentRun?.category_id || null,
+    current_category_name: currentRun?.category_name || null,
+    current_brand_id: currentRun?.brand_id || null,
+    current_brand_name: currentRun?.brand_name || null,
+    current_integration_id: currentRun?.integration_id || null,
+    current_page: currentRun?.page ?? null,
+    current_hits: currentRun?.hits ?? null,
+    current_remarks: currentRun?.remarks || null,
+    started_at:
+      currentRun?.started_at ?
+        new Date(currentRun.started_at).toISOString()
+      : null,
+    running_for,
+    batch_index: currentRun?.batch_index ?? null,
+  };
+}
+
+async function resolveCompanyIdFromOptions(options = {}) {
+  const direct = normalizeCompanyId(options.companyId);
+  if (direct) return direct;
+
+  const processId = options.processId ? String(options.processId) : null;
+  if (!processId) return null;
+
+  try {
+    const ProcessModel = require("../models/process");
+    const row = await ProcessModel.findById(processId)
+      .select("company_id")
+      .lean();
+    return normalizeCompanyId(idFromRef(row?.company_id));
+  } catch (err) {
+    console.warn(
+      "[process-queue-worker] resolve company from process failed:",
+      err?.message || err,
+    );
+    return null;
+  }
+}
+
+/**
+ * Companies with Redis queue length > 0 and/or Mongo pending process rows.
+ */
+async function discoverCompaniesNeedingWork() {
+  const companyIds = new Set();
+
+  try {
+    const tenants = await listQueueTenants(PROCESS_MODULE);
+    for (const tenant of tenants) {
+      const key = normalizeCompanyId(tenant);
+      if (!key) continue;
+      const length = await getQueueLength(key, PROCESS_MODULE);
+      if (length > 0) companyIds.add(key);
+    }
+  } catch (err) {
+    console.warn(
+      "[process-queue-worker] queue tenant discovery failed:",
+      err?.message || err,
+    );
+  }
+
+  try {
+    const ProcessModel = require("../models/process");
+    const { activeNotDeletedCriteria } = require("./modelHelper");
+    const rows = await ProcessModel.aggregate([
+      {
+        $match: {
+          progress: { $in: ["not_started", "started"] },
+          status: { $in: ["active", "pending"] },
+          $and: [activeNotDeletedCriteria()],
+        },
+      },
+      { $group: { _id: "$company_id" } },
+      { $limit: 200 },
+    ]);
+    for (const row of rows) {
+      const key = normalizeCompanyId(idFromRef(row._id));
+      if (key) companyIds.add(key);
+    }
+  } catch (err) {
+    console.warn(
+      "[process-queue-worker] db company discovery failed:",
+      err?.message || err,
+    );
+  }
+
+  return [...companyIds];
+}
+
+async function getWorkerStatus(options = {}) {
+  const drainingLanes = listDrainingLanes();
+  const scopedCompanyId = normalizeCompanyId(options.companyId);
+  const primaryLane =
+    (scopedCompanyId && lanes.get(scopedCompanyId)) || drainingLanes[0] || null;
+  const primaryStatus = serializeLaneStatus(primaryLane);
+  const anyDraining = drainingLanes.length > 0;
 
   let remaining_in_queue = 0;
   let remaining_in_db = 0;
@@ -453,7 +607,10 @@ async function getWorkerStatus(options = {}) {
 
   try {
     const ProcessModel = require("../models/process");
-    const { activeNotDeletedCriteria, coalesceObjectId } = require("./modelHelper");
+    const {
+      activeNotDeletedCriteria,
+      coalesceObjectId,
+    } = require("./modelHelper");
     const companyId = coalesceObjectId(options.companyId);
 
     const dbMatch = {
@@ -489,33 +646,36 @@ async function getWorkerStatus(options = {}) {
     );
   }
 
-  const why_slow = buildWhySlow({ remaining_in_db, remaining_in_queue });
+  const why_slow = buildWhySlow(primaryLane, {
+    remaining_in_db,
+    remaining_in_queue,
+  });
 
   return {
     enabled: isProcessQueueWorkerEnabled(),
-    draining,
+    draining: anyDraining,
+    parallel_companies_enabled: true,
+    max_parallel_companies: getMaxParallelCompanies(),
+    companies_draining: drainingLanes.map(serializeLaneStatus),
     queue_enabled: isQueueEnabled(),
-    current_process_id: currentRun?.process_id || null,
-    current_company_id: currentRun?.company_id || null,
-    current_action: currentRun?.action || null,
-    current_progress: currentRun?.progress || null,
-    current_status: currentRun?.status || null,
-    current_product_id: currentRun?.product_id || null,
-    current_product_name: currentRun?.product_name || null,
-    current_category_id: currentRun?.category_id || null,
-    current_category_name: currentRun?.category_name || null,
-    current_brand_id: currentRun?.brand_id || null,
-    current_brand_name: currentRun?.brand_name || null,
-    current_integration_id: currentRun?.integration_id || null,
-    current_page: currentRun?.page ?? null,
-    current_hits: currentRun?.hits ?? null,
-    current_remarks: currentRun?.remarks || null,
-    started_at:
-      currentRun?.started_at ?
-        new Date(currentRun.started_at).toISOString()
-      : null,
-    running_for,
-    batch_index: currentRun?.batch_index ?? null,
+    current_process_id: primaryStatus.current_process_id,
+    current_company_id: primaryStatus.current_company_id,
+    current_action: primaryStatus.current_action,
+    current_progress: primaryStatus.current_progress,
+    current_status: primaryStatus.current_status,
+    current_product_id: primaryStatus.current_product_id,
+    current_product_name: primaryStatus.current_product_name,
+    current_category_id: primaryStatus.current_category_id,
+    current_category_name: primaryStatus.current_category_name,
+    current_brand_id: primaryStatus.current_brand_id,
+    current_brand_name: primaryStatus.current_brand_name,
+    current_integration_id: primaryStatus.current_integration_id,
+    current_page: primaryStatus.current_page,
+    current_hits: primaryStatus.current_hits,
+    current_remarks: primaryStatus.current_remarks,
+    started_at: primaryStatus.started_at,
+    running_for: primaryStatus.running_for,
+    batch_index: primaryStatus.batch_index,
     remaining_processes: remaining_in_db,
     remaining_in_db,
     remaining_in_queue,
@@ -568,19 +728,33 @@ function shouldStopDrain(result) {
 }
 
 /**
- * Run process batches until the queue is empty, the job finishes, or maxBatches is hit.
- * Each batch calls execute-process, which reads Redis first then falls back to MongoDB.
+ * Drain one company lane until empty / finished / maxBatches.
  */
-async function drainProcessQueue(options = {}) {
-  if (draining) {
-    return { status: "busy", ...(await getWorkerStatus()) };
+async function drainCompanyLane(companyId, options = {}) {
+  const lane = getOrCreateLane(companyId);
+  if (!lane) {
+    return {
+      status: "error",
+      error: "Invalid companyId",
+      company_id: null,
+      batches_run: 0,
+      results: [],
+    };
   }
 
-  draining = true;
-  resetTimingStats();
-  setCurrentRun({
+  if (lane.draining) {
+    return {
+      status: "busy",
+      company_id: lane.companyId,
+      ...(await getWorkerStatus({ companyId: lane.companyId })),
+    };
+  }
+
+  lane.draining = true;
+  resetTimingStats(lane);
+  setCurrentRun(lane, {
     process_id: options.processId ? String(options.processId) : null,
-    company_id: options.companyId ? String(options.companyId) : null,
+    company_id: lane.companyId,
     started_at: Date.now(),
     batch_index: 0,
   });
@@ -590,12 +764,10 @@ async function drainProcessQueue(options = {}) {
     process.env.PROCESS_QUEUE_WORKER_BATCH_DELAY_MS || 1000,
   );
   const maxBatches = Number(
-    options.maxBatches ||
-      process.env.PROCESS_QUEUE_WORKER_MAX_BATCHES ||
-      5000,
+    options.maxBatches || process.env.PROCESS_QUEUE_WORKER_MAX_BATCHES || 5000,
   );
   const scopedProcessId = options.processId || null;
-  const scopedCompanyId = options.companyId || null;
+  const scopedCompanyId = lane.companyId;
 
   try {
     const {
@@ -604,10 +776,8 @@ async function drainProcessQueue(options = {}) {
     } = require("../controllers/process");
 
     for (let i = 0; i < maxBatches; i += 1) {
-      setCurrentRun({ batch_index: i + 1 });
+      setCurrentRun(lane, { batch_index: i + 1 });
 
-      // Resolve the same process execute-process will run (queue OR Mongo fallback)
-      // BEFORE awaiting the batch, so status shows ids while a long batch runs.
       let processIdForBatch = scopedProcessId || null;
       try {
         const probeReq = buildWorkerReq({
@@ -617,17 +787,13 @@ async function drainProcessQueue(options = {}) {
         });
         const activeProcess = await loadActiveProcess(probeReq);
         if (activeProcess) {
-          applyProcessToCurrentRun(activeProcess);
-          await hydrateCurrentRunNames();
-          processIdForBatch =
-            idFromRef(activeProcess._id) || processIdForBatch;
+          applyProcessToCurrentRun(lane, activeProcess);
+          await hydrateCurrentRunNames(lane);
+          processIdForBatch = idFromRef(activeProcess._id) || processIdForBatch;
         } else if (scopedProcessId) {
-          setCurrentRun({
+          setCurrentRun(lane, {
             process_id: String(scopedProcessId),
-            company_id:
-              scopedCompanyId ?
-                String(scopedCompanyId)
-              : currentRun?.company_id || null,
+            company_id: scopedCompanyId,
           });
         }
       } catch (peekErr) {
@@ -644,56 +810,55 @@ async function drainProcessQueue(options = {}) {
       });
 
       const batchStartedAt = Date.now();
-      timingStats.batch_started_at = batchStartedAt;
+      lane.timingStats.batch_started_at = batchStartedAt;
 
       try {
         const result = await runProcessExecution(req);
         const batchMs = Math.max(0, Date.now() - batchStartedAt);
-        timingStats.last_batch_ms = batchMs;
-        timingStats.batch_durations_ms.push(batchMs);
-        if (timingStats.batch_durations_ms.length > 50) {
-          timingStats.batch_durations_ms.shift();
+        lane.timingStats.last_batch_ms = batchMs;
+        lane.timingStats.batch_durations_ms.push(batchMs);
+        if (lane.timingStats.batch_durations_ms.length > 50) {
+          lane.timingStats.batch_durations_ms.shift();
         }
-        timingStats.batch_started_at = null;
+        lane.timingStats.batch_started_at = null;
 
         const summary = summarizeBatchResult(result);
-        timingStats.last_batch_success = summary.success !== false;
-        timingStats.last_batch_message = summary.message || null;
+        lane.timingStats.last_batch_success = summary.success !== false;
+        lane.timingStats.last_batch_message = summary.message || null;
         results.push(summary);
 
         if (summary.process_id || summary.progress || summary.status) {
-          setCurrentRun({
+          setCurrentRun(lane, {
             process_id:
               summary.process_id != null ?
                 String(summary.process_id)
-              : currentRun?.process_id || null,
+              : lane.currentRun?.process_id || null,
             company_id:
               summary.company_id != null ?
                 String(summary.company_id)
-              : currentRun?.company_id || null,
-            action: summary.action || currentRun?.action || null,
-            progress: summary.progress || currentRun?.progress || null,
-            status: summary.status || currentRun?.status || null,
+              : lane.currentRun?.company_id || scopedCompanyId,
+            action: summary.action || lane.currentRun?.action || null,
+            progress: summary.progress || lane.currentRun?.progress || null,
+            status: summary.status || lane.currentRun?.status || null,
             product_id:
               summary.product_id != null ?
                 String(summary.product_id)
-              : currentRun?.product_id || null,
+              : lane.currentRun?.product_id || null,
             category_id:
               summary.category_id != null ?
                 String(summary.category_id)
-              : currentRun?.category_id || null,
+              : lane.currentRun?.category_id || null,
             brand_id:
               summary.brand_id != null ?
                 String(summary.brand_id)
-              : currentRun?.brand_id || null,
+              : lane.currentRun?.brand_id || null,
           });
         }
 
-        // Refresh from DB after batch so page/hits/progress stay current
-        if (currentRun?.process_id) {
+        if (lane.currentRun?.process_id) {
           try {
             const ProcessModel = require("../models/process");
-            const row = await ProcessModel.findById(currentRun.process_id)
+            const row = await ProcessModel.findById(lane.currentRun.process_id)
               .select(
                 "action progress status company_id product_id category_id brand_id integration_id page hits remarks",
               )
@@ -704,8 +869,8 @@ async function drainProcessQueue(options = {}) {
               ])
               .lean();
             if (row) {
-              applyProcessToCurrentRun(row);
-              await hydrateCurrentRunNames();
+              applyProcessToCurrentRun(lane, row);
+              await hydrateCurrentRunNames(lane);
             }
           } catch (_) {
             /* ignore refresh errors */
@@ -729,29 +894,29 @@ async function drainProcessQueue(options = {}) {
         }
       } catch (err) {
         const batchMs = Math.max(0, Date.now() - batchStartedAt);
-        timingStats.last_batch_ms = batchMs;
-        timingStats.batch_durations_ms.push(batchMs);
-        if (timingStats.batch_durations_ms.length > 50) {
-          timingStats.batch_durations_ms.shift();
+        lane.timingStats.last_batch_ms = batchMs;
+        lane.timingStats.batch_durations_ms.push(batchMs);
+        if (lane.timingStats.batch_durations_ms.length > 50) {
+          lane.timingStats.batch_durations_ms.shift();
         }
-        timingStats.batch_started_at = null;
-        timingStats.last_batch_success = false;
-        timingStats.last_batch_message =
+        lane.timingStats.batch_started_at = null;
+        lane.timingStats.last_batch_success = false;
+        lane.timingStats.last_batch_message =
           err?.response?.data?.message || err?.message || String(err);
 
         console.warn(
           "[process-queue-worker] batch failed:",
-          timingStats.last_batch_message,
+          lane.timingStats.last_batch_message,
         );
         results.push({
           success: false,
           statusCode: err?.response?.status || 500,
-          process_id: currentRun?.process_id || null,
-          company_id: currentRun?.company_id || null,
-          action: currentRun?.action || null,
+          process_id: lane.currentRun?.process_id || null,
+          company_id: lane.currentRun?.company_id || scopedCompanyId,
+          action: lane.currentRun?.action || null,
           progress: null,
           status: null,
-          message: timingStats.last_batch_message,
+          message: lane.timingStats.last_batch_message,
         });
       }
 
@@ -761,23 +926,103 @@ async function drainProcessQueue(options = {}) {
     }
   } catch (err) {
     console.warn("[process-queue-worker] drain failed:", err?.message || err);
-    draining = false;
-    clearCurrentRun();
+    lane.draining = false;
+    clearCurrentRun(lane);
     return {
       status: "error",
       error: err?.message || String(err),
+      company_id: scopedCompanyId,
       batches_run: results.length,
       results,
-      ...(await getWorkerStatus()),
+      ...(await getWorkerStatus({ companyId: scopedCompanyId })),
     };
   } finally {
-    draining = false;
-    clearCurrentRun();
+    lane.draining = false;
+    clearCurrentRun(lane);
   }
 
   return {
     status: "done",
+    company_id: scopedCompanyId,
     batches_run: results.length,
+    results,
+    ...(await getWorkerStatus({ companyId: scopedCompanyId })),
+  };
+}
+
+/**
+ * Run process batches until the queue is empty, the job finishes, or maxBatches is hit.
+ * With companyId/processId: drain that company only.
+ * Without: discover companies needing work and drain up to max parallel in parallel.
+ */
+async function drainProcessQueue(options = {}) {
+  let companyId = normalizeCompanyId(options.companyId);
+  if (!companyId && options.processId) {
+    companyId = await resolveCompanyIdFromOptions(options);
+  }
+
+  if (companyId || options.processId) {
+    if (!companyId) {
+      return {
+        status: "error",
+        error: "Could not resolve companyId for process",
+        batches_run: 0,
+        results: [],
+        ...(await getWorkerStatus()),
+      };
+    }
+    return drainCompanyLane(companyId, {
+      ...options,
+      companyId,
+    });
+  }
+
+  const maxParallel = getMaxParallelCompanies();
+  const companies = await discoverCompaniesNeedingWork();
+  const slots = Math.max(0, maxParallel - countDrainingCompanies());
+  const toStart = companies
+    .filter((id) => !isCompanyDraining(id))
+    .slice(0, slots);
+
+  if (!toStart.length) {
+    if (countDrainingCompanies() >= maxParallel) {
+      return {
+        status: "busy",
+        message: `At max parallel company capacity (${maxParallel}).`,
+        ...(await getWorkerStatus()),
+      };
+    }
+    return {
+      status: "done",
+      batches_run: 0,
+      results: [],
+      companies: [],
+      ...(await getWorkerStatus()),
+    };
+  }
+
+  const settled = await Promise.all(
+    toStart.map((id) =>
+      drainCompanyLane(id, {
+        ...options,
+        companyId: id,
+        processId: undefined,
+      }),
+    ),
+  );
+
+  const batches_run = settled.reduce(
+    (sum, row) => sum + (row.batches_run || 0),
+    0,
+  );
+  const results = settled.flatMap((row) => row.results || []);
+  const anyError = settled.some((row) => row.status === "error");
+
+  return {
+    status: anyError ? "error" : "done",
+    companies: toStart,
+    company_results: settled,
+    batches_run,
     results,
     ...(await getWorkerStatus()),
   };
@@ -786,20 +1031,45 @@ async function drainProcessQueue(options = {}) {
 function scheduleProcessQueueDrain(options = {}) {
   if (!isProcessQueueWorkerEnabled()) return;
 
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
+  const debounceMs = Number(
+    process.env.PROCESS_QUEUE_WORKER_DEBOUNCE_MS || 500,
+  );
+  const companyId = normalizeCompanyId(options.companyId);
+
+  if (companyId) {
+    const existing = debounceTimers.get(companyId);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      debounceTimers.delete(companyId);
+      if (isCompanyDraining(companyId)) return;
+      if (countDrainingCompanies() >= getMaxParallelCompanies()) return;
+
+      drainProcessQueue({ ...options, companyId }).catch((err) => {
+        console.warn(
+          "[process-queue-worker] scheduled drain failed:",
+          err?.message || err,
+        );
+      });
+    }, debounceMs);
+
+    debounceTimers.set(companyId, timer);
+    return;
   }
 
-  const debounceMs = Number(process.env.PROCESS_QUEUE_WORKER_DEBOUNCE_MS || 500);
-  debounceTimer = setTimeout(() => {
-    debounceTimer = null;
-    drainProcessQueue(options).catch((err) => {
+  // No companyId: discover and schedule each company separately.
+  discoverCompaniesNeedingWork()
+    .then((companies) => {
+      for (const id of companies) {
+        scheduleProcessQueueDrain({ ...options, companyId: id });
+      }
+    })
+    .catch((err) => {
       console.warn(
-        "[process-queue-worker] scheduled drain failed:",
+        "[process-queue-worker] schedule discovery failed:",
         err?.message || err,
       );
     });
-  }, debounceMs);
 }
 
 function startProcessQueueWorker() {
@@ -811,18 +1081,25 @@ function startProcessQueueWorker() {
   }
 
   const pollMs = Number(process.env.PROCESS_QUEUE_WORKER_POLL_MS || 10000);
+  const maxParallel = getMaxParallelCompanies();
   console.log(
-    `[process-queue-worker] Auto drain enabled — poll ${pollMs}ms, batch delay ${process.env.PROCESS_QUEUE_WORKER_BATCH_DELAY_MS || 1000}ms`,
+    `[process-queue-worker] Auto drain enabled — per-company parallel (max ${maxParallel}), poll ${pollMs}ms, batch delay ${process.env.PROCESS_QUEUE_WORKER_BATCH_DELAY_MS || 1000}ms`,
   );
 
   setTimeout(() => scheduleProcessQueueDrain(), 2000);
 
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
-    if (draining) return;
     try {
-      const next = await peekNextProcessJob();
-      if (next?.jobId) scheduleProcessQueueDrain();
+      const max = getMaxParallelCompanies();
+      if (countDrainingCompanies() >= max) return;
+
+      const companies = await discoverCompaniesNeedingWork();
+      for (const companyId of companies) {
+        if (countDrainingCompanies() >= max) break;
+        if (isCompanyDraining(companyId)) continue;
+        scheduleProcessQueueDrain({ companyId });
+      }
     } catch (err) {
       console.warn("[process-queue-worker] poll failed:", err?.message || err);
     }
@@ -830,10 +1107,10 @@ function startProcessQueueWorker() {
 }
 
 function stopProcessQueueWorker() {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
+  for (const timer of debounceTimers.values()) {
+    clearTimeout(timer);
   }
+  debounceTimers.clear();
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -842,6 +1119,7 @@ function stopProcessQueueWorker() {
 
 module.exports = {
   isProcessQueueWorkerEnabled,
+  isCompanyDraining,
   getWorkerStatus,
   drainProcessQueue,
   scheduleProcessQueueDrain,

@@ -903,21 +903,35 @@ async function runQueueWorker(req, res) {
   const {
     drainProcessQueue,
     getWorkerStatus,
+    isCompanyDraining,
   } = require("../utils/processQueueWorker");
+  const companyId = req.query.company_id || null;
   const status = await getWorkerStatus({
-    companyId: req.query.company_id || null,
+    companyId,
   });
 
-  if (status.draining) {
+  if (companyId) {
+    if (isCompanyDraining(companyId)) {
+      return res.status(409).json({
+        success: false,
+        message: "Queue worker is already running for this company.",
+        data: status,
+      });
+    }
+  } else if (
+    status.draining &&
+    Array.isArray(status.companies_draining) &&
+    status.companies_draining.length >= (status.max_parallel_companies || 5)
+  ) {
     return res.status(409).json({
       success: false,
-      message: "Queue worker is already running.",
+      message: `Queue worker is at max parallel company capacity (${status.max_parallel_companies}).`,
       data: status,
     });
   }
 
   const result = await drainProcessQueue({
-    companyId: req.query.company_id,
+    companyId,
     processId: req.params.id || req.query.process_id,
     maxBatches: req.query.max_batches,
     user: req.user,

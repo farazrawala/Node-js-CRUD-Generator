@@ -59,7 +59,7 @@ async function enqueueProcess(process, options = {}) {
   if (queueResult.queued && scheduleDrain) {
     try {
       const { scheduleProcessQueueDrain } = require("./processQueueWorker");
-      scheduleProcessQueueDrain();
+      scheduleProcessQueueDrain({ companyId });
     } catch (err) {
       console.warn("[process-queue] schedule worker:", err?.message || err);
     }
