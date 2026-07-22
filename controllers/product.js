@@ -43,10 +43,14 @@ const { enqueueProductWebsiteSyncJobs } = require("../utils/productSyncQueue");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
+/** Parent fields needed for list UI (name + images for child fallback). */
+const PARENT_PRODUCT_LIST_SELECT =
+  "product_name product_image product_image_thumbnail_url multi_images multi_image_thumbnails";
+
 const PRODUCT_LIST_POPULATE = [
   {
     path: "parent_product_id",
-    select: "product_name",
+    select: PARENT_PRODUCT_LIST_SELECT,
   },
   {
     path: "category_id",
@@ -2477,7 +2481,7 @@ async function getAllActiveProductsPOS(req, res) {
     populate: [
       {
         path: "parent_product_id",
-        select: "product_name",
+        select: PARENT_PRODUCT_LIST_SELECT,
       },
       {
         path: "warehouse_inventory",
