@@ -118,7 +118,11 @@ const modelSchema = new mongoose.Schema(
       ref: "product",
       field_name: "Fetch From Product",
     },
-
+    fetch_from_company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      field_name: "Fetch From Company",
+    },
     ///// BigCommerce Settings /////
 
     company_id: {

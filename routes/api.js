@@ -273,6 +273,7 @@ const {
   getPartnerCategories,
   getPartnerBrands,
   duplicatePartnerProduct,
+  getFetchedProductIds,
   getFetchedProducts,
   softDeleteFetchedProduct,
 } = require("../controllers/big_commerce");
@@ -575,6 +576,10 @@ router.get("/big-commerce/company/:companyId", getPartnerCompany);
 router.get(
   "/big-commerce/get-all-active-ecommerce-products/:companyId",
   getBigCommerceProductsActivePos,
+);
+router.get(
+  "/big-commerce/fetched-product-ids/:companyId",
+  getFetchedProductIds,
 );
 router.get("/big-commerce/fetched-products", getFetchedProducts);
 router.get("/big-commerce/fetched-products/:companyId", getFetchedProducts);

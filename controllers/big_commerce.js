@@ -1598,6 +1598,86 @@ async function duplicatePartnerProduct(req, res) {
 }
 
 /**
+ * GET /big-commerce/fetched-product-ids/:companyId
+ *
+ * Lightweight me-too map while browsing a partner store.
+ * Returns only your copy id + the partner product id you fetched from:
+ *   [{ product_id, fetch_from_product_id }, ...]
+ *
+ * product_id            → your catalog product _id
+ * fetch_from_product_id → partner store product _id
+ */
+async function getFetchedProductIds(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Forbidden");
+    }
+
+    const sourceCompanyId = coalesceObjectId(req.params.companyId);
+    if (!sourceCompanyId || !isValidObjectId(sourceCompanyId)) {
+      return jsonError(res, 400, "Invalid company id");
+    }
+    if (String(sourceCompanyId) === String(myCompanyId)) {
+      return jsonError(
+        res,
+        400,
+        "Use product endpoints to list your own catalog",
+      );
+    }
+
+    const catalogCompanyIds = await resolveMarketplaceCatalogCompanyIds(
+      sourceCompanyId,
+    );
+    const sourceValues = companyIdQueryValues(catalogCompanyIds);
+
+    // Partner product ids in this store catalog (covers rows missing fetch_from_company_id).
+    const partnerProductIds = await Product.find({
+      company_id:
+        sourceValues.length === 1 ? sourceValues[0] : { $in: sourceValues },
+      deletedAt: null,
+    }).distinct("_id");
+
+    const rows = await Product.find({
+      company_id: myCompanyId,
+      deletedAt: null,
+      fetch_from_product_id: { $exists: true, $ne: null },
+      $or: [
+        {
+          fetch_from_company_id:
+            sourceValues.length === 1 ? sourceValues[0] : { $in: sourceValues },
+        },
+        ...(partnerProductIds.length
+          ? [{ fetch_from_product_id: { $in: partnerProductIds } }]
+          : []),
+      ],
+    })
+      .select("_id fetch_from_product_id")
+      .lean();
+
+    const data = rows.map((row) => ({
+      product_id: String(row._id),
+      fetch_from_product_id: row.fetch_from_product_id
+        ? String(row.fetch_from_product_id)
+        : null,
+    }));
+
+    return jsonSuccess(res, 200, data, null, {
+      total: data.length,
+      fetch_from_company_id: sourceCompanyId,
+      catalog_company_ids: catalogCompanyIds.map((id) => String(id)),
+    });
+  } catch (error) {
+    console.error("[big_commerce] getFetchedProductIds:", error);
+    return jsonError(
+      res,
+      500,
+      error.message || "Failed to load fetched product ids",
+    );
+  }
+}
+
+/**
  * GET /big-commerce/fetched-products
  * GET /big-commerce/fetched-products/:companyId
  *
@@ -1730,7 +1810,8 @@ async function getFetchedProducts(req, res) {
 /**
  * DELETE /big-commerce/fetched-products/:productId
  * Soft-delete a product you previously fetched from a partner store.
- * Only works on your catalog rows that have fetch_from_company_id set.
+ * Matches the same fetched rows as GET fetched-product-ids (copy must have
+ * fetch_from_company_id and/or fetch_from_product_id).
  * Variable parents also soft-delete their active child variants.
  */
 async function softDeleteFetchedProduct(req, res) {
@@ -1745,11 +1826,16 @@ async function softDeleteFetchedProduct(req, res) {
       return jsonError(res, 400, "Invalid product id");
     }
 
+    // Same “fetched copy” rules as getFetchedProductIds — some older rows only
+    // have fetch_from_product_id (no fetch_from_company_id).
     const product = await Product.findOne({
       _id: productId,
       company_id: myCompanyId,
-      fetch_from_company_id: { $exists: true, $ne: null },
       deletedAt: null,
+      $or: [
+        { fetch_from_company_id: { $exists: true, $ne: null } },
+        { fetch_from_product_id: { $exists: true, $ne: null } },
+      ],
     });
 
     if (!product) {
@@ -1817,6 +1903,7 @@ module.exports = {
   getPartnerCategories,
   getPartnerBrands,
   duplicatePartnerProduct,
+  getFetchedProductIds,
   getFetchedProducts,
   softDeleteFetchedProduct,
 };
