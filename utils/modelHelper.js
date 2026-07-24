@@ -1050,6 +1050,7 @@ const handleGenericCreateCore = async (
           error: beforeResult.error || "Creation aborted",
           message: beforeResult.message,
           details: beforeResult.details,
+          code: beforeResult.code,
         };
       }
     }

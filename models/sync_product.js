@@ -18,6 +18,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Refference ID",
     },
+    sync_price: {
+      type: Number,
+      default: 0,
+    },
+
     product_type: {
       type: String,
       enum: ["Single", "Variable"],

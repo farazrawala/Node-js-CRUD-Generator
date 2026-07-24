@@ -294,6 +294,18 @@ function validateShopifyIntegration(integration, res) {
     });
     return false;
   }
+  if (
+    integration.deletedAt ||
+    String(integration.status || "").toLowerCase() !== "active"
+  ) {
+    res.status(400).json({
+      success: false,
+      skipped: true,
+      code: "INTEGRATION_INACTIVE",
+      message: "Shopify integration is inactive. Sync skipped.",
+    });
+    return false;
+  }
   return true;
 }
 
@@ -1356,6 +1368,7 @@ async function syncShopifyVariableProductToStore(
   const syncRows = await SyncProduct.find({
     integration_id: integrationId,
     company_id: companyId,
+    status: "active",
     deletedAt: null,
     product_id: { $in: [parentId, ...childIds] },
   }).lean();
@@ -1632,6 +1645,7 @@ async function sync_product(req, res, process) {
         product_id: productId,
         integration_id: integrationId,
         company_id: companyId,
+        status: "active",
         deletedAt: null,
       }).lean();
 

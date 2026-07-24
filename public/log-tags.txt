@@ -41,6 +41,7 @@ imported_bigcommerce
 imported_shopify
 imported_woocommerce
 in
+inactive
 insert
 integration
 inventory
@@ -49,6 +50,7 @@ Inventory_movement
 inventory_movements
 label
 list-cache
+mapping
 movement
 not_found
 order

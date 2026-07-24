@@ -5,6 +5,11 @@ const Integration = require("../models/integration");
 const { coalesceObjectId } = require("./modelHelper");
 const { enqueueProcess } = require("./processQueue");
 const { createApplicationLog } = require("./applicationLogs");
+const {
+  findIntegrationIfActive,
+  logIntegrationInactiveSkip,
+  logSyncProductMappingInactiveSkip,
+} = require("./integrationActiveGuard");
 
 /**
  * Variable-product edits should queue sync against the parent so WooCommerce
@@ -98,11 +103,51 @@ async function enqueueProductWebsiteSyncJobs({
     .lean();
 
   if (!mappings.length) {
+    const inactiveMappings = await SyncProduct.find({
+      product_id: { $in: relatedProductIds },
+      company_id,
+      status: "inactive",
+      deletedAt: null,
+    })
+      .select("_id integration_id product_id")
+      .lean();
+
+    if (inactiveMappings.length) {
+      const actor = coalesceObjectId(createdBy);
+      for (const row of inactiveMappings) {
+        await logSyncProductMappingInactiveSkip(null, {
+          action: "sync_product",
+          integrationId: row.integration_id,
+          companyId: company_id,
+          productId: row.product_id || syncTargetId || product_id,
+          syncProductId: row._id,
+          createdBy: actor,
+          message:
+            "Skipped single-product sync_product queue: sync_product mapping is inactive",
+          extra: {
+            source: "enqueueProductWebsiteSyncJobs",
+          },
+        });
+      }
+      return {
+        created: [],
+        count: 0,
+        skipped: inactiveMappings.map((row) => ({
+          sync_product_id: String(row._id),
+          integration_id: String(row.integration_id),
+          reason: "sync_product_inactive",
+        })),
+        skipped_count: inactiveMappings.length,
+        reason: "sync_product_mappings_inactive",
+      };
+    }
+
     return { created: [], count: 0, reason: "no_sync_product_mappings" };
   }
 
   const actor = coalesceObjectId(createdBy);
   const created = [];
+  const skipped = [];
   const seenIntegrations = new Set();
 
   for (const row of mappings) {
@@ -116,6 +161,33 @@ async function enqueueProductWebsiteSyncJobs({
       continue;
     }
     seenIntegrations.add(integrationKey);
+
+    const activeIntegration = await findIntegrationIfActive(
+      integration_id,
+      company_id,
+    );
+    if (!activeIntegration) {
+      await logIntegrationInactiveSkip(null, {
+        action: "sync_product",
+        integrationId: integration_id,
+        companyId: company_id,
+        productId: syncTargetId || product_id,
+        createdBy: actor,
+        message:
+          "Skipped single-product sync_product queue: integration is inactive",
+        extra: {
+          source: "enqueueProductWebsiteSyncJobs",
+          sync_target_product_id: syncTargetId ?
+            String(syncTargetId)
+          : String(product_id),
+        },
+      });
+      skipped.push({
+        integration_id: String(integration_id),
+        reason: "integration_inactive",
+      });
+      continue;
+    }
 
     const doc = await ProcessModel.create({
       integration_id,
@@ -140,6 +212,8 @@ async function enqueueProductWebsiteSyncJobs({
   return {
     created,
     count: created.length,
+    skipped,
+    skipped_count: skipped.length,
     sync_target_product_id: syncTargetId,
   };
 }

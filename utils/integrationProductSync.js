@@ -13,7 +13,14 @@ function isIntegrationSyncEnabled(integration, fieldKey) {
   if (!fieldKey) return true;
   const raw = integration?.[fieldKey];
   if (raw == null || raw === "") return true;
-  return String(raw).trim().toLowerCase() !== "no";
+  if (raw === false || raw === 0) return false;
+  const normalized = String(raw).trim().toLowerCase();
+  return !(
+    normalized === "no" ||
+    normalized === "false" ||
+    normalized === "0" ||
+    normalized === "off"
+  );
 }
 
 function resolvePosProductSku(product) {
@@ -67,9 +74,11 @@ function buildWooCommerceProductSyncPayload(product, integration, options = {}) 
   const allowStatus =
     mode === "create" ||
     isIntegrationSyncEnabled(integration, "sync_product_status");
-  const allowImage =
-    mode === "create" ||
-    isIntegrationSyncEnabled(integration, "sync_product_image");
+  // Image sync must honor the toggle on create and update (Woo/Shopify fetch remote URLs).
+  const allowImage = isIntegrationSyncEnabled(
+    integration,
+    "sync_product_image",
+  );
 
   if (allowName && product?.product_name) {
     payload.name = product.product_name;
@@ -123,9 +132,11 @@ function buildShopifyProductSyncPayload(product, integration, options = {}) {
   const allowStatus =
     mode === "create" ||
     isIntegrationSyncEnabled(integration, "sync_product_status");
-  const allowImage =
-    mode === "create" ||
-    isIntegrationSyncEnabled(integration, "sync_product_image");
+  // Image sync must honor the toggle on create and update (remote URL fetch).
+  const allowImage = isIntegrationSyncEnabled(
+    integration,
+    "sync_product_image",
+  );
 
   if (allowName && product?.product_name) {
     payload.title = product.product_name;

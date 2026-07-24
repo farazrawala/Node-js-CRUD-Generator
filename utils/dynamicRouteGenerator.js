@@ -393,6 +393,38 @@ function generateControllerFunctions(modelName) {
               );
               return validateDefaultVendorFlag(modelData, modelData);
             }
+          : modelName === "sync_product"
+            ? async (modelData, req) => {
+                const {
+                  findIntegrationIfActive,
+                  logIntegrationInactiveSkip,
+                } = require("./integrationActiveGuard");
+                const active = await findIntegrationIfActive(
+                  modelData.integration_id,
+                  modelData.company_id || req?.user?.company_id,
+                );
+                if (!active) {
+                  await logIntegrationInactiveSkip(req, {
+                    action: "sync_product/create",
+                    integrationId: modelData.integration_id,
+                    companyId: modelData.company_id || req?.user?.company_id,
+                    productId: modelData.product_id,
+                    createdBy: req?.user?._id,
+                    message:
+                      "Skipped POST /api/sync_product/create: integration is inactive",
+                    extra: { source: "sync_product/create" },
+                  });
+                  return {
+                    success: false,
+                    status: 400,
+                    error: "Integration inactive",
+                    message:
+                      "Cannot create sync_product mapping: integration is inactive.",
+                    code: "INTEGRATION_INACTIVE",
+                  };
+                }
+                return undefined;
+              }
           : null;
 
       try {
@@ -421,6 +453,7 @@ function generateControllerFunctions(modelName) {
         }
 
         const response = await handleGenericCreate(req, modelName, {
+          beforeCreate: beforeCreate || undefined,
           afterCreate,
         });
         return res.status(response.status).json(response);

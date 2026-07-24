@@ -7,6 +7,7 @@ const {
   extractProcessErrorMessage,
   recordProcessFailure,
   attachProcessFailureHooks,
+  markProcessOutcome,
 } = require("../utils/processHelpers");
 const ProcessModel = require("../models/process");
 const Category = require("../models/category");
@@ -31,6 +32,14 @@ const {
   createFetchProductQueueJob,
 } = require("../utils/fetchProductQueue");
 const { createMockExpressResponse } = require("../utils/mockExpressResponse");
+const {
+  findIntegrationIfActive,
+  isIntegrationRecordInactive,
+  isSyncProductMappingInactive,
+  findSyncProductMapping,
+  logIntegrationInactiveSkip,
+  logSyncProductMappingInactiveSkip,
+} = require("../utils/integrationActiveGuard");
 
 /**
  * Process queue orchestrator.
@@ -352,6 +361,74 @@ async function createProcessQueueRecords(req, res) {
     }
 
     try {
+      if (normalized.integration_id) {
+        const activeIntegration = await findIntegrationIfActive(
+          normalized.integration_id,
+          companyId,
+        );
+        if (!activeIntegration) {
+          const skipError =
+            "Integration is inactive — process was not queued.";
+          failed.push({
+            index,
+            error: skipError,
+            code: "INTEGRATION_INACTIVE",
+            input: sourceRows[index],
+            skipped: true,
+          });
+          await logIntegrationInactiveSkip(req, {
+            action: normalized.action || "process",
+            integrationId: normalized.integration_id,
+            companyId,
+            productId: normalized.product_id,
+            createdBy,
+            message: skipError,
+            extra: {
+              source: "process/bulk-create",
+              index,
+            },
+          });
+          continue;
+        }
+      }
+
+      if (
+        normalized.action === "sync_product" &&
+        normalized.integration_id &&
+        normalized.product_id
+      ) {
+        const mapping = await findSyncProductMapping({
+          productId: normalized.product_id,
+          integrationId: normalized.integration_id,
+          companyId,
+        });
+        if (isSyncProductMappingInactive(mapping)) {
+          const skipError =
+            "sync_product mapping is inactive — process was not queued.";
+          failed.push({
+            index,
+            error: skipError,
+            code: "SYNC_PRODUCT_INACTIVE",
+            input: sourceRows[index],
+            skipped: true,
+          });
+          await logSyncProductMappingInactiveSkip(req, {
+            action: "sync_product",
+            integrationId: normalized.integration_id,
+            companyId,
+            productId: normalized.product_id,
+            syncProductId: mapping?._id,
+            createdBy,
+            message: skipError,
+            extra: {
+              source: "process/bulk-create",
+              index,
+            },
+          });
+          continue;
+        }
+      }
+
       if (isFetchProductAction(normalized.action)) {
         const result = await createFetchProductQueueJob({
           req,
@@ -810,6 +887,70 @@ async function execute_process(req, res) {
 }
 
 async function runProcessAction(req, res, process) {
+  const integration = process?.integration_id;
+  if (integration && isIntegrationRecordInactive(integration)) {
+    const integrationId =
+      integration._id || integration.id || process.integration_id;
+    const name = integration.name || String(integrationId || "");
+    const msg = `Skipped ${process.action || "process"}: integration "${name}" is inactive`;
+    await markProcessOutcome(process._id, "inactive", msg);
+    await logIntegrationInactiveSkip(req, {
+      action: process.action || "process",
+      integrationId,
+      integrationName: integration.name,
+      companyId: process.company_id?._id || process.company_id,
+      productId: process.product_id?._id || process.product_id,
+      processId: process._id,
+      createdBy: req.user?._id,
+      message: msg,
+      extra: { source: "execute_process" },
+    });
+    return res.status(200).json({
+      success: true,
+      skipped: true,
+      code: "INTEGRATION_INACTIVE",
+      message: msg,
+      process_id: process._id,
+    });
+  }
+
+  if (process.action === "sync_product") {
+    const productId = process.product_id?._id || process.product_id;
+    const integrationId =
+      process.integration_id?._id ||
+      process.integration_id?.id ||
+      process.integration_id;
+    const companyId = process.company_id?._id || process.company_id;
+    const mapping = await findSyncProductMapping({
+      productId,
+      integrationId,
+      companyId,
+    });
+    if (isSyncProductMappingInactive(mapping)) {
+      const msg =
+        "Skipped sync_product: sync_product mapping is inactive";
+      await markProcessOutcome(process._id, "inactive", msg);
+      await logSyncProductMappingInactiveSkip(req, {
+        action: "sync_product",
+        integrationId,
+        companyId,
+        productId,
+        processId: process._id,
+        syncProductId: mapping?._id,
+        createdBy: req.user?._id,
+        message: msg,
+        extra: { source: "execute_process" },
+      });
+      return res.status(200).json({
+        success: true,
+        skipped: true,
+        code: "SYNC_PRODUCT_INACTIVE",
+        message: msg,
+        process_id: process._id,
+      });
+    }
+  }
+
   switch (process.action) {
     case "sync_product": {
       return dispatchByStoreType(req, res, process, {

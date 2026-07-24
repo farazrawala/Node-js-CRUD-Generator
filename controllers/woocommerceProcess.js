@@ -1034,6 +1034,18 @@ function validateWooIntegration(integration, res) {
     });
     return false;
   }
+  if (
+    integration.deletedAt ||
+    String(integration.status || "").toLowerCase() !== "active"
+  ) {
+    res.status(400).json({
+      success: false,
+      skipped: true,
+      code: "INTEGRATION_INACTIVE",
+      message: "WooCommerce integration is inactive. Sync skipped.",
+    });
+    return false;
+  }
   return true;
 }
 
@@ -1770,6 +1782,7 @@ async function syncWooSimpleProductToStore(
     product_id: productId,
     integration_id: integrationId,
     company_id: companyId,
+    status: "active",
     deletedAt: null,
   }).lean();
 
@@ -2231,6 +2244,7 @@ async function syncWooVariableProductToStore(
   const syncRows = await SyncProduct.find({
     integration_id: integrationId,
     company_id: companyId,
+    status: "active",
     deletedAt: null,
     product_id: { $in: [parentId, ...childIds] },
   }).lean();

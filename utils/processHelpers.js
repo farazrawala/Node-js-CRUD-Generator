@@ -10,6 +10,10 @@ const SyncBrand = require("../models/sync_brand");
 const SyncProduct = require("../models/sync_product");
 const { coalesceObjectId } = require("./modelHelper");
 const { releaseProcessFromQueue } = require("./processQueue");
+const {
+  findIntegrationIfActive,
+  logIntegrationInactiveSkip,
+} = require("./integrationActiveGuard");
 
 /** Same default as POS add-customer UI. */
 const POS_DEFAULT_CUSTOMER_PASSWORD = "123456";
@@ -305,6 +309,7 @@ async function upsertSyncProductMapping({
   referenceId,
   createdBy,
   productType,
+  req = null,
 }) {
   const product_id = coalesceObjectId(productId);
   const integration_id = coalesceObjectId(integrationId);
@@ -312,6 +317,27 @@ async function upsertSyncProductMapping({
   const refference_id = String(referenceId ?? "").trim();
 
   if (!product_id || !integration_id || !company_id || !refference_id) {
+    return null;
+  }
+
+  const activeIntegration = await findIntegrationIfActive(
+    integration_id,
+    company_id,
+  );
+  if (!activeIntegration) {
+    await logIntegrationInactiveSkip(req, {
+      action: "sync_product_mapping",
+      integrationId: integration_id,
+      companyId: company_id,
+      productId: product_id,
+      createdBy,
+      message:
+        "Skipped sync_product mapping create/update: integration is inactive",
+      extra: {
+        source: "upsertSyncProductMapping",
+        refference_id,
+      },
+    });
     return null;
   }
 
@@ -382,6 +408,7 @@ async function findPosProductBySyncReference(
     integration_id,
     company_id,
     refference_id,
+    status: "active",
     deletedAt: null,
   }).lean();
 
