@@ -65,6 +65,7 @@ const {
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
+  resolveSyncProductPrice,
   buildShopifyProductSyncPayload,
   buildShopifyVariantSyncPayload,
   hasSyncPayloadFields,
@@ -1461,7 +1462,7 @@ async function syncShopifyVariableProductToStore(
   const parentUpdatePayload = buildShopifyProductSyncPayload(
     parentProduct,
     integration,
-    { mode: "update" },
+    { mode: "update", syncRow: parentSyncRow },
   );
   if (hasSyncPayloadFields(parentUpdatePayload)) {
     await client.put({
@@ -1516,6 +1517,7 @@ async function syncShopifyVariableProductToStore(
 
       const variantPayload = buildShopifyVariantSyncPayload(child, integration, {
         mode: "update",
+        syncRow: childSyncRow,
       });
       if (variantPayload) {
         await client.put({
@@ -1706,12 +1708,12 @@ async function sync_product(req, res, process) {
       const updatePayload = buildShopifyProductSyncPayload(
         product,
         integration,
-        { mode: "update" },
+        { mode: "update", syncRow },
       );
       const variantPayload = buildShopifyVariantSyncPayload(
         product,
         integration,
-        { mode: "update" },
+        { mode: "update", syncRow },
       );
       const stockSyncEnabled = isIntegrationSyncEnabled(
         integration,
@@ -1803,17 +1805,16 @@ async function sync_product(req, res, process) {
 
     const variantPayload = buildShopifyVariantSyncPayload(product, integration, {
       mode: "create",
+      syncRow,
     }) || {
-      price:
-        product.product_price !== undefined && product.product_price !== null ?
-          String(product.product_price)
-        : "0.00",
+      price: resolveSyncProductPrice(product, syncRow),
       sku,
     };
     if (!variantPayload.sku) variantPayload.sku = sku;
 
     const createPayload = buildShopifyProductSyncPayload(product, integration, {
       mode: "create",
+      syncRow,
     });
     if (!createPayload.title) {
       createPayload.title = product.product_name || sku;

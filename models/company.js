@@ -108,6 +108,10 @@ const modelSchema = new mongoose.Schema(
       field_name: "Printer Settings",
     },
 
+    google_address: {
+      type: String,
+      field_name: "Google Address",
+    },
     address_latitude: {
       type: String,
       field_name: "Address Latitude",

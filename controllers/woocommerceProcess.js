@@ -1836,7 +1836,7 @@ async function syncWooSimpleProductToStore(
     const updatePayload = buildWooCommerceProductSyncPayload(
       product,
       integration,
-      { mode: "update", stockQuantity },
+      { mode: "update", stockQuantity, syncRow },
     );
     if (categoryRefs.length) {
       updatePayload.categories = categoryRefs;
@@ -1881,6 +1881,7 @@ async function syncWooSimpleProductToStore(
     ...buildWooCommerceProductSyncPayload(product, integration, {
       mode: "create",
       stockQuantity,
+      syncRow,
     }),
   };
   if (!createPayload.name) {
@@ -2153,7 +2154,12 @@ async function syncWooVariationChildToStore({
       integration,
       remoteParent,
       parentSku,
-      { mode: "update", variationAttributes, stockQuantity },
+      {
+        mode: "update",
+        variationAttributes,
+        stockQuantity,
+        syncRow: childSyncRow,
+      },
     );
 
     if (!hasSyncPayloadFields(updatePayload)) {
@@ -2186,7 +2192,12 @@ async function syncWooVariationChildToStore({
     integration,
     remoteParent,
     parentSku,
-    { mode: "create", variationAttributes, stockQuantity },
+    {
+      mode: "create",
+      variationAttributes,
+      stockQuantity,
+      syncRow: childSyncRow,
+    },
   );
   if (!hasSyncPayloadFields(createPayload)) {
     stats.variations_skipped += 1;
@@ -2298,6 +2309,7 @@ async function syncWooVariableProductToStore(
       type: "variable",
       ...buildWooCommerceProductSyncPayload(parentProduct, integration, {
         mode: "update",
+        syncRow: parentSyncRow,
       }),
     };
     if (parentCategoryRefs.length) {
@@ -2317,6 +2329,7 @@ async function syncWooVariableProductToStore(
       sku: parentSku,
       ...buildWooCommerceProductSyncPayload(parentProduct, integration, {
         mode: "create",
+        syncRow: parentSyncRow,
       }),
     };
     if (!createPayload.name) {

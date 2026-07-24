@@ -31,8 +31,7 @@ class TCSCourier extends BaseCourier {
 
   get baseUrl() {
     const raw =
-      this.config.base_url ||
-      (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD);
+      this.config.base_url || (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD);
     // Accept pasted full paths like .../ecom/api/authentication/token
     return String(raw)
       .trim()
@@ -124,7 +123,9 @@ class TCSCourier extends BaseCourier {
       if (parts.length < 2) return null;
       const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
       const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-      const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+      const payload = JSON.parse(
+        Buffer.from(padded, "base64").toString("utf8"),
+      );
       const exp = Number(payload?.exp);
       return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
     } catch {
@@ -236,9 +237,9 @@ class TCSCourier extends BaseCourier {
 
     const authUrl =
       this.config.settings?.auth_url ||
-      (this.isSandbox
-        ? "https://devconnect.tcscourier.com/auth/api/auth"
-        : "https://ociconnect.tcscourier.com/auth/api/auth");
+      (this.isSandbox ?
+        "https://devconnect.tcscourier.com/auth/api/auth"
+      : "https://ociconnect.tcscourier.com/auth/api/auth");
 
     const authWithQuery = `${authUrl}?clientid=${encodeURIComponent(String(clientId))}&clientsecret=${encodeURIComponent(String(clientSecret))}`;
 
@@ -314,9 +315,8 @@ class TCSCourier extends BaseCourier {
         this.config.settings?.access_token ||
         "",
     );
-    const savedExpiry = savedToken ?
-        this.resolveSavedBearerExpiryMs(savedToken)
-      : null;
+    const savedExpiry =
+      savedToken ? this.resolveSavedBearerExpiryMs(savedToken) : null;
     // Prefer a still-valid saved token only when we know it is not expired.
     if (
       savedToken &&
@@ -334,17 +334,23 @@ class TCSCourier extends BaseCourier {
     const hasClientCreds =
       Boolean(
         this.config.settings?.clientId ||
-          this.config.settings?.client_id ||
-          this.config.api_key,
+        this.config.settings?.client_id ||
+        this.config.api_key,
       ) &&
       Boolean(
         this.config.settings?.clientSecret ||
-          this.config.settings?.client_secret ||
-          this.config.secret,
+        this.config.settings?.client_secret ||
+        this.config.secret,
       );
 
     // Missing, expired, unknown-expiry, or forced → refresh when client credentials exist.
-    if (hasClientCreds && (forceRefresh || !savedToken || savedExpiry == null || savedExpiry <= now + 60_000)) {
+    if (
+      hasClientCreds &&
+      (forceRefresh ||
+        !savedToken ||
+        savedExpiry == null ||
+        savedExpiry <= now + 60_000)
+    ) {
       const fresh = await this.fetchBearerTokenFromCredentials();
       this._bearerCache = {
         token: fresh.token,
@@ -413,8 +419,9 @@ class TCSCourier extends BaseCourier {
 
     const token = res.data?.accesstoken || res.data?.accessToken;
     if (!token) {
-      const tcsMsg = Array.isArray(res.data?.errorList)
-        ? res.data.errorList
+      const tcsMsg =
+        Array.isArray(res.data?.errorList) ?
+          res.data.errorList
             .map((e) => e.errormessage || e.message || "")
             .filter(Boolean)
             .join("; ")
@@ -466,7 +473,12 @@ class TCSCourier extends BaseCourier {
    */
   normalizePkMobile(raw, fallback = "03000000000") {
     const text = String(raw ?? "").trim();
-    if (!text || /^n\/?a$/i.test(text) || /^null$/i.test(text) || text === "-") {
+    if (
+      !text ||
+      /^n\/?a$/i.test(text) ||
+      /^null$/i.test(text) ||
+      text === "-"
+    ) {
       return fallback;
     }
     let digits = text.replace(/\D/g, "");
@@ -528,7 +540,11 @@ class TCSCourier extends BaseCourier {
 
     // Sandbox: create a cost center when the account has none yet.
     if (this.isSandbox) {
-      const created = await this.createCostCenter(accessToken, accountNo, order);
+      const created = await this.createCostCenter(
+        accessToken,
+        accountNo,
+        order,
+      );
       if (created) {
         this.config.settings = {
           ...(this.config.settings || {}),
@@ -606,7 +622,10 @@ class TCSCourier extends BaseCourier {
   async createCostCenter(accessToken, accountNo, order = {}) {
     const settings = this.config.settings || {};
     const company = order.company || {};
-    const code = String(settings.create_costcentercode || "Test-01").slice(0, 20);
+    const code = String(settings.create_costcentercode || "Test-01").slice(
+      0,
+      20,
+    );
     const city =
       order.warehouse?.city ||
       settings.shipper_city ||
@@ -634,12 +653,13 @@ class TCSCourier extends BaseCourier {
       islabelprint: "yes",
       accountnumber: String(accountNo).slice(0, 12),
       phonenumber: this.normalizePkMobile(
-        order.warehouse?.phone || company.company_phone || settings.shipper_phone,
+        order.warehouse?.phone ||
+          company.company_phone ||
+          settings.shipper_phone,
       ),
-      email: String(company.company_email || settings.email || "test@abc.com").slice(
-        0,
-        50,
-      ),
+      email: String(
+        company.company_email || settings.email || "test@abc.com",
+      ).slice(0, 50),
     };
 
     const url = `${this.baseUrl}/ecom/api/booking/createcostcentercode`;
@@ -661,9 +681,7 @@ class TCSCourier extends BaseCourier {
       const msg = String(res.data?.message || res.data?.Message || "");
       if (/success/i.test(msg) || res.status < 400) {
         return (
-          res.data?.costcentercode ||
-          res.data?.result?.costcentercode ||
-          code
+          res.data?.costcentercode || res.data?.result?.costcentercode || code
         );
       }
       // Already exists — reuse requested code
@@ -710,7 +728,8 @@ class TCSCourier extends BaseCourier {
       .trim()
       .split(/\s+/);
     const firstname = nameParts[0] || "Customer";
-    const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(" ") : ".";
+    const middlename =
+      nameParts.length > 2 ? nameParts.slice(1, -1).join(" ") : ".";
     const lastname =
       nameParts.length > 1 ? nameParts[nameParts.length - 1] : ".";
 
@@ -778,9 +797,10 @@ class TCSCourier extends BaseCourier {
         firstname: firstname.slice(0, 50),
         middlename: String(middlename || ".").slice(0, 50),
         lastname: String(lastname || ".").slice(0, 50),
-        address1: String(
-          shipping.address || order.address || "Address",
-        ).slice(0, 120),
+        address1: String(shipping.address || order.address || "Address").slice(
+          0,
+          120,
+        ),
         address2: String(shipping.address2 || "").slice(0, 120),
         address3: "",
         zip: String(shipping.zip || shipping.postal_code || "").slice(0, 6),
@@ -792,10 +812,9 @@ class TCSCourier extends BaseCourier {
         ).slice(0, 50),
         citycode: String(shipping.city_code || "").slice(0, 5),
         cityname: String(cityName).slice(0, 50),
-        email: String(shipping.email || order.email || customer.email || "").slice(
-          0,
-          50,
-        ),
+        email: String(
+          shipping.email || order.email || customer.email || "",
+        ).slice(0, 50),
         areacode: "",
         areaname: String(shipping.area || "").slice(0, 50),
         blockcode: "",
@@ -832,9 +851,8 @@ class TCSCourier extends BaseCourier {
         currency: "PKR",
         codamount: Number(codAmount) || 0,
         declaredvalue:
-          Number(
-            Math.round(Number(order.declaredValue) || codAmount || 0),
-          ) || 0,
+          Number(Math.round(Number(order.declaredValue) || codAmount || 0)) ||
+          0,
         transactiontype: "",
         dsflag: "",
         carrierslug: "",
@@ -906,10 +924,7 @@ class TCSCourier extends BaseCourier {
     });
 
     const message =
-      res.data?.message ||
-      res.data?.Message ||
-      res.data?.result?.message ||
-      "";
+      res.data?.message || res.data?.Message || res.data?.result?.message || "";
     // TCS sandbox returns camelCase `consignmentNo`; some envs use lowercase.
     const consignmentNo =
       res.data?.consignmentNo ||
@@ -919,8 +934,9 @@ class TCSCourier extends BaseCourier {
       res.data?.result?.consignmentno ||
       res.data?.result?.ConsignmentNo;
 
-    const tcsErrors = Array.isArray(res.data?.errorList)
-      ? res.data.errorList
+    const tcsErrors =
+      Array.isArray(res.data?.errorList) ?
+        res.data.errorList
           .map((e) => {
             const key = e.key || e.field || "";
             const msg = e.errormessage || e.message || "";
@@ -1002,7 +1018,8 @@ class TCSCourier extends BaseCourier {
       },
     });
 
-    const ok = res.status < 400 && !/fail/i.test(String(res.data?.message || ""));
+    const ok =
+      res.status < 400 && !/fail/i.test(String(res.data?.message || ""));
     if (!ok) {
       throw fromProviderMessage(res.data?.message || "TCS cancel failed", {
         provider: this.providerName,
@@ -1036,12 +1053,10 @@ class TCSCourier extends BaseCourier {
       url,
     });
 
-    const checkpoints = Array.isArray(res.data?.checkpoints)
-      ? res.data.checkpoints
-      : [];
-    const deliveryinfo = Array.isArray(res.data?.deliveryinfo)
-      ? res.data.deliveryinfo
-      : [];
+    const checkpoints =
+      Array.isArray(res.data?.checkpoints) ? res.data.checkpoints : [];
+    const deliveryinfo =
+      Array.isArray(res.data?.deliveryinfo) ? res.data.deliveryinfo : [];
 
     const events = [...deliveryinfo, ...checkpoints].map((ev) => {
       const status = mapTcsStatus(ev);
@@ -1072,12 +1087,18 @@ class TCSCourier extends BaseCourier {
     const accessToken = await this.getAccessToken();
     const headers = await this.authHeaders();
     const cn = String(
-      shipment.tracking_number || shipment.trackingNumber || shipment.consignmentno || "",
+      shipment.tracking_number ||
+        shipment.trackingNumber ||
+        shipment.consignmentno ||
+        "",
     ).trim();
     if (!cn) {
-      throw fromProviderMessage("Missing TCS consignment number for label print", {
-        provider: this.providerName,
-      });
+      throw fromProviderMessage(
+        "Missing TCS consignment number for label print",
+        {
+          provider: this.providerName,
+        },
+      );
     }
 
     // TCS CNPrint — https://devconnect.tcscourier.com/ecom/index.html
@@ -1085,7 +1106,8 @@ class TCSCourier extends BaseCourier {
     const printtype = Number(options.printtype ?? options.printType ?? 6) || 6;
     const shipperDetails =
       options.shipperDetails === true || options.shipperDetails === "true";
-    const accounttype = Number(options.accounttype ?? options.accountType ?? 1) || 1;
+    const accounttype =
+      Number(options.accounttype ?? options.accountType ?? 1) || 1;
 
     const qs = new URLSearchParams({
       accesstoken: String(accessToken),
@@ -1120,8 +1142,12 @@ class TCSCourier extends BaseCourier {
       }
       throw fromProviderMessage(String(msg), {
         provider: this.providerName,
-        details: Buffer.isBuffer(res.data)
-          ? { bytes: res.data.length, preview: res.data.toString("utf8").slice(0, 300) }
+        details:
+          Buffer.isBuffer(res.data) ?
+            {
+              bytes: res.data.length,
+              preview: res.data.toString("utf8").slice(0, 300),
+            }
           : res.data,
         httpStatus: res.status,
       });
@@ -1235,11 +1261,16 @@ class TCSCourier extends BaseCourier {
       null;
 
     if (typeof base64 === "string") {
-      base64 = base64.replace(/^data:application\/pdf;base64,/i, "").replace(/\s+/g, "");
+      base64 = base64
+        .replace(/^data:application\/pdf;base64,/i, "")
+        .replace(/\s+/g, "");
       // Reject empty / non-PDF payloads that produced blank blob pages
       try {
         const decoded = Buffer.from(base64, "base64");
-        if (decoded.length < 20 || !decoded.slice(0, 5).toString("utf8").startsWith("%PDF")) {
+        if (
+          decoded.length < 20 ||
+          !decoded.slice(0, 5).toString("utf8").startsWith("%PDF")
+        ) {
           base64 = null;
         }
       } catch {
@@ -1261,7 +1292,9 @@ class TCSCourier extends BaseCourier {
 
   async validateAddress(address = {}) {
     const cities = await this.getCities(address.countrycode || "PK");
-    const cityName = String(address.city || address.cityname || "").toLowerCase();
+    const cityName = String(
+      address.city || address.cityname || "",
+    ).toLowerCase();
     if (!cityName) {
       return { valid: false, message: "City is required" };
     }
@@ -1293,13 +1326,11 @@ class TCSCourier extends BaseCourier {
       headers,
     });
 
-    const list = Array.isArray(res.data?.cities)
-      ? res.data.cities
-      : Array.isArray(res.data?.result)
-        ? res.data.result
-        : Array.isArray(res.data)
-          ? res.data
-          : [];
+    const list =
+      Array.isArray(res.data?.cities) ? res.data.cities
+      : Array.isArray(res.data?.result) ? res.data.result
+      : Array.isArray(res.data) ? res.data
+      : [];
 
     const cities = list.map((c) => ({
       code: c.citycode || c.code || c.CityCode,

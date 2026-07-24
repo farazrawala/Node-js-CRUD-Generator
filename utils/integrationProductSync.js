@@ -55,6 +55,31 @@ function mapPosStatusToShopify(status) {
     : "draft";
 }
 
+/**
+ * Prefer sync_product.sync_price when > 0; otherwise product.product_price.
+ * @param {object|null|undefined} product
+ * @param {object|number|null|undefined} syncRowOrPrice - mapping row or numeric override
+ * @returns {string}
+ */
+function resolveSyncProductPrice(product, syncRowOrPrice) {
+  let override = null;
+  if (syncRowOrPrice != null && typeof syncRowOrPrice === "object") {
+    override = syncRowOrPrice.sync_price;
+  } else if (syncRowOrPrice != null && syncRowOrPrice !== "") {
+    override = syncRowOrPrice;
+  }
+
+  const syncPrice = Number(override);
+  if (Number.isFinite(syncPrice) && syncPrice > 0) {
+    return String(syncPrice);
+  }
+
+  if (product?.product_price !== undefined && product?.product_price !== null) {
+    return String(product.product_price);
+  }
+  return "0";
+}
+
 function buildWooCommerceProductSyncPayload(product, integration, options = {}) {
   const mode = options.mode === "create" ? "create" : "update";
   const payload = {};
@@ -90,10 +115,10 @@ function buildWooCommerceProductSyncPayload(product, integration, options = {}) 
     if (slug) payload.slug = slug;
   }
   if (allowPrice) {
-    payload.regular_price =
-      product?.product_price !== undefined && product?.product_price !== null ?
-        String(product.product_price)
-      : "0";
+    payload.regular_price = resolveSyncProductPrice(
+      product,
+      options.syncRow ?? options.syncPrice,
+    );
   }
   if (allowDescription) {
     payload.description = product?.product_description || "";
@@ -173,10 +198,10 @@ function buildShopifyVariantSyncPayload(product, integration, options = {}) {
   if (!allowPrice) return null;
 
   const variantPayload = {
-    price:
-      product?.product_price !== undefined && product?.product_price !== null ?
-        String(product.product_price)
-      : "0.00",
+    price: resolveSyncProductPrice(
+      product,
+      options.syncRow ?? options.syncPrice,
+    ),
   };
 
   if (product?.weight !== undefined && product?.weight !== null) {
@@ -387,10 +412,10 @@ function buildWooCommerceVariationSyncPayload(
   }
 
   if (allowPrice) {
-    payload.regular_price =
-      child?.product_price !== undefined && child?.product_price !== null ?
-        String(child.product_price)
-      : "0";
+    payload.regular_price = resolveSyncProductPrice(
+      child,
+      options.syncRow ?? options.syncPrice,
+    );
   }
 
   if (allowStatus) {
@@ -431,6 +456,7 @@ module.exports = {
   isIntegrationSyncEnabled,
   resolvePosProductSku,
   resolvePublicAssetUrl,
+  resolveSyncProductPrice,
   buildWooCommerceProductSyncPayload,
   buildWooCommerceVariationSyncPayload,
   buildShopifyProductSyncPayload,
