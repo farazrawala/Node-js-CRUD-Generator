@@ -167,6 +167,18 @@ app.use(handlePublicUploadRequest);
 app.use("/uploads", uploadsStatic);
 app.use("/api/uploads", uploadsStatic);
 
+// Public static assets (e.g. log-tags.txt for frontend filters) — no auth
+const publicStaticRoot = path.join(__dirname, "public");
+if (!fs.existsSync(publicStaticRoot)) {
+  fs.mkdirSync(publicStaticRoot, { recursive: true });
+}
+const publicStatic = express.static(publicStaticRoot, {
+  fallthrough: true,
+  maxAge: "1h",
+});
+app.use("/public", publicStatic);
+app.use("/api/public", publicStatic);
+
 // Session middleware (must come before flash)
 app.use(
   session({
@@ -305,10 +317,20 @@ app.use((req, res, next) => {
   next();
 });
 
-connectMonogodb(getMongoUri()).catch((err) => {
-  console.error("❌ Failed to connect to MongoDB:", err.message);
-  process.exit(1);
-});
+connectMonogodb(getMongoUri())
+  .then(() => {
+    const { syncLogTagsFromDatabase } = require("./utils/logTagsRegistry");
+    syncLogTagsFromDatabase().catch((err) => {
+      console.warn(
+        "[logTagsRegistry] startup sync failed:",
+        err?.message || err,
+      );
+    });
+  })
+  .catch((err) => {
+    console.error("❌ Failed to connect to MongoDB:", err.message);
+    process.exit(1);
+  });
 
 /** Public deploy check — registered before /api auth middleware. */
 app.get("/api/version", (req, res) => {

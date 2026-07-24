@@ -10,6 +10,8 @@ const {
   activeNotDeletedCriteria,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
+const OrderItem = require("../models/order_item");
+const PurchaseOrderItem = require("../models/purchase_order_item");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
@@ -39,7 +41,7 @@ const {
   updateBarcodesFromText,
   BARCODE_IMPORT_COLUMNS,
 } = require("../utils/productBarcodeImport");
-const { enqueueProductWebsiteSyncJobs } = require("../utils/productSyncQueue");
+const { enqueueProductWebsiteSyncJobs, enqueueBulkSyncProductJobsByCompany } = require("../utils/productSyncQueue");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -2736,6 +2738,200 @@ async function findProductsWithDuplicateBarcodes(req, res) {
   }
 }
 
+/** Default lookback for recent line-item product_id collection. */
+const RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES = 70;
+
+/**
+ * GET unique `product_id`s from `order_item` and `purchase_order_item`
+ * created in the last 70 minutes across all companies (public).
+ * Variants with a different `parent_product_id` are replaced by that parent id.
+ * Then bulk-inserts `sync_product` process rows grouped by each product's company.
+ * Optional query `minutes` overrides the lookback window (1–1440).
+ */
+async function getRecentLineItemProductIds(req, res) {
+  try {
+    let minutes = RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES;
+    const rawMinutes = req.query?.minutes;
+    if (rawMinutes != null && String(rawMinutes).trim() !== "") {
+      const parsed = Number(rawMinutes);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1440) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid minutes",
+          message: "minutes must be a number between 1 and 1440",
+        });
+      }
+      minutes = Math.floor(parsed);
+    }
+
+    const toDate = new Date();
+    const fromDate = new Date(toDate.getTime() - minutes * 60 * 1000);
+    const match = {
+      status: "active",
+      deletedAt: null,
+      createdAt: { $gte: fromDate, $lte: toDate },
+      product_id: { $ne: null },
+    };
+
+    const [orderItemProductIds, purchaseOrderItemProductIds] =
+      await Promise.all([
+        OrderItem.distinct("product_id", match),
+        PurchaseOrderItem.distinct("product_id", match),
+      ]);
+
+    const rawProductIds = [
+      ...new Set(
+        [...orderItemProductIds, ...purchaseOrderItemProductIds]
+          .filter(Boolean)
+          .map((id) => String(id)),
+      ),
+    ];
+
+    const objectIds = rawProductIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const products =
+      objectIds.length > 0 ?
+        await Product.find({ _id: { $in: objectIds } })
+          .select("_id parent_product_id")
+          .lean()
+      : [];
+
+    const parentById = new Map(
+      products.map((p) => [String(p._id), p.parent_product_id]),
+    );
+
+    const productIdSet = new Set();
+    for (const id of rawProductIds) {
+      const parentId = parentById.get(id);
+      if (parentId != null && String(parentId) !== String(id)) {
+        productIdSet.add(String(parentId));
+      } else {
+        productIdSet.add(id);
+      }
+    }
+    const product_ids = [...productIdSet];
+
+    const processQueue = await enqueueBulkSyncProductJobsByCompany({
+      req,
+      productIds: product_ids,
+      createdBy: req.user?._id || null,
+      remarks: `Auto-queued sync_product from recent line items (${minutes}m)`,
+      priority: 50,
+    });
+
+    console.log(
+      `[recent-product-ids] minutes=${minutes} products=${product_ids.length} processes=${processQueue.count}`,
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      minutes,
+      from: fromDate.toISOString(),
+      to: toDate.toISOString(),
+      count: product_ids.length,
+      order_item_product_count: orderItemProductIds.length,
+      purchase_order_item_product_count: purchaseOrderItemProductIds.length,
+      product_ids,
+      process: {
+        action: "sync_product",
+        created_count: processQueue.count,
+        jobs_planned: processQueue.jobs_planned ?? 0,
+        skipped: processQueue.skipped ?? 0,
+        by_company: processQueue.by_company || {},
+        failed: processQueue.failed || [],
+        created: processQueue.created || [],
+        logs: processQueue.logs || [],
+      },
+    });
+  } catch (error) {
+    console.error("❌ getRecentLineItemProductIds:", error);
+
+    try {
+      const fallbackCompanyIds = [];
+      const seen = new Set();
+      const maybeAdd = (raw) => {
+        const id = coalesceObjectId(raw);
+        if (!id) return;
+        const key = String(id);
+        if (seen.has(key)) return;
+        seen.add(key);
+        fallbackCompanyIds.push(id);
+      };
+      maybeAdd(req.user?.company_id);
+      maybeAdd(req.query?.company_id);
+
+      // Best-effort: resolve company from any recent product ids we already collected
+      if (!fallbackCompanyIds.length && Array.isArray(error?.product_ids)) {
+        for (const id of error.product_ids) maybeAdd(id);
+      }
+
+      const { createApplicationLog } = require("../utils/applicationLogs");
+      if (fallbackCompanyIds.length) {
+        await Promise.all(
+          fallbackCompanyIds.map((companyId) =>
+            createApplicationLog(
+              req,
+              {
+                action: "Recent line items sync_product failed :: endpoint error",
+                url: req.originalUrl || "/api/product/recent-product-ids",
+                tags: [
+                  "product",
+                  "process",
+                  "sync_product",
+                  "recent-product-ids",
+                  "failed",
+                  "cron job",
+                ],
+                description: {
+                  message: error.message || "Internal server error",
+                  error: error.message || String(error),
+                  stack: error.stack || null,
+                },
+                company_id: companyId,
+                created_by: req.user?._id || null,
+                reference_type: "product",
+              },
+              { silent: true },
+            ),
+          ),
+        );
+      } else {
+        await logControllerError(
+          req,
+          error.message || "getRecentLineItemProductIds failed",
+          {
+            action: "Recent line items sync_product failed :: endpoint error",
+            tags: [
+              "product",
+              "process",
+              "sync_product",
+              "recent-product-ids",
+              "failed",
+              "cron job",
+            ],
+            fallbackUrl: "/api/product/recent-product-ids",
+          },
+        );
+      }
+    } catch (logErr) {
+      console.error(
+        "❌ getRecentLineItemProductIds log failed:",
+        logErr?.message || logErr,
+      );
+    }
+
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   productCreate,
   productImportFromFile,
@@ -2746,6 +2942,7 @@ module.exports = {
   productBarcodeUpdateFormSchema,
   productGenerateUniqueBarcode,
   findProductsWithDuplicateBarcodes,
+  getRecentLineItemProductIds,
   productUpdate,
   productById,
   getAllProducts,

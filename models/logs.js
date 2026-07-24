@@ -1,11 +1,10 @@
 const mongoose = require("mongoose");
+const { registerLogTags } = require("../utils/logTagsRegistry");
 
 /** Hard caps — keep documents bounded for replication and admin list views. */
 const MAX_ACTION_LEN = 500;
 const MAX_URL_LEN = 2000;
 const MAX_DESCRIPTION_LEN = 8000;
-const MAX_TAGS = 30;
-const MAX_TAG_LEN = 64;
 const MAX_REFERENCE_TYPE_LEN = 64;
 
 /** Case-normalized key names (alphanumeric only) we never persist verbatim. */
@@ -76,10 +75,12 @@ function sanitizeLogDescription(raw) {
 function clampTags(tags) {
   if (!tags) return [];
   const arr = Array.isArray(tags) ? tags : [tags];
-  return arr
-    .slice(0, MAX_TAGS)
-    .map((t) => truncate(String(t), MAX_TAG_LEN))
+  const normalized = arr
+    .map((t) => String(t).trim())
     .filter((t) => t.length > 0);
+  // Keep public/log-tags.txt in sync for frontend filters (no count/length cap)
+  registerLogTags(normalized);
+  return normalized;
 }
 
 /**
@@ -116,12 +117,6 @@ const modelSchema = new mongoose.Schema(
     },
     tags: {
       type: [String],
-      validate: {
-        validator(v) {
-          return !v || (Array.isArray(v) && v.length <= MAX_TAGS);
-        },
-        message: `At most ${MAX_TAGS} tags`,
-      },
     },
     description: {
       type: String,

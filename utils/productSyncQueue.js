@@ -1,8 +1,10 @@
 const ProcessModel = require("../models/process");
 const Product = require("../models/product");
 const SyncProduct = require("../models/sync_product");
+const Integration = require("../models/integration");
 const { coalesceObjectId } = require("./modelHelper");
 const { enqueueProcess } = require("./processQueue");
+const { createApplicationLog } = require("./applicationLogs");
 
 /**
  * Variable-product edits should queue sync against the parent so WooCommerce
@@ -142,7 +144,389 @@ async function enqueueProductWebsiteSyncJobs({
   };
 }
 
+/**
+ * Bulk-queue `sync_product` process rows for many products, grouped by company.
+ * Creates one process per product for each active company integration
+ * (e.g. 2 integrations → 2 jobs per product).
+ *
+ * @param {{
+ *   req?: import("express").Request | null,
+ *   productIds: Array<string|import("mongoose").Types.ObjectId>,
+ *   createdBy?: unknown,
+ *   remarks?: string,
+ *   priority?: number,
+ * }} params
+ */
+async function enqueueBulkSyncProductJobsByCompany({
+  req = null,
+  productIds,
+  createdBy = null,
+  remarks = "Auto-queued sync_product from recent line items",
+  priority = 50,
+}) {
+  const uniqueIds = [
+    ...new Set(
+      (productIds || [])
+        .map((id) => coalesceObjectId(id))
+        .filter(Boolean)
+        .map((id) => String(id)),
+    ),
+  ];
+
+  console.log(
+    `[recent-sync] enqueueBulkSyncProductJobsByCompany start: products=${uniqueIds.length}`,
+  );
+
+  if (!uniqueIds.length) {
+    console.log("[recent-sync] skipped: no product_ids");
+    return {
+      created: [],
+      count: 0,
+      skipped: 0,
+      by_company: {},
+      logs: [],
+      reason: "no_product_ids",
+    };
+  }
+
+  const objectIds = uniqueIds.map((id) => coalesceObjectId(id));
+  const products = await Product.find({
+    _id: { $in: objectIds },
+    deletedAt: null,
+  })
+    .select("_id company_id")
+    .lean();
+
+  const productsWithCompany = products
+    .map((p) => ({
+      product_id: coalesceObjectId(p._id),
+      company_id: coalesceObjectId(p.company_id),
+    }))
+    .filter((p) => p.product_id && p.company_id);
+
+  if (!productsWithCompany.length) {
+    console.warn(
+      `[recent-sync] skipped: none of ${uniqueIds.length} product(s) have company_id`,
+    );
+    return {
+      created: [],
+      count: 0,
+      skipped: uniqueIds.length,
+      by_company: {},
+      logs: [],
+      reason: "no_products_with_company",
+    };
+  }
+
+  const companyIds = [
+    ...new Set(productsWithCompany.map((p) => String(p.company_id))),
+  ].map((id) => coalesceObjectId(id));
+
+  const integrations = await Integration.find({
+    company_id: { $in: companyIds },
+    status: "active",
+    deletedAt: null,
+  })
+    .select("_id company_id")
+    .lean();
+
+  console.log(
+    `[recent-sync] loaded products=${productsWithCompany.length} companies=${companyIds.length} integrations=${integrations.length}`,
+  );
+
+  const integrationsByCompany = new Map();
+  for (const row of integrations) {
+    const companyKey = String(row.company_id);
+    if (!integrationsByCompany.has(companyKey)) {
+      integrationsByCompany.set(companyKey, []);
+    }
+    const integrationId = coalesceObjectId(row._id);
+    if (!integrationId) continue;
+    const list = integrationsByCompany.get(companyKey);
+    if (!list.some((id) => String(id) === String(integrationId))) {
+      list.push(integrationId);
+    }
+  }
+
+  const actor = coalesceObjectId(createdBy);
+  const jobKeys = new Set();
+  const jobs = [];
+  const productIdsByCompany = new Map();
+
+  for (const product of productsWithCompany) {
+    const companyKey = String(product.company_id);
+    if (!productIdsByCompany.has(companyKey)) {
+      productIdsByCompany.set(companyKey, new Set());
+    }
+    productIdsByCompany.get(companyKey).add(String(product.product_id));
+
+    // One sync_product process per product × each active company integration
+    const integrationIds = integrationsByCompany.get(companyKey) || [];
+
+    for (const integration_id of integrationIds) {
+      if (!integration_id) continue;
+      const jobKey = `${companyKey}:${String(product.product_id)}:${String(integration_id)}`;
+      if (jobKeys.has(jobKey)) continue;
+      jobKeys.add(jobKey);
+      jobs.push({
+        product_id: product.product_id,
+        company_id: product.company_id,
+        integration_id,
+      });
+    }
+  }
+
+  console.log(`[recent-sync] jobs planned=${jobs.length}`);
+
+  const created = [];
+  const failed = [];
+  const byCompany = {};
+  const createdByCompany = new Map();
+  const logs = [];
+  const logUrl =
+    req?.originalUrl || req?.url || "/api/product/recent-product-ids";
+
+  for (const job of jobs) {
+    try {
+      const doc = await ProcessModel.create({
+        integration_id: job.integration_id,
+        product_id: job.product_id,
+        action: "sync_product",
+        company_id: job.company_id,
+        created_by: actor,
+        status: "active",
+        progress: "not_started",
+        priority,
+        limit: 1,
+        page: 1,
+        offset: 0,
+        count: 0,
+        hits: 0,
+        remarks,
+      });
+      await enqueueProcess(doc);
+      const createdRow = {
+        _id: doc._id,
+        product_id: doc.product_id,
+        company_id: doc.company_id,
+        integration_id: doc.integration_id,
+        action: doc.action,
+        progress: doc.progress,
+      };
+      created.push(createdRow);
+
+      const companyKey = String(job.company_id);
+      byCompany[companyKey] = (byCompany[companyKey] || 0) + 1;
+      if (!createdByCompany.has(companyKey)) {
+        createdByCompany.set(companyKey, []);
+      }
+      createdByCompany.get(companyKey).push(createdRow);
+    } catch (err) {
+      const errorMessage = err?.message || "Insert failed";
+      console.error(
+        `[recent-sync] process create failed product=${job.product_id} company=${job.company_id}:`,
+        errorMessage,
+      );
+      const failedRow = {
+        product_id: String(job.product_id),
+        company_id: String(job.company_id),
+        integration_id: String(job.integration_id),
+        error: errorMessage,
+      };
+      failed.push(failedRow);
+
+      const failLog = await createApplicationLog(
+        req,
+        {
+          action: `Recent line items sync_product failed :: product ${job.product_id}`,
+          url: logUrl,
+          tags: [
+            "product",
+            "process",
+            "sync_product",
+            "recent-product-ids",
+            "failed",
+            "cron job",
+          ],
+          description: {
+            message: `Failed to queue sync_product process for product ${job.product_id}`,
+            action: "sync_product",
+            product_id: String(job.product_id),
+            company_id: String(job.company_id),
+            integration_id: String(job.integration_id),
+            error: errorMessage,
+            remarks,
+          },
+          company_id: job.company_id,
+          created_by: actor,
+          reference_type: "product",
+          reference_id: job.product_id,
+        },
+        { silent: true },
+      );
+      logs.push({
+        company_id: String(job.company_id),
+        ok: !!failLog?.ok,
+        log_id: failLog?._id ? String(failLog._id) : null,
+        type: "failed",
+        skipped: failLog?.skipped || null,
+      });
+    }
+  }
+
+  for (const [companyKey, rows] of createdByCompany.entries()) {
+    const companyProductIds = [...(productIdsByCompany.get(companyKey) || [])];
+    const failedForCompany = failed.filter((f) => f.company_id === companyKey);
+    const logResult = await createApplicationLog(
+      req,
+      {
+        action: `Recent line items sync_product queued :: ${rows.length} job(s)`,
+        url: logUrl,
+        tags: [
+          "product",
+          "process",
+          "sync_product",
+          "recent-product-ids",
+          "bulk",
+          "cron job",
+        ],
+        description: {
+          message: `Queued ${rows.length} sync_product process job(s) from recent order/purchase line items`,
+          action: "sync_product",
+          process_count: rows.length,
+          product_count: companyProductIds.length,
+          product_ids: companyProductIds,
+          process_ids: rows.map((r) => String(r._id)),
+          failed_count: failedForCompany.length,
+          failed: failedForCompany,
+          remarks,
+        },
+        company_id: companyKey,
+        created_by: actor,
+        reference_type: "process",
+        reference_id: rows[0]?._id || null,
+      },
+      { silent: true },
+    );
+    logs.push({
+      company_id: companyKey,
+      ok: !!logResult?.ok,
+      log_id: logResult?._id ? String(logResult._id) : null,
+      type: "queued",
+      skipped: logResult?.skipped || null,
+    });
+    console.log(
+      `[recent-sync] log company=${companyKey} created=${rows.length} log_ok=${!!logResult?.ok}`,
+    );
+  }
+
+  // Companies with products but no successful creates
+  for (const companyKey of productIdsByCompany.keys()) {
+    if (createdByCompany.has(companyKey)) continue;
+    const companyProductIds = [...(productIdsByCompany.get(companyKey) || [])];
+    const failedForCompany = failed.filter((f) => f.company_id === companyKey);
+
+    if (failedForCompany.length) {
+      const logResult = await createApplicationLog(
+        req,
+        {
+          action: `Recent line items sync_product failed :: ${failedForCompany.length} job(s)`,
+          url: logUrl,
+          tags: [
+            "product",
+            "process",
+            "sync_product",
+            "recent-product-ids",
+            "failed",
+            "cron job",
+          ],
+          description: {
+            message: `All sync_product process inserts failed for company (${failedForCompany.length} failure(s))`,
+            action: "sync_product",
+            process_count: 0,
+            product_count: companyProductIds.length,
+            product_ids: companyProductIds,
+            failed_count: failedForCompany.length,
+            failed: failedForCompany,
+            remarks,
+          },
+          company_id: companyKey,
+          created_by: actor,
+          reference_type: "product",
+          reference_id: companyProductIds[0] || null,
+        },
+        { silent: true },
+      );
+      logs.push({
+        company_id: companyKey,
+        ok: !!logResult?.ok,
+        log_id: logResult?._id ? String(logResult._id) : null,
+        type: "failed_summary",
+        skipped: logResult?.skipped || null,
+      });
+      console.error(
+        `[recent-sync] all jobs failed for company=${companyKey} failed=${failedForCompany.length}`,
+      );
+      continue;
+    }
+
+    const logResult = await createApplicationLog(
+      req,
+      {
+        action: "Recent line items sync_product skipped :: no integrations",
+        url: logUrl,
+        tags: [
+          "product",
+          "process",
+          "sync_product",
+          "recent-product-ids",
+          "skipped",
+          "cron job",
+        ],
+        description: {
+          message:
+            "No sync_product jobs created — no active integrations for company",
+          action: "sync_product",
+          process_count: 0,
+          product_count: companyProductIds.length,
+          product_ids: companyProductIds,
+        },
+        company_id: companyKey,
+        created_by: actor,
+        reference_type: "product",
+        reference_id: companyProductIds[0] || null,
+      },
+      { silent: true },
+    );
+    logs.push({
+      company_id: companyKey,
+      ok: !!logResult?.ok,
+      log_id: logResult?._id ? String(logResult._id) : null,
+      type: "skipped",
+      skipped: logResult?.skipped || "no_jobs",
+    });
+    console.warn(
+      `[recent-sync] no jobs for company=${companyKey} products=${companyProductIds.length}`,
+    );
+  }
+
+  console.log(
+    `[recent-sync] done created=${created.length} failed=${failed.length} companies=${Object.keys(byCompany).length}`,
+  );
+
+  return {
+    created,
+    count: created.length,
+    skipped: uniqueIds.length - productsWithCompany.length,
+    failed,
+    jobs_planned: jobs.length,
+    by_company: byCompany,
+    logs,
+  };
+}
+
 module.exports = {
   resolveProductIdForWebsiteSync,
   enqueueProductWebsiteSyncJobs,
+  enqueueBulkSyncProductJobsByCompany,
 };

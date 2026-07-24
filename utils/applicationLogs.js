@@ -2,15 +2,10 @@ const mongoose = require("mongoose");
 const Logs = require("../models/logs");
 const { coalesceObjectId } = require("./modelHelper");
 
-const MAX_TAGS = 30;
-
 function normalizeTags(tags) {
   if (tags == null || tags === "") return [];
   const arr = Array.isArray(tags) ? tags : [tags];
-  return arr
-    .map((t) => String(t).trim())
-    .filter(Boolean)
-    .slice(0, MAX_TAGS);
+  return arr.map((t) => String(t).trim()).filter(Boolean);
 }
 
 function serializeDescription(description) {

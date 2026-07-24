@@ -216,6 +216,11 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/chats\/mark-not-available\/.*/,
     /^\/uploads\/.*/,
     /^\/api\/uploads\/.*/,
+    /^\/public\/.*/,
+    /^\/api\/public\/.*/,
+    // Recent line-item product_ids (public; all companies)
+    "/product/recent-product-ids",
+    "/api/product/recent-product-ids",
   ];
 
   const pathCandidates = [
