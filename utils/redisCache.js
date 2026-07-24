@@ -45,7 +45,7 @@ const LIST_CACHE_QUERY_BLOCKLIST = new Set([
 ]);
 
 /** Never read/write list cache for these modules (`get-all-active` / `get-all`). */
-const LIST_CACHE_BYPASS_MODULES = new Set(["user", "logs"]);
+const LIST_CACHE_BYPASS_MODULES = new Set(["user", "logs", "process"]);
 
 /** List endpoints that share the same invalidation on create/update/delete. */
 const LIST_CACHE_ACTIONS = ["get-all-active", "get-all"];
@@ -751,7 +751,7 @@ async function runCachedListHandler(req, res, options) {
     fetch,
   } = options;
 
-  // `user`: stale empty lists after create; `logs`: always hit DB, no list-access audit row.
+  // `user`: stale empty lists after create; `logs`: always hit DB; `process`: queue status changes too often.
   if (isListCacheBypassed(module)) {
     const response = await fetch();
     if (!isListAccessAuditExcluded(module)) {
