@@ -25,6 +25,8 @@ function sendError(res, err) {
     ? {
         httpStatus: err.details.httpStatus,
         response: err.details.response,
+        errorList: err.details.errorList,
+        sentWeights: err.details.sentWeights,
         // omit full request from API response (still in file/DB logs)
       }
     : undefined;

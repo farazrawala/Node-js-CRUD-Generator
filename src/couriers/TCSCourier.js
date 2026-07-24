@@ -19,6 +19,9 @@ const courierLogger = require("../utils/courierLogger");
 
 const DEFAULT_PROD = "https://ociconnect.tcscourier.com";
 const DEFAULT_SANDBOX = "https://devconnect.tcscourier.com";
+/** TCS eCom booking: weightinkg min 0.5; max ~10 (larger values → "Insert valid Decimal number"). */
+const TCS_MIN_WEIGHT_KG = 0.5;
+const TCS_MAX_WEIGHT_KG = 10;
 
 class TCSCourier extends BaseCourier {
   constructor(config, options) {
@@ -40,6 +43,25 @@ class TCSCourier extends BaseCourier {
   }
 
   /**
+   * Tracking API host (separate from eCom).
+   * Sandbox: https://devconnect.tcscourier.com/tracking
+   * Prod: https://ociconnect.tcscourier.com/tracking
+   * @see https://devconnect.tcscourier.com/tracking/index.html
+   */
+  get trackingBaseUrl() {
+    const raw =
+      this.config.settings?.tracking_base_url ||
+      this.config.tracking_base_url ||
+      (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD);
+    return String(raw)
+      .trim()
+      .replace(/\/+$/, "")
+      .replace(/\/tracking(\/.*)?$/i, "")
+      .replace(/\/ecom(\/.*)?$/i, "")
+      .replace(/\/auth(\/.*)?$/i, "");
+  }
+
+  /**
    * Normalize a saved JWT (users often paste "Bearer eyJ...").
    * @param {string} token
    * @returns {string}
@@ -51,33 +73,154 @@ class TCSCourier extends BaseCourier {
   }
 
   /**
-   * Step 1 — OAuth-style bearer token (clientId + clientsecret),
-   * or a pre-saved Token from Courier Integration.
-   * @returns {Promise<string>}
+   * Parse a decimal for TCS fields. Empty / invalid → null (field should be omitted).
+   * @param {*} raw
+   * @returns {number|null}
    */
-  async getBearerToken() {
-    const now = Date.now();
-    if (this._bearerCache?.token && this._bearerCache.expiresAt > now + 60_000) {
-      return this._bearerCache.token;
-    }
+  toOptionalDecimal(raw) {
+    if (raw == null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
 
-    // Use a pre-saved bearer token from Courier Integration when present.
-    const savedToken = this.normalizeBearerToken(
-      this.config.token ||
-        this.config.settings?.bearer_token ||
-        this.config.settings?.token ||
-        this.config.settings?.accessToken ||
-        this.config.settings?.access_token ||
-        "",
+  /**
+   * TCS weightinkg / SKU weight: double, min 0.5, max 10.
+   * Returns a fixed 3-decimal *string* so JSON keeps "5.000" (plain number 5 is
+   * rejected by TCS as "Insert valid Decimal number").
+   * @param {*} raw
+   * @returns {string}
+   */
+  toTcsWeightKg(raw) {
+    let n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) n = 0.5;
+    // Unrealistic as kg for retail parcels → treat as grams (Shopify stores g).
+    if (n > 50) n = n / 1000;
+    n = Math.min(TCS_MAX_WEIGHT_KG, Math.max(TCS_MIN_WEIGHT_KG, n));
+    return Number(n.toFixed(3));
+  }
+
+  /**
+   * JSON.stringify drops trailing .0 (5.000 → 5). TCS rejects whole numbers for
+   * weight fields ("Insert valid Decimal number"). Rewrite those keys to 3dp.
+   * @param {object} payload
+   * @returns {string}
+   */
+  stringifyBookingBody(payload) {
+    const json = JSON.stringify(payload);
+    return json.replace(
+      /"(weightinkg|weight)"\s*:\s*(-?\d+(?:\.\d+)?)/g,
+      (_, key, num) => `"${key}":${Number(num).toFixed(3)}`,
     );
-    if (savedToken) {
-      this._bearerCache = {
-        token: savedToken,
-        expiresAt: now + 24 * 3600_000,
-      };
-      return savedToken;
-    }
+  }
 
+  /**
+   * Read JWT `exp` (ms) without verifying signature.
+   * @param {string} token
+   * @returns {number|null}
+   */
+  readJwtExpiryMs(token) {
+    try {
+      const parts = String(token || "").split(".");
+      if (parts.length < 2) return null;
+      const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+      const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+      const exp = Number(payload?.exp);
+      return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} token
+   * @returns {number|null} expiry ms, or null if unknown
+   */
+  resolveSavedBearerExpiryMs(token) {
+    const fromSettings =
+      Date.parse(
+        this.config.settings?.token_expiry ||
+          this.config.settings?.bearer_token_expiry ||
+          this.config.token_expiry ||
+          "",
+      ) || 0;
+    if (fromSettings > 0) return fromSettings;
+    return this.readJwtExpiryMs(token);
+  }
+
+  /**
+   * Persist refreshed bearer token onto the courier / provider row.
+   * @param {string} token
+   * @param {number} expiresAtMs
+   */
+  async persistBearerToken(token, expiresAtMs) {
+    const expiryIso = new Date(
+      Number.isFinite(expiresAtMs) && expiresAtMs > 0 ?
+        expiresAtMs
+      : Date.now() + 3600_000,
+    ).toISOString();
+
+    this.config.token = token;
+    this.config.settings = {
+      ...(this.config.settings && typeof this.config.settings === "object" ?
+        this.config.settings
+      : {}),
+      token,
+      bearer_token: token,
+      token_expiry: expiryIso,
+      bearer_token_expiry: expiryIso,
+    };
+
+    try {
+      const mongoose = require("mongoose");
+      const legacyId = this.config._legacy_id;
+      if (legacyId) {
+        const Courier = mongoose.model("courier");
+        await Courier.updateOne(
+          { _id: legacyId },
+          {
+            $set: {
+              token,
+              "settings.token": token,
+              "settings.bearer_token": token,
+              "settings.token_expiry": expiryIso,
+              "settings.bearer_token_expiry": expiryIso,
+            },
+          },
+        );
+        return;
+      }
+
+      const providerId = this.config._id;
+      if (providerId) {
+        const CourierProvider = require("../models/courier_provider.model");
+        await CourierProvider.updateOne(
+          { _id: providerId },
+          {
+            $set: {
+              "settings.token": token,
+              "settings.bearer_token": token,
+              "settings.token_expiry": expiryIso,
+              "settings.bearer_token_expiry": expiryIso,
+            },
+          },
+        );
+      }
+    } catch (err) {
+      courierLogger.apiError({
+        provider: this.providerName,
+        step: "persist_bearer",
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  /**
+   * Fetch a fresh OAuth bearer using clientId / clientSecret.
+   * @returns {Promise<{ token: string, expiresAt: number }>}
+   */
+  async fetchBearerTokenFromCredentials() {
+    const now = Date.now();
     const clientId =
       this.config.settings?.clientId ||
       this.config.settings?.client_id ||
@@ -109,7 +252,11 @@ class TCSCourier extends BaseCourier {
     });
 
     // Some TCS gateways expect JSON body even on auth (non-standard GET).
-    if (!res.data?.result?.accessToken && !res.data?.result?.accesstoken && !res.data?.accessToken) {
+    if (
+      !res.data?.result?.accessToken &&
+      !res.data?.result?.accesstoken &&
+      !res.data?.accessToken
+    ) {
       res = await httpRequest(authUrl, {
         method: "POST",
         provider: this.providerName,
@@ -134,20 +281,107 @@ class TCSCourier extends BaseCourier {
       throw invalidCredentials(this.providerName);
     }
 
-    const expiry = Date.parse(res.data?.result?.expiry || "") || now + 3600_000;
-    this._bearerCache = { token, expiresAt: expiry };
-    return token;
+    const expiresAt =
+      Date.parse(res.data?.result?.expiry || "") ||
+      this.readJwtExpiryMs(token) ||
+      now + 3600_000;
+
+    return { token: this.normalizeBearerToken(token), expiresAt };
+  }
+
+  /**
+   * Step 1 — OAuth-style bearer token (clientId + clientsecret),
+   * or a pre-saved Token from Courier Integration (auto-refreshed when missing/expired).
+   * @param {{ forceRefresh?: boolean }} [options]
+   * @returns {Promise<string>}
+   */
+  async getBearerToken(options = {}) {
+    const forceRefresh = options.forceRefresh === true;
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      this._bearerCache?.token &&
+      this._bearerCache.expiresAt > now + 60_000
+    ) {
+      return this._bearerCache.token;
+    }
+
+    const savedToken = this.normalizeBearerToken(
+      this.config.token ||
+        this.config.settings?.bearer_token ||
+        this.config.settings?.token ||
+        this.config.settings?.accessToken ||
+        this.config.settings?.access_token ||
+        "",
+    );
+    const savedExpiry = savedToken ?
+        this.resolveSavedBearerExpiryMs(savedToken)
+      : null;
+    // Prefer a still-valid saved token only when we know it is not expired.
+    if (
+      savedToken &&
+      !forceRefresh &&
+      savedExpiry != null &&
+      savedExpiry > now + 60_000
+    ) {
+      this._bearerCache = {
+        token: savedToken,
+        expiresAt: savedExpiry,
+      };
+      return savedToken;
+    }
+
+    const hasClientCreds =
+      Boolean(
+        this.config.settings?.clientId ||
+          this.config.settings?.client_id ||
+          this.config.api_key,
+      ) &&
+      Boolean(
+        this.config.settings?.clientSecret ||
+          this.config.settings?.client_secret ||
+          this.config.secret,
+      );
+
+    // Missing, expired, unknown-expiry, or forced → refresh when client credentials exist.
+    if (hasClientCreds && (forceRefresh || !savedToken || savedExpiry == null || savedExpiry <= now + 60_000)) {
+      const fresh = await this.fetchBearerTokenFromCredentials();
+      this._bearerCache = {
+        token: fresh.token,
+        expiresAt: fresh.expiresAt,
+      };
+      await this.persistBearerToken(fresh.token, fresh.expiresAt);
+      return fresh.token;
+    }
+
+    if (savedToken) {
+      this._bearerCache = {
+        token: savedToken,
+        expiresAt: savedExpiry || now + 5 * 60_000,
+      };
+      return savedToken;
+    }
+
+    throw invalidCredentials(
+      this.providerName,
+      "Bearer Token is missing. Paste Token on Courier Integration, or set Client ID + Client Secret so the token can refresh automatically.",
+    );
   }
 
   /**
    * Step 2 — E-com API access token (username + password).
-   * TCS sandbox expects username/password as query params on GET
-   * (headers alone are ignored → "username/password is required").
+   * Auto-refreshes bearer when missing/expired or when ecom auth fails once.
+   * @param {{ forceRefresh?: boolean, _retried?: boolean }} [options]
    * @returns {Promise<string>}
    */
-  async getAccessToken() {
+  async getAccessToken(options = {}) {
+    const forceRefresh = options.forceRefresh === true;
     const now = Date.now();
-    if (this._tokenCache.token && this._tokenCache.expiresAt > now + 60_000) {
+    if (
+      !forceRefresh &&
+      this._tokenCache.token &&
+      this._tokenCache.expiresAt > now + 60_000
+    ) {
       return this._tokenCache.token;
     }
 
@@ -159,7 +393,7 @@ class TCSCourier extends BaseCourier {
       throw invalidCredentials(this.providerName);
     }
 
-    const bearer = await this.getBearerToken();
+    const bearer = await this.getBearerToken({ forceRefresh });
     const qs = new URLSearchParams({
       username,
       password,
@@ -185,6 +419,22 @@ class TCSCourier extends BaseCourier {
             .filter(Boolean)
             .join("; ")
         : res.data?.message || null;
+
+      // Stale bearer is a common cause — refresh once and retry.
+      if (!options._retried) {
+        courierLogger.apiError({
+          provider: this.providerName,
+          step: "ecom_token_retry_refresh_bearer",
+          hasUsername: Boolean(username),
+          hasPassword: Boolean(password),
+          hasBearer: Boolean(bearer),
+          response: res.data,
+        });
+        this._bearerCache = null;
+        this._tokenCache = { token: null, expiresAt: 0 };
+        return this.getAccessToken({ forceRefresh: true, _retried: true });
+      }
+
       courierLogger.apiError({
         provider: this.providerName,
         step: "ecom_token",
@@ -440,11 +690,11 @@ class TCSCourier extends BaseCourier {
     const company = order.company || {};
     const customer = order.customer || {};
     const shipping = order.shippingAddress || {};
-    const weight = Math.max(0.5, Number(order.weightKg) || 0.5);
+    const weight = this.toTcsWeightKg(order.weightKg);
     const pieces = Math.max(1, Number(order.pieces) || 1);
     const codAmount = Math.max(0, Math.round(Number(order.codAmount) || 0));
 
-    if (!(weight >= 0.5)) {
+    if (!(weight >= TCS_MIN_WEIGHT_KG)) {
       throw invalidWeight(weight);
     }
 
@@ -550,8 +800,13 @@ class TCSCourier extends BaseCourier {
         areaname: String(shipping.area || "").slice(0, 50),
         blockcode: "",
         blockname: "",
-        lat: String(shipping.lat || ""),
-        lng: String(shipping.lng || ""),
+        // Omit empty lat/lng — TCS returns "Insert valid Decimal number" for "".
+        ...(this.toOptionalDecimal(shipping.lat) != null ?
+          { lat: this.toOptionalDecimal(shipping.lat) }
+        : {}),
+        ...(this.toOptionalDecimal(shipping.lng) != null ?
+          { lng: this.toOptionalDecimal(shipping.lng) }
+        : {}),
         landmark: String(shipping.landmark || "").slice(0, 200),
         mobile: consigneeMobile,
       },
@@ -575,24 +830,27 @@ class TCSCourier extends BaseCourier {
         shipmentdate: formatTcsDate(new Date()),
         shippingtype: "",
         currency: "PKR",
-        codamount: codAmount,
-        declaredvalue: Math.round(Number(order.declaredValue) || codAmount || 0),
-        insuredvalue: null,
+        codamount: Number(codAmount) || 0,
+        declaredvalue:
+          Number(
+            Math.round(Number(order.declaredValue) || codAmount || 0),
+          ) || 0,
         transactiontype: "",
         dsflag: "",
         carrierslug: "",
         weightinkg: weight,
-        pieces,
+        pieces: Math.max(1, Math.round(Number(pieces) || 1)),
         fragile: Boolean(settings.fragile),
         remarks: String(order.description || order.remarks || "").slice(0, 500),
         skus: (order.items || []).map((item) => ({
           description: String(item.name || "Item").slice(0, 50),
-          quantity: Math.max(1, Number(item.qty) || 1),
-          weight: Math.max(0.5, Number(item.weight) || weight),
+          quantity: Math.max(1, Math.round(Number(item.qty) || 1)),
+          weight: this.toTcsWeightKg(
+            Number(item.weight) > 0 ? item.weight : weight,
+          ),
           uom: "KG",
           unitprice: Math.round(Number(item.price) || 0),
           declaredvalue: Math.round(Number(item.subtotal) || 0),
-          insuredvalue: null,
         })),
       },
     };
@@ -632,8 +890,11 @@ class TCSCourier extends BaseCourier {
     const res = await httpRequest(url, {
       method: "POST",
       provider: this.providerName,
-      headers,
-      body: payload,
+      headers: {
+        ...headers,
+        "Content-Type": "application/json",
+      },
+      body: this.stringifyBookingBody(payload),
     });
 
     courierLogger.shipmentResponse({
@@ -660,7 +921,12 @@ class TCSCourier extends BaseCourier {
 
     const tcsErrors = Array.isArray(res.data?.errorList)
       ? res.data.errorList
-          .map((e) => e.errormessage || e.message || e.key || "")
+          .map((e) => {
+            const key = e.key || e.field || "";
+            const msg = e.errormessage || e.message || "";
+            if (key && msg) return `${key}: ${msg}`;
+            return msg || key;
+          })
           .filter(Boolean)
           .join("; ")
       : null;
@@ -691,8 +957,12 @@ class TCSCourier extends BaseCourier {
         provider: this.providerName,
         details: {
           httpStatus: res.status,
-          request: payload,
           response: res.data,
+          errorList: res.data?.errorList || null,
+          sentWeights: {
+            weightinkg: payload.shipmentinfo?.weightinkg,
+            skuWeights: (payload.shipmentinfo?.skus || []).map((s) => s.weight),
+          },
         },
         city: order.city,
         weight: order.weightKg,
@@ -744,11 +1014,13 @@ class TCSCourier extends BaseCourier {
 
   async getTracking(trackingNo) {
     const headers = await this.authHeaders();
-    const url = `${this.baseUrl}/tracking/api/Tracking/GetDynamicTrackDetail?consignee=${encodeURIComponent(trackingNo)}`;
+    // Dev: https://devconnect.tcscourier.com/tracking/api/Tracking/GetDynamicTrackDetail
+    const url = `${this.trackingBaseUrl}/tracking/api/Tracking/GetDynamicTrackDetail?consignee=${encodeURIComponent(trackingNo)}`;
 
     courierLogger.trackingRequest({
       provider: this.providerName,
       trackingNo,
+      url,
     });
 
     const res = await httpRequest(url, {
@@ -761,6 +1033,7 @@ class TCSCourier extends BaseCourier {
       provider: this.providerName,
       trackingNo,
       httpStatus: res.status,
+      url,
     });
 
     const checkpoints = Array.isArray(res.data?.checkpoints)

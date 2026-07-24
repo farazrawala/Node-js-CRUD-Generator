@@ -582,6 +582,41 @@ function mapShopifyOrderStatus(financialStatus, fulfillmentStatus) {
   return "placed";
 }
 
+/**
+ * Raw store status for `order.order_website_status`.
+ * WooCommerce → `status`; Shopify → `financial_status` (fallback fulfillment_status).
+ */
+function resolveOrderWebsiteStatus(remoteOrder, store) {
+  const Order = require("../models/order");
+  const allowed = new Set(
+    Order.ORDER_WEBSITE_STATUS_VALUES || [
+      "pending",
+      "confirmed",
+      "shipped",
+      "delivered",
+      "cancelled",
+      "refunded",
+    ],
+  );
+  const storeKey = String(store || "").toLowerCase();
+  let raw = "";
+  if (storeKey === "shopify") {
+    raw =
+      remoteOrder?.financial_status ||
+      remoteOrder?.fulfillment_status ||
+      "";
+  } else {
+    raw = remoteOrder?.status || "";
+  }
+  const normalized = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (normalized && allowed.has(normalized)) {
+    return normalized;
+  }
+  return "pending";
+}
+
 function createFetchOrderStats() {
   return {
     inserted: 0,
@@ -1677,6 +1712,7 @@ module.exports = {
   resolvePosProductForRemoteLine,
   mapWooOrderStatus,
   mapShopifyOrderStatus,
+  resolveOrderWebsiteStatus,
   fallbackRemoteOrderLinesSubtotal,
   createFetchOrderStats,
   recordOrderSkip,

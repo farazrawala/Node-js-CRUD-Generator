@@ -77,6 +77,28 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     settings.token = token;
   }
 
+  const clientId =
+    legacy.client_id ||
+    settings.clientId ||
+    settings.client_id ||
+    settings.api_key ||
+    null;
+  const clientSecret =
+    legacy.client_secret ||
+    settings.clientSecret ||
+    settings.client_secret ||
+    settings.secret ||
+    null;
+
+  if (clientId) {
+    settings.clientId = settings.clientId || clientId;
+    settings.client_id = settings.client_id || clientId;
+  }
+  if (clientSecret) {
+    settings.clientSecret = settings.clientSecret || clientSecret;
+    settings.client_secret = settings.client_secret || clientSecret;
+  }
+
   return {
     company_id: legacy.company_id,
     provider: providerKey,
@@ -88,8 +110,8 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     sandbox:
       legacy.sandbox ??
       /devconnect|staging|sandbox|uat/i.test(String(legacy.url || "")),
-    api_key: settings.api_key || null,
-    secret: settings.secret || null,
+    api_key: clientId || settings.api_key || null,
+    secret: clientSecret || settings.secret || null,
     account_no: legacy.account_no || settings.account_no || null,
     pickup_location:
       legacy.cost_center ||
@@ -316,7 +338,7 @@ async function createShipment(orderId, options = {}) {
       const courierRef =
         options.courierId || config?._legacy_id || config?._id || null;
       const orderUpdate = {
-        order_status: "shipped",
+        order_status: "packed",
         courier_tracking_number: String(result.trackingNumber || ""),
       };
       if (courierRef) {

@@ -18,6 +18,7 @@ const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
 const { generateUniqueProductBarcode } = require("../utils/fetchProductBarcode");
 const {
+  logControllerError,
   logRollbackFailure,
   serializeErrorForLog,
 } = require("../utils/logControllerError");
@@ -2749,6 +2750,7 @@ const RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES = 70;
  * Optional query `minutes` overrides the lookback window (1–1440).
  */
 async function getRecentLineItemProductIds(req, res) {
+  let resolvedProductIds = [];
   try {
     let minutes = RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES;
     const rawMinutes = req.query?.minutes;
@@ -2813,6 +2815,7 @@ async function getRecentLineItemProductIds(req, res) {
       }
     }
     const product_ids = [...productIdSet];
+    resolvedProductIds = product_ids;
 
     const processQueue = await enqueueBulkSyncProductJobsByCompany({
       req,
@@ -2864,9 +2867,17 @@ async function getRecentLineItemProductIds(req, res) {
       maybeAdd(req.user?.company_id);
       maybeAdd(req.query?.company_id);
 
-      // Best-effort: resolve company from any recent product ids we already collected
-      if (!fallbackCompanyIds.length && Array.isArray(error?.product_ids)) {
-        for (const id of error.product_ids) maybeAdd(id);
+      if (resolvedProductIds.length) {
+        const products = await Product.find({
+          _id: {
+            $in: resolvedProductIds
+              .filter((id) => mongoose.Types.ObjectId.isValid(id))
+              .map((id) => new mongoose.Types.ObjectId(id)),
+          },
+        })
+          .select("company_id")
+          .lean();
+        for (const p of products) maybeAdd(p.company_id);
       }
 
       const { createApplicationLog } = require("../utils/applicationLogs");
@@ -2889,7 +2900,7 @@ async function getRecentLineItemProductIds(req, res) {
                 description: {
                   message: error.message || "Internal server error",
                   error: error.message || String(error),
-                  stack: error.stack || null,
+                  product_ids: resolvedProductIds,
                 },
                 company_id: companyId,
                 created_by: req.user?._id || null,

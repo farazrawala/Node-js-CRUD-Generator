@@ -48,11 +48,15 @@ function alreadyShipped(orderId, trackingNumber) {
 }
 
 function invalidCredentials(provider, detailMessage) {
-  const suffix = detailMessage ? `: ${detailMessage}` : "";
-  return new CourierError(`Invalid API credentials for ${provider}${suffix}`, {
+  const detail = detailMessage != null ? String(detailMessage).trim() : "";
+  const base = `Invalid API credentials for ${provider}`;
+  // Avoid "Invalid API credentials for TCS: Invalid API credentials for TCS"
+  const suffix =
+    detail && detail.toLowerCase() !== base.toLowerCase() ? `: ${detail}` : "";
+  return new CourierError(`${base}${suffix}`, {
     code: "INVALID_CREDENTIALS",
     httpStatus: 401,
-    details: detailMessage ? { message: detailMessage } : undefined,
+    details: detail ? { message: detail } : undefined,
   });
 }
 

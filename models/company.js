@@ -108,6 +108,15 @@ const modelSchema = new mongoose.Schema(
       field_name: "Printer Settings",
     },
 
+    address_latitude: {
+      type: String,
+      field_name: "Address Latitude",
+    },
+    address_longitude: {
+      type: String,
+      field_name: "Address Longitude",
+    },
+
     bigcommerce_settings: {
       type: String,
       field_name: "BigCommerce Settings",

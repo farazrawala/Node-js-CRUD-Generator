@@ -53,6 +53,7 @@ const ORDER_STATUS_VALUES = [
   "active",
   "placed",
   "confirmed",
+  "packed",
   "shipped",
   "delivered",
   "drafted",
@@ -66,6 +67,39 @@ const ORDER_STATUS_VALUES = [
   "refunded",
   "failed",
   "processing",
+];
+
+/**
+ * Website / store order statuses retained from Shopify + WooCommerce imports.
+ * WooCommerce uses hyphenated slugs; Shopify uses snake_case financial/fulfillment values.
+ */
+const ORDER_WEBSITE_STATUS_VALUES = [
+  // Existing / POS display
+  "pending",
+  "confirmed",
+  "shipped",
+  "delivered",
+  "cancelled",
+  "refunded",
+  // WooCommerce order statuses
+  "processing",
+  "on-hold",
+  "completed",
+  "failed",
+  "trash",
+  "checkout-draft",
+  "auto-draft",
+  // Shopify financial_status
+  "authorized",
+  "partially_paid",
+  "paid",
+  "partially_refunded",
+  "voided",
+  // Shopify fulfillment_status
+  "fulfilled",
+  "partial",
+  "restocked",
+  "unfulfilled",
 ];
 
 /**
@@ -86,7 +120,7 @@ const ORDER_STATUS_GROUPS = {
     "processing",
   ]),
   /** Physical / digital fulfillment */
-  fulfillment: new Set(["shipped", "delivered"]),
+  fulfillment: new Set(["packed", "shipped", "delivered"]),
   /** Closed — no further fulfillment; adjust stock/GL rules carefully per value */
   terminal: new Set(["completed", "cancelled", "refunded", "failed"]),
 };
@@ -289,7 +323,7 @@ const modelSchema = new mongoose.Schema(
     },
     order_type: {
       type: String,
-      enum: ["offline", "online"],
+      enum: ["offline", "online", "bigcommerce", "website"],
       default: "offline",
     },
     local_sms: {
@@ -316,6 +350,15 @@ const modelSchema = new mongoose.Schema(
         message: "{VALUE} is not a valid order_status",
       },
       default: "placed",
+    },
+    order_website_status: {
+      type: String,
+      enum: {
+        values: ORDER_WEBSITE_STATUS_VALUES,
+        message: "{VALUE} is not a valid order_website_status",
+      },
+      default: "pending",
+      field_name: "Website Order Status",
     },
     transaction_number: {
       type: String,
@@ -723,6 +766,7 @@ modelSchema.statics.syncHeaderTotalsFromLineItems = async function (
 const MODEL = mongoose.model("order", modelSchema);
 
 MODEL.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
+MODEL.ORDER_WEBSITE_STATUS_VALUES = ORDER_WEBSITE_STATUS_VALUES;
 MODEL.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
 
 /**

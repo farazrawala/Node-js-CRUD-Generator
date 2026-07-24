@@ -194,13 +194,21 @@ async function enqueueBulkSyncProductJobsByCompany({
     _id: { $in: objectIds },
     deletedAt: null,
   })
-    .select("_id company_id")
+    .select("_id company_id product_name")
     .lean();
+
+  const productNameById = new Map(
+    products.map((p) => [
+      String(p._id),
+      String(p.product_name || "").trim() || String(p._id),
+    ]),
+  );
 
   const productsWithCompany = products
     .map((p) => ({
       product_id: coalesceObjectId(p._id),
       company_id: coalesceObjectId(p.company_id),
+      product_name: String(p.product_name || "").trim() || String(p._id),
     }))
     .filter((p) => p.product_id && p.company_id);
 
@@ -252,28 +260,47 @@ async function enqueueBulkSyncProductJobsByCompany({
   const jobKeys = new Set();
   const jobs = [];
   const productIdsByCompany = new Map();
+  const productNamesByCompany = new Map();
 
   for (const product of productsWithCompany) {
     const companyKey = String(product.company_id);
     if (!productIdsByCompany.has(companyKey)) {
       productIdsByCompany.set(companyKey, new Set());
+      productNamesByCompany.set(companyKey, []);
     }
-    productIdsByCompany.get(companyKey).add(String(product.product_id));
+    const productIdStr = String(product.product_id);
+    if (!productIdsByCompany.get(companyKey).has(productIdStr)) {
+      productIdsByCompany.get(companyKey).add(productIdStr);
+      productNamesByCompany.get(companyKey).push(product.product_name);
+    }
 
     // One sync_product process per product × each active company integration
     const integrationIds = integrationsByCompany.get(companyKey) || [];
 
     for (const integration_id of integrationIds) {
       if (!integration_id) continue;
-      const jobKey = `${companyKey}:${String(product.product_id)}:${String(integration_id)}`;
+      const jobKey = `${companyKey}:${productIdStr}:${String(integration_id)}`;
       if (jobKeys.has(jobKey)) continue;
       jobKeys.add(jobKey);
       jobs.push({
         product_id: product.product_id,
         company_id: product.company_id,
         integration_id,
+        product_name: product.product_name,
       });
     }
+  }
+
+  function companyProductSummary(companyKey) {
+    const companyProductIds = [...(productIdsByCompany.get(companyKey) || [])];
+    const product_names = productNamesByCompany.get(companyKey) || [];
+    const namesList = product_names.join(", ");
+    return {
+      companyProductIds,
+      product_names,
+      namesList,
+      product_count: companyProductIds.length,
+    };
   }
 
   console.log(`[recent-sync] jobs planned=${jobs.length}`);
@@ -335,10 +362,14 @@ async function enqueueBulkSyncProductJobsByCompany({
       };
       failed.push(failedRow);
 
+      const productLabel =
+        job.product_name ||
+        productNameById.get(String(job.product_id)) ||
+        String(job.product_id);
       const failLog = await createApplicationLog(
         req,
         {
-          action: `Recent line items sync_product failed :: product ${job.product_id}`,
+          action: `Recent line items sync_product failed :: ${productLabel}`,
           url: logUrl,
           tags: [
             "product",
@@ -349,9 +380,10 @@ async function enqueueBulkSyncProductJobsByCompany({
             "cron job",
           ],
           description: {
-            message: `Failed to queue sync_product process for product ${job.product_id}`,
+            message: `Failed to queue sync_product process for ${productLabel}`,
             action: "sync_product",
             product_id: String(job.product_id),
+            product_name: productLabel,
             company_id: String(job.company_id),
             integration_id: String(job.integration_id),
             error: errorMessage,
@@ -375,12 +407,16 @@ async function enqueueBulkSyncProductJobsByCompany({
   }
 
   for (const [companyKey, rows] of createdByCompany.entries()) {
-    const companyProductIds = [...(productIdsByCompany.get(companyKey) || [])];
+    const { companyProductIds, product_names, namesList, product_count } =
+      companyProductSummary(companyKey);
     const failedForCompany = failed.filter((f) => f.company_id === companyKey);
+    const integrationCount = new Set(
+      rows.map((r) => String(r.integration_id)),
+    ).size;
     const logResult = await createApplicationLog(
       req,
       {
-        action: `Recent line items sync_product queued :: ${rows.length} job(s)`,
+        action: `Recent line items sync_product :: ${product_count} product(s) going in sync`,
         url: logUrl,
         tags: [
           "product",
@@ -391,11 +427,14 @@ async function enqueueBulkSyncProductJobsByCompany({
           "cron job",
         ],
         description: {
-          message: `Queued ${rows.length} sync_product process job(s) from recent order/purchase line items`,
+          message: `${product_count} product(s) going in sync: ${namesList}`,
           action: "sync_product",
           process_count: rows.length,
-          product_count: companyProductIds.length,
+          product_count,
           product_ids: companyProductIds,
+          product_names,
+          products_going_in_sync: namesList,
+          integration_count: integrationCount,
           process_ids: rows.map((r) => String(r._id)),
           failed_count: failedForCompany.length,
           failed: failedForCompany,
@@ -413,24 +452,27 @@ async function enqueueBulkSyncProductJobsByCompany({
       ok: !!logResult?.ok,
       log_id: logResult?._id ? String(logResult._id) : null,
       type: "queued",
+      product_count,
+      product_names,
       skipped: logResult?.skipped || null,
     });
     console.log(
-      `[recent-sync] log company=${companyKey} created=${rows.length} log_ok=${!!logResult?.ok}`,
+      `[recent-sync] log company=${companyKey} products=${product_count} names=${namesList} jobs=${rows.length} log_ok=${!!logResult?.ok}`,
     );
   }
 
   // Companies with products but no successful creates
   for (const companyKey of productIdsByCompany.keys()) {
     if (createdByCompany.has(companyKey)) continue;
-    const companyProductIds = [...(productIdsByCompany.get(companyKey) || [])];
+    const { companyProductIds, product_names, namesList, product_count } =
+      companyProductSummary(companyKey);
     const failedForCompany = failed.filter((f) => f.company_id === companyKey);
 
     if (failedForCompany.length) {
       const logResult = await createApplicationLog(
         req,
         {
-          action: `Recent line items sync_product failed :: ${failedForCompany.length} job(s)`,
+          action: `Recent line items sync_product failed :: ${product_count} product(s)`,
           url: logUrl,
           tags: [
             "product",
@@ -441,11 +483,13 @@ async function enqueueBulkSyncProductJobsByCompany({
             "cron job",
           ],
           description: {
-            message: `All sync_product process inserts failed for company (${failedForCompany.length} failure(s))`,
+            message: `All sync_product inserts failed for ${product_count} product(s): ${namesList}`,
             action: "sync_product",
             process_count: 0,
-            product_count: companyProductIds.length,
+            product_count,
             product_ids: companyProductIds,
+            product_names,
+            products_going_in_sync: namesList,
             failed_count: failedForCompany.length,
             failed: failedForCompany,
             remarks,
@@ -462,10 +506,12 @@ async function enqueueBulkSyncProductJobsByCompany({
         ok: !!logResult?.ok,
         log_id: logResult?._id ? String(logResult._id) : null,
         type: "failed_summary",
+        product_count,
+        product_names,
         skipped: logResult?.skipped || null,
       });
       console.error(
-        `[recent-sync] all jobs failed for company=${companyKey} failed=${failedForCompany.length}`,
+        `[recent-sync] all jobs failed for company=${companyKey} products=${namesList} failed=${failedForCompany.length}`,
       );
       continue;
     }
@@ -473,7 +519,7 @@ async function enqueueBulkSyncProductJobsByCompany({
     const logResult = await createApplicationLog(
       req,
       {
-        action: "Recent line items sync_product skipped :: no integrations",
+        action: `Recent line items sync_product skipped :: ${product_count} product(s), no integrations`,
         url: logUrl,
         tags: [
           "product",
@@ -484,12 +530,13 @@ async function enqueueBulkSyncProductJobsByCompany({
           "cron job",
         ],
         description: {
-          message:
-            "No sync_product jobs created — no active integrations for company",
+          message: `No sync_product jobs created for ${product_count} product(s) (no active integrations): ${namesList}`,
           action: "sync_product",
           process_count: 0,
-          product_count: companyProductIds.length,
+          product_count,
           product_ids: companyProductIds,
+          product_names,
+          products_going_in_sync: namesList,
         },
         company_id: companyKey,
         created_by: actor,
@@ -503,10 +550,12 @@ async function enqueueBulkSyncProductJobsByCompany({
       ok: !!logResult?.ok,
       log_id: logResult?._id ? String(logResult._id) : null,
       type: "skipped",
+      product_count,
+      product_names,
       skipped: logResult?.skipped || "no_jobs",
     });
     console.warn(
-      `[recent-sync] no jobs for company=${companyKey} products=${companyProductIds.length}`,
+      `[recent-sync] no jobs for company=${companyKey} products=${namesList}`,
     );
   }
 

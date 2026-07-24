@@ -90,7 +90,8 @@ async function loadOrderContext(orderId, opts = {}) {
       qty: Number(line.qty) || 1,
       price: Number(line.price) || 0,
       subtotal: Number(line.subtotal) || 0,
-      weight: Number(product?.weight) || 0,
+      // Product weight is stored in grams when synced to Shopify (weight_unit: "g").
+      weight: productWeightToKg(product?.weight),
       product_id: product?._id || line.product_id,
     };
   });
@@ -163,4 +164,18 @@ function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-module.exports = { loadOrderContext };
+/**
+ * Normalize product weight to kilograms.
+ * Values above 50 are treated as grams (common for Shopify-synced catalog data).
+ * @param {*} raw
+ * @returns {number}
+ */
+function productWeightToKg(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // Unrealistic as kg for a single retail line → assume grams.
+  if (n > 50) return n / 1000;
+  return n;
+}
+
+module.exports = { loadOrderContext, productWeightToKg };

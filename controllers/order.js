@@ -2090,9 +2090,9 @@ async function getOrderByorderItem(req, res) {
   return getOrdersWithItems(req, res);
 }
 
-/** GET /api/order/get-online-order-by-order-item — same as above, `order_type: "online"` only. */
+/** GET /api/order/get-online-order-by-order-item — same as above, `order_type != "offline"` (online, bigcommerce, website, …). */
 async function getOnlineOrders(req, res) {
-  return getOrdersWithItems(req, res, { order_type: "online" });
+  return getOrdersWithItems(req, res, { order_type: { $ne: "offline" } });
 }
 
 /**

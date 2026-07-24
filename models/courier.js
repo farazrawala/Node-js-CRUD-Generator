@@ -36,6 +36,17 @@ const modelSchema = new mongoose.Schema(
       field_name: "Token",
       field_type: "password",
     },
+    /** TCS OAuth client id — used to auto-refresh bearer Token when missing/expired. */
+    client_id: {
+      type: String,
+      field_name: "Client ID",
+    },
+    /** TCS OAuth client secret — used to auto-refresh bearer Token when missing/expired. */
+    client_secret: {
+      type: String,
+      field_name: "Client Secret",
+      field_type: "password",
+    },
     /**
      * Optional rich fields used by the Provider module (src/).
      * Prefer `courier_provider` collection for full multi-provider config;
