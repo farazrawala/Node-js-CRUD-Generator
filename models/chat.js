@@ -18,6 +18,15 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    whatsapp_time: {
+      type: String,
+      field_name: "Whatsapp Time",
+    },
+    type: {
+      type: String,
+      enum: ["sent", "received"],
+      default: "sent",
+    },
 
     // default fields
     company_id: {
@@ -58,6 +67,18 @@ const modelSchema = new mongoose.Schema(
     },
   },
   { timestamps: true },
+);
+
+modelSchema.index(
+  { company_id: 1, message_id: 1, type: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      deletedAt: null,
+      type: "received",
+      message_id: { $exists: true },
+    },
+  },
 );
 
 const MODEL = mongoose.model("chat", modelSchema);

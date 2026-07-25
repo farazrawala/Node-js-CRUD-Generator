@@ -85,6 +85,29 @@ const modelSchema = new mongoose.Schema(
       type: String,
       // required: true,
     },
+    whatsapp_number: {
+      type: String,
+      field_name: "Whatsapp Number",
+      default: "92",
+      maxlength: [12, "Whatsapp Number must be at most 12 digits"],
+      set(value) {
+        if (value == null || value === "") return "92";
+        let digits = String(value).trim().replace(/\D/g, "");
+        if (!digits) return "92";
+        if (digits.startsWith("00")) digits = digits.slice(2);
+        if (digits.startsWith("0")) digits = `92${digits.slice(1)}`;
+        if (!digits.startsWith("92")) digits = `92${digits}`;
+        return digits.slice(0, 12);
+      },
+      validate: {
+        validator(value) {
+          if (value == null || value === "") return true;
+          return /^92\d{0,10}$/.test(String(value));
+        },
+        message:
+          "Whatsapp Number must start with 92 and be at most 12 digits (e.g. 923001234567)",
+      },
+    },
     company_address: {
       type: String,
       // required: true,

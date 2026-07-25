@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const Chat = require("../models/chat");
 const { handleGenericCreate, coalesceObjectId, activeNotDeletedCriteria } = require("../utils/modelHelper");
 const { hydrateUserFromToken } = require("../middlewares/auth");
@@ -40,6 +41,7 @@ function resolveCompanyId(req) {
 function buildPendingChatFilter(companyId) {
   const filter = {
     status: "not_started",
+    type: "sent",
     $and: [activeNotDeletedCriteria()],
   };
   if (companyId) {
@@ -48,12 +50,47 @@ function buildPendingChatFilter(companyId) {
   return filter;
 }
 
+function normalizeWhatsappTime(raw) {
+  if (raw == null || raw === "") return "";
+  const asDate = raw instanceof Date ? raw : new Date(raw);
+  if (Number.isNaN(asDate.getTime())) return String(raw).trim();
+  return asDate.toISOString();
+}
+
+/**
+ * Stable fingerprint so WhatsApp's changing ids don't create duplicates.
+ * Hash of company + from + message + whatsapp_time.
+ * @returns {string|null}
+ */
+function buildStableReceivedMessageId({
+  companyId,
+  fromUserId,
+  message,
+  whatsappTime,
+}) {
+  const msg = String(message || "").trim();
+  const time = String(whatsappTime || "").trim();
+  if (!msg || !time) return null;
+
+  const material = [
+    String(companyId || ""),
+    String(fromUserId || "").trim(),
+    msg,
+    time,
+  ].join("|");
+
+  return crypto.createHash("sha256").update(material, "utf8").digest("hex");
+}
+
 /**
  * POST /api/chat/create/:pos_auth_token
  * Receive a chat message and insert into the chat collection.
  *
- * Body: from_user_id, to_user_id, message, message_id? (optional)
+ * Body: from_user_id, to_user_id, message, message_id?, whatsapp_time?
  * company_id / created_by are set from the authenticated POS user.
+ * type is always forced to "received".
+ * When message + whatsapp_time are present, message_id is a SHA-256 fingerprint
+ * so duplicate listens are skipped.
  */
 async function chatCreate(req, res) {
   try {
@@ -67,10 +104,56 @@ async function chatCreate(req, res) {
       req.body = { ...req.body, from_user_id: String(req.user._id) };
     }
 
+    const whatsapp_time = normalizeWhatsappTime(req.body?.whatsapp_time);
+    if (whatsapp_time) {
+      req.body = { ...req.body, whatsapp_time };
+    }
+
+    const companyId = resolveCompanyId(req);
+    const stableMessageId = buildStableReceivedMessageId({
+      companyId,
+      fromUserId: req.body?.from_user_id,
+      message: req.body?.message,
+      whatsappTime: whatsapp_time,
+    });
+
+    if (stableMessageId) {
+      req.body = { ...req.body, message_id: stableMessageId };
+
+      const existing = await Chat.findOne({
+        company_id: companyId,
+        message_id: stableMessageId,
+        type: "received",
+        deletedAt: null,
+      }).lean();
+
+      if (existing) {
+        return res.status(200).json({
+          success: true,
+          status: 200,
+          skipped: true,
+          message: "Duplicate WhatsApp message skipped",
+          data: existing,
+        });
+      }
+    }
+
+    // Incoming WhatsApp captures are always "received" (outbound queue uses "sent")
+    req.body = { ...req.body, type: "received" };
+
     const response = await handleGenericCreate(req, "chat", {});
     return res.status(response.status).json(response);
   } catch (error) {
     console.error("❌ chatCreate:", error);
+    // Race: unique-ish duplicate insert
+    if (error?.code === 11000) {
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        skipped: true,
+        message: "Duplicate WhatsApp message skipped",
+      });
+    }
     return res.status(500).json({
       success: false,
       status: 500,
