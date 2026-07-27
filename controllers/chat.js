@@ -33,9 +33,33 @@ async function authenticatePosToken(req) {
 }
 
 function resolveCompanyId(req) {
-  return coalesceObjectId(
-    req.query?.company_id || req.body?.company_id || req.user?.company_id,
-  );
+  const raw =
+    req.query?.company_id || req.body?.company_id || req.user?.company_id;
+  if (raw == null || raw === "") return null;
+
+  const id = coalesceObjectId(raw);
+  const mongoose = require("mongoose");
+  // Reject truncated / non-hex ids so Mongoose never throws CastError → 500
+  if (!(id instanceof mongoose.Types.ObjectId)) return null;
+  return id;
+}
+
+function companyIdMissingOrInvalidResponse(req) {
+  const raw =
+    req.query?.company_id || req.body?.company_id || req.user?.company_id;
+  if (raw == null || String(raw).trim() === "") {
+    return {
+      success: false,
+      status: 400,
+      message: "company_id is required",
+    };
+  }
+  return {
+    success: false,
+    status: 400,
+    message:
+      "company_id must be a valid 24-character MongoDB ObjectId (e.g. 6a60082a3bbbeaaacd9a4d3e)",
+  };
 }
 
 function buildPendingChatFilter(companyId) {
@@ -279,10 +303,333 @@ async function markChatNotAvailable(req, res) {
   );
 }
 
+function normalizePkWhatsappDigits(value) {
+  let digits = String(value || "").trim().replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `92${digits.slice(1)}`;
+  if (!digits.startsWith("92") && digits.length === 10 && digits.startsWith("3")) {
+    digits = `92${digits}`;
+  }
+  return digits;
+}
+
+function phoneMatchVariants(phone) {
+  const digits = normalizePkWhatsappDigits(phone);
+  if (!digits) return [];
+  const variants = new Set([digits, String(phone || "").trim()]);
+  if (digits.startsWith("92") && digits.length >= 12) {
+    variants.add(`0${digits.slice(2)}`);
+    variants.add(digits.slice(2));
+  }
+  return [...variants].filter(Boolean);
+}
+
+function readUnknownWhatsappSettings(company) {
+  const raw = company?.unknown_whatsapp_settings;
+  let row = null;
+
+  if (Array.isArray(raw)) {
+    row = raw[0] || null;
+  } else if (raw && typeof raw === "object") {
+    // Dotted $set can corrupt the field into { "0": {...} } instead of an array
+    row = raw["0"] ?? raw[0] ?? raw;
+    if (
+      row &&
+      typeof row === "object" &&
+      row.increase_daily == null &&
+      raw.increase_daily != null
+    ) {
+      row = { ...row, increase_daily: raw.increase_daily };
+    }
+  }
+
+  const daily_limit = Number(row?.daily_limit);
+  const usage = Number(row?.usage);
+  const increase_daily = Number(row?.increase_daily);
+  return {
+    daily_limit: Number.isFinite(daily_limit) ? daily_limit : 5,
+    usage: Number.isFinite(usage) ? usage : 0,
+    increase_daily: Number.isFinite(increase_daily) ? increase_daily : 1,
+  };
+}
+
+/**
+ * Core eligibility check used by HTTP /chat/can-send-unknown and workers.
+ * @param {{ companyId: unknown, number: string, incrementOnAllow?: boolean }} opts
+ */
+async function evaluateCanSendUnknownWhatsapp({
+  companyId,
+  number,
+  incrementOnAllow = true,
+}) {
+  const phone = normalizePkWhatsappDigits(number);
+  if (!companyId) {
+    return {
+      ok: false,
+      status: 400,
+      message: "company_id is required",
+    };
+  }
+  if (!phone) {
+    return {
+      ok: false,
+      status: 400,
+      message: "number (WhatsApp phone) is required",
+    };
+  }
+
+  const Company = require("../models/company");
+  const company = await Company.findOne({
+    _id: companyId,
+    deletedAt: null,
+  })
+    .select("unknown_whatsapp_settings whatsapp_number")
+    .lean();
+
+  if (!company) {
+    return {
+      ok: false,
+      status: 404,
+      message: "Company not found",
+    };
+  }
+
+  const settings = readUnknownWhatsappSettings(company);
+  const variants = phoneMatchVariants(phone);
+
+  const previousCount = await Chat.countDocuments({
+    company_id: companyId,
+    deletedAt: null,
+    $or: [
+      { from_user_id: { $in: variants } },
+      { to_user_id: { $in: variants } },
+    ],
+  });
+
+  const has_previous_conversation = previousCount > 0;
+  let can_send = false;
+  let reason = "";
+  let usage = settings.usage;
+
+  if (has_previous_conversation) {
+    can_send = true;
+    reason = "existing_conversation";
+  } else if (settings.usage < settings.daily_limit) {
+    can_send = true;
+    reason = "within_unknown_daily_limit";
+  } else {
+    can_send = false;
+    reason = "unknown_daily_limit_reached";
+  }
+
+  if (
+    incrementOnAllow &&
+    can_send &&
+    !has_previous_conversation &&
+    settings.usage < settings.daily_limit
+  ) {
+    const step =
+      Number.isFinite(settings.increase_daily) && settings.increase_daily > 0 ?
+        settings.increase_daily
+      : 1;
+    const nextUsage = settings.usage + step;
+
+    const updated = await Company.findOneAndUpdate(
+      { _id: companyId },
+      {
+        $set: {
+          unknown_whatsapp_settings: [
+            {
+              daily_limit: settings.daily_limit,
+              usage: nextUsage,
+              increase_daily: step,
+            },
+          ],
+        },
+      },
+      {
+        new: true,
+        upsert: false,
+        projection: { unknown_whatsapp_settings: 1 },
+      },
+    ).lean();
+
+    usage = updated ? readUnknownWhatsappSettings(updated).usage : nextUsage;
+    if (!Number.isFinite(usage) || usage < nextUsage) {
+      usage = nextUsage;
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    can_send,
+    data: {
+      can_send,
+      has_previous_conversation,
+      previous_conversation_count: previousCount,
+      number: phone,
+      usage,
+      daily_limit: settings.daily_limit,
+      increase_daily: settings.increase_daily,
+      reason,
+    },
+  };
+}
+
+/**
+ * GET|POST /api/chat/can-send-unknown
+ * Query/body: company_id, number|phone|to_user_id
+ *
+ * 1) Checks whether this number already has a chat conversation for the company.
+ * 2) If no previous conversation and usage < daily_limit → can_send: true.
+ * 3) Whenever can_send and usage < daily_limit → usage += increase_daily (default +1).
+ *    Existing conversations are always allowed.
+ */
+async function canSendUnknownWhatsapp(req, res) {
+  try {
+    const companyId = resolveCompanyId(req);
+    const phoneRaw =
+      req.query?.number ||
+      req.query?.phone ||
+      req.query?.to_user_id ||
+      req.body?.number ||
+      req.body?.phone ||
+      req.body?.to_user_id ||
+      "";
+
+    if (!companyId) {
+      return res.status(400).json(companyIdMissingOrInvalidResponse(req));
+    }
+
+    const result = await evaluateCanSendUnknownWhatsapp({
+      companyId,
+      number: phoneRaw,
+      incrementOnAllow: true,
+    });
+
+    if (!result.ok) {
+      return res.status(result.status).json({
+        success: false,
+        status: result.status,
+        message: result.message,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message:
+        result.can_send ?
+          "Yes, it can be sent."
+        : "No, unknown daily limit reached.",
+      data: result.data,
+    });
+  } catch (error) {
+    console.error("❌ canSendUnknownWhatsapp:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to check unknown WhatsApp send eligibility",
+    });
+  }
+}
+
+/**
+ * GET|POST /api/chat/reset-unknown-usage
+ * Query/body: company_id
+ * Sets usage = 0 and daily_limit = daily_limit + increase_daily
+ */
+async function resetUnknownWhatsappUsage(req, res) {
+  try {
+    const companyId = resolveCompanyId(req);
+    if (!companyId) {
+      return res.status(400).json(companyIdMissingOrInvalidResponse(req));
+    }
+
+    const Company = require("../models/company");
+    const company = await Company.findOne({
+      _id: companyId,
+      deletedAt: null,
+    })
+      .select("unknown_whatsapp_settings")
+      .lean();
+
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Company not found",
+      });
+    }
+
+    const settings = readUnknownWhatsappSettings(company);
+    const step =
+      Number.isFinite(settings.increase_daily) && settings.increase_daily > 0 ?
+        settings.increase_daily
+      : 1;
+    const nextDailyLimit = settings.daily_limit + step;
+
+    const updated = await Company.findOneAndUpdate(
+      { _id: companyId },
+      {
+        $set: {
+          unknown_whatsapp_settings: [
+            {
+              daily_limit: nextDailyLimit,
+              usage: 0,
+              increase_daily: step,
+            },
+          ],
+        },
+      },
+      {
+        new: true,
+        projection: { unknown_whatsapp_settings: 1 },
+      },
+    ).lean();
+
+    const next = readUnknownWhatsappSettings(updated || {
+      unknown_whatsapp_settings: [
+        {
+          daily_limit: nextDailyLimit,
+          usage: 0,
+          increase_daily: step,
+        },
+      ],
+    });
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message:
+        "Unknown WhatsApp usage reset to 0 and daily_limit increased.",
+      data: {
+        usage: 0,
+        daily_limit: next.daily_limit,
+        increase_daily: next.increase_daily,
+        previous_usage: settings.usage,
+        previous_daily_limit: settings.daily_limit,
+      },
+    });
+  } catch (error) {
+    console.error("❌ resetUnknownWhatsappUsage:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to reset unknown WhatsApp usage",
+    });
+  }
+}
+
 module.exports = {
   chatCreate,
   authenticatePosToken,
   fetchRandomChat,
   markChatSent,
   markChatNotAvailable,
+  canSendUnknownWhatsapp,
+  evaluateCanSendUnknownWhatsapp,
+  resetUnknownWhatsappUsage,
 };

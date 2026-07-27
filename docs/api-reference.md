@@ -37,6 +37,15 @@ Authorization: Bearer <token>
 | `GET` / `POST` | `/integration/generate-token` | Generate Shopify token (by integration_id) |
 | `GET` / `POST` | `/integration/generate-token/:id` | Generate Shopify token for integration |
 | `GET` / `POST` | `/integration/generate-tokens-cron` | Cron: refresh all Shopify integration tokens |
+| `POST` | `/chat/create/:pos_auth_token` | Insert received WhatsApp chat (POS token in URL) |
+| `GET` | `/chat/fetch-random` | Next pending outbound chat (`type=sent`, `status=not_started`) |
+| `GET` / `POST` | `/chat/can-send-unknown` | Unknown-contact daily limit check (+ usage bump) |
+| `GET` / `POST` | `/chat/reset-unknown-usage` | Reset `usage` to `0` and `daily_limit += increase_daily` |
+| `GET` | `/chat/mark-sent/:id` | Mark chat as sent |
+| `GET` | `/chat/mark-not-available/:id` | Mark chat as not available |
+| `GET` | `/whatsapp_message/fetch-random` | Legacy WhatsApp message worker (gated by can-send-unknown) |
+| `GET` | `/whatsapp_message/mark-sent/:id` | Legacy mark sent |
+| `GET` | `/whatsapp_message/mark-not-available/:id` | Legacy mark not available |
 | `POST` | `/test` | Smoke test |
 
 Uploads under `/api/uploads/*` are also public.
@@ -444,6 +453,132 @@ Related: [woocommerce_to_local_product_sync.md](./woocommerce_to_local_product_s
 
 Dynamic CRUD: `/process/*`.  
 See [queue-apis.md](./queue-apis.md) and [process-system.md](./process-system.md).
+
+---
+
+## Chat & WhatsApp
+
+Worker / extension routes. Most are **public** (no Bearer). Scope with `company_id` query/body where noted. Plural aliases (`/chats/...`, `/whatsapp_messages/...`) are registered the same way.
+
+| Method | Path | Auth | Description |
+| ------ | ---- | ---- | ----------- |
+| `POST` | `/chat/create/:pos_auth_token` | No (POS token in URL) | Create **received** chat message |
+| `GET` | `/chat/fetch-random` | No | Random pending outbound chat (`type=sent`, `status=not_started`) |
+| `GET` / `POST` | `/chat/can-send-unknown` | No | Check if an unknown number can be messaged; may bump usage |
+| `GET` / `POST` | `/chat/reset-unknown-usage` | No | Reset `usage` to `0` and bump `daily_limit += increase_daily` |
+| `GET` | `/chat/mark-sent/:id` | No | Set chat `status=sent` |
+| `GET` | `/chat/mark-not-available/:id` | No | Set chat `status=not_available` |
+| `GET` | `/whatsapp_message/fetch-random` | No | Random pending message that passes `can-send-unknown` |
+| `GET` | `/whatsapp_message/mark-sent/:id` | No | Legacy mark sent |
+| `GET` | `/whatsapp_message/mark-not-available/:id` | No | Legacy mark not available |
+
+### `GET` / `POST` `/chat/can-send-unknown`
+
+Decides whether a number may receive a **first** (unknown) WhatsApp message for the company, using `company.unknown_whatsapp_settings[0]`.
+
+**Query / body**
+
+| Param | Required | Description |
+| ----- | -------- | ----------- |
+| `company_id` | Yes | Company ObjectId |
+| `number` | Yes* | WhatsApp phone (`phone` / `to_user_id` also accepted). Normalized to `92…` |
+
+**Logic**
+
+1. Look up existing chats for that company + number (`from_user_id` / `to_user_id`).
+2. If **previous conversation exists** → `can_send: true` (does **not** change usage).
+3. If **no** previous conversation and `usage < daily_limit` → `can_send: true`, then **`usage += increase_daily`** (default `+1`) on the company settings array.
+4. Otherwise → `can_send: false` (`unknown_daily_limit_reached`).
+
+Company field shape (always stored as an array of one object):
+
+```json
+"unknown_whatsapp_settings": [
+  { "daily_limit": 5, "usage": 0, "increase_daily": 1 }
+]
+```
+
+**Example**
+
+```http
+GET /api/chat/can-send-unknown?company_id=6a60082a3bbbeaaacd9a4d3e&number=923001234560
+```
+
+**Success response**
+
+```json
+{
+  "success": true,
+  "status": 200,
+  "message": "Yes, it can be sent.",
+  "data": {
+    "can_send": true,
+    "has_previous_conversation": false,
+    "previous_conversation_count": 0,
+    "number": "923001234560",
+    "usage": 2,
+    "daily_limit": 5,
+    "increase_daily": 1,
+    "reason": "within_unknown_daily_limit"
+  }
+}
+```
+
+| `data.reason` | Meaning |
+| ------------- | ------- |
+| `existing_conversation` | Number already has chat history; send allowed, usage unchanged |
+| `within_unknown_daily_limit` | First contact under limit; send allowed, usage incremented |
+| `unknown_daily_limit_reached` | No history and `usage >= daily_limit`; send blocked |
+
+`usage` in the response is the value **after** a successful unknown increment.
+
+### `GET` / `POST` `/chat/reset-unknown-usage`
+
+Daily reset for unknown WhatsApp caps:
+
+1. `usage = 0`
+2. `daily_limit = daily_limit + increase_daily`
+
+**Query / body**
+
+| Param | Required | Description |
+| ----- | -------- | ----------- |
+| `company_id` | Yes | Company ObjectId |
+
+**Example**
+
+```http
+GET /api/chat/reset-unknown-usage?company_id=6a60082a3bbbeaaacd9a4d3e
+```
+
+**Success response**
+
+```json
+{
+  "success": true,
+  "status": 200,
+  "message": "Unknown WhatsApp usage reset to 0 and daily_limit increased.",
+  "data": {
+    "usage": 0,
+    "daily_limit": 6,
+    "increase_daily": 1,
+    "previous_usage": 3,
+    "previous_daily_limit": 5
+  }
+}
+```
+
+### `POST` `/chat/create/:pos_auth_token`
+
+Inserts a **received** message. Auth is the company POS token in the URL path (not Bearer). Accepts `whatsapp_time`; builds a stable `message_id` (SHA-256 of company + from + message + time). Duplicate → `200` with `skipped: true`.
+
+### Worker helpers
+
+| Endpoint | Notes |
+| -------- | ----- |
+| `GET /chat/fetch-random?company_id=...` | Returns one `sent` / `not_started` chat for the company |
+| `GET /chat/mark-sent/:id?company_id=...` | Marks that chat sent |
+| `GET /chat/mark-not-available/:id?company_id=...` | Marks not available |
 
 ---
 

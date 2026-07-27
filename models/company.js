@@ -131,6 +131,26 @@ const modelSchema = new mongoose.Schema(
       field_name: "Printer Settings",
     },
 
+    unknown_whatsapp_settings: [
+      {
+        daily_limit: {
+          type: Number,
+          field_name: "Daily Limit",
+          default: 5,
+        },
+        usage: {
+          type: Number,
+          field_name: "Usage",
+          default: 0,
+        },
+        increase_daily: {
+          type: Number,
+          default: 1,
+          field_name: "Increase Daily",
+        },
+      },
+    ],
+
     google_address: {
       type: String,
       field_name: "Google Address",

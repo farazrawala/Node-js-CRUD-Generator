@@ -3,16 +3,17 @@ const {
   coalesceObjectId,
   activeNotDeletedCriteria,
 } = require("../utils/modelHelper");
+const { evaluateCanSendUnknownWhatsapp } = require("./chat");
+
+const MAX_FETCH_ATTEMPTS = 25;
 
 function resolveCompanyId(req) {
   return coalesceObjectId(
-    req.query?.company_id ||
-      req.body?.company_id ||
-      req.user?.company_id,
+    req.query?.company_id || req.body?.company_id || req.user?.company_id,
   );
 }
 
-function buildPendingMessageFilter(companyId) {
+function buildPendingMessageFilter(companyId, excludeIds = []) {
   const filter = {
     status: "not_started",
     $and: [activeNotDeletedCriteria()],
@@ -20,39 +21,84 @@ function buildPendingMessageFilter(companyId) {
   if (companyId) {
     filter.company_id = companyId;
   }
+  if (excludeIds.length > 0) {
+    filter._id = { $nin: excludeIds };
+  }
   return filter;
 }
 
 /**
  * GET /api/whatsapp_message/fetch-random
- * Returns one random pending message (status: not_started).
+ * Returns one random pending message (status: not_started) that passes
+ * /chat/can-send-unknown (can_send: true). Skips blocked unknown numbers
+ * and tries another pending message.
  */
 async function fetchRandomWhatsappMessage(req, res) {
   try {
     const companyId = resolveCompanyId(req);
-    const filter = buildPendingMessageFilter(companyId);
-
-    const rows = await WhatsappMessage.aggregate([
-      { $match: filter },
-      { $sample: { size: 1 } },
-    ]);
-
-    const message = rows[0] || null;
-
-    if (!message) {
-      return res.status(200).json({
-        success: true,
-        status: 200,
-        message: "No pending whatsapp messages",
-        data: null,
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "company_id is required",
       });
     }
+
+    const skippedIds = [];
+    let lastEligibility = null;
+
+    for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
+      const filter = buildPendingMessageFilter(companyId, skippedIds);
+      const rows = await WhatsappMessage.aggregate([
+        { $match: filter },
+        { $sample: { size: 1 } },
+      ]);
+
+      const message = rows[0] || null;
+      if (!message) {
+        break;
+      }
+
+      const eligibility = await evaluateCanSendUnknownWhatsapp({
+        companyId: message.company_id || companyId,
+        number: message.number,
+        incrementOnAllow: true,
+      });
+
+      lastEligibility = eligibility;
+
+      if (!eligibility.ok) {
+        skippedIds.push(message._id);
+        continue;
+      }
+
+      if (eligibility.can_send) {
+        return res.status(200).json({
+          success: true,
+          status: 200,
+          message: "Pending whatsapp message fetched",
+          data: message,
+          eligibility: eligibility.data,
+        });
+      }
+
+      // can_send false (e.g. unknown daily limit) → try another pending message
+      skippedIds.push(message._id);
+    }
+
+    const limitReached =
+      lastEligibility?.data?.reason === "unknown_daily_limit_reached";
 
     return res.status(200).json({
       success: true,
       status: 200,
-      message: "Pending whatsapp message fetched",
-      data: message,
+      message:
+        limitReached ?
+          "No pending whatsapp messages that can be sent (unknown daily limit reached)"
+        : "No pending whatsapp messages",
+      data: null,
+      eligibility: lastEligibility?.data || null,
+      skipped_count: skippedIds.length,
     });
   } catch (error) {
     console.error("❌ fetchRandomWhatsappMessage:", error);
@@ -116,7 +162,7 @@ async function updateWhatsappMessageStatus(req, res, status, successMessage) {
     return res.status(500).json({
       success: false,
       status: 500,
-      message: error.message || "Failed to update whatsapp message status",
+      message: error.message || "Failed to update whatsapp message",
     });
   }
 }
