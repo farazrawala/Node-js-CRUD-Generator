@@ -2155,6 +2155,19 @@ async function maybeQueueWhatsappOnOrderSave(req, order) {
       created_by: coalesceObjectId(req.user?._id),
     });
 
+    try {
+      const { createChatForWhatsappMessage } = require("./whatsapp_message");
+      await createChatForWhatsappMessage(row, {
+        created_by: req.user?._id,
+        company_id: companyId,
+      });
+    } catch (chatErr) {
+      console.error(
+        "[order_save] chat insert after whatsapp_message failed:",
+        chatErr?.message || chatErr,
+      );
+    }
+
     console.log(
       "[order_save] whatsapp_message queued:",
       row._id,

@@ -22,12 +22,33 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Whatsapp Time",
     },
+
+    whatsapp_message_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "whatsapp_message",
+      field_name: "Whatsapp Message ID",
+    },
+
     type: {
       type: String,
       enum: ["sent", "received"],
       default: "sent",
     },
 
+    sending_status: {
+      type: String,
+      // required: true,
+      enum: [
+        "not_started",
+        "inprocess",
+        "sent",
+        "not_available",
+        "exceeded_limit",
+      ],
+      default: "not_started",
+      field_name: "Status",
+      index: true,
+    },
     // default fields
     company_id: {
       type: mongoose.Schema.Types.ObjectId,

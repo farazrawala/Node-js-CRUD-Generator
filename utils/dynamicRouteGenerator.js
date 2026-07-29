@@ -176,6 +176,57 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
 }
 
 /**
+ * chat list: ?number=923… matches from_user_id OR to_user_id (PK phone variants).
+ * Removes literal `number`/`phone` keys that are not schema fields on chat.
+ */
+function applyChatNumberQueryFilter(filter, query = {}) {
+  const raw = query?.number ?? query?.phone;
+  if (raw == null || String(raw).trim() === "") {
+    return filter;
+  }
+
+  delete filter.number;
+  delete filter.phone;
+
+  let digits = String(raw).trim().replace(/\D/g, "");
+  if (!digits) return filter;
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `92${digits.slice(1)}`;
+  if (
+    !digits.startsWith("92") &&
+    digits.length === 10 &&
+    digits.startsWith("3")
+  ) {
+    digits = `92${digits}`;
+  }
+
+  const variants = new Set([digits, String(raw).trim()]);
+  if (digits.startsWith("92") && digits.length >= 12) {
+    variants.add(`0${digits.slice(2)}`);
+    variants.add(digits.slice(2));
+  }
+  const list = [...variants].filter(Boolean);
+  if (list.length === 0) return filter;
+
+  const numberClause = {
+    $or: [
+      { from_user_id: { $in: list } },
+      { to_user_id: { $in: list } },
+    ],
+  };
+
+  if (filter.$and && Array.isArray(filter.$and)) {
+    filter.$and.push(numberClause);
+  } else if (filter.$or) {
+    filter.$and = [{ $or: filter.$or }, numberClause];
+    delete filter.$or;
+  } else {
+    filter.$or = numberClause.$or;
+  }
+  return filter;
+}
+
+/**
  * `?role=CUSTOMER` or `?role=customer` on user list routes.
  * `role` is stored as a string array; equality matches docs that include the role.
  */
@@ -631,6 +682,9 @@ function generateControllerFunctions(modelName) {
             console.log(`🔍 Filtering ${modelName} getAll by tenant:`, tenantCo);
           }
           filter = applyQueryFilters(filter, req.query, modelName);
+          if (modelName === "chat") {
+            filter = applyChatNumberQueryFilter(filter, req.query);
+          }
           const roleFilter = applyUserRoleQueryFilter(
             filter,
             req.query,
@@ -689,6 +743,9 @@ function generateControllerFunctions(modelName) {
             );
           }
           filter = applyQueryFilters(filter, req.query, modelName);
+          if (modelName === "chat") {
+            filter = applyChatNumberQueryFilter(filter, req.query);
+          }
           const roleFilter = applyUserRoleQueryFilter(
             filter,
             req.query,

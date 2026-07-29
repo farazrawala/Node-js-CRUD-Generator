@@ -15,6 +15,7 @@ bulk-create
 Cache
 cancel
 category
+chat
 company
 courier
 create

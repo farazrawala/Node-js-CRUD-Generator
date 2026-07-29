@@ -62,7 +62,9 @@ function companyIdMissingOrInvalidResponse(req) {
   };
 }
 
-function buildPendingChatFilter(companyId) {
+const MAX_FETCH_ATTEMPTS = 25;
+
+function buildPendingChatFilter(companyId, excludeIds = []) {
   const filter = {
     status: "not_started",
     type: "sent",
@@ -70,6 +72,9 @@ function buildPendingChatFilter(companyId) {
   };
   if (companyId) {
     filter.company_id = companyId;
+  }
+  if (excludeIds.length > 0) {
+    filter._id = { $nin: excludeIds };
   }
   return filter;
 }
@@ -108,14 +113,26 @@ function buildStableReceivedMessageId({
 
 /**
  * POST /api/chat/create/:pos_auth_token
+ * POST /api/chat/create/:pos_auth_token/swap  (or ?swap=1)
  * Receive a chat message and insert into the chat collection.
  *
  * Body: from_user_id, to_user_id, message, message_id?, whatsapp_time?
  * company_id / created_by are set from the authenticated POS user.
- * type is always forced to "received".
+ * Default type is "received". With /swap or ?swap=1, from/to are swapped and type becomes "sent".
  * When message + whatsapp_time are present, message_id is a SHA-256 fingerprint
  * so duplicate listens are skipped.
  */
+function wantsChatUserSwap(req) {
+  const path = String(req.path || req.url || "");
+  if (/\/swap\/?$/i.test(path) || String(req.params?.mode || "") === "swap") {
+    return true;
+  }
+  const q = req.query?.swap ?? req.query?.swap_users;
+  if (q == null || q === "") return false;
+  const v = String(q).trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "swap";
+}
+
 async function chatCreate(req, res) {
   try {
     const authError = await authenticatePosToken(req);
@@ -123,9 +140,22 @@ async function chatCreate(req, res) {
       return res.status(authError.status).json(authError);
     }
 
+    const swapUsers = wantsChatUserSwap(req);
+
     // Default sender to the authenticated POS user when omitted
     if (!req.body?.from_user_id && req.user?._id) {
       req.body = { ...req.body, from_user_id: String(req.user._id) };
+    }
+
+    // /swap or ?swap=1 → from_user_id ↔ to_user_id (e.g. company phone becomes from)
+    if (swapUsers) {
+      const from = req.body?.from_user_id;
+      const to = req.body?.to_user_id;
+      req.body = {
+        ...req.body,
+        from_user_id: to,
+        to_user_id: from,
+      };
     }
 
     const whatsapp_time = normalizeWhatsappTime(req.body?.whatsapp_time);
@@ -134,6 +164,8 @@ async function chatCreate(req, res) {
     }
 
     const companyId = resolveCompanyId(req);
+    const chatType = swapUsers ? "sent" : "received";
+
     const stableMessageId = buildStableReceivedMessageId({
       companyId,
       fromUserId: req.body?.from_user_id,
@@ -147,7 +179,7 @@ async function chatCreate(req, res) {
       const existing = await Chat.findOne({
         company_id: companyId,
         message_id: stableMessageId,
-        type: "received",
+        type: chatType,
         deletedAt: null,
       }).lean();
 
@@ -158,14 +190,17 @@ async function chatCreate(req, res) {
           skipped: true,
           message: "Duplicate WhatsApp message skipped",
           data: existing,
+          swapped: swapUsers,
         });
       }
     }
 
-    // Incoming WhatsApp captures are always "received" (outbound queue uses "sent")
-    req.body = { ...req.body, type: "received" };
+    req.body = { ...req.body, type: chatType };
 
     const response = await handleGenericCreate(req, "chat", {});
+    if (response && typeof response === "object") {
+      response.swapped = swapUsers;
+    }
     return res.status(response.status).json(response);
   } catch (error) {
     console.error("❌ chatCreate:", error);
@@ -188,34 +223,94 @@ async function chatCreate(req, res) {
 
 /**
  * GET /api/chat/fetch-random?company_id=...
- * Returns one random pending chat message (status: not_started).
+ * Returns one random pending chat (status: not_started, type: sent) whose
+ * to_user_id passes can-send-unknown (can_send: true). Claims it by setting
+ * status to inprocess. If can_send is false, skips that number and samples
+ * another pending chat.
  */
 async function fetchRandomChat(req, res) {
   try {
     const companyId = resolveCompanyId(req);
-    const filter = buildPendingChatFilter(companyId);
-
-    const rows = await Chat.aggregate([
-      { $match: filter },
-      { $sample: { size: 1 } },
-    ]);
-
-    const message = rows[0] || null;
-
-    if (!message) {
-      return res.status(200).json({
-        success: true,
-        status: 200,
-        message: "No pending chat messages",
-        data: null,
-      });
+    if (!companyId) {
+      return res.status(400).json(companyIdMissingOrInvalidResponse(req));
     }
+
+    const skippedIds = [];
+    let lastEligibility = null;
+
+    for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
+      const filter = buildPendingChatFilter(companyId, skippedIds);
+      const rows = await Chat.aggregate([
+        { $match: filter },
+        { $sample: { size: 1 } },
+      ]);
+
+      const message = rows[0] || null;
+      if (!message) {
+        break;
+      }
+
+      const eligibility = await evaluateCanSendUnknownWhatsapp({
+        companyId: message.company_id || companyId,
+        number: message.to_user_id,
+        incrementOnAllow: true,
+      });
+
+      lastEligibility = eligibility;
+
+      if (!eligibility.ok) {
+        skippedIds.push(message._id);
+        continue;
+      }
+
+      if (eligibility.can_send) {
+        const claimed = await Chat.findOneAndUpdate(
+          {
+            _id: message._id,
+            status: "not_started",
+            deletedAt: null,
+          },
+          {
+            $set: {
+              status: "inprocess",
+              sending_status: "inprocess",
+            },
+          },
+          { new: true },
+        ).lean();
+
+        // Another worker may have claimed it already — try another
+        if (!claimed) {
+          skippedIds.push(message._id);
+          continue;
+        }
+
+        return res.status(200).json({
+          success: true,
+          status: 200,
+          message: "Pending chat message fetched",
+          data: claimed,
+          eligibility: eligibility.data,
+        });
+      }
+
+      // can_send false (e.g. unknown daily limit) → try another number
+      skippedIds.push(message._id);
+    }
+
+    const limitReached =
+      lastEligibility?.data?.reason === "unknown_daily_limit_reached";
 
     return res.status(200).json({
       success: true,
       status: 200,
-      message: "Pending chat message fetched",
-      data: message,
+      message:
+        limitReached ?
+          "No pending chat messages that can be sent (unknown daily limit reached)"
+        : "No pending chat messages",
+      data: null,
+      eligibility: lastEligibility?.data || null,
+      skipped_count: skippedIds.length,
     });
   } catch (error) {
     console.error("❌ fetchRandomChat:", error);
@@ -229,28 +324,57 @@ async function fetchRandomChat(req, res) {
 
 /**
  * Shared status update for worker callbacks (sent / not_available).
+ * Updates both `status` and `sending_status`.
+ *
+ * Resolves the chat by `_id` (preferred), or by `message_id` /
+ * `whatsapp_message_id` if the worker passes those instead.
  */
 async function updateChatStatus(req, res, status, successMessage) {
   try {
-    const messageId = coalesceObjectId(req.params?.id);
-    if (!messageId) {
+    const rawId =
+      req.params?.id ||
+      req.query?.id ||
+      req.body?.id ||
+      req.query?.chat_id ||
+      req.body?.chat_id ||
+      null;
+
+    const messageIdStr = rawId != null ? String(rawId).trim() : "";
+
+    if (
+      !messageIdStr ||
+      messageIdStr === ":id" ||
+      messageIdStr === "undefined" ||
+      messageIdStr === "null"
+    ) {
       return res.status(400).json({
         success: false,
         status: 400,
-        message: "Message id is required",
+        message:
+          "Chat id is required. Use the chat `_id` from fetch-random in the URL path.",
+        received_id: rawId ?? null,
       });
     }
 
-    const companyId = resolveCompanyId(req);
-    const filter = {
-      _id: messageId,
-      $and: [activeNotDeletedCriteria()],
-    };
-    if (companyId) {
-      filter.company_id = companyId;
+    const mongoose = require("mongoose");
+    const orClauses = [{ message_id: messageIdStr }];
+
+    if (
+      mongoose.Types.ObjectId.isValid(messageIdStr) &&
+      messageIdStr.length === 24
+    ) {
+      const oid = new mongoose.Types.ObjectId(messageIdStr);
+      orClauses.push({ _id: oid }, { whatsapp_message_id: oid });
     }
 
-    const update = { status };
+    const filter = {
+      $and: [activeNotDeletedCriteria(), { $or: orClauses }],
+    };
+
+    const update = {
+      status,
+      sending_status: status,
+    };
     if (req.user?._id) {
       update.updated_by = coalesceObjectId(req.user._id);
     }
@@ -265,6 +389,8 @@ async function updateChatStatus(req, res, status, successMessage) {
         success: false,
         status: 404,
         message: "Chat message not found",
+        received_id: messageIdStr,
+        hint: "Pass the chat `_id` from GET /api/chat/fetch-random (data._id).",
       });
     }
 
@@ -397,15 +523,23 @@ async function evaluateCanSendUnknownWhatsapp({
 
   const settings = readUnknownWhatsappSettings(company);
   const variants = phoneMatchVariants(phone);
-
-  const previousCount = await Chat.countDocuments({
+  const conversationFilter = {
     company_id: companyId,
     deletedAt: null,
+    status: "sent",
     $or: [
       { from_user_id: { $in: variants } },
       { to_user_id: { $in: variants } },
     ],
-  });
+  };
+
+  const [previousCount, lastConversation] = await Promise.all([
+    Chat.countDocuments(conversationFilter),
+    Chat.findOne(conversationFilter)
+      .sort({ createdAt: -1 })
+      .populate("whatsapp_message_id")
+      .lean(),
+  ]);
 
   const has_previous_conversation = previousCount > 0;
   let can_send = false;
@@ -423,16 +557,9 @@ async function evaluateCanSendUnknownWhatsapp({
     reason = "unknown_daily_limit_reached";
   }
 
-  if (
-    incrementOnAllow &&
-    can_send &&
-    !has_previous_conversation &&
-    settings.usage < settings.daily_limit
-  ) {
-    const step =
-      Number.isFinite(settings.increase_daily) && settings.increase_daily > 0 ?
-        settings.increase_daily
-      : 1;
+  // previous_conversation_count === 0 and allowed → usage += 1
+  if (incrementOnAllow && can_send && previousCount === 0) {
+    const step = 1;
     const nextUsage = settings.usage + step;
 
     const updated = await Company.findOneAndUpdate(
@@ -443,7 +570,7 @@ async function evaluateCanSendUnknownWhatsapp({
             {
               daily_limit: settings.daily_limit,
               usage: nextUsage,
-              increase_daily: step,
+              increase_daily: settings.increase_daily,
             },
           ],
         },
@@ -474,6 +601,7 @@ async function evaluateCanSendUnknownWhatsapp({
       daily_limit: settings.daily_limit,
       increase_daily: settings.increase_daily,
       reason,
+      last_conversation: lastConversation || null,
     },
   };
 }
@@ -482,10 +610,10 @@ async function evaluateCanSendUnknownWhatsapp({
  * GET|POST /api/chat/can-send-unknown
  * Query/body: company_id, number|phone|to_user_id
  *
- * 1) Checks whether this number already has a chat conversation for the company.
+ * 1) Checks whether this number already has a status=sent chat for the company.
  * 2) If no previous conversation and usage < daily_limit → can_send: true.
- * 3) Whenever can_send and usage < daily_limit → usage += increase_daily (default +1).
- *    Existing conversations are always allowed.
+ * 3) If previous_conversation_count === 0 and can_send → usage += 1.
+ *    Existing sent conversations are always allowed (usage unchanged).
  */
 async function canSendUnknownWhatsapp(req, res) {
   try {

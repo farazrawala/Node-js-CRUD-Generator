@@ -1,7 +1,10 @@
 const WhatsappMessage = require("../models/whatsapp_message");
+const Chat = require("../models/chat");
+const Company = require("../models/company");
 const {
   coalesceObjectId,
   activeNotDeletedCriteria,
+  handleGenericCreate,
 } = require("../utils/modelHelper");
 const { evaluateCanSendUnknownWhatsapp } = require("./chat");
 
@@ -11,6 +14,125 @@ function resolveCompanyId(req) {
   return coalesceObjectId(
     req.query?.company_id || req.body?.company_id || req.user?.company_id,
   );
+}
+
+/**
+ * After a whatsapp_message is created, mirror it into `chat` as an outbound (sent) row.
+ * from_user_id = company.whatsapp_number, to_user_id = message.number
+ *
+ * For unknown numbers (no prior status=sent chat), bumps company
+ * unknown_whatsapp_settings.usage when still under the daily limit.
+ * @returns {{ chat: object|null, eligibility: object|null }}
+ */
+async function createChatForWhatsappMessage(whatsappMessage, extras = {}) {
+  if (!whatsappMessage?._id) {
+    return { chat: null, eligibility: null };
+  }
+
+  const companyId = coalesceObjectId(
+    whatsappMessage.company_id || extras.company_id,
+  );
+  if (!companyId) {
+    throw new Error(
+      "company_id is required to create chat for whatsapp_message",
+    );
+  }
+
+  const company = await Company.findOne({
+    _id: companyId,
+    deletedAt: null,
+  })
+    .select("whatsapp_number")
+    .lean();
+
+  let fromUserId = String(company?.whatsapp_number || "").trim();
+  if (!fromUserId) fromUserId = "92";
+
+  const toUserId = String(whatsappMessage.number || "").trim();
+  if (!toUserId) {
+    throw new Error("whatsapp_message.number is required for chat insert");
+  }
+
+  const messageText = String(whatsappMessage.message || "").trim();
+  if (!messageText) {
+    throw new Error("whatsapp_message.message is required for chat insert");
+  }
+
+  const chat = await Chat.create({
+    from_user_id: fromUserId,
+    to_user_id: toUserId,
+    message: messageText,
+    whatsapp_time: new Date().toISOString(),
+    whatsapp_message_id: whatsappMessage._id,
+    type: "sent",
+    status: whatsappMessage.status || "not_started",
+    company_id: companyId,
+    created_by:
+      coalesceObjectId(extras.created_by) ||
+      coalesceObjectId(whatsappMessage.created_by) ||
+      undefined,
+  });
+
+  // not_started chats are ignored by previous-conversation count, so creating
+  // a first message to an unknown number increments usage here.
+  let eligibility = null;
+  try {
+    const result = await evaluateCanSendUnknownWhatsapp({
+      companyId,
+      number: toUserId,
+      incrementOnAllow: true,
+    });
+    eligibility = result?.ok ? result.data : result;
+  } catch (usageErr) {
+    console.error(
+      "❌ createChatForWhatsappMessage → usage bump failed:",
+      usageErr?.message || usageErr,
+    );
+  }
+
+  return { chat, eligibility };
+}
+
+/**
+ * POST /api/whatsapp_message/create
+ * Creates whatsapp_message, then inserts a linked chat row.
+ * Unknown numbers (no status=sent history) bump daily usage.
+ */
+async function whatsappMessageCreate(req, res) {
+  try {
+    const response = await handleGenericCreate(req, "whatsapp_message", {});
+    if (response?.success && response?.data) {
+      try {
+        const { chat, eligibility } = await createChatForWhatsappMessage(
+          response.data,
+          {
+            created_by: req.user?._id,
+            company_id: resolveCompanyId(req),
+          },
+        );
+        if (chat) {
+          response.chat = chat.toObject ? chat.toObject() : chat;
+        }
+        if (eligibility) {
+          response.eligibility = eligibility;
+        }
+      } catch (chatErr) {
+        console.error(
+          "❌ whatsappMessageCreate → chat insert failed:",
+          chatErr?.message || chatErr,
+        );
+        response.chat_error = chatErr?.message || "Failed to insert chat";
+      }
+    }
+    return res.status(response.status || 500).json(response);
+  } catch (error) {
+    console.error("❌ whatsappMessageCreate:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to create whatsapp message",
+    });
+  }
 }
 
 function buildPendingMessageFilter(companyId, excludeIds = []) {
@@ -194,6 +316,8 @@ async function markWhatsappMessageNotAvailable(req, res) {
 }
 
 module.exports = {
+  whatsappMessageCreate,
+  createChatForWhatsappMessage,
   fetchRandomWhatsappMessage,
   markWhatsappMessageSent,
   markWhatsappMessageNotAvailable,

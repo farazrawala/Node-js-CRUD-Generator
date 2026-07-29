@@ -38,7 +38,7 @@ Authorization: Bearer <token>
 | `GET` / `POST` | `/integration/generate-token/:id` | Generate Shopify token for integration |
 | `GET` / `POST` | `/integration/generate-tokens-cron` | Cron: refresh all Shopify integration tokens |
 | `POST` | `/chat/create/:pos_auth_token` | Insert received WhatsApp chat (POS token in URL) |
-| `GET` | `/chat/fetch-random` | Next pending outbound chat (`type=sent`, `status=not_started`) |
+| `GET` | `/chat/fetch-random` | Next pending outbound chat; claims it as `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | Unknown-contact daily limit check (+ usage bump) |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | Reset `usage` to `0` and `daily_limit += increase_daily` |
 | `GET` | `/chat/mark-sent/:id` | Mark chat as sent |
@@ -463,11 +463,12 @@ Worker / extension routes. Most are **public** (no Bearer). Scope with `company_
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | `POST` | `/chat/create/:pos_auth_token` | No (POS token in URL) | Create **received** chat message |
-| `GET` | `/chat/fetch-random` | No | Random pending outbound chat (`type=sent`, `status=not_started`) |
+| `GET` | `/chat/fetch-random` | No | Random pending outbound chat; sets `status` to `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | No | Check if an unknown number can be messaged; may bump usage |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | No | Reset `usage` to `0` and bump `daily_limit += increase_daily` |
 | `GET` | `/chat/mark-sent/:id` | No | Set chat `status=sent` |
 | `GET` | `/chat/mark-not-available/:id` | No | Set chat `status=not_available` |
+| `POST` | `/whatsapp_message/create` | Yes | Create outbound message + linked `chat` (`from_user_id` = company `whatsapp_number`) |
 | `GET` | `/whatsapp_message/fetch-random` | No | Random pending message that passes `can-send-unknown` |
 | `GET` | `/whatsapp_message/mark-sent/:id` | No | Legacy mark sent |
 | `GET` | `/whatsapp_message/mark-not-available/:id` | No | Legacy mark not available |
@@ -485,9 +486,9 @@ Decides whether a number may receive a **first** (unknown) WhatsApp message for 
 
 **Logic**
 
-1. Look up existing chats for that company + number (`from_user_id` / `to_user_id`).
-2. If **previous conversation exists** → `can_send: true` (does **not** change usage).
-3. If **no** previous conversation and `usage < daily_limit` → `can_send: true`, then **`usage += increase_daily`** (default `+1`) on the company settings array.
+1. Look up existing chats for that company + number (`from_user_id` / `to_user_id`) with **`status: "sent"`** only.
+2. If **previous conversation exists** (`previous_conversation_count > 0`) → `can_send: true` (does **not** change usage).
+3. If **no** previous conversation (`previous_conversation_count === 0`) and `usage < daily_limit` → `can_send: true`, then **`usage += 1`**.
 4. Otherwise → `can_send: false` (`unknown_daily_limit_reached`).
 
 Company field shape (always stored as an array of one object):
@@ -526,11 +527,13 @@ GET /api/chat/can-send-unknown?company_id=6a60082a3bbbeaaacd9a4d3e&number=923001
 
 | `data.reason` | Meaning |
 | ------------- | ------- |
-| `existing_conversation` | Number already has chat history; send allowed, usage unchanged |
+| `existing_conversation` | Number already has a `status: "sent"` chat; send allowed, usage unchanged |
 | `within_unknown_daily_limit` | First contact under limit; send allowed, usage incremented |
 | `unknown_daily_limit_reached` | No history and `usage >= daily_limit`; send blocked |
 
 `usage` in the response is the value **after** a successful unknown increment.
+
+`data.last_conversation` is the newest chat for that number (sorted by `createdAt`), with `whatsapp_message_id` populated, or `null` if none.
 
 ### `GET` / `POST` `/chat/reset-unknown-usage`
 
@@ -572,13 +575,31 @@ GET /api/chat/reset-unknown-usage?company_id=6a60082a3bbbeaaacd9a4d3e
 
 Inserts a **received** message. Auth is the company POS token in the URL path (not Bearer). Accepts `whatsapp_time`; builds a stable `message_id` (SHA-256 of company + from + message + time). Duplicate → `200` with `skipped: true`.
 
+**Swap from/to** (company phone becomes `from_user_id`, customer becomes `to_user_id`; `type` = `sent`):
+
+```http
+POST /api/chat/create/:pos_auth_token/swap
+POST /api/chat/create/:pos_auth_token?swap=1
+```
+
 ### Worker helpers
 
 | Endpoint | Notes |
 | -------- | ----- |
-| `GET /chat/fetch-random?company_id=...` | Returns one `sent` / `not_started` chat for the company |
+| `GET /chat/fetch-random?company_id=...` | Claims one `sent` / `not_started` chat → sets `status` (+ `sending_status`) to `inprocess` |
 | `GET /chat/mark-sent/:id?company_id=...` | Marks that chat sent |
 | `GET /chat/mark-not-available/:id?company_id=...` | Marks not available |
+
+### `GET` `/chat/get-all?number=...`
+
+List chats for a phone number (Bearer auth). Matches **`from_user_id` or `to_user_id`** (PK variants like `03…` / `92…`). Default sort: **`createdAt` desc**.
+
+```http
+GET /api/chat/get-all?number=923001234567&limit=100
+Authorization: Bearer <token>
+```
+
+Alias: `/api/chats/get-all?number=...`
 
 ---
 

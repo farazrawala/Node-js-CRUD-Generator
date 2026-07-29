@@ -124,7 +124,15 @@ const userSchema = new mongoose.Schema(
       required: true,
     },
     phone: {
-      type: Number,
+      type: String,
+      field_name: "Phone",
+      default: "92",
+      maxlength: [13, "Phone must be at most 13 digits"],
+      set(value) {
+        if (value == null || value === "") return "92";
+        const digits = String(value).trim().replace(/\D/g, "").slice(0, 13);
+        return digits || "92";
+      },
     },
     password: {
       type: String,

@@ -231,11 +231,15 @@ const {
   adjustmentUpdate,
 } = require("../controllers/adjustment");
 const {
+  whatsappMessageCreate,
   fetchRandomWhatsappMessage,
   markWhatsappMessageSent,
   markWhatsappMessageNotAvailable,
 } = require("../controllers/whatsapp_message");
 const { chatCreate, fetchRandomChat, markChatSent, markChatNotAvailable, canSendUnknownWhatsapp, resetUnknownWhatsappUsage } = require("../controllers/chat");
+
+const supportTicketCtrl = require("../controllers/support_ticket");
+
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
 // const {
@@ -481,6 +485,8 @@ router.get("/whatsapp_messages/mark-sent/:id", markWhatsappMessageSent);
 // Chat insert via POS auth token in URL (no Authorization header required)
 router.post("/chat/create/:pos_auth_token", chatCreate);
 router.post("/chats/create/:pos_auth_token", chatCreate);
+router.post("/chat/create/:pos_auth_token/swap", chatCreate);
+router.post("/chats/create/:pos_auth_token/swap", chatCreate);
 
 // Chat worker routes (public, scoped by company_id — same pattern as whatsapp_message)
 router.get("/chat/fetch-random", fetchRandomChat);
@@ -494,9 +500,13 @@ router.post("/chat/reset-unknown-usage", resetUnknownWhatsappUsage);
 router.get("/chats/reset-unknown-usage", resetUnknownWhatsappUsage);
 router.post("/chats/reset-unknown-usage", resetUnknownWhatsappUsage);
 router.get("/chat/mark-sent/:id", markChatSent);
+router.post("/chat/mark-sent/:id", markChatSent);
 router.get("/chats/mark-sent/:id", markChatSent);
+router.post("/chats/mark-sent/:id", markChatSent);
 router.get("/chat/mark-not-available/:id", markChatNotAvailable);
+router.post("/chat/mark-not-available/:id", markChatNotAvailable);
 router.get("/chats/mark-not-available/:id", markChatNotAvailable);
+router.post("/chats/mark-not-available/:id", markChatNotAvailable);
 
 router.get(
   "/whatsapp_message/mark-not-available/:id",
@@ -744,6 +754,26 @@ router.post("/test", (req, res) => {
 // Admin routes
 router.post("/login/admin", handleAdminLogin);
 
+// ─── Support Ticket routes ───────────────────────────────────────────
+router.get("/support-ticket/get-all", supportTicketCtrl.getAll);
+router.get("/support-tickets/get-all", supportTicketCtrl.getAll);
+router.get("/support-ticket/get/:id", supportTicketCtrl.getById);
+router.get("/support-tickets/get/:id", supportTicketCtrl.getById);
+router.post("/support-ticket/create", supportTicketCtrl.create);
+router.post("/support-tickets/create", supportTicketCtrl.create);
+router.post("/support-ticket/reply/:id", supportTicketCtrl.reply);
+router.post("/support-tickets/reply/:id", supportTicketCtrl.reply);
+router.put("/support-ticket/change-status/:id", supportTicketCtrl.changeStatus);
+router.put("/support-tickets/change-status/:id", supportTicketCtrl.changeStatus);
+router.put("/support-ticket/change-priority/:id", supportTicketCtrl.changePriority);
+router.put("/support-tickets/change-priority/:id", supportTicketCtrl.changePriority);
+router.put("/support-ticket/assign/:id", supportTicketCtrl.assign);
+router.put("/support-tickets/assign/:id", supportTicketCtrl.assign);
+router.post("/support-ticket/upload-attachment", supportTicketCtrl.uploadAttachment);
+router.post("/support-tickets/upload-attachment", supportTicketCtrl.uploadAttachment);
+router.delete("/support-ticket/delete-attachment/:id", supportTicketCtrl.deleteAttachment);
+router.delete("/support-tickets/delete-attachment/:id", supportTicketCtrl.deleteAttachment);
+
 // Register dynamic CRUD routes for all models
 // This automatically creates routes like: /{model}/create, /{model}/update/:id, /{model}/get/:id, etc.
 registerAllModelRoutes(router, {
@@ -756,6 +786,12 @@ registerAllModelRoutes(router, {
     "company_connection",
     "company_connection_log",
     // 'purchase_order' removed - we want BOTH dynamic routes AND custom routes
+    // Support ticket module uses custom controller routes
+    "support_ticket",
+    "support_message",
+    "support_attachment",
+    "support_ticket_read",
+    "support_ticket_counter",
   ],
   modelConfigs: {
     // You can configure specific models here if needed
@@ -858,6 +894,22 @@ registerAllModelRoutes(router, {
     assets: {
       enabled: true,
       excludedRoutes: ["create", "update"],
+    },
+    whatsapp_message: {
+      enabled: true,
+      excludedRoutes: ["create"],
+      customRoutes: [
+        {
+          method: "POST",
+          path: "/whatsapp_message/create",
+          handler: whatsappMessageCreate,
+        },
+        {
+          method: "POST",
+          path: "/whatsapp_messages/create",
+          handler: whatsappMessageCreate,
+        },
+      ],
     },
   },
 });
