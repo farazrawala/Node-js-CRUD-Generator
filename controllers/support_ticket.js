@@ -362,7 +362,9 @@ async function create(req, res) {
             {
               ticket_id: ticket._id,
               user: userId(req),
-              role: isAdmin(req) ? "admin" : "user",
+              // Creating a ticket is always a customer/requester action, even
+              // when that user also holds an ADMIN permission.
+              role: "user",
               message: description,
               is_internal: false,
               attachments: attachmentMeta,
@@ -455,8 +457,13 @@ async function reply(req, res) {
       });
     }
 
-    const replyRole =
-      admin || req.body.role === "admin" ? "admin" : "user";
+    const requesterId = ticket.created_by || ticket.user;
+    const replyingAsRequester =
+      String(requesterId || "") === String(userId(req) || "") &&
+      req.body.role !== "admin" &&
+      req.query.scope !== "admin" &&
+      !isInternal;
+    const replyRole = replyingAsRequester ? "user" : admin ? "admin" : "user";
 
     const newMessage = await SupportMessage.create({
       ticket_id: ticketId,

@@ -514,10 +514,7 @@ async function resolveWarehouseForOutboundLine({
     const bestAvailable = [...avail.entries()].sort((a, b) => b[1] - a[1]);
     if (bestAvailable.length > 0) return bestAvailable[0][0];
     const fallbackOid = coalesceObjectId(fallbackWarehouseId);
-    if (
-      fallbackOid &&
-      mongoose.Types.ObjectId.isValid(String(fallbackOid))
-    ) {
+    if (fallbackOid && mongoose.Types.ObjectId.isValid(String(fallbackOid))) {
       return String(fallbackOid);
     }
   }
@@ -606,7 +603,10 @@ function resolveOrderPaymentMethodAccount(body, user) {
  * GL bulk insert requires it — generate and persist when missing.
  * @returns {Promise<string>}
  */
-async function ensureOrderTransactionNumber(orderLike, { session = null } = {}) {
+async function ensureOrderTransactionNumber(
+  orderLike,
+  { session = null } = {},
+) {
   const existing = String(orderLike?.transaction_number ?? "").trim();
   if (existing) return existing;
 
@@ -1606,9 +1606,7 @@ function orderUpdateTouchesFinancialFields(body) {
     "posPayMethod",
     "payment_method_id",
   ];
-  return keys.some((k) =>
-    Object.prototype.hasOwnProperty.call(body, k),
-  );
+  return keys.some((k) => Object.prototype.hasOwnProperty.call(body, k));
 }
 
 /** Unit cost snapshot for the line: `wholesale_price` from product at time of sale. */
@@ -1988,8 +1986,55 @@ async function findSales(req, res) {
 // }
 
 /**
+ * Order list fields that exist on the Order document and are safe to `$sort` on.
+ * Frontend aliases (`order_items_total`) map to stored fields (`total_amount`).
+ * Computed-only columns (`no_of_items`) are omitted — caller falls back to default.
+ */
+const ORDER_LIST_SORT_FIELDS = new Set([
+  "order_no",
+  "integration_order_id",
+  "name",
+  "email",
+  "phone",
+  "order_status",
+  "order_website_status",
+  "order_type",
+  "total_amount",
+  "lines_subtotal",
+  "createdAt",
+  "updatedAt",
+  "deletedAt",
+]);
+
+const ORDER_LIST_SORT_ALIASES = {
+  order_items_total: "total_amount",
+};
+
+/**
+ * Resolve `?sortBy=&sortOrder=` for get-order-by-order-item (and deleted twin).
+ * Unknown / computed fields fall back to the default (createdAt desc).
+ * @param {Record<string, unknown>} query
+ * @param {Record<string, number>} fallback
+ */
+function buildOrderListSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
+  const raw = typeof query.sortBy === "string" ? query.sortBy.trim() : "";
+  if (!raw) return fallback;
+
+  const mapped = ORDER_LIST_SORT_ALIASES[raw] || raw;
+  if (!ORDER_LIST_SORT_FIELDS.has(mapped)) return fallback;
+
+  const sortOrderRaw =
+    typeof query.sortOrder === "string" ?
+      query.sortOrder.trim().toLowerCase()
+    : "";
+  const direction = sortOrderRaw === "asc" || sortOrderRaw === "1" ? 1 : -1;
+  return { [mapped]: direction };
+}
+
+/**
  * Shared list: active orders + line items (same response as get-order-by-order-item).
  * Query: optional `startDate` / `endDate` (or `from` / `to`, `start_date` / `end_date`) on order `createdAt`.
+ * Optional `sortBy` / `sortOrder` (whitelisted Order fields; default createdAt desc).
  * @param {import("express").Request} req
  * @param {import("express").Response} res
  * @param {Record<string, unknown>} [extraFilter]
@@ -2022,10 +2067,14 @@ async function getOrdersWithItems(
     populate.push("integration_id");
   }
 
+  const defaultSort =
+    deletedOnly ? { deletedAt: -1, createdAt: -1 } : { createdAt: -1 };
+  const sort = buildOrderListSortFromQuery(req.query || {}, defaultSort);
+
   const response = await handleGenericGetAll(req, "order", {
     filter,
     excludeFields: [],
-    sort: deletedOnly ? { deletedAt: -1, createdAt: -1 } : { createdAt: -1 },
+    sort,
     populate,
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
@@ -2715,7 +2764,8 @@ async function order_update(req, res) {
   // step 1 start — parse lines + normalize header for `handleGenericUpdate`
   const lines = parseOrderLineItems(req.body);
   const originalBody = req.body;
-  const clientTouchedFinancial = orderUpdateTouchesFinancialFields(originalBody);
+  const clientTouchedFinancial =
+    orderUpdateTouchesFinancialFields(originalBody);
   req.body = normalizeOrderAddressFields(
     normalizeOrderNumericFields(stripLineItemKeys(originalBody)),
   );

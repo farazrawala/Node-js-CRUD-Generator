@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root { --primary: #2563eb; --navy: #0f172a; --page: #f1f5f9; --border: #e2e8f0; }
+        * { box-sizing: border-box; }
+        body { font-family: "Inter", sans-serif; color: var(--navy); }
+        .sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar.collapsed { transform: translateX(-100%); }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .main-content.expanded { margin-left: 0; }
+        .sub-menu { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-in-out; }
+        .sub-menu.expanded { max-height: 200px; }
+        .menu-item.has-submenu .chevron { transition: transform 0.3s ease-in-out; }
+        .menu-item.has-submenu.expanded .chevron { transform: rotate(180deg); }
+        .page-shell { max-width: 1560px; margin: 0 auto; }
+        .panel {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+        }
+        .stat-card {
+            position: relative;
+            overflow: hidden;
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 18px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+        }
+        .stat-icon {
+            width: 42px; height: 42px; display: grid; place-items: center;
+            border-radius: 12px; font-size: 16px;
+        }
+        .field-control {
+            width: 100%;
+            border: 1px solid #cbd5e1;
+            border-radius: 10px;
+            background: white;
+            padding: 10px 12px;
+            font-size: 13px;
+            transition: .2s ease;
+        }
+        .field-control:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, .14);
+        }
+        .ticket-row { transition: background .15s ease, transform .15s ease; }
+        .ticket-row:hover { background: #f8fafc; }
+        .view-button {
+            display: inline-flex; align-items: center; gap: 7px;
+            padding: 8px 12px; border-radius: 9px;
+            background: #eff6ff; color: #1d4ed8;
+            font-size: 12px; font-weight: 700; transition: .2s ease;
+        }
+        .view-button:hover { background: #2563eb; color: white; }
+        @media (max-width: 1023px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.mobile-open { transform: translateX(0); }
+            .main-content { margin-left: 0 !important; }
+        }
+    </style>
+</head>
+<body style="background: var(--page);">
+    <header class="bg-white border-b border-gray-200 fixed top-0 left-0 right-0 z-50" style="box-shadow: 0 1px 8px rgba(15,23,42,.05);">
+        <div class="flex items-center justify-between px-6" style="height: 64px;">
+            <div class="flex items-center">
+                <button id="sidebarToggle" class="w-10 h-10 rounded-lg text-gray-500 hover:text-blue-600 hover:bg-blue-50 mr-3">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+                <div class="w-9 h-9 rounded-xl bg-blue-600 text-white grid place-items-center mr-3">
+                    <i class="fas fa-headset"></i>
+                </div>
+                <div>
+                    <p class="text-xs font-semibold text-blue-600 uppercase tracking-wider">Support center</p>
+                    <h1 class="text-lg font-bold text-gray-900">Ticket Management</h1>
+                </div>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="/admin/dashboard" class="text-sm font-medium text-gray-600 hover:text-blue-600">
+                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                </a>
+                <a href="/admin/logout" class="text-sm font-medium text-red-600 hover:text-red-800">
+                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white border-r border-gray-200 z-40">
+        <nav class="mt-5 px-3">
+            <div class="px-4 py-2">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+            </div>
+            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+                <% routes.forEach(route => { %>
+                    <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
+                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 my-1 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 <%= modelName === route.path.replace('/admin/', '') ? 'bg-blue-50 text-blue-700' : '' %>"
+                           <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
+                            <i class="<%= route.icon %> mr-3"></i>
+                            <span><%= route.name %></span>
+                            <% if (route.subMenus && route.subMenus.length > 0) { %>
+                                <i class="fas fa-chevron-down ml-auto text-xs chevron"></i>
+                            <% } %>
+                        </a>
+                        <% if (route.subMenus && route.subMenus.length > 0) { %>
+                            <div class="sub-menu ml-4">
+                                <% route.subMenus.forEach(subMenu => { %>
+                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800">
+                                        <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
+                                        <span><%= subMenu.name %></span>
+                                    </a>
+                                <% }); %>
+                            </div>
+                        <% } %>
+                    </div>
+                <% }); %>
+            <% } %>
+        </nav>
+    </aside>
+
+    <main id="mainContent" class="main-content ml-64 pt-24 px-4 sm:px-6 pb-10">
+      <div class="page-shell">
+        <% if (typeof success !== 'undefined' && success && success.length > 0) { %>
+            <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4"><%= success %></div>
+        <% } %>
+        <% if (typeof error !== 'undefined' && error && error.length > 0) { %>
+            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4"><%= error %></div>
+        <% } %>
+
+        <div class="flex flex-wrap items-end justify-between gap-4 mb-6">
+            <div>
+                <p class="text-sm font-semibold text-blue-600 mb-1">Customer support</p>
+                <h2 class="text-3xl font-extrabold text-gray-900 tracking-tight">Support Tickets</h2>
+                <p class="text-gray-500 mt-1">Review conversations, assign owners and resolve requests.</p>
+            </div>
+            <div class="inline-flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-4 py-2.5 text-sm font-semibold text-gray-600 shadow-sm">
+                <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                <%= pagination.totalItems %> total ticket<%= pagination.totalItems === 1 ? '' : 's' %>
+            </div>
+        </div>
+
+        <% const openCount = records.filter(t => !['resolved', 'closed'].includes(t.status)).length; %>
+        <% const waitingCount = records.filter(t => t.status === 'waiting_for_admin').length; %>
+        <% const urgentCount = records.filter(t => t.priority === 'urgent').length; %>
+        <% const unreadCount = records.reduce((sum, t) => sum + (t.unread_count || 0), 0); %>
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+            <div class="stat-card flex items-center justify-between">
+                <div><p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Active</p><p class="text-2xl font-extrabold text-gray-900 mt-1"><%= openCount %></p></div>
+                <span class="stat-icon bg-blue-50 text-blue-600"><i class="fas fa-inbox"></i></span>
+            </div>
+            <div class="stat-card flex items-center justify-between">
+                <div><p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Needs reply</p><p class="text-2xl font-extrabold text-gray-900 mt-1"><%= waitingCount %></p></div>
+                <span class="stat-icon bg-orange-50 text-orange-600"><i class="fas fa-reply"></i></span>
+            </div>
+            <div class="stat-card flex items-center justify-between">
+                <div><p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Urgent</p><p class="text-2xl font-extrabold text-gray-900 mt-1"><%= urgentCount %></p></div>
+                <span class="stat-icon bg-red-50 text-red-600"><i class="fas fa-bolt"></i></span>
+            </div>
+            <div class="stat-card flex items-center justify-between">
+                <div><p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Unread</p><p class="text-2xl font-extrabold text-gray-900 mt-1"><%= unreadCount %></p></div>
+                <span class="stat-icon bg-purple-50 text-purple-600"><i class="fas fa-envelope"></i></span>
+            </div>
+        </div>
+
+        <div class="panel p-5 mb-6">
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h3 class="text-sm font-bold text-gray-900"><i class="fas fa-sliders-h text-blue-600 mr-2"></i>Filter tickets</h3>
+                    <p class="text-xs text-gray-500 mt-1">Narrow results by status, priority or owner</p>
+                </div>
+                <a href="/admin/support-tickets" class="text-xs font-semibold text-blue-600 hover:text-blue-800">Reset all</a>
+            </div>
+            <form method="GET" action="/admin/support-tickets" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3">
+                <div class="lg:col-span-2">
+                    <label class="block text-xs font-medium text-gray-500 mb-1">Search</label>
+                    <input type="text" name="search" value="<%= filters.search %>" placeholder="Ticket #, subject, user..."
+                           class="field-control">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 mb-1">Status</label>
+                    <select name="status" class="field-control">
+                        <option value="">All</option>
+                        <% statuses.forEach(s => { %>
+                            <option value="<%= s %>" <%= filters.status === s ? 'selected' : '' %>><%= formatLabel(s) %></option>
+                        <% }); %>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 mb-1">Priority</label>
+                    <select name="priority" class="field-control">
+                        <option value="">All</option>
+                        <% priorities.forEach(p => { %>
+                            <option value="<%= p %>" <%= filters.priority === p ? 'selected' : '' %>><%= formatLabel(p) %></option>
+                        <% }); %>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 mb-1">Category</label>
+                    <select name="category" class="field-control">
+                        <option value="">All</option>
+                        <% categories.forEach(c => { %>
+                            <option value="<%= c %>" <%= filters.category === c ? 'selected' : '' %>><%= c %></option>
+                        <% }); %>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-500 mb-1">Assignee</label>
+                    <select name="assigned_to" class="field-control">
+                        <option value="">All</option>
+                        <option value="unassigned" <%= filters.assigned_to === 'unassigned' ? 'selected' : '' %>>Unassigned</option>
+                        <% adminUsers.forEach(u => { %>
+                            <option value="<%= u._id %>" <%= String(filters.assigned_to) === String(u._id) ? 'selected' : '' %>><%= u.name %></option>
+                        <% }); %>
+                    </select>
+                </div>
+                <div class="lg:col-span-6 flex gap-2">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold shadow-sm">
+                        <i class="fas fa-filter mr-1"></i>Filter
+                    </button>
+                    <a href="/admin/support-tickets" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium">
+                        Clear
+                    </a>
+                </div>
+            </form>
+        </div>
+
+        <div class="panel overflow-hidden">
+            <div class="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h3 class="text-sm font-bold text-gray-900">All conversations</h3>
+                <span class="text-xs text-gray-500">Sorted by latest activity</span>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ticket</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Priority</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Assigned</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Updated</th>
+                            <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        <% if (!records || records.length === 0) { %>
+                            <tr>
+                                <td colspan="9" class="px-4 py-10 text-center text-gray-500">
+                                    <i class="fas fa-ticket-alt text-3xl mb-2 text-gray-300"></i>
+                                    <p>No support tickets found.</p>
+                                </td>
+                            </tr>
+                        <% } else { %>
+                            <% records.forEach(ticket => { %>
+                                <tr class="ticket-row <%= ticket.unread_count > 0 ? 'bg-blue-50' : '' %>">
+                                    <td class="px-4 py-3 whitespace-nowrap">
+                                        <div class="flex items-center gap-2">
+                                            <span class="font-mono text-sm font-semibold text-gray-900"><%= ticket.ticket_number %></span>
+                                            <% if (ticket.unread_count > 0) { %>
+                                                <span class="bg-red-500 text-white text-xs font-medium px-2 py-0.5 rounded-full"><%= ticket.unread_count %></span>
+                                            <% } %>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="text-sm font-semibold text-gray-900 max-w-xs truncate"><%= ticket.subject %></div>
+                                        <div class="text-xs text-gray-400 mt-1">Updated <%= new Date(ticket.last_reply_at || ticket.updatedAt || ticket.createdAt).toLocaleDateString() %></div>
+                                    </td>
+                                    <td class="px-4 py-3 whitespace-nowrap">
+                                        <% const owner = ticket.created_by || ticket.user; %>
+                                        <div class="text-sm text-gray-900"><%= owner && owner.name ? owner.name : '—' %></div>
+                                        <div class="text-xs text-gray-500"><%= owner && owner.email ? owner.email : '' %></div>
+                                    </td>
+                                    <td class="px-4 py-3 whitespace-nowrap">
+                                        <span class="px-2 py-1 text-xs font-medium rounded-full <%= statusBadgeClass(ticket.status) %>">
+                                            <%= formatLabel(ticket.status) %>
+                                        </span>
+                                    </td>
+                                    <td class="px-4 py-3 whitespace-nowrap">
+                                        <span class="px-2 py-1 text-xs font-medium rounded-full <%= priorityBadgeClass(ticket.priority) %>">
+                                            <%= formatLabel(ticket.priority) %>
+                                        </span>
+                                    </td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-700"><%= ticket.category %></td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                                        <%= ticket.assigned_to && ticket.assigned_to.name ? ticket.assigned_to.name : 'Unassigned' %>
+                                    </td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">
+                                        <%= new Date(ticket.last_reply_at || ticket.updatedAt || ticket.createdAt).toLocaleString() %>
+                                    </td>
+                                    <td class="px-4 py-3 whitespace-nowrap text-right">
+                                        <a href="/admin/support-tickets/<%= ticket._id %>"
+                                           class="view-button">
+                                            Open <i class="fas fa-arrow-right"></i>
+                                        </a>
+                                    </td>
+                                </tr>
+                            <% }); %>
+                        <% } %>
+                    </tbody>
+                </table>
+            </div>
+
+            <% if (pagination.totalPages > 1) { %>
+                <div class="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+                    <div class="text-sm text-gray-600">
+                        Page <%= pagination.currentPage %> of <%= pagination.totalPages %>
+                    </div>
+                    <div class="flex gap-2">
+                        <% if (pagination.hasPrevPage) { %>
+                            <a href="<%= buildListUrl({ ...filters, page: pagination.currentPage - 1 }) %>"
+                               class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">Previous</a>
+                        <% } %>
+                        <% if (pagination.hasNextPage) { %>
+                            <a href="<%= buildListUrl({ ...filters, page: pagination.currentPage + 1 }) %>"
+                               class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">Next</a>
+                        <% } %>
+                    </div>
+                </div>
+            <% } %>
+        </div>
+      </div>
+    </main>
+
+    <script>
+        document.getElementById('sidebarToggle').addEventListener('click', () => {
+            document.getElementById('sidebar').classList.toggle('collapsed');
+            document.getElementById('sidebar').classList.toggle('mobile-open');
+            document.getElementById('mainContent').classList.toggle('expanded');
+        });
+        function toggleSubMenu(event, element) {
+            event.preventDefault();
+            const menuItem = element.closest('.menu-item');
+            const subMenu = menuItem.querySelector('.sub-menu');
+            menuItem.classList.toggle('expanded');
+            subMenu.classList.toggle('expanded');
+        }
+    </script>
+</body>
+</html>

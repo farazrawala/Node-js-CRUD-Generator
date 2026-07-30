@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --navy: #0f172a;
+            --surface: #ffffff;
+            --page: #f1f5f9;
+            --border: #e2e8f0;
+        }
+        * { box-sizing: border-box; }
+        body { font-family: "Inter", sans-serif; color: var(--navy); }
+        .sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar.collapsed { transform: translateX(-100%); }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .main-content.expanded { margin-left: 0; }
+        .sub-menu { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-in-out; }
+        .sub-menu.expanded { max-height: 200px; }
+        .menu-item.has-submenu .chevron { transition: transform 0.3s ease-in-out; }
+        .menu-item.has-submenu.expanded .chevron { transform: rotate(180deg); }
+        .page-shell { max-width: 1560px; margin: 0 auto; }
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+        }
+        .message-thread {
+            min-height: 360px;
+            max-height: 62vh;
+            overflow-y: auto;
+            background:
+                radial-gradient(circle at 1px 1px, rgba(148, 163, 184, .18) 1px, transparent 0);
+            background-size: 22px 22px;
+            scrollbar-color: #cbd5e1 transparent;
+        }
+        .message-row { display: flex; gap: 10px; align-items: flex-end; }
+        .message-row.admin { justify-content: flex-end; }
+        .message-row.customer { justify-content: flex-start; }
+        .avatar {
+            width: 34px;
+            height: 34px;
+            flex: 0 0 34px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            color: white;
+            font-size: 12px;
+            font-weight: 700;
+            box-shadow: 0 0 0 3px white;
+        }
+        .avatar.admin { background: linear-gradient(135deg, #2563eb, #4f46e5); }
+        .avatar.customer { background: linear-gradient(135deg, #475569, #0f172a); }
+        .bubble {
+            max-width: min(680px, 78%);
+            border-radius: 16px;
+            padding: 14px 16px;
+            box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+        }
+        .bubble.admin {
+            color: white;
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            border-bottom-right-radius: 4px;
+        }
+        .bubble.customer {
+            color: #1e293b;
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-bottom-left-radius: 4px;
+        }
+        .bubble.internal {
+            color: #713f12;
+            background: #fef3c7;
+            border: 1px solid #fde68a;
+        }
+        .bubble.admin .message-meta,
+        .bubble.admin .message-copy { color: rgba(255, 255, 255, .92); }
+        .bubble.admin .attachment-link { color: white; background: rgba(255, 255, 255, .14); }
+        .attachment-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin: 8px 6px 0 0;
+            padding: 7px 10px;
+            border-radius: 9px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .chat-image-link {
+            display: block;
+            width: fit-content;
+            max-width: 100%;
+            margin-top: 10px;
+            border: 0;
+            padding: 0;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(148, 163, 184, .35);
+            background: #f8fafc;
+            cursor: zoom-in;
+            text-align: left;
+            transition: transform .2s ease, box-shadow .2s ease;
+        }
+        .chat-image-link:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 22px rgba(15, 23, 42, .18);
+        }
+        .chat-image {
+            display: block;
+            width: auto;
+            height: auto;
+            max-width: min(360px, 100%);
+            max-height: 260px;
+            object-fit: cover;
+        }
+        .chat-image-caption {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 10px;
+            color: #475569;
+            background: white;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .image-lightbox {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: rgba(15, 23, 42, .78);
+            backdrop-filter: blur(4px);
+        }
+        .image-lightbox.open { display: flex; }
+        .image-lightbox-dialog {
+            position: relative;
+            width: min(960px, 100%);
+            max-height: 90vh;
+            background: #0f172a;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 24px 64px rgba(0, 0, 0, .45);
+        }
+        .image-lightbox-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            color: white;
+            background: rgba(15, 23, 42, .92);
+            border-bottom: 1px solid rgba(255, 255, 255, .08);
+        }
+        .image-lightbox-title {
+            font-size: 13px;
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .image-lightbox-close {
+            width: 36px;
+            height: 36px;
+            border: 0;
+            border-radius: 10px;
+            color: white;
+            background: rgba(255, 255, 255, .1);
+            cursor: pointer;
+        }
+        .image-lightbox-close:hover { background: rgba(255, 255, 255, .18); }
+        .image-lightbox-body {
+            display: grid;
+            place-items: center;
+            padding: 18px;
+            min-height: 240px;
+            max-height: calc(90vh - 64px);
+            overflow: auto;
+            background: #020617;
+        }
+        .image-lightbox-body img {
+            display: block;
+            width: auto;
+            height: auto;
+            max-width: 100%;
+            max-height: calc(90vh - 100px);
+            border-radius: 8px;
+        }
+        .field-control {
+            width: 100%;
+            border: 1px solid #cbd5e1;
+            border-radius: 10px;
+            background: white;
+            padding: 10px 12px;
+            font-size: 14px;
+            transition: .2s ease;
+        }
+        .field-control:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, .14);
+        }
+        .primary-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border-radius: 10px;
+            padding: 11px 18px;
+            color: white;
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            font-size: 14px;
+            font-weight: 700;
+            box-shadow: 0 6px 16px rgba(37, 99, 235, .22);
+            transition: .2s ease;
+        }
+        .primary-button:hover { transform: translateY(-1px); box-shadow: 0 9px 22px rgba(37, 99, 235, .28); }
+        .secondary-button {
+            border: 1px solid #cbd5e1;
+            border-radius: 9px;
+            padding: 9px 12px;
+            background: #f8fafc;
+            color: #334155;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .detail-row {
+            display: grid;
+            grid-template-columns: 34px 1fr;
+            gap: 10px;
+            align-items: start;
+            padding: 11px 0;
+            border-bottom: 1px solid #f1f5f9;
+        }
+        .detail-row:last-child { border-bottom: 0; }
+        .detail-icon {
+            width: 34px;
+            height: 34px;
+            display: grid;
+            place-items: center;
+            border-radius: 9px;
+            color: #2563eb;
+            background: #eff6ff;
+        }
+        @media (max-width: 1023px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.mobile-open { transform: translateX(0); }
+            .main-content { margin-left: 0 !important; }
+        }
+    </style>
+</head>
+<body style="background: var(--page);">
+    <% const ticketOwner = ticket.created_by || ticket.user; %>
+    <header class="bg-white border-b border-gray-200 fixed top-0 left-0 right-0 z-50" style="box-shadow: 0 1px 8px rgba(15,23,42,.05);">
+        <div class="flex items-center justify-between px-6" style="height: 64px;">
+            <div class="flex items-center">
+                <button id="sidebarToggle" class="w-10 h-10 rounded-lg text-gray-500 hover:text-blue-600 hover:bg-blue-50 mr-3">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+                <div class="w-9 h-9 rounded-xl bg-blue-600 text-white grid place-items-center mr-3">
+                    <i class="fas fa-headset"></i>
+                </div>
+                <div>
+                    <p class="text-xs font-semibold text-blue-600 uppercase tracking-wider">Support center</p>
+                    <h1 class="text-lg font-bold text-gray-900"><%= ticket.ticket_number %></h1>
+                </div>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="/admin/dashboard" class="text-sm font-medium text-gray-600 hover:text-blue-600">
+                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                </a>
+                <a href="/admin/logout" class="text-sm font-medium text-red-600 hover:text-red-800">
+                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white border-r border-gray-200 z-40">
+        <nav class="mt-5 px-3">
+            <div class="px-4 py-2">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+            </div>
+            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+                <% routes.forEach(route => { %>
+                    <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
+                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 my-1 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 <%= modelName === route.path.replace('/admin/', '') ? 'bg-blue-50 text-blue-700' : '' %>"
+                           <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
+                            <i class="<%= route.icon %> mr-3"></i>
+                            <span><%= route.name %></span>
+                            <% if (route.subMenus && route.subMenus.length > 0) { %>
+                                <i class="fas fa-chevron-down ml-auto text-xs chevron"></i>
+                            <% } %>
+                        </a>
+                        <% if (route.subMenus && route.subMenus.length > 0) { %>
+                            <div class="sub-menu ml-4">
+                                <% route.subMenus.forEach(subMenu => { %>
+                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800">
+                                        <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
+                                        <span><%= subMenu.name %></span>
+                                    </a>
+                                <% }); %>
+                            </div>
+                        <% } %>
+                    </div>
+                <% }); %>
+            <% } %>
+        </nav>
+    </aside>
+
+    <main id="mainContent" class="main-content ml-64 pt-24 px-4 sm:px-6 pb-10">
+      <div class="page-shell">
+        <% if (typeof success !== 'undefined' && success && success.length > 0) { %>
+            <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4"><%= success %></div>
+        <% } %>
+        <% if (typeof error !== 'undefined' && error && error.length > 0) { %>
+            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4"><%= error %></div>
+        <% } %>
+
+        <div class="mb-5">
+            <a href="/admin/support-tickets" class="inline-flex items-center gap-2 text-gray-600 hover:text-blue-700 text-sm font-semibold">
+                <span class="w-8 h-8 rounded-lg bg-white border border-gray-200 grid place-items-center"><i class="fas fa-arrow-left text-xs"></i></span>
+                Back to all tickets
+            </a>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+            <div class="xl:col-span-2 space-y-5">
+                <div class="panel p-6">
+                    <div class="flex flex-wrap items-start justify-between gap-3 mb-3">
+                        <div>
+                            <div class="flex flex-wrap items-center gap-2 mb-3">
+                                <span class="font-mono text-xs font-bold tracking-wide text-gray-500 bg-gray-100 px-2.5 py-1 rounded-lg"><%= ticket.ticket_number %></span>
+                                <span class="px-2.5 py-1 text-xs font-semibold rounded-full <%= statusBadgeClass(ticket.status) %>">
+                                    <%= formatLabel(ticket.status) %>
+                                </span>
+                                <span class="px-2.5 py-1 text-xs font-semibold rounded-full <%= priorityBadgeClass(ticket.priority) %>">
+                                    <%= formatLabel(ticket.priority) %>
+                                </span>
+                            </div>
+                            <h2 class="text-2xl font-extrabold text-gray-900 leading-tight"><%= ticket.subject %></h2>
+                        </div>
+                        <div class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-50 text-sm font-semibold text-gray-600 border border-gray-100">
+                            <i class="far fa-folder text-blue-500"></i><%= ticket.category %>
+                        </div>
+                    </div>
+                    <% if (ticket.description) { %>
+                        <p class="text-gray-600 leading-7 whitespace-pre-wrap pt-4 mt-4 border-t border-gray-100"><%= ticket.description %></p>
+                    <% } %>
+                </div>
+
+                <div class="panel overflow-hidden">
+                    <div class="px-6 py-5 border-b border-gray-200 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-gray-900 flex items-center gap-3">
+                            <span class="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 grid place-items-center"><i class="fas fa-comments"></i></span>
+                            Conversation
+                        </h3>
+                        <span class="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-full"><%= messages ? messages.length : 0 %> messages</span>
+                    </div>
+                    <div class="message-thread p-6 space-y-5" id="messageThread">
+                        <% if (!messages || messages.length === 0) { %>
+                            <p class="text-gray-500 text-center py-8">No messages yet.</p>
+                        <% } else { %>
+                            <% messages.forEach(msg => { %>
+                                <%
+                                    const messageUserId = msg.user && msg.user._id ? String(msg.user._id) : String(msg.user || '');
+                                    const ownerId = ticketOwner && ticketOwner._id ? String(ticketOwner._id) : String(ticketOwner || '');
+                                    // The requester may also hold ADMIN permissions. Within this ticket,
+                                    // their messages still belong on the customer side.
+                                    const isCustomerMsg = messageUserId && ownerId && messageUserId === ownerId && !msg.is_internal;
+                                    const isAdminMsg = !isCustomerMsg;
+                                %>
+                                <div class="message-row <%= isAdminMsg ? 'admin' : 'customer' %>">
+                                    <% if (!isAdminMsg) { %><div class="avatar customer"><i class="fas fa-user"></i></div><% } %>
+                                    <div class="bubble <%= msg.is_internal ? 'internal' : (isAdminMsg ? 'admin' : 'customer') %>">
+                                        <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 mb-2">
+                                            <div class="text-sm font-bold">
+                                                <%= msg.user && msg.user.name ? msg.user.name : (isAdminMsg ? 'Admin' : 'User') %>
+                                                <% if (msg.is_internal) { %>
+                                                    <span class="ml-2 px-2 py-0.5 text-xs font-semibold rounded-full bg-yellow-200 text-yellow-900"><i class="fas fa-lock mr-1"></i>Internal</span>
+                                                <% } %>
+                                            </div>
+                                            <div class="message-meta text-xs whitespace-nowrap">
+                                                <%= new Date(msg.createdAt).toLocaleString() %>
+                                            </div>
+                                        </div>
+                                        <% if (msg.message) { %>
+                                            <p class="message-copy text-sm leading-6 whitespace-pre-wrap"><%= msg.message %></p>
+                                        <% } %>
+                                        <% if (msg.attachments && msg.attachments.length > 0) { %>
+                                            <div class="mt-3 space-y-1">
+                                                <% msg.attachments.forEach(att => { %>
+                                                    <%
+                                                        const attachmentName = att.name || att.filename || 'Attachment';
+                                                        const attachmentMime = String(att.mime_type || '').toLowerCase();
+                                                        const attachmentExtension = attachmentName.split('.').pop().toLowerCase();
+                                                        const isImageAttachment =
+                                                            attachmentMime.startsWith('image/') ||
+                                                            ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(attachmentExtension);
+                                                    %>
+                                                    <% if (isImageAttachment) { %>
+                                                        <button type="button"
+                                                                class="chat-image-link"
+                                                                data-image-src="<%= att.url %>"
+                                                                data-image-name="<%= attachmentName %>"
+                                                                title="View image">
+                                                            <img src="<%= att.url %>" alt="<%= attachmentName %>" class="chat-image" loading="lazy">
+                                                            <span class="chat-image-caption">
+                                                                <i class="fas fa-expand-alt"></i><%= attachmentName %>
+                                                            </span>
+                                                        </button>
+                                                    <% } else { %>
+                                                        <a href="<%= att.url %>" target="_blank" rel="noopener" class="attachment-link">
+                                                            <i class="fas fa-paperclip mr-1"></i><%= attachmentName %>
+                                                        </a>
+                                                    <% } %>
+                                                <% }); %>
+                                            </div>
+                                        <% } %>
+                                    </div>
+                                    <% if (isAdminMsg) { %><div class="avatar admin"><i class="fas fa-headset"></i></div><% } %>
+                                </div>
+                            <% }); %>
+                        <% } %>
+                    </div>
+                </div>
+
+                <% if (ticket.status !== 'closed') { %>
+                    <div class="panel p-6">
+                        <h3 class="text-base font-bold text-gray-900 mb-5 flex items-center gap-3">
+                            <span class="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 grid place-items-center"><i class="fas fa-reply"></i></span>
+                            Send a reply
+                        </h3>
+                        <form method="POST" action="/admin/support-tickets/<%= ticket._id %>/reply" enctype="multipart/form-data" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-semibold text-gray-700 mb-2">Message</label>
+                                <textarea name="message" rows="4"
+                                          class="field-control"
+                                          placeholder="Write your reply to the customer..."></textarea>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-gray-700 mb-2">Attachments</label>
+                                <div class="border border-dashed border-gray-300 rounded-xl p-4 bg-gray-50 hover:border-blue-400 transition">
+                                  <input type="file" name="attachments" multiple
+                                         accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.zip,.docx"
+                                         class="w-full text-sm text-gray-600">
+                                </div>
+                                <p class="text-xs text-gray-500 mt-1">Max 10MB. Images, PDF, ZIP, DOCX.</p>
+                            </div>
+                            <div class="flex flex-wrap items-center justify-between gap-3">
+                                <label class="inline-flex items-center text-sm text-gray-700">
+                                    <input type="checkbox" name="is_internal" value="true" class="mr-2 rounded border-gray-300">
+                                    Internal note (not visible to customer)
+                                </label>
+                                <button type="submit" class="primary-button">
+                                    <i class="fas fa-paper-plane"></i>Send Reply
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                <% } else { %>
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-600 text-sm">
+                        This ticket is closed. Replies are disabled.
+                    </div>
+                <% } %>
+            </div>
+
+            <div class="space-y-5 xl:sticky xl:top-24">
+                <div class="panel p-5">
+                    <h3 class="text-sm font-bold text-gray-900 uppercase tracking-wider mb-3">Ticket details</h3>
+                    <dl class="text-sm">
+                        <div class="detail-row">
+                            <span class="detail-icon"><i class="far fa-user"></i></span>
+                            <div><dt class="text-xs font-medium text-gray-500 mb-0.5">Customer</dt>
+                            <dd class="font-semibold text-gray-900"><%= ticketOwner && ticketOwner.name ? ticketOwner.name : '—' %></dd>
+                            <dd class="text-xs text-gray-500 break-all"><%= ticketOwner && ticketOwner.email ? ticketOwner.email : '' %></dd></div>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-icon"><i class="far fa-calendar"></i></span>
+                            <div><dt class="text-xs font-medium text-gray-500 mb-0.5">Created</dt>
+                            <dd class="font-medium text-gray-900"><%= new Date(ticket.createdAt).toLocaleString() %></dd></div>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-icon"><i class="far fa-clock"></i></span>
+                            <div><dt class="text-xs font-medium text-gray-500 mb-0.5">Last reply</dt>
+                            <dd class="font-medium text-gray-900"><%= ticket.last_reply_at ? new Date(ticket.last_reply_at).toLocaleString() : '—' %></dd></div>
+                        </div>
+                        <% if (ticket.closed_at) { %>
+                            <div>
+                                <dt class="text-gray-500">Closed</dt>
+                                <dd class="text-gray-900"><%= new Date(ticket.closed_at).toLocaleString() %></dd>
+                            </div>
+                        <% } %>
+                    </dl>
+                </div>
+
+                <% if (ticket.status !== 'closed') { %>
+                    <div class="panel p-5 space-y-5">
+                        <div>
+                          <h3 class="text-sm font-bold text-gray-900 uppercase tracking-wider">Manage ticket</h3>
+                          <p class="text-xs text-gray-500 mt-1">Update workflow and ownership</p>
+                        </div>
+
+                        <form method="POST" action="/admin/support-tickets/<%= ticket._id %>/status" class="space-y-2">
+                            <label class="block text-xs font-semibold text-gray-600 uppercase tracking-wide">Status</label>
+                            <select name="status" class="field-control" onchange="this.form.submit()">
+                                <% statuses.forEach(s => { %>
+                                    <option value="<%= s %>" <%= ticket.status === s ? 'selected' : '' %>><%= formatLabel(s) %></option>
+                                <% }); %>
+                            </select>
+                        </form>
+
+                        <form method="POST" action="/admin/support-tickets/<%= ticket._id %>/priority" class="space-y-2">
+                            <label class="block text-xs font-semibold text-gray-600 uppercase tracking-wide">Priority</label>
+                            <select name="priority" class="field-control" onchange="this.form.submit()">
+                                <% priorities.forEach(p => { %>
+                                    <option value="<%= p %>" <%= ticket.priority === p ? 'selected' : '' %>><%= formatLabel(p) %></option>
+                                <% }); %>
+                            </select>
+                        </form>
+
+                        <form method="POST" action="/admin/support-tickets/<%= ticket._id %>/assign" class="space-y-2">
+                            <label class="block text-xs font-semibold text-gray-600 uppercase tracking-wide">Assign to</label>
+                            <select name="assigned_to" class="field-control" onchange="this.form.submit()">
+                                <option value="">Unassigned</option>
+                                <% adminUsers.forEach(u => { %>
+                                    <option value="<%= u._id %>" <%= ticket.assigned_to && String(ticket.assigned_to._id) === String(u._id) ? 'selected' : '' %>><%= u.name %></option>
+                                <% }); %>
+                            </select>
+                        </form>
+                    </div>
+                <% } %>
+            </div>
+        </div>
+      </div>
+    </main>
+
+    <div id="imageLightbox" class="image-lightbox" aria-hidden="true">
+        <div class="image-lightbox-dialog" role="dialog" aria-modal="true" aria-labelledby="imageLightboxTitle">
+            <div class="image-lightbox-header">
+                <div id="imageLightboxTitle" class="image-lightbox-title">Image preview</div>
+                <button type="button" id="imageLightboxClose" class="image-lightbox-close" aria-label="Close image preview">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="image-lightbox-body">
+                <img id="imageLightboxImg" src="" alt="Full size attachment">
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('sidebarToggle').addEventListener('click', () => {
+            document.getElementById('sidebar').classList.toggle('collapsed');
+            document.getElementById('sidebar').classList.toggle('mobile-open');
+            document.getElementById('mainContent').classList.toggle('expanded');
+        });
+        function toggleSubMenu(event, element) {
+            event.preventDefault();
+            const menuItem = element.closest('.menu-item');
+            const subMenu = menuItem.querySelector('.sub-menu');
+            menuItem.classList.toggle('expanded');
+            subMenu.classList.toggle('expanded');
+        }
+        const thread = document.getElementById('messageThread');
+        function scrollChatToEnd() {
+            if (!thread) return;
+            thread.scrollTop = thread.scrollHeight;
+        }
+        function scrollChatToEndHard() {
+            scrollChatToEnd();
+            requestAnimationFrame(() => {
+                scrollChatToEnd();
+                setTimeout(scrollChatToEnd, 50);
+                setTimeout(scrollChatToEnd, 250);
+            });
+        }
+        scrollChatToEndHard();
+        window.addEventListener('load', scrollChatToEndHard);
+        if (thread) {
+            thread.querySelectorAll('img').forEach((img) => {
+                if (img.complete) return;
+                img.addEventListener('load', scrollChatToEnd);
+                img.addEventListener('error', scrollChatToEnd);
+            });
+        }
+
+        const lightbox = document.getElementById('imageLightbox');
+        const lightboxImg = document.getElementById('imageLightboxImg');
+        const lightboxTitle = document.getElementById('imageLightboxTitle');
+        const lightboxClose = document.getElementById('imageLightboxClose');
+
+        function openImageLightbox(src, name) {
+            if (!lightbox || !lightboxImg) return;
+            lightboxImg.src = src;
+            lightboxImg.alt = name || 'Attachment image';
+            if (lightboxTitle) lightboxTitle.textContent = name || 'Image preview';
+            lightbox.classList.add('open');
+            lightbox.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeImageLightbox() {
+            if (!lightbox || !lightboxImg) return;
+            lightbox.classList.remove('open');
+            lightbox.setAttribute('aria-hidden', 'true');
+            lightboxImg.src = '';
+            document.body.style.overflow = '';
+        }
+
+        document.querySelectorAll('.chat-image-link').forEach((button) => {
+            button.addEventListener('click', () => {
+                openImageLightbox(button.dataset.imageSrc, button.dataset.imageName);
+            });
+        });
+
+        if (lightboxClose) lightboxClose.addEventListener('click', closeImageLightbox);
+        if (lightbox) {
+            lightbox.addEventListener('click', (event) => {
+                if (event.target === lightbox) closeImageLightbox();
+            });
+        }
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') closeImageLightbox();
+        });
+    </script>
+</body>
+</html>

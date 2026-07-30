@@ -20,6 +20,7 @@ const Account = require("../models/account");
 const Warehouse = require("../models/warehouse");
 const Integration = require("../models/integration");
 const stockTransferController = require("../controllers/stockTransfer");
+const adminSupportTicketController = require("../controllers/adminSupportTicket");
 const Process = require("../models/process");
 const Brands = require("../models/brands");
 const Attribute = require("../models/attribute");
@@ -152,6 +153,7 @@ const userAdminCRUD = adminCrudGenerator(
           { key: "expenses", label: "Expenses" },
           { key: "transactions", label: "Transactions" },
           { key: "logs", label: "Logs" },
+          { key: "support-tickets", label: "Support Tickets" },
         ],
         actions: [
           { key: "view", label: "View" },
@@ -3557,6 +3559,26 @@ router.get(
 router.post(
   "/products/stock-transfer",
   stockTransferController.handleStockTransfer,
+);
+
+// Support ticket management
+router.get("/support-tickets", adminSupportTicketController.listTickets);
+router.get("/support-tickets/:id", adminSupportTicketController.viewTicket);
+router.post(
+  "/support-tickets/:id/reply",
+  adminSupportTicketController.replyTicket,
+);
+router.post(
+  "/support-tickets/:id/status",
+  adminSupportTicketController.updateStatus,
+);
+router.post(
+  "/support-tickets/:id/priority",
+  adminSupportTicketController.updatePriority,
+);
+router.post(
+  "/support-tickets/:id/assign",
+  adminSupportTicketController.assignTicket,
 );
 
 // Mount all registered CRUD routes dynamically
