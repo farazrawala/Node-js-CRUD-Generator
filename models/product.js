@@ -185,6 +185,31 @@ const modelSchema = new mongoose.Schema(
       field_type: "image",
       field_name: "Gallery Thumbnails",
     },
+
+    // BigCommerce Settings //
+    show_on_bigcommerce: {
+      type: Boolean,
+      field_name: "Show On BigCommerce",
+      default: false,
+    },
+    bigcommerce_price: {
+      type: String,
+      field_name: "BigCommerce Price",
+    },
+    bigcommerce_hold_qty: {
+      type: Number,
+      field_name: "BigCommerce Hold Qty",
+    },
+    bigcommerce_isbn: {
+      type: String,
+      field_name: "BigCommerce ISBN",
+    },
+    bigcommerce_mpn: {
+      type: String,
+      field_name: "BigCommerce MPN",
+    },
+    // BigCommerce Settings //
+
     created_by: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "user",
