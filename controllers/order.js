@@ -40,6 +40,7 @@ const {
 } = require("../utils/companyWhatsappSettings");
 const WhatsappMessage = require("../models/whatsapp_message");
 const User = require("../models/user");
+const Account = require("../models/account");
 const {
   resolveReportPeriodRange,
   periodResponse: reportPeriodResponse,
@@ -2728,6 +2729,118 @@ async function order_save(req, res) {
   // step 9 end — 201 response
 }
 
+async function orderUpdateAuditSnapshot(req, order, lineItems) {
+  const orderFields =
+    typeof order?.toObject === "function" ?
+      order.toObject({ depopulate: true })
+    : { ...(order || {}) };
+  const companyId = coalesceObjectId(order?.company_id || req.user?.company_id);
+  const customerId = coalesceObjectId(order?.customer_id);
+  const paymentAccountId = coalesceObjectId(
+    order?.payment_method_accounts_id,
+  );
+
+  const [customer, paymentAccount] = await Promise.all([
+    customerId ?
+      User.findOne({ _id: customerId, company_id: companyId })
+        .select("name email phone role company_id")
+        .lean()
+    : null,
+    paymentAccountId ?
+      Account.findOne({ _id: paymentAccountId, company_id: companyId })
+        .select("name account_number account_type company_id status")
+        .lean()
+    : null,
+  ]);
+
+  const products = (lineItems || []).map((line) => {
+    const lineFields =
+      typeof line?.toObject === "function" ?
+        line.toObject({ depopulate: true })
+      : { ...(line || {}) };
+    const populatedProduct =
+      line?.product_id &&
+      typeof line.product_id === "object" &&
+      line.product_id._id ?
+        line.product_id
+      : null;
+    const productId = coalesceObjectId(
+      populatedProduct?._id || line?.product_id,
+    );
+    return {
+      ...lineFields,
+      product_id: productId || null,
+      product_name:
+        populatedProduct?.product_name || line?.product_name || null,
+      product_code:
+        populatedProduct?.product_code || line?.product_code || null,
+      qty: Number(line?.qty) || 0,
+      price: Number(line?.price) || 0,
+      subtotal: Number(line?.subtotal) || 0,
+    };
+  });
+
+  const totalAmount = Number(order?.total_amount) || 0;
+  const amountReceived = Number(order?.amount_received) || 0;
+  return {
+    order_fields: orderFields,
+    customer: {
+      customer_id: customerId || null,
+      name: customer?.name || order?.name || null,
+      email: customer?.email || order?.email || null,
+      phone: customer?.phone || order?.phone || null,
+      role: customer?.role || [],
+      company_id: customer?.company_id || companyId || null,
+    },
+    payment_details: {
+      payment_method_accounts_id: paymentAccountId || null,
+      payment_account: paymentAccount || null,
+      lines_subtotal: Number(order?.lines_subtotal) || 0,
+      discount: Number(order?.discount) || 0,
+      discount_percentage: Number(order?.discount_percentage) || 0,
+      shipment: Number(order?.shipment) || 0,
+      total_amount: totalAmount,
+      amount_received: amountReceived,
+      remaining_amount:
+        Math.round(Math.max(0, totalAmount - amountReceived) * 100) / 100,
+      change_given: Number(order?.change_given) || 0,
+      transaction_number: order?.transaction_number || null,
+    },
+    product_count: products.length,
+    products,
+  };
+}
+
+async function logOrderUpdated(req, before, after) {
+  try {
+    const order = after?.order_fields || {};
+    await createApplicationLog(
+      req,
+      {
+        action: "Order updated",
+        url:
+          req.originalUrl ||
+          req.path ||
+          `/api/order/order_update/${req.params?.id || ""}`,
+        tags: ["order", "update", "before_after", "products"],
+        description: {
+          order_id: order._id || req.params?.id || null,
+          order_no: order.order_no || null,
+          before,
+          after,
+        },
+        reference_id: order._id || req.params?.id,
+        reference_type: "order",
+        company_id: order.company_id || req.user?.company_id,
+      },
+      { silent: true },
+    );
+  } catch (error) {
+    // An audit failure must not turn an already-committed update into a 500.
+    console.error("[order] update success log failed:", error.message);
+  }
+}
+
 /**
  * PUT/PATCH order — header update, GL rebuild, optional full line replace + warehouse inventory replay.
  *
@@ -2777,6 +2890,34 @@ async function order_update(req, res) {
   resolveOrderPaymentMethodAccount(req.body, req.user);
 
   const recordId = String(req.params?.id || "").trim();
+  let beforeUpdateSnapshot = null;
+  if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
+    const companyId = coalesceObjectId(req.user?.company_id);
+    const beforeOrder = await Order.findOne({
+      _id: recordId,
+      ...(companyId ? { company_id: companyId } : {}),
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (beforeOrder) {
+      const beforeItems = await OrderItem.find({
+        order_id: recordId,
+        ...(companyId ? { company_id: companyId } : {}),
+        status: "active",
+        deletedAt: null,
+      })
+        .populate("product_id", "product_name product_code")
+        .sort({ createdAt: 1 })
+        .lean();
+      beforeUpdateSnapshot = await orderUpdateAuditSnapshot(
+        req,
+        beforeOrder,
+        beforeItems,
+      );
+    }
+  }
+
   if (lines.length > 0) {
     req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
   } else if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
@@ -3271,6 +3412,13 @@ async function order_update(req, res) {
   // step 16 start — order read (response reload)
   const orderFresh = await Order.findById(orderId).lean();
   const data = shapeOrderWithItems(orderFresh || response.data, items);
+
+  const afterUpdateSnapshot = await orderUpdateAuditSnapshot(
+    req,
+    orderFresh || response.data,
+    items,
+  );
+  await logOrderUpdated(req, beforeUpdateSnapshot, afterUpdateSnapshot);
 
   return res.status(200).json({
     success: true,

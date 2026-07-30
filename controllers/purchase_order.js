@@ -4,6 +4,7 @@ const PurchaseOrderItem = require("../models/purchase_order_item");
 const PurchaseReturn = require("../models/purchase_return");
 const Order = require("../models/order");
 const User = require("../models/user");
+const Account = require("../models/account");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const Product = require("../models/product");
 
@@ -723,6 +724,217 @@ function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
     docs.push(doc);
   }
   return { docs };
+}
+
+/**
+ * Write the successful PO snapshot after commit so the audit trail never
+ * describes an order that was later rolled back.
+ */
+async function logPurchaseOrderCreated(
+  req,
+  purchaseOrder,
+  lineItems,
+) {
+  try {
+    const purchaseOrderFields =
+      typeof purchaseOrder?.toObject === "function" ?
+        purchaseOrder.toObject({ depopulate: true })
+      : { ...(purchaseOrder || {}) };
+    const productIds = collectUniqueProductIdsFromLineRows(lineItems);
+    const companyId = coalesceObjectId(
+      purchaseOrder?.company_id || req.user?.company_id,
+    );
+    const vendorId = coalesceObjectId(purchaseOrder?.vendor_id);
+    const paymentAccountId = coalesceObjectId(
+      purchaseOrder?.payment_method_accounts_id,
+    );
+    const productRows =
+      productIds.length > 0 ?
+        await Product.find({
+          _id: { $in: productIds },
+          ...(companyId ? { company_id: companyId } : {}),
+        })
+          .select("product_name product_code")
+          .lean()
+      : [];
+    const productById = new Map(
+      productRows.map((product) => [String(product._id), product]),
+    );
+
+    const [vendor, paymentAccount] = await Promise.all([
+      vendorId ?
+        User.findOne({ _id: vendorId, company_id: companyId })
+          .select("name email phone role company_id")
+          .lean()
+      : null,
+      paymentAccountId ?
+        Account.findOne({ _id: paymentAccountId, company_id: companyId })
+          .select("name account_number account_type company_id status")
+          .lean()
+      : null,
+    ]);
+
+    const products = (lineItems || []).map((line) => {
+      const lineFields =
+        typeof line?.toObject === "function" ?
+          line.toObject({ depopulate: true })
+        : { ...(line || {}) };
+      const productId = String(coalesceObjectId(line?.product_id) || "");
+      const product = productById.get(productId);
+      const qty = Number(line?.qty) || 0;
+      const price = Number(line?.price) || 0;
+      return {
+        ...lineFields,
+        product_id: productId || null,
+        product_name:
+          product?.product_name ||
+          line?.product_name ||
+          line?.name ||
+          "Unknown product",
+        qty,
+        price,
+        subtotal: Math.round(qty * price * 100) / 100,
+      };
+    });
+
+    const linesSubtotal = Number(purchaseOrder?.lines_subtotal) || 0;
+    const discount = Number(purchaseOrder?.discount) || 0;
+    const shipment = Number(purchaseOrder?.shipment) || 0;
+    const totalAmount = Number(purchaseOrder?.total_amount) || 0;
+    const amountPaid = Number(purchaseOrder?.amount_paid) || 0;
+    const remainingAmount =
+      Math.round(Math.max(0, totalAmount - amountPaid) * 100) / 100;
+
+    await createApplicationLog(
+      req,
+      {
+        action: "Purchase order created",
+        url:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_order/purchase_order_create",
+        tags: ["purchase_order", "create", "products"],
+        description: {
+          purchase_order_id: purchaseOrder?._id,
+          purchase_order_no: purchaseOrder?.purchase_order_no || null,
+          purchase_order_fields: purchaseOrderFields,
+          vendor: {
+            vendor_id: vendorId || null,
+            name: vendor?.name || null,
+            email: vendor?.email || null,
+            phone: vendor?.phone || null,
+            role: vendor?.role || [],
+            company_id: vendor?.company_id || companyId || null,
+          },
+          payment_details: {
+            payment_method_accounts_id: paymentAccountId || null,
+            payment_account: paymentAccount || null,
+            lines_subtotal: linesSubtotal,
+            discount,
+            shipment,
+            total_amount: totalAmount,
+            amount_paid: amountPaid,
+            remaining_amount: remainingAmount,
+            transaction_number: purchaseOrder?.transaction_number || null,
+          },
+          product_count: products.length,
+          products,
+        },
+        reference_id: purchaseOrder?._id,
+        reference_type: "purchase_order",
+        company_id: companyId,
+      },
+      { silent: true },
+    );
+  } catch (error) {
+    // Audit logging must never turn an already-committed PO into a 500 response.
+    console.error("[purchase_order] create success log failed:", error.message);
+  }
+}
+
+function purchaseOrderUpdateAuditSnapshot(purchaseOrder, lineItems) {
+  const purchaseOrderFields =
+    typeof purchaseOrder?.toObject === "function" ?
+      purchaseOrder.toObject({ depopulate: true })
+    : { ...(purchaseOrder || {}) };
+
+  const products = (lineItems || []).map((line) => {
+    const lineFields =
+      typeof line?.toObject === "function" ?
+        line.toObject({ depopulate: true })
+      : { ...(line || {}) };
+    const populatedProduct =
+      line?.product_id &&
+      typeof line.product_id === "object" &&
+      line.product_id._id ?
+        line.product_id
+      : null;
+    const productId = coalesceObjectId(
+      populatedProduct?._id || line?.product_id,
+    );
+    return {
+      ...lineFields,
+      product_id: productId || null,
+      product_name:
+        populatedProduct?.product_name || line?.product_name || null,
+      product_code:
+        populatedProduct?.product_code || line?.product_code || null,
+      qty: Number(line?.qty) || 0,
+      price: Number(line?.price) || 0,
+      subtotal: Number(line?.subtotal) || 0,
+    };
+  });
+
+  const totalAmount = Number(purchaseOrder?.total_amount) || 0;
+  const amountPaid = Number(purchaseOrder?.amount_paid) || 0;
+  return {
+    purchase_order_fields: purchaseOrderFields,
+    vendor_id: coalesceObjectId(purchaseOrder?.vendor_id) || null,
+    payment_details: {
+      payment_method_accounts_id:
+        coalesceObjectId(purchaseOrder?.payment_method_accounts_id) || null,
+      lines_subtotal: Number(purchaseOrder?.lines_subtotal) || 0,
+      discount: Number(purchaseOrder?.discount) || 0,
+      shipment: Number(purchaseOrder?.shipment) || 0,
+      total_amount: totalAmount,
+      amount_paid: amountPaid,
+      remaining_amount:
+        Math.round(Math.max(0, totalAmount - amountPaid) * 100) / 100,
+      transaction_number: purchaseOrder?.transaction_number || null,
+    },
+    product_count: products.length,
+    products,
+  };
+}
+
+async function logPurchaseOrderUpdated(req, before, after) {
+  try {
+    const purchaseOrder = after?.purchase_order_fields || {};
+    await createApplicationLog(
+      req,
+      {
+        action: "Purchase order updated",
+        url:
+          req.originalUrl ||
+          req.path ||
+          "/api/purchase_order/purchase_order_update",
+        tags: ["purchase_order", "update", "before_after", "products"],
+        description: {
+          purchase_order_id: purchaseOrder._id || req.params?.id || null,
+          purchase_order_no: purchaseOrder.purchase_order_no || null,
+          before,
+          after,
+        },
+        reference_id: purchaseOrder._id || req.params?.id,
+        reference_type: "purchase_order",
+        company_id: purchaseOrder.company_id || req.user?.company_id,
+      },
+      { silent: true },
+    );
+  } catch (error) {
+    // An audit failure must not turn an already-committed update into a 500.
+    console.error("[purchase_order] update success log failed:", error.message);
+  }
 }
 
 function sessionOpts(sess) {
@@ -2173,6 +2385,12 @@ async function purchaseOrderCreate(req, res) {
 
     const createdPurchaseOrderId = purchaseOrderCreateResult.data._id;
 
+    await logPurchaseOrderCreated(
+      req,
+      purchaseOrderCreateResult.data,
+      lineItemsFromClient,
+    );
+
     if (lineItemsFromClient.length === 0) {
       const stepTimingsHeaderOnly = poStepTimer.log();
       return res.status(201).json({
@@ -2278,6 +2496,33 @@ async function purchase_order_update(req, res) {
   resolvePoPaymentMethodAccount(req.body, req.user);
 
   const recordId = String(req.params?.id || "").trim();
+  let beforeUpdateSnapshot = null;
+  if (recordId && mongoose.Types.ObjectId.isValid(recordId)) {
+    const companyId = coalesceObjectId(req.user?.company_id);
+    const beforePurchaseOrder = await PurchaseOrder.findOne({
+      _id: recordId,
+      ...(companyId ? { company_id: companyId } : {}),
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (beforePurchaseOrder) {
+      const beforeItems = await PurchaseOrderItem.find({
+        purchase_order_id: recordId,
+        ...(companyId ? { company_id: companyId } : {}),
+        status: "active",
+        deletedAt: null,
+      })
+        .populate("product_id", "product_name product_code")
+        .sort({ createdAt: 1 })
+        .lean();
+      beforeUpdateSnapshot = purchaseOrderUpdateAuditSnapshot(
+        beforePurchaseOrder,
+        beforeItems,
+      );
+    }
+  }
+
   if (lines.length > 0) {
     // step 1 — same parsed lines as insertMany; no post-line `syncHeaderTotalsFromLineItems`
     req.body.lines_subtotal = purchaseOrderLinesSubtotalSum(lines);
@@ -2646,6 +2891,16 @@ async function purchase_order_update(req, res) {
     (sumSubtotals, lineItemDoc) =>
       sumSubtotals + (Number(lineItemDoc.subtotal) || 0),
     0,
+  );
+
+  const afterUpdateSnapshot = purchaseOrderUpdateAuditSnapshot(
+    poFresh || response.data,
+    items,
+  );
+  await logPurchaseOrderUpdated(
+    req,
+    beforeUpdateSnapshot,
+    afterUpdateSnapshot,
   );
 
   return res.status(200).json({

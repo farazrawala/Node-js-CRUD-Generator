@@ -7,6 +7,7 @@ API
 assets
 attribute
 authenticated
+before_after
 bigcommerce
 booking_failed
 brands
@@ -62,6 +63,7 @@ payment_receipt
 post
 process
 product
+products
 public
 purchase
 purchase_order

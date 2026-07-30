@@ -4,7 +4,9 @@ const { registerLogTags } = require("../utils/logTagsRegistry");
 /** Hard caps — keep documents bounded for replication and admin list views. */
 const MAX_ACTION_LEN = 500;
 const MAX_URL_LEN = 2000;
-const MAX_DESCRIPTION_LEN = 8000;
+// Before/after audit snapshots (for example a PO with many line items) must fit
+// in one row while remaining safely below MongoDB's 16 MB document limit.
+const MAX_DESCRIPTION_LEN = 262144;
 const MAX_REFERENCE_TYPE_LEN = 64;
 
 /** Case-normalized key names (alphanumeric only) we never persist verbatim. */
