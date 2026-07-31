@@ -775,6 +775,9 @@ const BIG_COMMERCE_POS_PRODUCT_SELECT = [
   "barcode",
   "product_price",
   "wholesale_price",
+  "show_on_bigcommerce",
+  "bigcommerce_price",
+  "bigcommerce_hold_qty",
   "product_description",
   "product_image",
   "product_image_thumbnail_url",
@@ -1022,6 +1025,7 @@ async function getBigCommerceProductsActivePos(req, res) {
     const filter = {
       company_id:
         companyIdValues.length === 1 ? companyIdValues[0] : { $in: companyIdValues },
+      show_on_bigcommerce: true,
       deletedAt: null,
     };
 

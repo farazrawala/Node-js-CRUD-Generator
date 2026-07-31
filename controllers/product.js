@@ -8,6 +8,7 @@ const {
   parseSearchFieldsFromQuery,
   coalesceObjectId,
   activeNotDeletedCriteria,
+  buildPopulateFromQuery,
 } = require("../utils/modelHelper");
 const Product = require("../models/product");
 const OrderItem = require("../models/order_item");
@@ -2473,6 +2474,61 @@ async function getAllActiveProductsPOS(req, res) {
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
 
+  const warehouseInventoryPopulate = {
+    path: "warehouse_inventory",
+    match: warehouseInventoryMatch,
+    select: "warehouse_id quantity status company_id",
+    populate: {
+      path: "warehouse_id",
+      select: "name code",
+    },
+  };
+
+  // Source-product inventory belongs to the fetch-from company, not the tenant.
+  const fetchFromWarehouseInventoryPopulate = {
+    path: "warehouse_inventory",
+    match: {
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    },
+    select: "warehouse_id quantity status company_id",
+    populate: {
+      path: "warehouse_id",
+      select: "name code",
+    },
+  };
+
+  const populate = [
+    {
+      path: "parent_product_id",
+      select: PARENT_PRODUCT_LIST_SELECT,
+    },
+    warehouseInventoryPopulate,
+  ];
+  // Honor ?populate=fetch_from_company_id,fetch_from_product_id (and other refs)
+  // without dropping the POS defaults above.
+  const queryPopulate = buildPopulateFromQuery(req.query || {}, "product");
+  for (const entry of queryPopulate) {
+    const path = typeof entry === "string" ? entry : entry?.path;
+    if (!path) continue;
+    if (
+      populate.some(
+        (existing) =>
+          (typeof existing === "string" ? existing : existing?.path) === path,
+      )
+    ) {
+      continue;
+    }
+    if (path === "fetch_from_product_id") {
+      populate.push({
+        path: "fetch_from_product_id",
+        populate: fetchFromWarehouseInventoryPopulate,
+      });
+      continue;
+    }
+    populate.push(entry);
+  }
+
   const response = await handleGenericGetAll(req, "product", {
     filter,
     excludeFields: [],
@@ -2481,21 +2537,7 @@ async function getAllActiveProductsPOS(req, res) {
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
     search: req.query.search,
     searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
-    populate: [
-      {
-        path: "parent_product_id",
-        select: PARENT_PRODUCT_LIST_SELECT,
-      },
-      {
-        path: "warehouse_inventory",
-        match: warehouseInventoryMatch,
-        select: "warehouse_id quantity status company_id",
-        populate: {
-          path: "warehouse_id",
-          select: "name code",
-        },
-      },
-    ],
+    populate,
   });
   return res.status(response.status).json(response);
 }

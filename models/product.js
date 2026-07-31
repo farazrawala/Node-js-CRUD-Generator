@@ -113,16 +113,7 @@ const modelSchema = new mongoose.Schema(
     },
 
     ///// BigCommerce Settings /////
-    fetch_from_product_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "product",
-      field_name: "Fetch From Product",
-    },
-    fetch_from_company_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "company",
-      field_name: "Fetch From Company",
-    },
+
     ///// BigCommerce Settings /////
 
     company_id: {
@@ -187,6 +178,23 @@ const modelSchema = new mongoose.Schema(
     },
 
     // BigCommerce Settings //
+
+    fetch_from_product_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "product",
+      field_name: "Fetch From Product",
+    },
+    fetch_from_company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      field_name: "Fetch From Company",
+    },
+    bigcommerce_sync_status: {
+      type: Boolean,
+      field_name: "BigCommerce Sync Status",
+      default: false,
+    },
+
     show_on_bigcommerce: {
       type: Boolean,
       field_name: "Show On BigCommerce",
