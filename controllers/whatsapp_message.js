@@ -6,7 +6,7 @@ const {
   activeNotDeletedCriteria,
   handleGenericCreate,
 } = require("../utils/modelHelper");
-const { evaluateCanSendUnknownWhatsapp } = require("./chat");
+const { evaluateCanSendUnknownWhatsapp, phoneMatchVariants } = require("./chat");
 
 const MAX_FETCH_ATTEMPTS = 25;
 
@@ -305,7 +305,8 @@ async function markWhatsappMessageSent(req, res) {
 /**
  * GET|PATCH /api/whatsapp_message/mark-not-available/:id
  * Number is not on WhatsApp → mark all pending queue rows for that number
- * (whatsapp_message + chat) as not_available.
+ * (whatsapp_message + chat), including format variants
+ * (e.g. 16558112317 and 9216558112317).
  */
 async function markWhatsappMessageNotAvailable(req, res) {
   try {
@@ -337,7 +338,8 @@ async function markWhatsappMessageNotAvailable(req, res) {
     }
 
     const number = String(source.number || "").trim();
-    if (!number) {
+    const variants = phoneMatchVariants(number);
+    if (!variants.length) {
       return res.status(400).json({
         success: false,
         status: 400,
@@ -352,7 +354,7 @@ async function markWhatsappMessageNotAvailable(req, res) {
 
     const pendingStatuses = ["not_started", "inprocess"];
     const wmFilter = {
-      number,
+      number: { $in: variants },
       status: { $in: pendingStatuses },
       $and: [activeNotDeletedCriteria()],
     };
@@ -366,9 +368,16 @@ async function markWhatsappMessageNotAvailable(req, res) {
     const wmResult = await WhatsappMessage.updateMany(wmFilter, wmUpdate);
 
     const chatFilter = {
-      to_user_id: number,
       status: { $in: pendingStatuses },
-      $and: [activeNotDeletedCriteria()],
+      $and: [
+        activeNotDeletedCriteria(),
+        {
+          $or: [
+            { to_user_id: { $in: variants } },
+            { from_user_id: { $in: variants } },
+          ],
+        },
+      ],
     };
     if (scopeCompanyId) {
       chatFilter.company_id = scopeCompanyId;
@@ -383,7 +392,7 @@ async function markWhatsappMessageNotAvailable(req, res) {
     const chatResult = await Chat.updateMany(chatFilter, chatUpdate);
 
     const updatedMessages = await WhatsappMessage.find({
-      number,
+      number: { $in: variants },
       status: "not_available",
       ...(scopeCompanyId ? { company_id: scopeCompanyId } : {}),
       $and: [activeNotDeletedCriteria()],
@@ -399,6 +408,7 @@ async function markWhatsappMessageNotAvailable(req, res) {
         "All pending messages for this number marked as not available",
       data: {
         number,
+        number_variants: variants,
         company_id: scopeCompanyId,
         whatsapp_messages_updated: wmResult.modifiedCount ?? 0,
         chats_updated: chatResult.modifiedCount ?? 0,

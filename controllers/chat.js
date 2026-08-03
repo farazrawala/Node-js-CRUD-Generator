@@ -419,14 +419,142 @@ async function markChatSent(req, res) {
 
 /**
  * GET /api/chat/mark-not-available/:id?company_id=...
+ * Number not on WhatsApp → mark all pending chat + whatsapp_message rows
+ * for every format variant of that phone.
  */
 async function markChatNotAvailable(req, res) {
-  return updateChatStatus(
-    req,
-    res,
-    "not_available",
-    "Chat message marked as not available",
-  );
+  try {
+    const rawId =
+      req.params?.id ||
+      req.query?.id ||
+      req.body?.id ||
+      req.query?.chat_id ||
+      req.body?.chat_id ||
+      null;
+
+    const messageIdStr = rawId != null ? String(rawId).trim() : "";
+
+    if (
+      !messageIdStr ||
+      messageIdStr === ":id" ||
+      messageIdStr === "undefined" ||
+      messageIdStr === "null"
+    ) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message:
+          "Chat id is required. Use the chat `_id` from fetch-random in the URL path.",
+        received_id: rawId ?? null,
+      });
+    }
+
+    const mongoose = require("mongoose");
+    const orClauses = [{ message_id: messageIdStr }];
+
+    if (
+      mongoose.Types.ObjectId.isValid(messageIdStr) &&
+      messageIdStr.length === 24
+    ) {
+      const oid = new mongoose.Types.ObjectId(messageIdStr);
+      orClauses.push({ _id: oid }, { whatsapp_message_id: oid });
+    }
+
+    const findFilter = {
+      $and: [activeNotDeletedCriteria(), { $or: orClauses }],
+    };
+
+    const source = await Chat.findOne(findFilter).lean();
+    if (!source) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Chat message not found",
+        received_id: messageIdStr,
+        hint: "Pass the chat `_id` from GET /api/chat/fetch-random (data._id).",
+      });
+    }
+
+    const number =
+      String(source.to_user_id || "").trim() ||
+      String(source.from_user_id || "").trim();
+    const variants = phoneMatchVariants(number);
+    if (!variants.length) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "Chat has no phone number to mark",
+      });
+    }
+
+    const scopeCompanyId = coalesceObjectId(
+      source.company_id ||
+        req.query?.company_id ||
+        req.body?.company_id ||
+        req.user?.company_id,
+    );
+    const updatedBy = req.user?._id
+      ? coalesceObjectId(req.user._id)
+      : undefined;
+    const pendingStatuses = ["not_started", "inprocess"];
+
+    const chatFilter = {
+      status: { $in: pendingStatuses },
+      $and: [
+        activeNotDeletedCriteria(),
+        {
+          $or: [
+            { to_user_id: { $in: variants } },
+            { from_user_id: { $in: variants } },
+          ],
+        },
+      ],
+    };
+    if (scopeCompanyId) chatFilter.company_id = scopeCompanyId;
+
+    const chatUpdate = {
+      status: "not_available",
+      sending_status: "not_available",
+    };
+    if (updatedBy) chatUpdate.updated_by = updatedBy;
+
+    const chatResult = await Chat.updateMany(chatFilter, chatUpdate);
+
+    const WhatsappMessage = require("../models/whatsapp_message");
+    const wmFilter = {
+      number: { $in: variants },
+      status: { $in: pendingStatuses },
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (scopeCompanyId) wmFilter.company_id = scopeCompanyId;
+
+    const wmUpdate = { status: "not_available" };
+    if (updatedBy) wmUpdate.updated_by = updatedBy;
+
+    const wmResult = await WhatsappMessage.updateMany(wmFilter, wmUpdate);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message:
+        "All pending messages for this number marked as not available",
+      data: {
+        number,
+        number_variants: variants,
+        company_id: scopeCompanyId,
+        chats_updated: chatResult.modifiedCount ?? 0,
+        whatsapp_messages_updated: wmResult.modifiedCount ?? 0,
+        source_chat_id: source._id,
+      },
+    });
+  } catch (error) {
+    console.error("❌ markChatNotAvailable:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to mark chat as not available",
+    });
+  }
 }
 
 function normalizePkWhatsappDigits(value) {
@@ -441,13 +569,29 @@ function normalizePkWhatsappDigits(value) {
 }
 
 function phoneMatchVariants(phone) {
+  const raw = String(phone || "").trim();
   const digits = normalizePkWhatsappDigits(phone);
   if (!digits) return [];
-  const variants = new Set([digits, String(phone || "").trim()]);
+  const variants = new Set([digits, raw]);
+
+  // PK local forms: 923XXXXXXXXX ↔ 03XXXXXXXXX ↔ 3XXXXXXXXX
   if (digits.startsWith("92") && digits.length >= 12) {
     variants.add(`0${digits.slice(2)}`);
     variants.add(digits.slice(2));
   }
+
+  // Mistaken "92" prefix on an already-international number
+  // e.g. 16558112317 ↔ 9216558112317
+  if (!digits.startsWith("92")) {
+    variants.add(`92${digits}`);
+  } else if (digits.length > 12) {
+    const without92 = digits.slice(2);
+    variants.add(without92);
+    if (!without92.startsWith("0")) {
+      variants.add(`0${without92}`);
+    }
+  }
+
   return [...variants].filter(Boolean);
 }
 
@@ -760,4 +904,6 @@ module.exports = {
   canSendUnknownWhatsapp,
   evaluateCanSendUnknownWhatsapp,
   resetUnknownWhatsappUsage,
+  phoneMatchVariants,
+  normalizePkWhatsappDigits,
 };
