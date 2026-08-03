@@ -233,7 +233,7 @@ async function fetchRandomWhatsappMessage(req, res) {
 }
 
 /**
- * Shared status update for worker callbacks (sent / not_available).
+ * Shared status update for worker callbacks (sent only — single row).
  */
 async function updateWhatsappMessageStatus(req, res, status, successMessage) {
   try {
@@ -303,16 +303,116 @@ async function markWhatsappMessageSent(req, res) {
 }
 
 /**
- * PATCH /api/whatsapp_message/mark-not-available/:id
- * Marks a whatsapp message as not_available (user not on WhatsApp).
+ * GET|PATCH /api/whatsapp_message/mark-not-available/:id
+ * Number is not on WhatsApp → mark all pending queue rows for that number
+ * (whatsapp_message + chat) as not_available.
  */
 async function markWhatsappMessageNotAvailable(req, res) {
-  return updateWhatsappMessageStatus(
-    req,
-    res,
-    "not_available",
-    "Whatsapp message marked as not available",
-  );
+  try {
+    const messageId = coalesceObjectId(req.params?.id);
+    if (!messageId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "Message id is required",
+      });
+    }
+
+    const companyId = resolveCompanyId(req);
+    const findFilter = {
+      _id: messageId,
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (companyId) {
+      findFilter.company_id = companyId;
+    }
+
+    const source = await WhatsappMessage.findOne(findFilter).lean();
+    if (!source) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Whatsapp message not found",
+      });
+    }
+
+    const number = String(source.number || "").trim();
+    if (!number) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "Whatsapp message has no number",
+      });
+    }
+
+    const scopeCompanyId = coalesceObjectId(source.company_id) || companyId;
+    const updatedBy = req.user?._id
+      ? coalesceObjectId(req.user._id)
+      : undefined;
+
+    const pendingStatuses = ["not_started", "inprocess"];
+    const wmFilter = {
+      number,
+      status: { $in: pendingStatuses },
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (scopeCompanyId) {
+      wmFilter.company_id = scopeCompanyId;
+    }
+
+    const wmUpdate = { status: "not_available" };
+    if (updatedBy) wmUpdate.updated_by = updatedBy;
+
+    const wmResult = await WhatsappMessage.updateMany(wmFilter, wmUpdate);
+
+    const chatFilter = {
+      to_user_id: number,
+      status: { $in: pendingStatuses },
+      $and: [activeNotDeletedCriteria()],
+    };
+    if (scopeCompanyId) {
+      chatFilter.company_id = scopeCompanyId;
+    }
+
+    const chatUpdate = {
+      status: "not_available",
+      sending_status: "not_available",
+    };
+    if (updatedBy) chatUpdate.updated_by = updatedBy;
+
+    const chatResult = await Chat.updateMany(chatFilter, chatUpdate);
+
+    const updatedMessages = await WhatsappMessage.find({
+      number,
+      status: "not_available",
+      ...(scopeCompanyId ? { company_id: scopeCompanyId } : {}),
+      $and: [activeNotDeletedCriteria()],
+    })
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message:
+        "All pending messages for this number marked as not available",
+      data: {
+        number,
+        company_id: scopeCompanyId,
+        whatsapp_messages_updated: wmResult.modifiedCount ?? 0,
+        chats_updated: chatResult.modifiedCount ?? 0,
+        messages: updatedMessages,
+      },
+    });
+  } catch (error) {
+    console.error("❌ markWhatsappMessageNotAvailable:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to mark messages as not available",
+    });
+  }
 }
 
 module.exports = {
