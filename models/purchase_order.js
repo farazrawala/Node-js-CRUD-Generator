@@ -239,6 +239,10 @@ const modelSchema = new mongoose.Schema(
   { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );
 
+// Allow backfilling / editing Created on from admin UI (Mongoose timestamp
+// `createdAt` is immutable by default; `.immutable(false)` is a no-op in Mongoose 8).
+modelSchema.path("createdAt").options.immutable = false;
+
 modelSchema.pre("validate", function (next) {
   this.lines_subtotal = roundMoney2(
     Math.max(0, toMoneyNumber(this.lines_subtotal, 0)),

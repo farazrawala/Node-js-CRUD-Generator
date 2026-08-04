@@ -20,19 +20,31 @@ function companyIdFromReq(req) {
 
 function sendError(res, err) {
   const status = err.httpStatus || err.status || 500;
+  const providerResponse = err.details?.response;
+  const statusMessage =
+    err.details?.statusMessage ||
+    (providerResponse && typeof providerResponse === "object"
+      ? providerResponse.statusMessage || providerResponse.message
+      : null);
+
   // Never leak raw credentials; details are already masked when logged.
   const details = err.details
     ? {
         httpStatus: err.details.httpStatus,
-        response: err.details.response,
+        url: err.details.url || null,
+        statusMessage: statusMessage || null,
+        response: providerResponse,
         errorList: err.details.errorList,
         sentWeights: err.details.sentWeights,
         // omit full request from API response (still in file/DB logs)
       }
     : undefined;
+
+  const errorText = String(err.message || "Courier error");
   return res.status(status).json({
     success: false,
-    error: err.message || "Courier error",
+    error: errorText,
+    message: errorText,
     code: err.code || "COURIER_ERROR",
     details,
     retryable: Boolean(err.retryable),
@@ -144,6 +156,7 @@ async function cancelShipment(req, res) {
 /**
  * GET /courier/label/:orderId
  * Query: printtype, shipperDetails, accounttype (TCS CNPrint)
+ * PostEx: Airway Bill PDF via GET /order/v1/get-invoice?trackingNumbers=...
  */
 async function printLabel(req, res) {
   try {
@@ -187,6 +200,39 @@ async function syncTracking(req, res) {
   }
 }
 
+/**
+ * POST /courier/test/:courierId
+ * Optional body overrides (url, login, password, token, account_no, type)
+ * so the edit form can verify values before saving.
+ * Blank password/token keep the stored secrets.
+ */
+async function testCredentials(req, res) {
+  try {
+    const courierId = req.params.courierId || req.body?.courier_id || null;
+    const result = await CourierService.testCredentials({
+      companyId: companyIdFromReq(req),
+      courierId,
+      overrides: {
+        type: req.body?.type,
+        url: req.body?.url,
+        login: req.body?.login,
+        password: req.body?.password,
+        token: req.body?.token,
+        account_no: req.body?.account_no ?? req.body?.accountNo,
+        provider: req.body?.provider,
+      },
+    });
+
+    return res.status(result.ok ? 200 : 401).json(result);
+  } catch (err) {
+    await logControllerError(req, err.message, {
+      action: "COURIER TEST CREDENTIALS",
+      tags: ["courier", "test", "credentials", "error"],
+    });
+    return sendError(res, err instanceof CourierError ? err : err);
+  }
+}
+
 module.exports = {
   createShipment,
   getTrackingByNumber,
@@ -195,4 +241,5 @@ module.exports = {
   printLabel,
   listProviders,
   syncTracking,
+  testCredentials,
 };

@@ -307,6 +307,48 @@ function normalizePurchaseOrderNumericFields(obj) {
   return out;
 }
 
+/** Optional client `createdAt` / `created_at` for PO backfill (create + update). */
+function resolveOptionalPurchaseOrderCreatedAt(body) {
+  if (!body || typeof body !== "object") return null;
+  const raw = body.createdAt ?? body.created_at;
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (raw instanceof Date) {
+    return Number.isNaN(raw.getTime()) ? null : raw;
+  }
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const t = String(raw).trim();
+  if (!t) return null;
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Persist client-supplied createdAt (Mongoose marks timestamp `createdAt` immutable,
+ * so document updates via findByIdAndUpdate/$set are ignored — use the collection API).
+ * @returns {Promise<object|null>} updated lean doc, or null when nothing to apply
+ */
+async function applyPurchaseOrderCreatedAtOverride(
+  purchaseOrderId,
+  body,
+  mongoSession = null,
+) {
+  const createdAt = resolveOptionalPurchaseOrderCreatedAt(body);
+  if (!createdAt || !purchaseOrderId) return null;
+  const _id =
+    purchaseOrderId instanceof mongoose.Types.ObjectId
+      ? purchaseOrderId
+      : new mongoose.Types.ObjectId(String(purchaseOrderId));
+  const update = { createdAt, updatedAt: new Date() };
+  const opts = mongoSession ? { session: mongoSession } : {};
+  await PurchaseOrder.collection.updateOne({ _id }, { $set: update }, opts);
+  let q = PurchaseOrder.findById(_id);
+  if (mongoSession) q = q.session(mongoSession);
+  return q.exec();
+}
+
 /** Same as order: qs / express-fileupload parseNested turn `product_id[0]` into nested structures. */
 function indexedContainerLength(v) {
   if (v == null) return 0;
@@ -2578,6 +2620,16 @@ async function purchase_order_update(req, res) {
     }
 
     const poId = response.data._id;
+
+    // Explicit createdAt backfill — generic update historically skipped timestamp paths.
+    const createdAtOverride = await applyPurchaseOrderCreatedAtOverride(
+      poId,
+      originalBody,
+      mongoSession,
+    );
+    if (createdAtOverride) {
+      response.data = createdAtOverride;
+    }
 
     if (lines.length > 0) {
       // steps 4–13 — full line replace + inventory

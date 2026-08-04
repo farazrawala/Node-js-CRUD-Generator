@@ -4,7 +4,7 @@
  * @module src/couriers/BaseCourier
  */
 
-const { UNIFIED_STATUSES } = require("./constants");
+const { UNIFIED_STATUSES, isCourierSandbox } = require("./constants");
 const { mapGenericStatus } = require("./statusMap");
 
 class BaseCourier {
@@ -23,9 +23,12 @@ class BaseCourier {
     this._tokenCache = { token: null, expiresAt: 0 };
   }
 
-  /** @returns {boolean} */
+  /**
+   * Sandbox vs production — driven by `.env` `COURIER_SANDBOX` for all couriers.
+   * @returns {boolean}
+   */
   get isSandbox() {
-    return this.config.sandbox !== false;
+    return isCourierSandbox(this.config);
   }
 
   /**

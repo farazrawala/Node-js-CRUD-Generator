@@ -33,6 +33,7 @@ const PROVIDERS = Object.freeze({
   MNP: "M&P",
   CALL_COURIER: "Call Courier",
   TRAX: "Trax",
+  POSTEX: "PostEx",
 });
 
 const PROVIDER_ALIASES = Object.freeze({
@@ -54,6 +55,10 @@ const PROVIDER_ALIASES = Object.freeze({
   "Call Courier": PROVIDERS.CALL_COURIER,
   trax: PROVIDERS.TRAX,
   Trax: PROVIDERS.TRAX,
+  postex: PROVIDERS.POSTEX,
+  PostEx: PROVIDERS.POSTEX,
+  "post-ex": PROVIDERS.POSTEX,
+  "post ex": PROVIDERS.POSTEX,
 });
 
 /**
@@ -71,10 +76,44 @@ function normalizeProviderKey(value) {
   return raw;
 }
 
+/**
+ * Global courier sandbox switch from `.env` (`COURIER_SANDBOX`).
+ * Used by all courier drivers (TCS, Leopard, PostEx, …).
+ *
+ * - `true` / `1` / `yes` / `on` → sandbox endpoints
+ * - `false` / `0` / `no` / `off` → production endpoints
+ * - unset → fall back to per-courier `config.sandbox` (default sandbox)
+ *
+ * @returns {boolean|null} null when env is unset
+ */
+function readCourierSandboxEnv() {
+  const raw = process.env.COURIER_SANDBOX;
+  if (raw == null || String(raw).trim() === "") return null;
+  const v = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return null;
+}
+
+/**
+ * Resolve sandbox mode for a courier config.
+ * `.env` COURIER_SANDBOX wins when set; otherwise uses config.sandbox.
+ * @param {object} [config]
+ * @returns {boolean}
+ */
+function isCourierSandbox(config = {}) {
+  const fromEnv = readCourierSandboxEnv();
+  if (fromEnv != null) return fromEnv;
+  if (config.sandbox === false || config.sandbox === "false") return false;
+  return true;
+}
+
 module.exports = {
   UNIFIED_STATUSES,
   TERMINAL_STATUSES,
   PROVIDERS,
   PROVIDER_ALIASES,
   normalizeProviderKey,
+  readCourierSandboxEnv,
+  isCourierSandbox,
 };

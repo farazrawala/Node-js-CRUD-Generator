@@ -94,6 +94,39 @@ function mapLeopardStatus(event = {}) {
   return mapByRules(key);
 }
 
+/** PostEx transaction / order status strings. */
+const POSTEX_CODE_MAP = Object.freeze({
+  UnBooked: UNIFIED_STATUSES.BOOKED,
+  Booked: UNIFIED_STATUSES.BOOKED,
+  "Pickup Requested": UNIFIED_STATUSES.BOOKED,
+  "At Warehouse": UNIFIED_STATUSES.PICKED,
+  "In Transit": UNIFIED_STATUSES.IN_TRANSIT,
+  Dispatched: UNIFIED_STATUSES.IN_TRANSIT,
+  "Out For Delivery": UNIFIED_STATUSES.OUT_FOR_DELIVERY,
+  Delivered: UNIFIED_STATUSES.DELIVERED,
+  Returned: UNIFIED_STATUSES.RETURNED,
+  "Return To Shipper": UNIFIED_STATUSES.RETURNED,
+  Cancelled: UNIFIED_STATUSES.CANCELLED,
+  Canceled: UNIFIED_STATUSES.CANCELLED,
+});
+
+/**
+ * Map a PostEx tracking / order status to a unified status.
+ * @param {{ status?: string, transactionStatus?: string, orderStatus?: string }} event
+ * @returns {string}
+ */
+function mapPostExStatus(event = {}) {
+  const raw =
+    event.transactionStatus ||
+    event.orderStatus ||
+    event.status ||
+    event.description ||
+    "";
+  const key = String(raw).trim();
+  if (key && POSTEX_CODE_MAP[key]) return POSTEX_CODE_MAP[key];
+  return mapByRules(key);
+}
+
 /**
  * Generic mapper used by future providers until they supply their own.
  * @param {string} providerStatus
@@ -106,8 +139,10 @@ function mapGenericStatus(providerStatus) {
 module.exports = {
   mapTcsStatus,
   mapLeopardStatus,
+  mapPostExStatus,
   mapGenericStatus,
   mapByRules,
   TCS_CODE_MAP,
   LEOPARD_CODE_MAP,
+  POSTEX_CODE_MAP,
 };

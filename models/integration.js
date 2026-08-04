@@ -66,6 +66,25 @@ const modelSchema = new mongoose.Schema(
       field_type: "image",
     },
 
+    smtp_host: {
+      type: String,
+      field_name: "SMTP Host",
+      default: "ssl://smtp.gmail.com",
+    },
+    smtp_port: {
+      type: Number,
+      field_name: "SMTP Port",
+      default: 465,
+    },
+    smtp_username: {
+      type: String,
+      field_name: "SMTP Username",
+    },
+    smtp_password: {
+      type: String,
+      field_name: "SMTP 2FA Password",
+    },
+
     sync_product_name: {
       type: String,
       enum: ["yes", "no"],

@@ -10,6 +10,7 @@ const {
   UNIFIED_STATUSES,
   TERMINAL_STATUSES,
   normalizeProviderKey,
+  readCourierSandboxEnv,
 } = require("../couriers/constants");
 const {
   CourierError,
@@ -56,6 +57,9 @@ function buildPublicCourierTrackingUrl(provider, trackingId) {
   }
   if (key === "trax") {
     return `https://sonic.pk/tracking?tracking_number=${encodeURIComponent(id)}`;
+  }
+  if (key === "postex" || key === "post-ex" || key === "postex.pk") {
+    return `https://postex.pk/tracking?cn=${encodeURIComponent(id)}`;
   }
   return "";
 }
@@ -108,8 +112,13 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     token: token || null,
     base_url: legacy.url,
     sandbox:
-      legacy.sandbox ??
-      /devconnect|staging|sandbox|uat/i.test(String(legacy.url || "")),
+      (() => {
+        const fromEnv = readCourierSandboxEnv();
+        if (fromEnv != null) return fromEnv;
+        if (legacy.sandbox === false || legacy.sandbox === "false") return false;
+        if (legacy.sandbox === true || legacy.sandbox === "true") return true;
+        return /devconnect|staging|sandbox|uat/i.test(String(legacy.url || ""));
+      })(),
     api_key: clientId || settings.api_key || null,
     secret: clientSecret || settings.secret || null,
     account_no: legacy.account_no || settings.account_no || null,
@@ -161,7 +170,9 @@ async function loadProviderConfig(companyId, providerKey, courierId = null) {
             ? "Leopard"
             : String(legacy.type || "").toLowerCase().includes("tcs")
               ? "TCS"
-              : key;
+              : String(legacy.type || "").toLowerCase().includes("postex")
+                ? "PostEx"
+                : key;
         return mapLegacyCourierToConfig(
           legacy,
           normalizeProviderKey(fromType) || key,
@@ -196,6 +207,7 @@ async function loadProviderConfig(companyId, providerKey, courierId = null) {
     const legacyType =
       String(key).toLowerCase().includes("leopard") ? "leopard"
       : String(key).toLowerCase().includes("tcs") ? "tcs"
+      : String(key).toLowerCase().includes("postex") ? "postex"
       : String(key).toLowerCase();
 
     const legacy = await LegacyCourier.findOne({
@@ -295,13 +307,32 @@ async function createShipment(orderId, options = {}) {
     if (!healthy?.ok) {
       // Auth/config failures should surface immediately — do not book or silently queue.
       const msg = healthy?.message || `Courier provider unavailable: ${providerKey}`;
-      if (/credential|unauthor|auth/i.test(msg)) {
+      if (/credential|unauthor|auth|bearer token is missing/i.test(msg)) {
+        // healthCheck often already returns a CourierError message — don't wrap twice
+        if (msg.toLowerCase().startsWith("invalid api credentials")) {
+          throw new CourierError(msg, {
+            code: "INVALID_CREDENTIALS",
+            httpStatus: 401,
+          });
+        }
         throw invalidCredentials(providerKey, msg);
       }
       if (options.async || options.queueOnUnavailable) {
         return enqueueShipmentCreation(order, options, healthy);
       }
-      throw providerUnavailable(providerKey, { message: msg });
+      // Network blips: skip soft health-check and let createShipment report the real API error
+      if (
+        healthy?.retryable ||
+        /fetch failed|timeout|ECONN|ENOTFOUND|network|socket/i.test(msg)
+      ) {
+        courierLogger.apiError({
+          event: "health_check_skipped",
+          provider: providerKey,
+          message: msg,
+        });
+      } else {
+        throw providerUnavailable(providerKey, { message: msg });
+      }
     }
 
     const result = await driver.createShipment(order);
@@ -659,6 +690,139 @@ async function syncOpenShipments(options = {}) {
   return summary;
 }
 
+/**
+ * Lightweight auth / connectivity check for a Courier Integration row.
+ * Optional overrides let the UI test form values before save
+ * (blank password/token keep the stored secrets).
+ *
+ * @param {object} options
+ * @param {string} options.companyId
+ * @param {string} [options.courierId]
+ * @param {object} [options.overrides]
+ * @returns {Promise<{ success: boolean, ok: boolean, message: string, provider: string }>}
+ */
+async function testCredentials(options = {}) {
+  const companyId = options.companyId;
+  const courierId = options.courierId;
+  const overrides =
+    options.overrides && typeof options.overrides === "object"
+      ? options.overrides
+      : {};
+
+  if (!companyId) {
+    throw new CourierError("Company id is required", {
+      code: "COMPANY_NOT_FOUND",
+      httpStatus: 400,
+    });
+  }
+
+  const Company = mongoose.model("company");
+  const company = await Company.findById(companyId).lean();
+  if (!company) {
+    throw new CourierError("Company not found", {
+      code: "COMPANY_NOT_FOUND",
+      httpStatus: 400,
+    });
+  }
+
+  let legacy = null;
+  if (courierId) {
+    try {
+      const LegacyCourier = mongoose.model("courier");
+      legacy = await LegacyCourier.findOne({
+        _id: courierId,
+        company_id: companyId,
+        deletedAt: null,
+      }).lean();
+    } catch {
+      legacy = null;
+    }
+    if (!legacy) {
+      throw new CourierError("Courier integration not found", {
+        code: "COURIER_NOT_FOUND",
+        httpStatus: 404,
+      });
+    }
+  }
+
+  const merged = legacy ? { ...legacy } : {};
+  const pickOverride = (key) => {
+    if (!(key in overrides)) return;
+    const value = overrides[key];
+    if (value == null) return;
+    const text = String(value);
+    // Keep stored password/token when the form field is left blank.
+    if ((key === "password" || key === "token") && !text.trim()) return;
+    merged[key] = typeof value === "string" ? text.trim() || text : value;
+  };
+
+  for (const key of [
+    "type",
+    "url",
+    "login",
+    "password",
+    "token",
+    "account_no",
+    "name",
+  ]) {
+    pickOverride(key);
+  }
+
+  if (!merged.url || !String(merged.url).trim()) {
+    throw new CourierError("API URL is required", {
+      code: "VALIDATION_ERROR",
+      httpStatus: 400,
+    });
+  }
+  if (!merged.login || !String(merged.login).trim()) {
+    throw new CourierError("Login is required", {
+      code: "VALIDATION_ERROR",
+      httpStatus: 400,
+    });
+  }
+
+  const typeKey = String(merged.type || overrides.type || "tcs")
+    .trim()
+    .toLowerCase();
+  const providerKey =
+    normalizeProviderKey(typeKey) ||
+    normalizeProviderKey(overrides.provider) ||
+    normalizeProviderKey(merged.type);
+
+  if (!providerKey || !CourierFactory.isRegistered(providerKey)) {
+    throw new CourierError(
+      `Credential check is not available for courier type "${merged.type || typeKey}". Supported: TCS, Leopard, PostEx.`,
+      {
+        code: "UNSUPPORTED_COURIER",
+        httpStatus: 400,
+      },
+    );
+  }
+
+  const config = mapLegacyCourierToConfig(merged, providerKey);
+  const driver = CourierFactory.get(company, config, providerKey);
+
+  let healthy;
+  try {
+    healthy = await driver.healthCheck();
+  } catch (err) {
+    healthy = {
+      ok: false,
+      message: err.message || "Credential check failed",
+    };
+  }
+
+  const ok = Boolean(healthy?.ok);
+  return {
+    success: ok,
+    ok,
+    message:
+      healthy?.message ||
+      (ok ? "Credentials OK" : "Credential check failed"),
+    provider: providerKey,
+  };
+}
+
 module.exports = {
   createShipment,
   getTracking,
@@ -666,6 +830,7 @@ module.exports = {
   cancelShipment,
   printLabel,
   syncOpenShipments,
+  testCredentials,
   loadProviderConfig,
   resolveDriver,
   appendTrackingEvent,

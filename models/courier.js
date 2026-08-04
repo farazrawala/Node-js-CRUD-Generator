@@ -5,7 +5,15 @@ const modelSchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
-      enum: ["tcs", "leopard", "blueex", "mnp", "call_courier", "trax"],
+      enum: [
+        "tcs",
+        "leopard",
+        "blueex",
+        "mnp",
+        "call_courier",
+        "trax",
+        "postex",
+      ],
       default: "tcs",
       field_name: "Courier",
       field_type: "select",

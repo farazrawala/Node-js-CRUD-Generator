@@ -591,11 +591,16 @@ const handleGenericCreateCore = async (
     // so they are skipped by the loop above. Accept them for backfills / historical rows.
     const applyOptionalTimestamp = (tsKey) => {
       if (!Model.schema.paths[tsKey]) return;
-      const raw = req.body[tsKey];
+      const raw =
+        req.body[tsKey] ??
+        (tsKey === "createdAt" ? req.body.created_at : undefined) ??
+        (tsKey === "updatedAt" ? req.body.updated_at : undefined);
       if (raw === undefined || raw === null || raw === "") return;
       if (typeof raw === "string") {
         const t = raw.trim();
-        if (t.length) modelData[tsKey] = t;
+        if (!t.length) return;
+        const parsed = new Date(t);
+        modelData[tsKey] = Number.isNaN(parsed.getTime()) ? t : parsed;
       } else if (raw instanceof Date) {
         modelData[tsKey] = raw;
       } else if (typeof raw === "number" && Number.isFinite(raw)) {
@@ -1532,6 +1537,30 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       });
     }
 
+    // Mongoose `timestamps` add createdAt/updatedAt to `schema.paths` but not `schema.obj`,
+    // so they are skipped by the loop above. Accept them for backfills / historical rows
+    // (same behavior as handleGenericCreate).
+    const applyOptionalTimestamp = (tsKey) => {
+      if (!Model.schema.paths[tsKey]) return;
+      const raw =
+        req.body[tsKey] ??
+        (tsKey === "createdAt" ? req.body.created_at : undefined) ??
+        (tsKey === "updatedAt" ? req.body.updated_at : undefined);
+      if (raw === undefined || raw === null || raw === "") return;
+      if (typeof raw === "string") {
+        const t = raw.trim();
+        if (!t.length) return;
+        const parsed = new Date(t);
+        updateData[tsKey] = Number.isNaN(parsed.getTime()) ? t : parsed;
+      } else if (raw instanceof Date) {
+        updateData[tsKey] = raw;
+      } else if (typeof raw === "number" && Number.isFinite(raw)) {
+        updateData[tsKey] = new Date(raw);
+      }
+    };
+    applyOptionalTimestamp("createdAt");
+    applyOptionalTimestamp("updatedAt");
+
     // Multipart/form-data always sends strings — coerce Boolean schema fields.
     Object.keys(updateData).forEach((key) => {
       const fieldConfig = modelSchema[key];
@@ -1984,12 +2013,38 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       password: updateData.password ? "[HIDDEN]" : undefined,
     });
 
-    // Update the record
-    const updatedRecord = await Model.findByIdAndUpdate(recordId, updateData, {
+    // When backfilling `createdAt`, Mongoose timestamp paths are immutable by default —
+    // findByIdAndUpdate/$set silently drops them. Use the native collection API instead.
+    const updateOptions = {
       new: true,
       runValidators: true,
       ...(session ? { session } : {}),
-    });
+    };
+
+    let updatedRecord;
+    if (updateData.createdAt != null) {
+      if (updateData.updatedAt == null && Model.schema.paths.updatedAt) {
+        updateData.updatedAt = new Date();
+      }
+      const _id =
+        existingRecord._id instanceof mongoose.Types.ObjectId
+          ? existingRecord._id
+          : new mongoose.Types.ObjectId(String(recordId));
+      await Model.collection.updateOne(
+        { _id },
+        { $set: updateData },
+        session ? { session } : {},
+      );
+      let reloadQ = Model.findById(_id);
+      if (session) reloadQ = reloadQ.session(session);
+      updatedRecord = await reloadQ;
+    } else {
+      updatedRecord = await Model.findByIdAndUpdate(
+        recordId,
+        { $set: updateData },
+        updateOptions,
+      );
+    }
 
     if (
       modelName === "product" &&

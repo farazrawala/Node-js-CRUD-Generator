@@ -50,13 +50,21 @@ function alreadyShipped(orderId, trackingNumber) {
 function invalidCredentials(provider, detailMessage) {
   const detail = detailMessage != null ? String(detailMessage).trim() : "";
   const base = `Invalid API credentials for ${provider}`;
-  // Avoid "Invalid API credentials for TCS: Invalid API credentials for TCS"
-  const suffix =
-    detail && detail.toLowerCase() !== base.toLowerCase() ? `: ${detail}` : "";
+  // Avoid "Invalid API credentials for TCS: Invalid API credentials for TCS: …"
+  let cleanDetail = detail;
+  const prefixRe = new RegExp(
+    `^Invalid API credentials for\\s+${String(provider).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:\\s*`,
+    "i",
+  );
+  while (prefixRe.test(cleanDetail)) {
+    cleanDetail = cleanDetail.replace(prefixRe, "").trim();
+  }
+  if (cleanDetail.toLowerCase() === base.toLowerCase()) cleanDetail = "";
+  const suffix = cleanDetail ? `: ${cleanDetail}` : "";
   return new CourierError(`${base}${suffix}`, {
     code: "INVALID_CREDENTIALS",
     httpStatus: 401,
-    details: detail ? { message: detail } : undefined,
+    details: cleanDetail ? { message: cleanDetail } : undefined,
   });
 }
 
@@ -110,11 +118,18 @@ function invalidWeight(weight, details) {
 }
 
 function providerUnavailable(provider, details) {
-  return new CourierError(`Courier provider unavailable: ${provider}`, {
+  const detailMsg =
+    (details && typeof details === "object"
+      ? details.message || details.error || details.reason
+      : null) ||
+    (typeof details === "string" ? details : null) ||
+    "";
+  const suffix = detailMsg ? `: ${detailMsg}` : "";
+  return new CourierError(`Courier provider unavailable: ${provider}${suffix}`, {
     code: "PROVIDER_UNAVAILABLE",
     httpStatus: 503,
     retryable: true,
-    details,
+    details: details && typeof details === "object" ? details : { message: detailMsg || null },
   });
 }
 

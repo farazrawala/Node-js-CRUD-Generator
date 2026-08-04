@@ -21,4 +21,8 @@ router.get("/label/:orderId", CourierController.printLabel);
 router.get("/providers", CourierController.listProviders);
 router.post("/sync", CourierController.syncTracking);
 
+/** Verify saved (or form-override) courier API credentials. */
+router.post("/test/:courierId", CourierController.testCredentials);
+router.post("/test", CourierController.testCredentials);
+
 module.exports = router;

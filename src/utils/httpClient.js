@@ -123,7 +123,21 @@ async function httpRequest(url, options = {}) {
       } else if (err.code && err.httpStatus) {
         lastError = err;
       } else {
-        lastError = fromProviderMessage(err.message, { provider });
+        const cause =
+          err?.cause?.code ||
+          err?.cause?.message ||
+          err?.code ||
+          "";
+        const msg = cause
+          ? `${err.message || "Network error"} (${cause})`
+          : err.message || "Network error";
+        lastError = fromProviderMessage(msg, {
+          provider,
+          retryable: /fetch failed|ECONN|ENOTFOUND|ETIMEDOUT|network|socket/i.test(
+            `${err.message || ""} ${cause}`,
+          ),
+          httpStatus: 503,
+        });
       }
 
       if (attempt < maxAttempts && (lastError.retryable || err.name === "AbortError")) {

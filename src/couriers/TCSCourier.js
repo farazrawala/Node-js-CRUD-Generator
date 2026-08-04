@@ -217,22 +217,45 @@ class TCSCourier extends BaseCourier {
   }
 
   /**
+   * OAuth client credentials for bearer token.
+   * Prefer dedicated Client ID / Client Secret; fall back to ID / Password
+   * when those fields were used for OAuth on the courier form.
+   * @returns {{ clientId: string, clientSecret: string }}
+   */
+  resolveOAuthClientCredentials() {
+    const clientId = String(
+      this.config.settings?.clientId ||
+        this.config.settings?.client_id ||
+        this.config.api_key ||
+        this.config.client_id ||
+        this.config.login ||
+        this.config.username ||
+        "",
+    ).trim();
+    const clientSecret = String(
+      this.config.settings?.clientSecret ||
+        this.config.settings?.client_secret ||
+        this.config.secret ||
+        this.config.client_secret ||
+        this.config.password ||
+        "",
+    ).trim();
+    return { clientId, clientSecret };
+  }
+
+  /**
    * Fetch a fresh OAuth bearer using clientId / clientSecret.
    * @returns {Promise<{ token: string, expiresAt: number }>}
    */
   async fetchBearerTokenFromCredentials() {
     const now = Date.now();
-    const clientId =
-      this.config.settings?.clientId ||
-      this.config.settings?.client_id ||
-      this.config.api_key;
-    const clientSecret =
-      this.config.settings?.clientSecret ||
-      this.config.settings?.client_secret ||
-      this.config.secret;
+    const { clientId, clientSecret } = this.resolveOAuthClientCredentials();
 
     if (!clientId || !clientSecret) {
-      throw invalidCredentials(this.providerName);
+      throw invalidCredentials(
+        this.providerName,
+        "Client ID + Client Secret are required to create a bearer token (or put OAuth creds in ID + Password).",
+      );
     }
 
     const authUrl =
@@ -274,12 +297,24 @@ class TCSCourier extends BaseCourier {
       res.data?.accessToken;
 
     if (!token) {
+      const tcsMsg =
+        Array.isArray(res.data?.errorList) ?
+          res.data.errorList
+            .map((e) => e.errormessage || e.message || "")
+            .filter(Boolean)
+            .join("; ")
+        : res.data?.message || res.data?.result?.message || null;
+
       courierLogger.apiError({
         provider: this.providerName,
         step: "bearer",
         response: res.data,
       });
-      throw invalidCredentials(this.providerName);
+      throw invalidCredentials(
+        this.providerName,
+        tcsMsg ||
+          "TCS did not return an access token. Check Client ID + Client Secret (OAuth), not only eCom ID/Password.",
+      );
     }
 
     const expiresAt =
@@ -331,17 +366,8 @@ class TCSCourier extends BaseCourier {
       return savedToken;
     }
 
-    const hasClientCreds =
-      Boolean(
-        this.config.settings?.clientId ||
-        this.config.settings?.client_id ||
-        this.config.api_key,
-      ) &&
-      Boolean(
-        this.config.settings?.clientSecret ||
-        this.config.settings?.client_secret ||
-        this.config.secret,
-      );
+    const { clientId, clientSecret } = this.resolveOAuthClientCredentials();
+    const hasClientCreds = Boolean(clientId && clientSecret);
 
     // Missing, expired, unknown-expiry, or forced → refresh when client credentials exist.
     if (
@@ -370,7 +396,7 @@ class TCSCourier extends BaseCourier {
 
     throw invalidCredentials(
       this.providerName,
-      "Bearer Token is missing. Paste Token on Courier Integration, or set Client ID + Client Secret so the token can refresh automatically.",
+      "Bearer Token is missing. Set Client ID + Client Secret on Courier Integration (or ID + Password) so the token can be created automatically, or paste Token.",
     );
   }
 
@@ -500,6 +526,74 @@ class TCSCourier extends BaseCourier {
   }
 
   /**
+   * TCS account number (tcsaccount). Sandbox falls back to a known test account
+   * when the courier row left Account No blank.
+   * @returns {string}
+   */
+  resolveAccountNo() {
+    let accountNo = String(
+      this.config.account_no ||
+        this.config.settings?.tcsaccount ||
+        this.config.settings?.account_no ||
+        "",
+    ).trim();
+
+    if (!accountNo && this.isSandbox) {
+      accountNo = String(
+        this.config.settings?.sandbox_account_no ||
+          process.env.TCS_SANDBOX_ACCOUNT_NO ||
+          "04011K1",
+      ).trim();
+      this.config.account_no = accountNo;
+      this.config.settings = {
+        ...(this.config.settings && typeof this.config.settings === "object"
+          ? this.config.settings
+          : {}),
+        tcsaccount: accountNo,
+        account_no: accountNo,
+      };
+    }
+
+    return accountNo;
+  }
+
+  /**
+   * Persist resolved account / cost center onto the courier integration row.
+   * @param {{ accountNo?: string, costCenter?: string }} fields
+   */
+  async persistCourierBookingDefaults(fields = {}) {
+    const accountNo = fields.accountNo != null ? String(fields.accountNo).trim() : "";
+    const costCenter =
+      fields.costCenter != null ? String(fields.costCenter).trim() : "";
+    if (!accountNo && !costCenter) return;
+
+    try {
+      const mongoose = require("mongoose");
+      const legacyId = this.config._legacy_id;
+      if (legacyId) {
+        const $set = {};
+        if (accountNo) {
+          $set.account_no = accountNo;
+          $set["settings.tcsaccount"] = accountNo;
+          $set["settings.account_no"] = accountNo;
+        }
+        if (costCenter) {
+          $set.cost_center = costCenter;
+          $set["settings.costcentercode"] = costCenter;
+          $set["settings.cost_center"] = costCenter;
+        }
+        await mongoose.model("courier").updateOne({ _id: legacyId }, { $set });
+      }
+    } catch (err) {
+      courierLogger.apiError({
+        provider: this.providerName,
+        step: "persist_booking_defaults",
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  /**
    * Resolve a valid TCS cost center code.
    * Uses courier config first; otherwise inquiries TCS; optionally creates one for sandbox.
    * @param {string} accessToken
@@ -509,7 +603,7 @@ class TCSCourier extends BaseCourier {
    */
   async resolveCostCenterCode(accessToken, accountNo, order = {}) {
     const settings = this.config.settings || {};
-    const configured = String(
+    let configured = String(
       settings.costcentercode ||
         this.config.pickup_location ||
         settings.cost_center ||
@@ -517,8 +611,27 @@ class TCSCourier extends BaseCourier {
         "",
     ).trim();
 
+    if (!configured && this.isSandbox) {
+      configured = String(
+        settings.sandbox_cost_center ||
+          process.env.TCS_SANDBOX_COST_CENTER ||
+          "Test-01",
+      ).trim();
+    }
+
     if (configured && !/^default$/i.test(configured)) {
       return configured.slice(0, 20);
+    }
+
+    if (!accountNo) {
+      throw fromProviderMessage(
+        "TCS Account No is required. Set Account No on the courier integration (sandbox default is 04011K1).",
+        {
+          provider: this.providerName,
+          code: "CONFIG_MISSING",
+          httpStatus: 400,
+        },
+      );
     }
 
     const inquired = await this.inquireCostCenters(accessToken, accountNo);
@@ -878,20 +991,28 @@ class TCSCourier extends BaseCourier {
 
   async createShipment(order) {
     const accessToken = await this.getAccessToken();
-    const headers = await this.authHeaders();
-    const accountNo = String(
-      this.config.account_no ||
-        this.config.settings?.tcsaccount ||
-        this.config.settings?.account_no ||
-        "",
-    ).trim();
+    const accountNo = this.resolveAccountNo();
+    if (!accountNo) {
+      throw fromProviderMessage(
+        "TCS Account No is required. Set Account No on the courier integration.",
+        {
+          provider: this.providerName,
+          code: "CONFIG_MISSING",
+          httpStatus: 400,
+        },
+      );
+    }
+
     const costCenter = await this.resolveCostCenterCode(
       accessToken,
       accountNo,
       order,
     );
+    await this.persistCourierBookingDefaults({ accountNo, costCenter });
+
     const payload = this.buildBookingPayload(order, accessToken, costCenter);
     const url = `${this.baseUrl}/ecom/api/booking/create`;
+    const headers = await this.authHeaders();
 
     courierLogger.shipmentRequest({
       provider: this.providerName,
@@ -1350,7 +1471,13 @@ class TCSCourier extends BaseCourier {
       await this.getAccessToken();
       return { ok: true, message: "TCS auth OK" };
     } catch (err) {
-      return { ok: false, message: err.message };
+      const cause = err?.cause?.message || err?.cause?.code || "";
+      const msg = [err.message, cause].filter(Boolean).join(" — ");
+      return {
+        ok: false,
+        message: msg || "TCS health check failed",
+        retryable: /fetch failed|timeout|ECONN|ENOTFOUND|network/i.test(msg),
+      };
     }
   }
 
