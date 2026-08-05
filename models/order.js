@@ -67,7 +67,67 @@ const ORDER_STATUS_VALUES = [
   "refunded",
   "failed",
   "processing",
+  "return",
 ];
+
+/**
+ * Stock effect by order_status (warehouse_inventory + inventory_movements).
+ * Transition only when effect changes: IN→OUT deducts, OUT→IN restores, same→same no-op.
+ */
+const ORDER_STATUS_STOCK = Object.freeze({
+  out: Object.freeze([
+    "placed",
+    "processing",
+    "active",
+    "confirmed",
+    "packed",
+    "shipped",
+    "delivered",
+    "completed",
+  ]),
+  in: Object.freeze([
+    "drafted",
+    "draft",
+    "checkout_draft",
+    "pending",
+    "pending_payment",
+    "on_hold",
+    "cancelled",
+    "refunded",
+    "failed",
+    "return",
+  ]),
+});
+
+const ORDER_STATUS_STOCK_OUT = new Set(ORDER_STATUS_STOCK.out);
+const ORDER_STATUS_STOCK_IN = new Set(ORDER_STATUS_STOCK.in);
+
+/**
+ * @param {string|null|undefined} status
+ * @returns {"out"|"in"|null}
+ */
+function getOrderStatusStockEffect(status) {
+  const s = status == null ? "" : String(status).trim();
+  if (!s) return null;
+  if (ORDER_STATUS_STOCK_OUT.has(s)) return "out";
+  if (ORDER_STATUS_STOCK_IN.has(s)) return "in";
+  return null;
+}
+
+/**
+ * @param {string|null|undefined} fromStatus
+ * @param {string|null|undefined} toStatus
+ * @returns {"out"|"in"|"none"}
+ */
+function getOrderStatusStockAction(fromStatus, toStatus) {
+  const from = getOrderStatusStockEffect(fromStatus);
+  const to = getOrderStatusStockEffect(toStatus);
+  if (!to) return "none";
+  // First commit (create / unknown → OUT): treat missing/unknown from as IN
+  const fromEffect = from || "in";
+  if (fromEffect === to) return "none";
+  return to;
+}
 
 /**
  * Website / store order statuses retained from Shopify + WooCommerce imports.
@@ -768,6 +828,9 @@ const MODEL = mongoose.model("order", modelSchema);
 MODEL.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
 MODEL.ORDER_WEBSITE_STATUS_VALUES = ORDER_WEBSITE_STATUS_VALUES;
 MODEL.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
+MODEL.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;
+MODEL.getOrderStatusStockEffect = getOrderStatusStockEffect;
+MODEL.getOrderStatusStockAction = getOrderStatusStockAction;
 
 /**
  * Drop legacy global unique index on `order_no` only. Numbering is per-tenant via
@@ -805,3 +868,9 @@ if (mongoose.connection.readyState === 1) {
 }
 
 module.exports = MODEL;
+module.exports.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
+module.exports.ORDER_WEBSITE_STATUS_VALUES = ORDER_WEBSITE_STATUS_VALUES;
+module.exports.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
+module.exports.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;
+module.exports.getOrderStatusStockEffect = getOrderStatusStockEffect;
+module.exports.getOrderStatusStockAction = getOrderStatusStockAction;

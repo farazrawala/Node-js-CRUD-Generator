@@ -93,6 +93,7 @@ const {
 const {
   order_save,
   order_update,
+  order_update_status,
   order_delete,
   getOrderByorderItem,
   getOnlineOrders,
@@ -678,6 +679,8 @@ router.patch("/amount_transfer/update_record/:id", amountTransferUpdate);
 // Order routes
 router.post("/order/order_save", order_save);
 router.patch("/order/order_update/:id", order_update);
+router.patch("/order/update-status/:id", order_update_status);
+router.post("/order/update-status/:id", order_update_status);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/get-online-order-by-order-item", getOnlineOrders);

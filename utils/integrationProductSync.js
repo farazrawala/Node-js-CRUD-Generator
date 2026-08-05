@@ -222,16 +222,21 @@ function hasSyncPayloadFields(payload) {
 /**
  * Build WooCommerce stock fields from a POS on-hand quantity. Returns null when
  * the quantity isn't a finite number (so callers can skip stock entirely).
+ *
+ * WooCommerce REST API validates `stock_quantity` as integer — decimals like
+ * 150.8 fail with "Invalid parameter(s): stock_quantity". Floor so the store
+ * never shows more stock than POS on-hand; negatives become 0 (outofstock).
  */
 function buildWooStockPayloadFields(quantity) {
   const qty = Number(quantity);
   if (!Number.isFinite(qty)) {
     return null;
   }
+  const stockQty = Math.max(0, Math.floor(qty));
   return {
     manage_stock: true,
-    stock_quantity: qty,
-    stock_status: qty > 0 ? "instock" : "outofstock",
+    stock_quantity: stockQty,
+    stock_status: stockQty > 0 ? "instock" : "outofstock",
   };
 }
 

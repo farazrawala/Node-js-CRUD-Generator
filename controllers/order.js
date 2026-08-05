@@ -2296,6 +2296,12 @@ async function order_save(req, res) {
   delete req.body.order_no;
   req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
 
+  // Lifecycle default: placed (stock OUT). Ignore legacy "active" confused with record status.
+  const rawLifecycle = String(req.body.order_status || "").trim();
+  if (!rawLifecycle || rawLifecycle === "active") {
+    req.body.order_status = "placed";
+  }
+
   const transaction_number = generateTransactionNumber();
   resolveOrderPaymentMethodAccount(req.body, req.user);
   req.body.transaction_number = transaction_number;
@@ -5531,6 +5537,326 @@ async function order_delete(req, res) {
   });
 }
 
+/**
+ * Apply warehouse_inventory + inventory_movements for an order_status transition.
+ * Only moves stock when stock-effect changes (IN↔OUT).
+ *
+ * @returns {Promise<{ action: "out"|"in"|"none", stock_updates: object[], previous_status: string, order_status: string }>}
+ */
+async function applyOrderStatusStockTransition({
+  order,
+  toStatus,
+  req,
+  mongoSession = null,
+  logUrl = "/api/order/update-status",
+}) {
+  const previousStatus = String(order?.order_status || "").trim();
+  const nextStatus = String(toStatus || "").trim();
+  const action = Order.getOrderStatusStockAction(previousStatus, nextStatus);
+
+  const orderId = order._id;
+  const orderNo = order.order_no || null;
+  const companyId =
+    coalesceObjectId(order.company_id) || coalesceObjectId(req.user?.company_id);
+  const companyIdOid =
+    companyId && mongoose.Types.ObjectId.isValid(String(companyId)) ?
+      new mongoose.Types.ObjectId(String(companyId))
+    : null;
+
+  if (action === "none") {
+    return {
+      action: "none",
+      stock_updates: [],
+      previous_status: previousStatus,
+      order_status: nextStatus,
+    };
+  }
+
+  const existingOrderItems = await OrderItem.find({
+    order_id: orderId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  })
+    .sort({ createdAt: 1 })
+    .session(mongoSession || null)
+    .lean();
+
+  if (action === "out") {
+    const lines = (existingOrderItems || []).map((item) => ({
+      product_id: item.product_id,
+      qty: item.qty,
+      price: item.price,
+      warehouse_id: item.warehouse_id,
+    }));
+    if (lines.length === 0) {
+      return {
+        action: "out",
+        stock_updates: [],
+        previous_status: previousStatus,
+        order_status: nextStatus,
+      };
+    }
+    const stock_updates = await applyOrderOutboundLines({
+      lines,
+      orderId,
+      orderNo,
+      companyId,
+      companyIdOid,
+      req,
+      mongoSession,
+      logUrl,
+      allowInsufficientStock: allowAddToCartWhenStockInsufficient(
+        req.user?.company_id,
+      ),
+    });
+    return {
+      action: "out",
+      stock_updates,
+      previous_status: previousStatus,
+      order_status: nextStatus,
+    };
+  }
+
+  // action === "in" — restore only if there was prior outbound for this order
+  const oldOutMovements = await InventoryMovements.find({
+    reference_type: "order",
+    reference_id: orderId,
+    movement_type: "out",
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  })
+    .select("product_id warehouse_id quantity")
+    .session(mongoSession || null)
+    .lean();
+
+  if (!oldOutMovements.length) {
+    return {
+      action: "in",
+      stock_updates: [],
+      previous_status: previousStatus,
+      order_status: nextStatus,
+      skipped_reason: "no_prior_outbound_movements",
+    };
+  }
+
+  const restoreResult = await applyOrderDeleteInventoryRestore({
+    oldOutMovements,
+    existingOrderItems,
+    orderId,
+    orderNo,
+    companyId,
+    companyIdOid,
+    req,
+    mongoSession,
+    logUrl,
+  });
+
+  return {
+    action: "in",
+    stock_updates: restoreResult?.productStockUpdates || restoreResult || [],
+    previous_status: previousStatus,
+    order_status: nextStatus,
+  };
+}
+
+/**
+ * PATCH|POST /api/order/update-status/:id
+ * Body: { order_status }, optional { from_status }
+ */
+async function order_update_status(req, res) {
+  const orderId = String(req.params?.id || "").trim();
+  if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid id",
+      details: "id must be a valid order ObjectId",
+      type: "invalid_id",
+    });
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      details: "Authenticated user must have company_id",
+      type: "validation",
+    });
+  }
+
+  const nextStatus = String(
+    req.body?.order_status ?? req.body?.status ?? "",
+  ).trim();
+  if (!nextStatus) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "order_status is required",
+      type: "validation",
+    });
+  }
+  if (!Order.ORDER_STATUS_VALUES.includes(nextStatus)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid order_status",
+      details: `Allowed: ${Order.ORDER_STATUS_VALUES.join(", ")}`,
+      type: "validation",
+    });
+  }
+
+  const existingOrder = await Order.findOne({
+    _id: orderId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  }).lean();
+
+  if (!existingOrder) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `order with id "${orderId}" not found`,
+      type: "not_found",
+    });
+  }
+
+  const fromStatusOpt = String(req.body?.from_status || "").trim();
+  if (
+    fromStatusOpt &&
+    fromStatusOpt !== String(existingOrder.order_status || "").trim()
+  ) {
+    return res.status(409).json({
+      success: false,
+      status: 409,
+      error: "from_status mismatch",
+      details: {
+        expected: existingOrder.order_status,
+        received: fromStatusOpt,
+      },
+      type: "conflict",
+    });
+  }
+
+  if (String(existingOrder.order_status || "").trim() === nextStatus) {
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Order status unchanged",
+      data: {
+        order: existingOrder,
+        previous_status: existingOrder.order_status,
+        stock_action: "none",
+        stock_updates: [],
+      },
+    });
+  }
+
+  let clientSession = null;
+  let txnError = null;
+  let stockResult = null;
+  let updatedOrder = null;
+  const logUrl = req.originalUrl || req.path || "/api/order/update-status";
+
+  const runBody = async (mongoSession) => {
+    stockResult = await applyOrderStatusStockTransition({
+      order: existingOrder,
+      toStatus: nextStatus,
+      req,
+      mongoSession,
+      logUrl,
+    });
+
+    const $set = {
+      order_status: nextStatus,
+    };
+    if (req.user?._id) {
+      $set.updated_by = coalesceObjectId(req.user._id);
+    }
+
+    updatedOrder = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      },
+      { $set },
+      { new: true, runValidators: true, ...orderSessionOpts(mongoSession) },
+    ).lean();
+
+    if (!updatedOrder) {
+      throw new Error("Order not found or already deleted");
+    }
+  };
+
+  try {
+    clientSession = await mongoose.startSession();
+    try {
+      await clientSession.withTransaction(async () => {
+        await runBody(clientSession);
+      });
+    } catch (e) {
+      txnError = e;
+      if (isMongoTransactionUnsupportedError(e)) {
+        console.warn(
+          "[order_update_status] MongoDB transactions unavailable; continuing without session",
+        );
+        stockResult = null;
+        updatedOrder = null;
+        await runBody(null);
+        txnError = null;
+      } else {
+        throw e;
+      }
+    }
+  } catch (error) {
+    console.error("[order_update_status] failed:", error);
+    const clientPayload = error?.clientErrorPayload || error?.clientPayload;
+    if (clientPayload) {
+      return res.status(clientPayload.status || 400).json(clientPayload);
+    }
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to update order status",
+      type: "server_error",
+    });
+  } finally {
+    if (clientSession) {
+      try {
+        await clientSession.endSession();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  if (txnError) {
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: txnError.message || "Failed to update order status",
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Order status updated",
+    data: {
+      order: updatedOrder,
+      previous_status: stockResult?.previous_status ?? existingOrder.order_status,
+      stock_action: stockResult?.action ?? "none",
+      stock_updates: stockResult?.stock_updates ?? [],
+    },
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -5538,7 +5864,9 @@ module.exports = {
   getOrderByOrderNo,
   order_save,
   order_update,
+  order_update_status,
   order_delete,
+  applyOrderStatusStockTransition,
   getOrderByorderItem,
   getOnlineOrders,
   getDeletedOrders,
