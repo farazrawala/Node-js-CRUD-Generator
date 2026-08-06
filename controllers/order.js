@@ -25,7 +25,10 @@ const {
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
-const { insertInventoryMovementRecord } = require("./inventory_movements");
+const {
+  insertInventoryMovementRecord,
+  insertInventoryMovementRecordsBulk,
+} = require("./inventory_movements");
 const { evaluateProductStockAlert } = require("./alerts");
 const {
   normalizePopulatedCompanyForClient,
@@ -1278,7 +1281,9 @@ async function teardownOrderForLineReplace({
 }
 
 /**
- * Per cart line: resolve warehouse, outbound `warehouse_inventory`, insert `inventory_movements` (`out`), stock alert.
+ * Per cart line: resolve warehouse, outbound `warehouse_inventory`, collect `out` movements.
+ * Movements are insertMany'd once; stock alerts run once per distinct product (not per line).
+ * Application logs are skipped on this hot path to keep POS Payment responsive.
  */
 async function applyOrderOutboundLines({
   lines,
@@ -1291,16 +1296,16 @@ async function applyOrderOutboundLines({
   logUrl = "/api/order/order_save",
   allowInsufficientStock = false,
 }) {
-  const inventoryLogContext = salesWarehouseInventoryLogContext(
-    orderId,
-    orderNo,
-  );
+  const inventoryLogContext = {
+    ...salesWarehouseInventoryLogContext(orderId, orderNo),
+    skipLog: true,
+  };
   const productStockUpdates = [];
-
-  console.log("[order oversell] allow_add_to_cart_when_stock_insufficient:", {
-    allowInsufficientStock,
-    raw_product_settings: req?.user?.company_id?.product_settings ?? null,
-  });
+  const movementDocs = [];
+  const productsTouched = new Set();
+  const companyIdForDocs = companyIdOid || companyId;
+  const createdBy = coalesceObjectId(req.user?._id);
+  const referenceName = orderGlDescription("Order", orderNo);
 
   for (const line of lines) {
     const unitCost = Number(line.price);
@@ -1329,7 +1334,7 @@ async function applyOrderOutboundLines({
       ({ allocations, stockChanges } =
         await WarehouseInventory.applySplitWarehouseOutbound({
           productId: productIdStr,
-          companyId: companyIdOid || companyId,
+          companyId: companyIdForDocs,
           qtyNeeded: lineQtyNum,
           preferredWarehouseId:
             (
@@ -1359,64 +1364,64 @@ async function applyOrderOutboundLines({
       productStockUpdates.push(whChange);
     }
 
+    productsTouched.add(productIdStr);
+
     for (const alloc of allocations) {
       const allocQty = Number(alloc.quantity);
       const totalCostMovement = Math.round(allocQty * unitCost * 100) / 100;
-      const bodyBeforeInventoryMovement = req.body;
-      const hadRouteParamId = Object.prototype.hasOwnProperty.call(
-        req.params,
-        "id",
-      );
-      const savedRouteParamId = hadRouteParamId ? req.params.id : undefined;
-
-      req.body = {
-        product_id: productIdStr,
-        warehouse_id: alloc.warehouse_id,
+      movementDocs.push({
+        product_id: new mongoose.Types.ObjectId(productIdStr),
+        warehouse_id: new mongoose.Types.ObjectId(String(alloc.warehouse_id)),
         quantity: allocQty,
         movement_type: "out",
         unit_cost: unitCost,
         total_cost: totalCostMovement,
         reference_type: "order",
         reference_id: orderId,
-        reference_name: orderGlDescription("Order", orderNo),
-        company_id: companyIdOid || companyId,
+        reference_name: referenceName,
+        company_id: companyIdForDocs,
         status: "active",
-      };
-
-      try {
-        await insertInventoryMovementRecord(req, mongoSession);
-      } catch (inventoryMovementErr) {
-        if (inventoryMovementErr.clientPayload) {
-          throwOrderCreateFromGenericFailure(
-            inventoryMovementErr.clientPayload,
-            "Inventory movement for order failed",
-          );
-        }
-        throw inventoryMovementErr;
-      } finally {
-        req.body = bodyBeforeInventoryMovement;
-        if (hadRouteParamId) {
-          req.params.id = savedRouteParamId;
-        } else {
-          delete req.params.id;
-        }
-      }
+        deletedAt: null,
+        ...(createdBy ? { created_by: createdBy } : {}),
+      });
     }
+  }
 
-    const onHandAfterOutbound = await sumWarehouseInventoryQtyForProduct(
-      productIdStr,
-      companyIdOid || companyId,
-      mongoSession,
-    );
-    const alertResult = await evaluateProductStockAlert({
-      req,
-      productId: productIdStr,
-      companyId: companyIdOid || companyId,
-      onHand: onHandAfterOutbound,
-      pathQty: onHandAfterOutbound,
-      session: mongoSession,
-      logUrl,
-    });
+  if (movementDocs.length) {
+    try {
+      await insertInventoryMovementRecordsBulk(movementDocs, mongoSession);
+    } catch (inventoryMovementErr) {
+      if (inventoryMovementErr.clientPayload) {
+        throwOrderCreateFromGenericFailure(
+          inventoryMovementErr.clientPayload,
+          "Inventory movement for order failed",
+        );
+      }
+      throw inventoryMovementErr;
+    }
+  }
+
+  // One alert check per distinct SKU (not per cart line); parallelize independent reads.
+  const alertResults = await Promise.all(
+    [...productsTouched].map(async (productIdStr) => {
+      const onHandAfterOutbound = await sumWarehouseInventoryQtyForProduct(
+        productIdStr,
+        companyIdForDocs,
+        mongoSession,
+      );
+      return evaluateProductStockAlert({
+        req,
+        productId: productIdStr,
+        companyId: companyIdForDocs,
+        onHand: onHandAfterOutbound,
+        pathQty: onHandAfterOutbound,
+        session: mongoSession,
+        logUrl,
+        skipLog: true,
+      });
+    }),
+  );
+  for (const alertResult of alertResults) {
     if (!alertResult.success) {
       throw new Error(
         alertResult.message ||
@@ -2267,7 +2272,7 @@ async function maybeQueueWhatsappOnOrderSave(req, order) {
  * |    2 | In txn            | order                   | insert             | one          | low    | `handleGenericCreate` (model assigns `order_no` when missing) |
  * |    3 | In txn            | transaction             | insert             | many (4)     | medium | `transactionBulkCreate` in `afterCreate` — sales, shipping, discount, payment |
  * |    4 | In txn            | order_item              | insert             | many (L)     | medium | `buildOrderItemDocuments` + `insertMany` |
- * |    5 | In txn            | warehouse_inventory, inventory_movements, logs | read / update / insert | one × L | medium | Per line: resolve warehouse, outbound `warehouse_inventory`, `insertInventoryMovementRecord` (`out`), stock alert |
+ * |    5 | In txn            | warehouse_inventory, inventory_movements | read / update / insertMany | L + 1 bulk | medium | Per line outbound; one movement insertMany; alerts once per distinct SKU |
  * |    6 | In txn            | order                   | update             | one          | low    | `Order.syncHeaderTotalsFromLineItems` |
  * |    7 | Txn wrap          | —                       | —                  | —            | low    | `withTransaction` or standalone retry (`mongoTransactionSupport`) |
  * |    8 | On failure        | logs                    | insert             | one          | low    | `logRollbackFailure` (`ORDER CREATE ROLLBACK`) |
@@ -2339,6 +2344,7 @@ async function order_save(req, res) {
 
     response = await handleGenericCreate(req, "order", {
       ...(mongoSession ? { session: mongoSession } : {}),
+      quiet: true,
       afterCreate: async (record, orderReq, sess) => {
         // step 3 start — transaction insert ×4 (GL)
         const orderTotal = Number(
@@ -2728,8 +2734,8 @@ async function order_save(req, res) {
     insertedItemsPlain,
   );
 
-  // Best-effort WhatsApp queue: never fails the order response
-  await maybeQueueWhatsappOnOrderSave(req, orderFresh || response.data);
+  // Queue WhatsApp without blocking the Payment 201 response.
+  void maybeQueueWhatsappOnOrderSave(req, orderFresh || response.data);
 
   return res.status(201).json({
     success: true,

@@ -514,7 +514,10 @@ const handleGenericCreateCore = async (
     afterCreate = null, // Function to run after creating (third arg: mongoose ClientSession when passed in options)
     errorHandlers = {}, // Custom error handlers
     session = null, // Optional Mongo session (caller-owned); use with session.withTransaction
+    quiet = false, // Skip verbose debug console.log (POS / bulk hot paths)
   } = options;
+
+  const createLog = quiet ? () => {} : (...args) => console.log(...args);
 
   if (!req.body || Object.keys(req.body).length === 0) {
     return {
@@ -536,12 +539,12 @@ const handleGenericCreateCore = async (
     const modelSchema = Model.schema.obj;
 
     // Debug: Log the incoming request data
-    console.log("🔍 handleGenericCreate - Raw req.body:", req.body);
-    console.log(
+    createLog("🔍 handleGenericCreate - Raw req.body:", req.body);
+    createLog(
       "🔍 handleGenericCreate - req.body keys:",
       Object.keys(req.body),
     );
-    console.log(
+    createLog(
       "🔍 handleGenericCreate - modelSchema keys:",
       Object.keys(modelSchema),
     );
@@ -617,18 +620,18 @@ const handleGenericCreateCore = async (
       modelData.updatedAt = modelData.createdAt;
     }
 
-    console.log("🔧 About to start nested array processing...");
+    createLog("🔧 About to start nested array processing...");
 
     // Process nested array fields (e.g., warehouse_inventory[warehouse_id], warehouse_inventory[quantity], warehouse_inventory[0][warehouse_id])
-    console.log("🚀 Starting nested array processing...");
-    console.log("🚀 req.body keys:", Object.keys(req.body));
-    console.log(
+    createLog("🚀 Starting nested array processing...");
+    createLog("🚀 req.body keys:", Object.keys(req.body));
+    createLog(
       "🚀 modelData before nested processing:",
       JSON.stringify(modelData, null, 2),
     );
 
     Object.keys(req.body).forEach((key) => {
-      console.log(`🔍 Checking key: ${key}`);
+      createLog(`🔍 Checking key: ${key}`);
 
       // Handle both indexed and non-indexed arrays
       // Pattern 2: field[index][subfield] (e.g., warehouse_inventory[0][warehouse_id]) - Check this FIRST
@@ -641,7 +644,7 @@ const handleGenericCreateCore = async (
         arrayFieldName = arrayMatch[1];
         index = parseInt(arrayMatch[2]);
         arrayItemField = arrayMatch[3];
-        console.log(
+        createLog(
           `🔍 Pattern 2 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
         );
       } else {
@@ -651,7 +654,7 @@ const handleGenericCreateCore = async (
           arrayFieldName = arrayMatch[1];
           arrayItemField = arrayMatch[2];
           index = 0; // Default to index 0
-          console.log(
+          createLog(
             `🔍 Pattern 1 match: ${key} -> ${arrayFieldName}[${index}].${arrayItemField}`,
           );
         }
@@ -659,12 +662,12 @@ const handleGenericCreateCore = async (
 
       if (arrayMatch) {
         // Check if this is a valid array field in the schema
-        console.log(
+        createLog(
           `🔍 Checking schema for ${arrayFieldName}:`,
           modelSchema[arrayFieldName],
         );
-        console.log(`🔍 Is array:`, Array.isArray(modelSchema[arrayFieldName]));
-        console.log(
+        createLog(`🔍 Is array:`, Array.isArray(modelSchema[arrayFieldName]));
+        createLog(
           `🔍 Is type array:`,
           Array.isArray(modelSchema[arrayFieldName]?.type),
         );
@@ -673,7 +676,7 @@ const handleGenericCreateCore = async (
           modelSchema[arrayFieldName] &&
           Array.isArray(modelSchema[arrayFieldName].type)
         ) {
-          console.log(`🔍 Processing array field: ${arrayFieldName}`);
+          createLog(`🔍 Processing array field: ${arrayFieldName}`);
           if (!modelData[arrayFieldName]) {
             modelData[arrayFieldName] = [];
           }
@@ -687,16 +690,16 @@ const handleGenericCreateCore = async (
 
           // Set the field value
           modelData[arrayFieldName][index][arrayItemField] = value;
-          console.log(
+          createLog(
             `🏭 Processed nested array field: ${key} -> ${arrayFieldName}[${index}].${arrayItemField} = ${value}`,
           );
         } else {
-          console.log(
+          createLog(
             `🔍 Schema field not found or not array: ${arrayFieldName}`,
           );
         }
       } else {
-        console.log(`🔍 No array match for key: ${key}`);
+        createLog(`🔍 No array match for key: ${key}`);
       }
     });
 
@@ -718,7 +721,7 @@ const handleGenericCreateCore = async (
         schemaPath.instance.toLowerCase().startsWith("map");
 
       if (!isMapField) {
-        console.log(
+        createLog(
           `🔍 ${mapFieldName} is not a Map field, skipping map processing`,
         );
         return;
@@ -745,7 +748,7 @@ const handleGenericCreateCore = async (
       }
 
       modelData[mapFieldName][mapKey][mapSubField] = value;
-      console.log(
+      createLog(
         `🗺️ Processed map field: ${mapFieldName}[${mapKey}].${mapSubField} =`,
         value,
       );
@@ -773,7 +776,7 @@ const handleGenericCreateCore = async (
       const isMultiselect = fieldConfig.field_type === "multiselect";
 
       if (isObjectIdArray || isStringArray || isMultiselect) {
-        console.log(`🔍 Processing multiselect array field: ${fieldName}`);
+        createLog(`🔍 Processing multiselect array field: ${fieldName}`);
 
         // FIRST: Check if field already exists in req.body (parsed from indexed format)
         if (
@@ -781,7 +784,7 @@ const handleGenericCreateCore = async (
           (Array.isArray(req.body[fieldName]) ||
             typeof req.body[fieldName] === "object")
         ) {
-          console.log(
+          createLog(
             `🔍 Found ${fieldName} directly in req.body:`,
             req.body[fieldName],
           );
@@ -801,7 +804,7 @@ const handleGenericCreateCore = async (
                 const objValue = Object.values(val)[0];
                 if (objValue) {
                   extractedValues.push(objValue);
-                  console.log(
+                  createLog(
                     `✅ Extracted from object at index ${idx}:`,
                     objValue,
                   );
@@ -878,7 +881,7 @@ const handleGenericCreateCore = async (
           });
 
           modelData[fieldName] = processedValues;
-          console.log(
+          createLog(
             `✅ Processed multiselect field ${fieldName}:`,
             modelData[fieldName],
           );
@@ -951,7 +954,7 @@ const handleGenericCreateCore = async (
               }
             });
           modelData[fieldName] = processedValues;
-          console.log(
+          createLog(
             `✅ Processed indexed multiselect field ${fieldName}:`,
             modelData[fieldName],
           );
@@ -967,11 +970,11 @@ const handleGenericCreateCore = async (
     });
 
     // Debug: Log the final processed data
-    console.log(
+    createLog(
       "🔍 handleGenericCreate - Final modelData:",
       JSON.stringify(modelData, null, 2),
     );
-    console.log(
+    createLog(
       "🔍 handleGenericCreate - modelData keys:",
       Object.keys(modelData),
     );
@@ -987,7 +990,7 @@ const handleGenericCreateCore = async (
     }
 
     // Automatically set company_id if field exists and user has company_id
-    console.log(`🔍 Checking company_id assignment:`, {
+    createLog(`🔍 Checking company_id assignment:`, {
       hasUser: !!req.user,
       hasCompanyId: !!(req.user && req.user.company_id),
       hasSchemaField: !!modelSchema.company_id,
@@ -997,7 +1000,7 @@ const handleGenericCreateCore = async (
 
     if (req.user && req.user.company_id && modelSchema.company_id) {
       modelData.company_id = coalesceObjectId(req.user.company_id);
-      // console.log(`✅ Automatically set company_id to:`, modelData.company_id);
+      // createLog(`✅ Automatically set company_id to:`, modelData.company_id);
     }
 
     // Automatically generate EAN13 barcode if barcode field is empty and exists in schema
@@ -1007,10 +1010,10 @@ const handleGenericCreateCore = async (
     ) {
       const { generateProductBarcode } = require("./barcodeGenerator");
       modelData.barcode = generateProductBarcode();
-      // console.log("🏷️ Generated new EAN13 barcode for API:", modelData.barcode);
+      // createLog("🏷️ Generated new EAN13 barcode for API:", modelData.barcode);
     }
 
-    // console.log(`📝 Preparing data for ${modelName} creation:`, {
+    // createLog(`📝 Preparing data for ${modelName} creation:`, {
     //   receivedFields: Object.keys(req.body),
     //   schemaFields: Object.keys(modelSchema),
     //   modelDataFields: Object.keys(modelData),
@@ -1095,7 +1098,7 @@ const handleGenericCreateCore = async (
       );
     }
 
-    console.log(`✅ Creating ${modelName} with data:`, {
+    createLog(`✅ Creating ${modelName} with data:`, {
       ...modelData,
       password: modelData.password ? "[HIDDEN]" : undefined,
     });

@@ -72,6 +72,8 @@ async function evaluateProductStockAlert({
   logUrl = null,
 
   logTags = [],
+
+  skipLog = false,
 }) {
   const productIdStr = String(productId ?? "").trim();
 
@@ -246,7 +248,7 @@ async function evaluateProductStockAlert({
     }
   }
 
-  if (alertThreshold > 0) {
+  if (alertThreshold > 0 && !skipLog) {
     const nameLabel =
       String(product.product_name || "").trim() || `id ${productIdStr}`;
 

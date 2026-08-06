@@ -86,6 +86,7 @@ async function createTransactionsFromItems(req, items, options = {}) {
     try {
       response = await handleGenericCreate(req, "transaction", {
         ...(session ? { session } : {}),
+        quiet: true,
       });
     } finally {
       req.body = savedBody;

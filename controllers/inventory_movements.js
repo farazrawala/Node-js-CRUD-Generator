@@ -460,9 +460,10 @@ async function logInventoryMovementCreated(
   );
 }
 
-async function insertInventoryMovementRecord(req, session = null) {
+async function insertInventoryMovementRecord(req, session = null, options = {}) {
   const response = await handleGenericCreate(req, "inventory_movements", {
     session,
+    quiet: options.quiet === true,
   });
 
   if (!response.success || !response.data) {
@@ -473,12 +474,31 @@ async function insertInventoryMovementRecord(req, session = null) {
     throw createFailure;
   }
 
-  await logInventoryMovementCreated(req, {
-    movementId: response.data?._id,
-    session,
-  });
+  if (options.skipLog !== true) {
+    await logInventoryMovementCreated(req, {
+      movementId: response.data?._id,
+      session,
+    });
+  }
 
   return { response, consoleLog: [], logWholesale: null };
+}
+
+/**
+ * Bulk insert inventory movement rows (POS/order hot path).
+ * Avoids N× handleGenericCreate + per-row application logs.
+ * @param {object[]} docs - Plain movement documents (schema fields)
+ * @param {import("mongoose").ClientSession | null} [session]
+ * @returns {Promise<object[]>} inserted docs (lean-ish)
+ */
+async function insertInventoryMovementRecordsBulk(docs, session = null) {
+  if (!Array.isArray(docs) || docs.length === 0) return [];
+  const InventoryMovements = require("../models/inventory_movements");
+  const opts = session ? { session, ordered: true } : { ordered: true };
+  const inserted = await InventoryMovements.insertMany(docs, opts);
+  return inserted.map((d) =>
+    typeof d.toObject === "function" ? d.toObject({ flattenMaps: true }) : d,
+  );
 }
 
 /**
@@ -1467,6 +1487,7 @@ module.exports = {
   inventoryMovementsCreate,
   runInventoryMovementTxnBody,
   insertInventoryMovementRecord,
+  insertInventoryMovementRecordsBulk,
   buildActiveMovementLedgerMatch,
   aggregateNetQtyByWarehouse,
   getLedgerNetQtyForWarehouse,

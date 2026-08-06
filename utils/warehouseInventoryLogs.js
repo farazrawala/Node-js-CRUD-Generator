@@ -39,6 +39,8 @@ function normalizeWarehouseInventoryLogContext(input = {}) {
     reference_no,
     product_code: String(input.product_code ?? "").trim(),
     product_name: String(input.product_name ?? "").trim(),
+    // When true, skip createApplicationLog (POS hot path).
+    skipLog: input.skipLog === true,
   };
 }
 
@@ -107,6 +109,7 @@ async function logWarehouseInventoryChange(
   if (!change || !Number.isFinite(Number(change.qty_delta))) return;
 
   const ctx = normalizeWarehouseInventoryLogContext(logContext);
+  if (ctx.skipLog || logContext?.skipLog === true) return;
   const cid = coalesceObjectId(companyId ?? logContext.company_id);
   if (!cid) return;
 
