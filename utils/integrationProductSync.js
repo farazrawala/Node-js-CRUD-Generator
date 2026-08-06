@@ -26,7 +26,8 @@ function isIntegrationSyncEnabled(integration, fieldKey) {
 function resolvePosProductSku(product) {
   return (
     (typeof product?.sku === "string" && product.sku.trim()) ||
-    (typeof product?.product_code === "string" && product.product_code.trim()) ||
+    (typeof product?.product_code === "string" &&
+      product.product_code.trim()) ||
     (product?._id ? String(product._id) : "")
   );
 }
@@ -80,7 +81,11 @@ function resolveSyncProductPrice(product, syncRowOrPrice) {
   return "0";
 }
 
-function buildWooCommerceProductSyncPayload(product, integration, options = {}) {
+function buildWooCommerceProductSyncPayload(
+  product,
+  integration,
+  options = {},
+) {
   const mode = options.mode === "create" ? "create" : "update";
   const payload = {};
 
@@ -216,7 +221,9 @@ function buildShopifyVariantSyncPayload(product, integration, options = {}) {
 }
 
 function hasSyncPayloadFields(payload) {
-  return payload && typeof payload === "object" && Object.keys(payload).length > 0;
+  return (
+    payload && typeof payload === "object" && Object.keys(payload).length > 0
+  );
 }
 
 /**
@@ -280,8 +287,7 @@ function parsePosVariationValues(child, parentSku) {
   if (!label) {
     return [];
   }
-  const parts =
-    label.includes(" - ") ? label.split(" - ") : label.split("-");
+  const parts = label.includes(" - ") ? label.split(" - ") : label.split("-");
   return parts.map((part) => part.trim()).filter(Boolean);
 }
 
@@ -298,7 +304,11 @@ function parsePosVariationValues(child, parentSku) {
  * @param {Array<string|null>} positionNames Resolved attribute name per position
  *   (e.g. ["Size", "Colors"]). Missing entries fall back to "Attribute N".
  */
-function buildWooVariableAttributePlan(children, parentSku, positionNames = []) {
+function buildWooVariableAttributePlan(
+  children,
+  parentSku,
+  positionNames = [],
+) {
   const rows = (Array.isArray(children) ? children : []).map((child) => ({
     child,
     values: parsePosVariationValues(child, parentSku),
@@ -357,12 +367,14 @@ function mapLabelToWooVariationAttributes(label, remoteParentAttributes) {
     return [];
   }
 
-  const attrs = Array.isArray(remoteParentAttributes) ? remoteParentAttributes : [];
+  const attrs =
+    Array.isArray(remoteParentAttributes) ? remoteParentAttributes : [];
   const matched = [];
   const usedParts = new Set();
 
   for (const remoteAttr of attrs) {
-    const options = Array.isArray(remoteAttr?.options) ? remoteAttr.options : [];
+    const options =
+      Array.isArray(remoteAttr?.options) ? remoteAttr.options : [];
     for (const option of options) {
       const optionText = String(option || "").trim();
       if (!optionText) {
