@@ -12,6 +12,7 @@ const Brand = require("../models/brands");
 const Product = require("../models/product");
 const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
+const { recordOrderStatusUpdate } = require("../utils/orderStatusHistory");
 const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
 const Attribute = require("../models/attribute");
@@ -2804,6 +2805,35 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     integrationOrderId,
   });
   if (existing) {
+    if (!existing.customer_id) {
+      const billing = remoteOrder?.billing || {};
+      const shipping = remoteOrder?.shipping || {};
+      const customerName = [billing.first_name, billing.last_name]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      const shippingName = [shipping.first_name, shipping.last_name]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      const backfillCustomerId = await findOrCreatePosCustomerFromBilling({
+        name:
+          customerName ||
+          shippingName ||
+          existing.name ||
+          "",
+        email: billing.email || shipping.email || existing.email || "",
+        phone: billing.phone || shipping.phone || existing.phone || "",
+        companyId,
+        createdBy: process.created_by?._id || process.created_by,
+      });
+      if (backfillCustomerId) {
+        await Order.updateOne(
+          { _id: existing._id },
+          { $set: { customer_id: backfillCustomerId } },
+        );
+      }
+    }
     recordOrderSkip(stats, {
       store: "woocommerce",
       remote_id: remoteId,
@@ -2863,15 +2893,21 @@ async function importWooOrderToPos(remoteOrder, ctx) {
   }
 
   const billing = remoteOrder?.billing || {};
+  const shipping = remoteOrder?.shipping || {};
   const customerName = [billing.first_name, billing.last_name]
     .filter(Boolean)
     .join(" ")
     .trim();
-  const customerEmail = billing.email || "";
-  const customerPhone = billing.phone || "";
+  const shippingName = [shipping.first_name, shipping.last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const resolvedName = customerName || shippingName;
+  const customerEmail = billing.email || shipping.email || "";
+  const customerPhone = billing.phone || shipping.phone || "";
 
   const customerId = await findOrCreatePosCustomerFromBilling({
-    name: customerName,
+    name: resolvedName,
     email: customerEmail,
     phone: customerPhone,
     companyId,
@@ -2882,7 +2918,7 @@ async function importWooOrderToPos(remoteOrder, ctx) {
 
   const orderPayload = {
     name:
-      customerName ||
+      resolvedName ||
       `WooCommerce #${remoteOrder?.number || remoteId}`,
     email: customerEmail,
     phone: customerPhone,
@@ -2917,6 +2953,13 @@ async function importWooOrderToPos(remoteOrder, ctx) {
   }
 
   const order = await Order.create(orderPayload);
+
+  await recordOrderStatusUpdate({
+    orderId: order._id,
+    orderStatus: order.order_status || orderPayload.order_status || "placed",
+    companyId,
+    userId: orderPayload.created_by,
+  });
 
   for (const item of orderItemsPayload) {
     await OrderItem.create({ ...item, order_id: order._id });

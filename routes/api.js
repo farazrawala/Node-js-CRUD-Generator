@@ -94,7 +94,9 @@ const {
   order_save,
   order_update,
   order_update_status,
+  order_update_tags,
   order_delete,
+  order_merge,
   getOrderByorderItem,
   getOnlineOrders,
   getDeletedOrders,
@@ -685,6 +687,9 @@ router.post("/order/order_save", order_save);
 router.patch("/order/order_update/:id", order_update);
 router.patch("/order/update-status/:id", order_update_status);
 router.post("/order/update-status/:id", order_update_status);
+router.patch("/order/update-tags/:id", order_update_tags);
+router.post("/order/update-tags/:id", order_update_tags);
+router.post("/order/order_merge", order_merge);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
 router.get("/order/get-online-order-by-order-item", getOnlineOrders);

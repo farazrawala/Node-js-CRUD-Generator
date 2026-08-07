@@ -37,18 +37,34 @@ function resolvePosCustomerEmail(email, phone) {
   return `customer_${Date.now()}@gmail.com`;
 }
 
+/** User.phone is a digit string (max 13); never store as Number. */
 function phoneToStoredValue(phone) {
-  const digits = digitsOnlyPhone(phone);
-  if (!digits) return undefined;
-  const asNum = Number(digits);
-  return Number.isFinite(asNum) ? asNum : undefined;
+  const digits = digitsOnlyPhone(phone).slice(0, 13);
+  return digits || undefined;
 }
 
-/**
- * Find or create a POS customer user for an imported online order.
- * Match by company + email first, then company + phone (CUSTOMER role).
- * Returns user `_id` or null (order import should continue without customer_id).
- */
+/** Phone variants for match (exact, with/without country code, last 10 digits). */
+function phoneMatchCandidates(phone) {
+  const digits = digitsOnlyPhone(phone);
+  if (!digits) return [];
+  const variants = new Set([digits, digits.slice(0, 13)]);
+  if (digits.startsWith("0") && digits.length > 1) {
+    variants.add(digits.slice(1));
+  }
+  if (digits.startsWith("92") && digits.length > 2) {
+    variants.add(digits.slice(2));
+    variants.add(`0${digits.slice(2)}`);
+  }
+  if (digits.length === 10) {
+    variants.add(`92${digits}`);
+    variants.add(`0${digits}`);
+  }
+  if (digits.length === 11 && digits.startsWith("0")) {
+    variants.add(`92${digits.slice(1)}`);
+  }
+  return [...variants].filter((v) => v && v.length >= 7).slice(0, 12);
+}
+
 /**
  * Map remote store shipping/billing into POS order address fields.
  * Prefers shipping address; falls back to billing.
@@ -98,6 +114,13 @@ function mapRemoteOrderAddressFields(remoteOrder, store) {
   return { address, city, state, zip, country };
 }
 
+/**
+ * Find or create a POS customer for an imported online order.
+ * 1) Match by phone (CUSTOMER) — preferred
+ * 2) Match by email (CUSTOMER)
+ * 3) Create new CUSTOMER
+ * Returns user `_id` or null (order import continues without customer_id).
+ */
 async function findOrCreatePosCustomerFromBilling({
   name,
   email,
@@ -108,27 +131,25 @@ async function findOrCreatePosCustomerFromBilling({
   const company_id = coalesceObjectId(companyId);
   if (!company_id) return null;
 
-  const resolvedEmail = resolvePosCustomerEmail(email, phone);
-  const phoneDigits = digitsOnlyPhone(phone);
-  const phoneValue = phoneToStoredValue(phone);
+  const phoneDigits = phoneToStoredValue(phone);
+  const phoneCandidates = phoneMatchCandidates(phone);
+  let resolvedEmail = resolvePosCustomerEmail(email, phone);
   const displayName =
     String(name || "").trim() ||
     resolvedEmail.split("@")[0] ||
     "Online customer";
   const actor = coalesceObjectId(createdBy);
 
-  let existing = await User.findOne({
-    company_id,
-    email: resolvedEmail,
-    deletedAt: null,
-  })
-    .select("_id")
-    .lean();
-
-  if (!existing && phoneDigits) {
-    const phoneOr = [{ phone: phoneDigits }];
-    if (phoneValue != null) phoneOr.push({ phone: phoneValue });
-    existing = await User.findOne({
+  // 1) Phone first
+  if (phoneCandidates.length) {
+    const last10 = digitsOnlyPhone(phone).slice(-10);
+    const phoneOr = [{ phone: { $in: phoneCandidates } }];
+    if (last10.length >= 7) {
+      phoneOr.push({
+        phone: { $regex: `${escapeRegex(last10)}$` },
+      });
+    }
+    const byPhone = await User.findOne({
       company_id,
       deletedAt: null,
       role: "CUSTOMER",
@@ -136,10 +157,43 @@ async function findOrCreatePosCustomerFromBilling({
     })
       .select("_id")
       .lean();
+    if (byPhone?._id) return byPhone._id;
   }
 
+  // 2) Email
+  let existing = await User.findOne({
+    company_id,
+    email: resolvedEmail,
+    deletedAt: null,
+    role: "CUSTOMER",
+  })
+    .select("_id")
+    .lean();
   if (existing?._id) return existing._id;
 
+  // Email taken by a non-CUSTOMER (e.g. staff) — use a customer-specific address.
+  const emailTaken = await User.findOne({
+    company_id,
+    email: resolvedEmail,
+    deletedAt: null,
+  })
+    .select("_id")
+    .lean();
+  if (emailTaken?._id) {
+    const stamp = phoneDigits || String(Date.now());
+    resolvedEmail = `customer_${stamp}@gmail.com`;
+    existing = await User.findOne({
+      company_id,
+      email: resolvedEmail,
+      deletedAt: null,
+      role: "CUSTOMER",
+    })
+      .select("_id")
+      .lean();
+    if (existing?._id) return existing._id;
+  }
+
+  // 3) Create
   try {
     const payload = {
       name: displayName,
@@ -149,25 +203,61 @@ async function findOrCreatePosCustomerFromBilling({
       company_id,
       status: "active",
     };
-    if (phoneValue != null) payload.phone = phoneValue;
+    if (phoneDigits) payload.phone = phoneDigits;
     if (actor) payload.created_by = actor;
 
     const created = await User.create(payload);
     return created._id;
   } catch (err) {
     if (err?.code === 11000) {
+      // Race: prefer phone match, then email
+      if (phoneCandidates.length) {
+        const byPhone = await User.findOne({
+          company_id,
+          deletedAt: null,
+          role: "CUSTOMER",
+          phone: { $in: phoneCandidates },
+        })
+          .select("_id")
+          .lean();
+        if (byPhone?._id) return byPhone._id;
+      }
       const again = await User.findOne({
         company_id,
         email: resolvedEmail,
         deletedAt: null,
+        role: "CUSTOMER",
       })
         .select("_id")
         .lean();
-      return again?._id || null;
+      if (again?._id) return again._id;
+
+      // Last resort: unique email + create again
+      try {
+        const retryEmail = `customer_${phoneDigits || Date.now()}_${Math.floor(Math.random() * 1e4)}@gmail.com`;
+        const created = await User.create({
+          name: displayName,
+          email: retryEmail,
+          password: POS_DEFAULT_CUSTOMER_PASSWORD,
+          role: ["CUSTOMER"],
+          company_id,
+          status: "active",
+          ...(phoneDigits ? { phone: phoneDigits } : {}),
+          ...(actor ? { created_by: actor } : {}),
+        });
+        return created._id;
+      } catch (retryErr) {
+        console.error(
+          "[fetch_order] Failed to create POS customer (retry):",
+          retryErr?.message || retryErr,
+        );
+        return null;
+      }
     }
     console.error(
       "[fetch_order] Failed to create POS customer:",
       err?.message || err,
+      err?.errors ? JSON.stringify(err.errors) : "",
     );
     return null;
   }

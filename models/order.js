@@ -67,6 +67,22 @@ const ORDER_STATUS_VALUES = [
   "return_received", // Return received
 ];
 
+/** Allowed values for `order.tags`. */
+const ORDER_TAG_VALUES = [
+  "coupon",
+  "order_merged",
+  "last_order_return",
+  "incomplete_address",
+  "not_answering",
+  "stock_awaiting",
+  "customer_cancel",
+  "previous_data",
+  "confirmed_by_email",
+  "confirmed_by_sms",
+  "confirmed_by_whatsapp",
+  "confirmed_by_call",
+];
+
 /**
  * Stock effect by order_status (warehouse_inventory + inventory_movements).
  * Transition only when effect changes: IN→OUT deducts, OUT→IN restores, same→same no-op.
@@ -400,25 +416,14 @@ const modelSchema = new mongoose.Schema(
     },
 
     /**
-     * Sales lifecycle (mixed semantics historically). Prefer `ORDER_STATUS_GROUPS` +
-     * `classifyOrderStatus` for stock and revenue rules instead of ad-hoc string checks.
+     * Sales lifecycle tags (OMS / ops labels). Prefer `ORDER_TAG_VALUES`.
      */
     tags: {
       type: [String],
-      enum: [
-        "coupon",
-        "order_merged",
-        "last_order_return",
-        "incomplete_address",
-        "not_answering",
-        "stock_awaiting",
-        "customer_cancel",
-        "previous_data",
-        "confirmed_by_email",
-        "confirmed_by_sms",
-        "confirmed_by_whatsapp",
-        "confirmed_by_call",
-      ],
+      enum: {
+        values: ORDER_TAG_VALUES,
+        message: "{VALUE} is not a valid order tag",
+      },
       default: [],
     },
     order_status: {
@@ -844,6 +849,7 @@ modelSchema.statics.syncHeaderTotalsFromLineItems = async function (
 const MODEL = mongoose.model("order", modelSchema);
 
 MODEL.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
+MODEL.ORDER_TAG_VALUES = ORDER_TAG_VALUES;
 MODEL.ORDER_WEBSITE_STATUS_VALUES = ORDER_WEBSITE_STATUS_VALUES;
 MODEL.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
 MODEL.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;

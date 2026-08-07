@@ -45,7 +45,13 @@ const LIST_CACHE_QUERY_BLOCKLIST = new Set([
 ]);
 
 /** Never read/write list cache for these modules (`get-all-active` / `get-all`). */
-const LIST_CACHE_BYPASS_MODULES = new Set(["user", "chat", "logs", "process"]);
+const LIST_CACHE_BYPASS_MODULES = new Set([
+  "user",
+  "chat",
+  "logs",
+  "process",
+  "order_status_updates",
+]);
 
 /** List endpoints that share the same invalidation on create/update/delete. */
 const LIST_CACHE_ACTIONS = ["get-all-active", "get-all"];

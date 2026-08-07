@@ -1,7 +1,6 @@
 const mongoose = require("mongoose");
 const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
-const OrderStatusUpdates = require("../models/order_status_updates");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const InventoryMovements = require("../models/inventory_movements");
@@ -26,6 +25,10 @@ const {
 const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
+const {
+  recordOrderStatusUpdate,
+  recordOrderStatusUpdates,
+} = require("../utils/orderStatusHistory");
 const {
   insertInventoryMovementRecord,
   insertInventoryMovementRecordsBulk,
@@ -2579,22 +2582,16 @@ async function order_save(req, res) {
 
     // step 6b — initial order_status_updates history row
     const actorUserId = coalesceObjectId(req.user?._id);
-    await OrderStatusUpdates.create(
-      [
-        {
-          order_id: orderId,
-          order_status:
-            String(
-              response.data.order_status || req.body.order_status || "",
-            ).trim() || "placed",
-          company_id: companyIdForMovement,
-          created_by: actorUserId || undefined,
-          updated_by: actorUserId || undefined,
-          status: "active",
-        },
-      ],
-      lineItemSessionOpts,
-    );
+    await recordOrderStatusUpdate({
+      orderId,
+      orderStatus:
+        String(
+          response.data.order_status || req.body.order_status || "",
+        ).trim() || "placed",
+      companyId: companyIdForMovement,
+      userId: actorUserId,
+      mongoSession,
+    });
   };
 
   // step 7 start — MongoDB transaction wrapper (or standalone retry)
@@ -3324,6 +3321,28 @@ async function order_update(req, res) {
       // step 12 start — header-only: sync totals from persisted lines
       await Order.syncHeaderTotalsFromLineItems(orderId, sessOpts);
       // step 12 end
+    }
+
+    // step 12b — status history when order_status changed via order_update
+    const previousStatus = String(
+      beforeUpdateSnapshot?.order_fields?.order_status ?? "",
+    ).trim();
+    const nextStatus = String(
+      response?.data?.order_status ?? req.body?.order_status ?? "",
+    ).trim();
+    const clientSentStatus =
+      originalBody != null &&
+      Object.prototype.hasOwnProperty.call(originalBody, "order_status");
+    if (clientSentStatus && nextStatus && nextStatus !== previousStatus) {
+      await recordOrderStatusUpdate({
+        orderId,
+        orderStatus: nextStatus,
+        companyId:
+          coalesceObjectId(response?.data?.company_id) ||
+          coalesceObjectId(req.user?.company_id),
+        userId: coalesceObjectId(req.user?._id),
+        mongoSession,
+      });
     }
     // Header-only: steps 1–3 + 12; line replace: steps 4–11.
   };
@@ -5856,21 +5875,13 @@ async function order_update_status(req, res) {
       throw new Error("Order not found or already deleted");
     }
 
-    const [createdStatusUpdate] = await OrderStatusUpdates.create(
-      [
-        {
-          order_id: orderId,
-          order_status: nextStatus,
-          company_id: companyId,
-          created_by: actorUserId || undefined,
-          updated_by: actorUserId || undefined,
-          status: "active",
-        },
-      ],
-      orderSessionOpts(mongoSession),
-    );
-    statusUpdateRow =
-      createdStatusUpdate?.toObject?.() || createdStatusUpdate || null;
+    statusUpdateRow = await recordOrderStatusUpdate({
+      orderId,
+      orderStatus: nextStatus,
+      companyId,
+      userId: actorUserId,
+      mongoSession,
+    });
   };
 
   try {
@@ -5939,6 +5950,528 @@ async function order_update_status(req, res) {
   });
 }
 
+/**
+ * POST /api/order/order_merge
+ * Body: { order_ids: [id1, id2, ..., idN] } — last id is the survivor (target).
+ * Same customer required. Source items consolidate onto target (sum qty by product_id).
+ * Sources → order_status duplicate (no stock restore; movements re-pointed to target).
+ */
+async function order_merge(req, res) {
+  const rawIds = req.body?.order_ids ?? req.body?.orders ?? [];
+  const orderIdList = (Array.isArray(rawIds) ? rawIds : [rawIds])
+    .map((id) => String(id ?? "").trim())
+    .filter(Boolean);
+
+  if (orderIdList.length < 2) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "At least two order_ids are required",
+      type: "validation",
+    });
+  }
+
+  const uniqueCheck = new Set(orderIdList);
+  if (uniqueCheck.size !== orderIdList.length) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "order_ids must be unique",
+      type: "validation",
+    });
+  }
+
+  for (const id of orderIdList) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid order id",
+        details: `order_ids entry "${id}" is not a valid ObjectId`,
+        type: "invalid_id",
+      });
+    }
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      details: "Authenticated user must have company_id",
+      type: "validation",
+    });
+  }
+
+  const sourceIds = orderIdList.slice(0, -1);
+  const targetId = orderIdList[orderIdList.length - 1];
+  const actorUserId = coalesceObjectId(req.user?._id);
+  const logUrl = req.originalUrl || req.path || "/api/order/order_merge";
+
+  const orders = await Order.find({
+    _id: { $in: orderIdList },
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  }).lean();
+
+  if (orders.length !== orderIdList.length) {
+    const found = new Set(orders.map((o) => String(o._id)));
+    const missing = orderIdList.filter((id) => !found.has(id));
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Order not found",
+      details: `Missing or inactive order id(s): ${missing.join(", ")}`,
+      type: "not_found",
+    });
+  }
+
+  const orderById = new Map(orders.map((o) => [String(o._id), o]));
+  const targetOrder = orderById.get(targetId);
+  const sourceOrders = sourceIds.map((id) => orderById.get(id));
+
+  const customerKeys = orderIdList.map((id) =>
+    String(orderById.get(id)?.customer_id || "").trim(),
+  );
+  const customerId = customerKeys[0];
+  if (
+    !customerId ||
+    !customerKeys.every((k) => k && k === customerId)
+  ) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Orders must belong to the same customer",
+      details:
+        "Every order in order_ids must share the same non-empty customer_id",
+      type: "validation",
+    });
+  }
+
+  for (const src of sourceOrders) {
+    if (String(src.order_status || "").trim() === "duplicate") {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Cannot merge from a duplicate order",
+        details: `Order ${src.order_no || src._id} is already duplicate`,
+        type: "validation",
+      });
+    }
+  }
+
+  let clientSession = null;
+  let txnError = null;
+  let targetFresh = null;
+  let duplicateOrders = [];
+  let itemsConsolidated = 0;
+  let linesSoftDeleted = 0;
+
+  const runBody = async (mongoSession) => {
+    const sessOpts = orderSessionOpts(mongoSession);
+    const allOrderOids = orderIdList.map(
+      (id) => new mongoose.Types.ObjectId(id),
+    );
+
+    const allItems = await OrderItem.find({
+      order_id: { $in: allOrderOids },
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    })
+      .sort({ createdAt: 1 })
+      .session(mongoSession || null)
+      .lean();
+
+    /** @type {Map<string, object[]>} */
+    const byProduct = new Map();
+    for (const item of allItems) {
+      const pid = String(item.product_id || "").trim();
+      if (!pid) continue;
+      if (!byProduct.has(pid)) byProduct.set(pid, []);
+      byProduct.get(pid).push(item);
+    }
+
+    const softDeleteAt = new Date();
+    const softDeleteSet = {
+      deletedAt: softDeleteAt,
+      status: "inactive",
+    };
+    if (actorUserId) softDeleteSet.updated_by = actorUserId;
+
+    for (const [, group] of byProduct.entries()) {
+      if (group.length === 0) continue;
+
+      const totalQty = roundMoney2(
+        group.reduce((sum, row) => sum + (Number(row.qty) || 0), 0),
+      );
+      if (!Number.isFinite(totalQty) || totalQty <= 0) continue;
+
+      const onTarget = group.filter(
+        (row) => String(row.order_id) === String(targetId),
+      );
+      const survivor = onTarget[0] || group[0];
+      const price = Number(onTarget[0]?.price ?? survivor.price);
+      const subtotal = roundMoney2(price * totalQty);
+
+      const survivorSet = {
+        order_id: new mongoose.Types.ObjectId(targetId),
+        qty: totalQty,
+        price,
+        subtotal,
+      };
+      if (actorUserId) survivorSet.updated_by = actorUserId;
+
+      const cost = Number(survivor.cost_price_at_sale);
+      if (Number.isFinite(cost) && cost >= 0) {
+        survivorSet.profit = roundMoney2((price - cost) * totalQty);
+      }
+
+      await OrderItem.findOneAndUpdate(
+        { _id: survivor._id },
+        { $set: survivorSet },
+        { runValidators: true, ...sessOpts },
+      );
+      itemsConsolidated += 1;
+
+      const extraIds = group
+        .filter((row) => String(row._id) !== String(survivor._id))
+        .map((row) => row._id);
+      if (extraIds.length) {
+        const softRes = await OrderItem.updateMany(
+          { _id: { $in: extraIds } },
+          { $set: softDeleteSet },
+          sessOpts,
+        );
+        linesSoftDeleted += softRes.modifiedCount || 0;
+      }
+    }
+
+    const targetRefName = orderGlDescription(
+      "Order",
+      targetOrder.order_no,
+    );
+    const sourceOids = sourceIds.map((id) => new mongoose.Types.ObjectId(id));
+    await InventoryMovements.updateMany(
+      {
+        reference_type: "order",
+        reference_id: { $in: sourceOids },
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      },
+      {
+        $set: {
+          reference_id: new mongoose.Types.ObjectId(targetId),
+          reference_name: targetRefName,
+          ...(actorUserId ? { updated_by: actorUserId } : {}),
+        },
+      },
+      sessOpts,
+    );
+
+    const targetSet = {
+      $addToSet: { tags: "order_merged" },
+    };
+    if (actorUserId) {
+      targetSet.$set = { updated_by: actorUserId };
+    }
+    targetFresh = await Order.findOneAndUpdate(
+      {
+        _id: targetId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      },
+      targetSet,
+      { new: true, runValidators: true, ...sessOpts },
+    ).lean();
+    if (!targetFresh) {
+      throw new Error("Target order not found or already deleted");
+    }
+
+    duplicateOrders = [];
+    const statusUpdateDocs = [];
+    for (const srcId of sourceIds) {
+      const prev = orderById.get(srcId);
+      const $set = { order_status: "duplicate" };
+      if (actorUserId) $set.updated_by = actorUserId;
+
+      const updatedSrc = await Order.findOneAndUpdate(
+        {
+          _id: srcId,
+          company_id: companyId,
+          status: "active",
+          deletedAt: null,
+        },
+        { $set },
+        { new: true, runValidators: true, ...sessOpts },
+      ).lean();
+      if (!updatedSrc) {
+        throw new Error(`Source order ${srcId} not found during merge`);
+      }
+      duplicateOrders.push({
+        _id: updatedSrc._id,
+        order_no: updatedSrc.order_no,
+        order_status: updatedSrc.order_status,
+        previous_status: prev?.order_status || null,
+      });
+
+      statusUpdateDocs.push({
+        orderId: srcId,
+        orderStatus: "duplicate",
+        companyId,
+        userId: actorUserId,
+      });
+    }
+
+    if (statusUpdateDocs.length) {
+      await recordOrderStatusUpdates(statusUpdateDocs, mongoSession);
+    }
+
+    for (const oid of orderIdList) {
+      await Order.syncHeaderTotalsFromLineItems(oid, sessOpts);
+    }
+
+    targetFresh = await Order.findById(targetId)
+      .session(mongoSession || null)
+      .lean();
+  };
+
+  try {
+    clientSession = await mongoose.startSession();
+    try {
+      await clientSession.withTransaction(async () => {
+        await runBody(clientSession);
+      });
+    } catch (e) {
+      txnError = e;
+      if (isMongoTransactionUnsupportedError(e)) {
+        console.warn(
+          `[order_merge] MongoDB transactions unavailable; continuing without session (${logUrl})`,
+        );
+        targetFresh = null;
+        duplicateOrders = [];
+        itemsConsolidated = 0;
+        linesSoftDeleted = 0;
+        await runBody(null);
+        txnError = null;
+      } else {
+        throw e;
+      }
+    }
+  } catch (error) {
+    console.error("[order_merge] failed:", error);
+    const clientPayload = error?.clientErrorPayload || error?.clientPayload;
+    if (clientPayload) {
+      return res.status(clientPayload.status || 400).json(clientPayload);
+    }
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to merge orders",
+      type: "server_error",
+    });
+  } finally {
+    if (clientSession) {
+      try {
+        await clientSession.endSession();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  if (txnError) {
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: txnError.message || "Failed to merge orders",
+    });
+  }
+
+  const targetItems = await OrderItem.find({
+    order_id: targetId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Orders merged",
+    data: {
+      target_order: shapeOrderWithItems(targetFresh, targetItems),
+      merged_from: sourceIds,
+      items_consolidated: itemsConsolidated,
+      lines_soft_deleted: linesSoftDeleted,
+      duplicate_orders: duplicateOrders,
+    },
+  });
+}
+
+/**
+ * PATCH|POST /api/order/update-tags/:id
+ * Body: { tags: string[] } full replace
+ * Optional: { add: string[], remove: string[] } merge into current tags
+ * Allowed: Order.ORDER_TAG_VALUES
+ */
+async function order_update_tags(req, res) {
+  const orderId = String(req.params?.id || "").trim();
+  if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid id",
+      details: "id must be a valid order ObjectId",
+      type: "invalid_id",
+    });
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      details: "Authenticated user must have company_id",
+      type: "validation",
+    });
+  }
+
+  const allowed = new Set(Order.ORDER_TAG_VALUES || []);
+  const hasTags = Object.prototype.hasOwnProperty.call(req.body || {}, "tags");
+  const addRaw = req.body?.add;
+  const removeRaw = req.body?.remove;
+
+  const normalizeList = (raw) => {
+    if (raw == null) return [];
+    const arr = Array.isArray(raw) ? raw : [raw];
+    return [
+      ...new Set(
+        arr
+          .map((t) => String(t ?? "").trim())
+          .filter(Boolean),
+      ),
+    ];
+  };
+
+  let nextTags = null;
+  if (hasTags) {
+    nextTags = normalizeList(req.body.tags);
+  } else if (addRaw != null || removeRaw != null) {
+    nextTags = null; // resolve after load
+  } else {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "tags is required",
+      details:
+        "Send { tags: [...] } to replace, or { add: [...], remove: [...] } to patch",
+      type: "validation",
+      allowed: Order.ORDER_TAG_VALUES,
+    });
+  }
+
+  const candidateTags =
+    nextTags != null ?
+      nextTags
+    : [...normalizeList(addRaw), ...normalizeList(removeRaw)];
+  const invalid = candidateTags.filter((t) => !allowed.has(t));
+  if (invalid.length) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid tag(s)",
+      details: invalid,
+      type: "validation",
+      allowed: Order.ORDER_TAG_VALUES,
+    });
+  }
+
+  const existingOrder = await Order.findOne({
+    _id: orderId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  }).lean();
+
+  if (!existingOrder) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `order with id "${orderId}" not found`,
+      type: "not_found",
+    });
+  }
+
+  if (nextTags == null) {
+    const current = new Set(
+      (existingOrder.tags || []).map((t) => String(t).trim()).filter(Boolean),
+    );
+    for (const t of normalizeList(addRaw)) current.add(t);
+    for (const t of normalizeList(removeRaw)) current.delete(t);
+    nextTags = [...current];
+  }
+
+  const previousTags = [...(existingOrder.tags || [])];
+  const same =
+    previousTags.length === nextTags.length &&
+    previousTags.every((t) => nextTags.includes(t));
+  if (same) {
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Order tags unchanged",
+      data: {
+        order: existingOrder,
+        previous_tags: previousTags,
+        tags: previousTags,
+      },
+    });
+  }
+
+  const actorUserId = coalesceObjectId(req.user?._id);
+  const $set = { tags: nextTags };
+  if (actorUserId) $set.updated_by = actorUserId;
+
+  const updatedOrder = await Order.findOneAndUpdate(
+    {
+      _id: orderId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    },
+    { $set },
+    { new: true, runValidators: true },
+  ).lean();
+
+  if (!updatedOrder) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      type: "not_found",
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Order tags updated",
+    data: {
+      order: updatedOrder,
+      previous_tags: previousTags,
+      tags: updatedOrder.tags || [],
+    },
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -5947,6 +6480,8 @@ module.exports = {
   order_save,
   order_update,
   order_update_status,
+  order_update_tags,
+  order_merge,
   order_delete,
   applyOrderStatusStockTransition,
   getOrderByorderItem,
