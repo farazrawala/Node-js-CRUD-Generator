@@ -41,6 +41,7 @@ Authorization: Bearer <token>
 | `GET` | `/chat/fetch-random` | Next pending outbound chat; claims it as `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | Unknown-contact daily limit check (+ usage bump) |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | Reset `usage` to `0` and `daily_limit += increase_daily` |
+| `GET` / `POST` | `/chat/reset-unknown-usage-only` | Reset `usage` to `0` only (no `daily_limit` bump) |
 | `GET` | `/chat/mark-sent/:id` | Mark chat as sent |
 | `GET` | `/chat/mark-not-available/:id` | Mark chat as not available |
 | `GET` | `/whatsapp_message/fetch-random` | Legacy WhatsApp message worker (gated by can-send-unknown) |
@@ -467,6 +468,7 @@ Worker / extension routes. Most are **public** (no Bearer). Scope with `company_
 | `GET` | `/chat/fetch-random` | No | Random pending outbound chat; sets `status` to `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | No | Check if an unknown number can be messaged; may bump usage |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | No | Reset `usage` to `0` and bump `daily_limit += increase_daily` |
+| `GET` / `POST` | `/chat/reset-unknown-usage-only` | No | Reset `usage` to `0` only (no `daily_limit` bump) |
 | `GET` | `/chat/mark-sent/:id` | No | Set chat `status=sent` |
 | `GET` | `/chat/mark-not-available/:id` | No | Set chat `status=not_available` |
 | `POST` | `/whatsapp_message/create` | Yes | Create outbound message + linked `chat` (`from_user_id` = company `whatsapp_number`) |
@@ -565,6 +567,33 @@ GET /api/chat/reset-unknown-usage?company_id=6a60082a3bbbeaaacd9a4d3e
   "data": {
     "usage": 0,
     "daily_limit": 6,
+    "increase_daily": 1,
+    "previous_usage": 3,
+    "previous_daily_limit": 5
+  }
+}
+```
+
+### `GET` / `POST` `/chat/reset-unknown-usage-only`
+
+Same as above but **does not** bump `daily_limit` — only resets `usage` to `0`.
+
+**Example**
+
+```http
+GET /api/chat/reset-unknown-usage-only?company_id=6a60082a3bbbeaaacd9a4d3e
+```
+
+**Success response**
+
+```json
+{
+  "success": true,
+  "status": 200,
+  "message": "Unknown WhatsApp usage reset to 0 (daily_limit unchanged).",
+  "data": {
+    "usage": 0,
+    "daily_limit": 5,
     "increase_daily": 1,
     "previous_usage": 3,
     "previous_daily_limit": 5

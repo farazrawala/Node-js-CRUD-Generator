@@ -237,7 +237,7 @@ const {
   markWhatsappMessageSent,
   markWhatsappMessageNotAvailable,
 } = require("../controllers/whatsapp_message");
-const { chatCreate, fetchRandomChat, markChatSent, markChatNotAvailable, canSendUnknownWhatsapp, resetUnknownWhatsappUsage } = require("../controllers/chat");
+const { chatCreate, fetchRandomChat, markChatSent, markChatNotAvailable, canSendUnknownWhatsapp, resetUnknownWhatsappUsage, resetUnknownWhatsappUsageOnly } = require("../controllers/chat");
 
 const supportTicketCtrl = require("../controllers/support_ticket");
 
@@ -500,6 +500,10 @@ router.get("/chat/reset-unknown-usage", resetUnknownWhatsappUsage);
 router.post("/chat/reset-unknown-usage", resetUnknownWhatsappUsage);
 router.get("/chats/reset-unknown-usage", resetUnknownWhatsappUsage);
 router.post("/chats/reset-unknown-usage", resetUnknownWhatsappUsage);
+router.get("/chat/reset-unknown-usage-only", resetUnknownWhatsappUsageOnly);
+router.post("/chat/reset-unknown-usage-only", resetUnknownWhatsappUsageOnly);
+router.get("/chats/reset-unknown-usage-only", resetUnknownWhatsappUsageOnly);
+router.post("/chats/reset-unknown-usage-only", resetUnknownWhatsappUsageOnly);
 router.get("/chat/mark-sent/:id", markChatSent);
 router.post("/chat/mark-sent/:id", markChatSent);
 router.get("/chats/mark-sent/:id", markChatSent);

@@ -895,6 +895,93 @@ async function resetUnknownWhatsappUsage(req, res) {
   }
 }
 
+/**
+ * GET|POST /api/chat/reset-unknown-usage-only
+ * Query/body: company_id
+ * Sets usage = 0 only — does not increase daily_limit.
+ */
+async function resetUnknownWhatsappUsageOnly(req, res) {
+  try {
+    const companyId = resolveCompanyId(req);
+    if (!companyId) {
+      return res.status(400).json(companyIdMissingOrInvalidResponse(req));
+    }
+
+    const Company = require("../models/company");
+    const company = await Company.findOne({
+      _id: companyId,
+      deletedAt: null,
+    })
+      .select("unknown_whatsapp_settings")
+      .lean();
+
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Company not found",
+      });
+    }
+
+    const settings = readUnknownWhatsappSettings(company);
+    const step =
+      Number.isFinite(settings.increase_daily) && settings.increase_daily > 0 ?
+        settings.increase_daily
+      : 1;
+
+    const updated = await Company.findOneAndUpdate(
+      { _id: companyId },
+      {
+        $set: {
+          unknown_whatsapp_settings: [
+            {
+              daily_limit: settings.daily_limit,
+              usage: 0,
+              increase_daily: step,
+            },
+          ],
+        },
+      },
+      {
+        new: true,
+        projection: { unknown_whatsapp_settings: 1 },
+      },
+    ).lean();
+
+    const next = readUnknownWhatsappSettings(
+      updated || {
+        unknown_whatsapp_settings: [
+          {
+            daily_limit: settings.daily_limit,
+            usage: 0,
+            increase_daily: step,
+          },
+        ],
+      },
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Unknown WhatsApp usage reset to 0 (daily_limit unchanged).",
+      data: {
+        usage: 0,
+        daily_limit: next.daily_limit,
+        increase_daily: next.increase_daily,
+        previous_usage: settings.usage,
+        previous_daily_limit: settings.daily_limit,
+      },
+    });
+  } catch (error) {
+    console.error("❌ resetUnknownWhatsappUsageOnly:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to reset unknown WhatsApp usage",
+    });
+  }
+}
+
 module.exports = {
   chatCreate,
   authenticatePosToken,
@@ -904,6 +991,7 @@ module.exports = {
   canSendUnknownWhatsapp,
   evaluateCanSendUnknownWhatsapp,
   resetUnknownWhatsappUsage,
+  resetUnknownWhatsappUsageOnly,
   phoneMatchVariants,
   normalizePkWhatsappDigits,
 };

@@ -206,3 +206,48 @@ node scripts/run-shopify-parts-import.js --local --from 5 --no-images
 4. Dry run (parse only, no DB writes):
 
 node scripts/run-shopify-parts-import.js --local --dry-run --company-id YOUR_ID
+
+
+
+//beta.
+Processing (Order Placed)
+On Hold
+On Hold (merge)
+Coupon Hold
+LO Return
+Incomplete Address
+Payment Pending
+Today Not Answering
+Not Answering
+Confirmed
+Stock Awaiting
+Ready
+Duplicate
+Cancelled
+Customer Cancel
+Not Available
+
+
+
+
+
+ "active",
+  "placed",
+  "confirmed",
+  "packed",
+  "shipped",
+  "delivered",
+  "drafted",
+  "draft",
+  "checkout_draft",
+  "pending",
+  "pending_payment",
+  "on_hold",
+  "completed",
+  "cancelled",
+  "refunded",
+  "failed",
+  "processing",
+  "return",
+
+
