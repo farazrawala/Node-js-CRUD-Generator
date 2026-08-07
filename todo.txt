@@ -230,6 +230,7 @@ node scripts/run-shopify-parts-import.js --local --dry-run --company-id YOUR_ID
 
 //Tags
   coupon,
+  order_merged,
   last_order_return,
   incomplete_address,
   not_answering,

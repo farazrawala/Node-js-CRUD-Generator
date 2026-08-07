@@ -403,6 +403,24 @@ const modelSchema = new mongoose.Schema(
      * Sales lifecycle (mixed semantics historically). Prefer `ORDER_STATUS_GROUPS` +
      * `classifyOrderStatus` for stock and revenue rules instead of ad-hoc string checks.
      */
+    tags: {
+      type: [String],
+      enum: [
+        "coupon",
+        "order_merged",
+        "last_order_return",
+        "incomplete_address",
+        "not_answering",
+        "stock_awaiting",
+        "customer_cancel",
+        "previous_data",
+        "confirmed_by_email",
+        "confirmed_by_sms",
+        "confirmed_by_whatsapp",
+        "confirmed_by_call",
+      ],
+      default: [],
+    },
     order_status: {
       type: String,
       enum: {
