@@ -160,13 +160,14 @@ Custom product routes (dynamic product CRUD is disabled).
 | `PATCH` | `/product/update/:id` | Yes | Update product |
 | `PATCH` | `/product/update-cost/:id` | Yes | Update product cost |
 | `GET` | `/product/get/:id` | Yes | Get product |
-| `GET` | `/product/get-all` | Yes | List products |
-| `GET` | `/product/get-all-active` | Yes | List active products |
+| `GET` | `/product/get-all` | Yes | List products. Filter by ids: `?_id=id1,id2` (also `ids`, `product_ids`) |
+| `GET` | `/product/get-all-active` | Yes | List active products (same id query params) |
+| `GET` | `/product/get-all-active-pos` | Yes | Active products for POS (same id query params; includes warehouse_inventory) |
 | `DELETE` | `/product/delete/:id` | Yes | Soft delete |
 | `POST` | `/product/create-product-variation` | Yes | Create variation |
 | `PATCH` | `/product/update-product-variation/:id` | Yes | Update variation |
 | `GET` | `/product/get-product-variation/:id` | Yes | Get variation |
-| `GET` | `/product/get-all-active-pos` | Yes | Active products for POS |
+| `GET` | `/product/get-all-active-pos` | Yes | Active products for POS. Filter by ids: `?_id=id1,id2` (also `ids`, `product_ids`) |
 | `PATCH` | `/product/:id/update-default-warehouse` | Yes | Set default warehouse |
 | `GET` | `/product/top-selling` | Yes | Top sellers (alias of order analytics) |
 | `GET` | `/warehouse/:warehouseId/products` | Yes | Products with stock in warehouse |

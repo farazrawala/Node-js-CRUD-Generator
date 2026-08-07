@@ -6,6 +6,8 @@ const {
   handleGenericGetAll,
   handleGenericFindOne,
   parseSearchFieldsFromQuery,
+  applyIncludeExcludeIdQueryFilter,
+  parseObjectIdListFromQuery,
   coalesceObjectId,
   activeNotDeletedCriteria,
   buildPopulateFromQuery,
@@ -108,19 +110,31 @@ function applyPosProductStatusFilter(filter, query = {}) {
 
 function buildParentProductListFilter(req, { status } = {}) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
+  const query = req.query || {};
+  const explicitIds = parseObjectIdListFromQuery(
+    query._id ?? query.ids ?? query.product_ids ?? query.product_id,
+  );
+
   const filter = {
     deletedAt: null,
-    $or: [
-      { parent_product_id: { $exists: false } },
-      { parent_product_id: null },
-    ],
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
+
+  // Explicit id list: return those products (including variations). Skip parent-only constraint.
+  if (explicitIds.length > 0) {
+    filter._id = { $in: explicitIds };
+  } else {
+    filter.$or = [
+      { parent_product_id: { $exists: false } },
+      { parent_product_id: null },
+    ];
+  }
+
   if (status) {
     filter.status = status;
   }
-  applyProductTypeFilter(filter, req.query || {});
-  return filter;
+  applyProductTypeFilter(filter, query);
+  return applyIncludeExcludeIdQueryFilter(filter, query);
 }
 
 function fetchParentProductList(req, filter) {
@@ -2444,13 +2458,21 @@ async function productCostUpdate(req, res) {
 
 async function getAllActiveProductsPOS(req, res) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
+  const query = req.query || {};
 
-  const filter = {
+  let filter = {
     deletedAt: null,
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
 
-  const rawCategory = req.query.category_id ?? req.query.categoryId;
+  const explicitIds = parseObjectIdListFromQuery(
+    query._id ?? query.ids ?? query.product_ids ?? query.product_id,
+  );
+  if (explicitIds.length > 0) {
+    filter._id = { $in: explicitIds };
+  }
+
+  const rawCategory = query.category_id ?? query.categoryId;
   if (rawCategory != null && String(rawCategory).trim() !== "") {
     const categoryOid = coalesceObjectId(rawCategory);
     if (!categoryOid || !mongoose.Types.ObjectId.isValid(String(categoryOid))) {
@@ -2465,8 +2487,9 @@ async function getAllActiveProductsPOS(req, res) {
     filter.category_id = categoryOid;
   }
 
-  applyProductTypeFilter(filter, req.query || {});
-  applyPosProductStatusFilter(filter, req.query || {});
+  applyProductTypeFilter(filter, query);
+  applyPosProductStatusFilter(filter, query);
+  filter = applyIncludeExcludeIdQueryFilter(filter, query);
 
   const warehouseInventoryMatch = {
     status: "active",

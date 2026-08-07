@@ -233,6 +233,7 @@ function clientErrorFromGenericResponse(response, fallbackError) {
   if (response.missing != null) out.missing = response.missing;
   if (response.required != null) out.required = response.required;
   if (response.received != null) out.received = response.received;
+  if (response.invalid_lines != null) out.invalid_lines = response.invalid_lines;
   return out;
 }
 
@@ -766,6 +767,92 @@ function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
     docs.push(doc);
   }
   return { docs };
+}
+
+/**
+ * Run mongoose validateSync on each built PO line before insertMany.
+ * Throws with `clientErrorPayload` naming line index + product so multi-line
+ * creates/updates do not surface a bare "warehouse_id is required".
+ */
+async function assertPurchaseOrderItemDocsValid(docs, lines, req) {
+  const issues = [];
+  for (let lineIndex = 0; lineIndex < docs.length; lineIndex++) {
+    const syncErr = new PurchaseOrderItem(docs[lineIndex]).validateSync();
+    if (!syncErr) continue;
+    const fieldErrors = syncErr.errors || {};
+    const fields = Object.keys(fieldErrors);
+    const line = lines[lineIndex] || {};
+    const productIdRaw =
+      docs[lineIndex]?.product_id ?? line?.product_id ?? null;
+    const productIdStr =
+      productIdRaw != null ? String(productIdRaw).trim() : "";
+    issues.push({
+      line_index: lineIndex,
+      product_id:
+        productIdStr && mongoose.Types.ObjectId.isValid(productIdStr) ?
+          productIdStr
+        : productIdStr || null,
+      product_name: line?.product_name || line?.name || null,
+      product_code: line?.product_code || line?.sku || null,
+      missing_or_invalid: fields,
+      messages: fields.map((f) => fieldErrors[f]?.message || f),
+    });
+  }
+  if (!issues.length) return;
+
+  const companyId = coalesceObjectId(req?.user?.company_id);
+  const idsToLookup = [
+    ...new Set(
+      issues
+        .map((i) => i.product_id)
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  if (idsToLookup.length) {
+    const products = await Product.find({
+      _id: { $in: idsToLookup },
+      ...(companyId ? { company_id: companyId } : {}),
+    })
+      .select("product_name product_code")
+      .lean();
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+    for (const issue of issues) {
+      const product = issue.product_id ? byId.get(issue.product_id) : null;
+      if (!product) continue;
+      if (product.product_name) issue.product_name = product.product_name;
+      if (product.product_code) issue.product_code = product.product_code;
+    }
+  }
+
+  const detailLines = issues.map((issue) => {
+    const label =
+      issue.product_name ||
+      issue.product_code ||
+      issue.product_id ||
+      `line ${issue.line_index + 1}`;
+    const fieldPart = issue.missing_or_invalid.join(", ");
+    return `Line ${issue.line_index + 1} (${label}): ${fieldPart} ${
+      issue.missing_or_invalid.length === 1 ? "is" : "are"
+    } required/invalid`;
+  });
+
+  const message =
+    issues.length === 1 ?
+      `Purchase order line validation failed: ${detailLines[0]}`
+    : `Purchase order line validation failed for ${issues.length} products: ${detailLines.join("; ")}`;
+
+  throwWithGenericFailure(
+    {
+      success: false,
+      status: 400,
+      error: "Purchase order line validation failed",
+      message,
+      details: detailLines,
+      invalid_lines: issues,
+      type: "ValidationError",
+    },
+    message,
+  );
 }
 
 /**
@@ -2153,26 +2240,6 @@ async function purchaseOrderCreate(req, res) {
         );
       }
 
-      for (
-        let lineIndex = 0;
-        lineIndex < lineItemsFromClient.length;
-        lineIndex++
-      ) {
-        const line = lineItemsFromClient[lineIndex];
-        const productIdStr = String(line.product_id).trim();
-        const lineQtyNum = Number(line.qty);
-        if (
-          !productIdStr ||
-          !mongoose.Types.ObjectId.isValid(productIdStr) ||
-          !Number.isFinite(lineQtyNum) ||
-          lineQtyNum <= 0
-        ) {
-          throw new Error(
-            "Each purchase order line needs a valid product_id and positive qty",
-          );
-        }
-      }
-
       // step 5 start — purchase_order_item insertMany
       const built = buildPurchaseOrderItemDocuments(
         newPurchaseOrderId,
@@ -2186,6 +2253,11 @@ async function purchaseOrderCreate(req, res) {
       if (built.docs.length !== lineItemsFromClient.length) {
         throw new Error("Could not build purchase order line documents");
       }
+      await assertPurchaseOrderItemDocsValid(
+        built.docs,
+        lineItemsFromClient,
+        req,
+      );
 
       const endStep5 = poStepTimer.start(5, "purchase_order_item insertMany", {
         line_count: built.docs.length,
@@ -2643,25 +2715,7 @@ async function purchase_order_update(req, res) {
         );
       }
 
-      // step 4 start — validate line payloads
-      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-        const line = lines[lineIndex];
-        const productIdStr = String(line.product_id).trim();
-        const lineQtyNum = Number(line.qty);
-        if (
-          !productIdStr ||
-          !mongoose.Types.ObjectId.isValid(productIdStr) ||
-          !Number.isFinite(lineQtyNum) ||
-          lineQtyNum <= 0
-        ) {
-          throw new Error(
-            "Each purchase order line needs a valid product_id and positive qty",
-          );
-        }
-      }
-      // step 4 end
-
-      // step 5 start — build purchase_order_item documents
+      // step 4–5 start — build + validate purchase_order_item documents
       const built = buildPurchaseOrderItemDocuments(
         poId,
         response.data,
@@ -2674,7 +2728,8 @@ async function purchase_order_update(req, res) {
       if (built.docs.length !== lines.length) {
         throw new Error("Could not build purchase order line documents");
       }
-      // step 5 end
+      await assertPurchaseOrderItemDocsValid(built.docs, lines, req);
+      // step 4–5 end
 
       // step 6 start — snapshot existing lines before teardown
       let existingPoItemsQuery = PurchaseOrderItem.find({
