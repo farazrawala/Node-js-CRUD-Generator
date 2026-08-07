@@ -57,6 +57,7 @@ mapping
 movement
 not_found
 order
+order_status_updates
 out
 outer
 patch

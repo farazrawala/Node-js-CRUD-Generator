@@ -20,7 +20,7 @@ Allowed values for `order.order_status`, with stock effect:
 | `packed` | Packed | **out** |
 | `delivered` | Delivered | **out** |
 | `draft` | Draft / not finalized | **in** |
-| `pending` | Pending | **out** |
+| `pending` | Pending | **in** |
 | `pending_payment` | Received, payment not started (unpaid) | **out** |
 | `on_hold` | Awaiting payment confirmation (e.g. bank transfer) | **in** |
 | `cancelled` | Cancelled by admin or customer | **in** |
@@ -37,8 +37,8 @@ Export: `Order.ORDER_STATUS_VALUES` / `require("../models/order").ORDER_STATUS_V
 
 | Effect | Movement | Enum statuses |
 |--------|----------|---------------|
-| **out** | Deduct stock (`movement_type: "out"`) | `active`, `placed`, `confirmed`, `packed`, `delivered`, `pending`, `pending_payment`, `processing` |
-| **in** | Hold / restore stock (no sale deduction; restore on cancel etc.) | `duplicate`, `draft`, `on_hold`, `cancelled`, `failed`, `return`, `return_received` |
+| **out** | Deduct stock (`movement_type: "out"`) | `active`, `placed`, `confirmed`, `packed`, `delivered`, `pending_payment`, `processing` |
+| **in** | Hold / restore stock (no sale deduction; restore on cancel etc.) | `duplicate`, `draft`, `pending`, `on_hold`, `cancelled`, `failed`, `return`, `return_received` |
 
 ```text
 ORDER_STATUS_STOCK.out  → stock deducted
@@ -55,7 +55,7 @@ duplicate         → in
 packed            → out
 delivered         → out
 draft             → in
-pending           → out
+pending           → in
 pending_payment   → out
 on_hold           → in
 cancelled         → in
@@ -101,7 +101,8 @@ Rules:
 | `confirmed` | `delivered` | `none` (both out) |
 | `placed` | `cancelled` | `in` (restore) |
 | `cancelled` | `on_hold` | `none` (both in) |
-| `pending` | `draft` | `in` (restore; pending is out) |
+| `pending` | `draft` | `none` (both in) |
+| `pending` | `processing` | `out` (deduct) |
 | `packed` | `duplicate` | `in` (restore) |
 | `delivered` | `return_received` | `in` (restore) |
 

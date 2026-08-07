@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
+const OrderStatusUpdates = require("../models/order_status_updates");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const InventoryMovements = require("../models/inventory_movements");
@@ -1435,8 +1436,38 @@ async function applyOrderOutboundLines({
 }
 
 /**
+ * User-facing inventory movement label for stock restore on status change.
+ * Delete keeps its own default "Order Delete" at the delete call site.
+ */
+function orderStatusRestoreReferenceName(toStatus) {
+  const s = String(toStatus || "").trim();
+  switch (s) {
+    case "on_hold":
+      return "Order On Hold";
+    case "pending":
+      return "Order Pending";
+    case "cancelled":
+      return "Order Cancel";
+    case "failed":
+      return "Order Failed";
+    case "duplicate":
+      return "Order Duplicate";
+    case "draft":
+      return "Order Draft";
+    case "return":
+    case "return_received":
+      return "Order Return";
+    case "refunded":
+      return "Order Refund";
+    default:
+      return "Order Status Restore";
+  }
+}
+
+/**
  * Delete / void order: restore warehouse qty and insert reversal `in` movements from current order lines.
  * Movements are used only for warehouse lookup; qty comes from `existingOrderItems`, not summed movement rows.
+ * Also used by status transitions that restore stock (OUT→IN); pass status-specific referenceName.
  */
 async function applyOrderDeleteInventoryRestore({
   oldOutMovements,
@@ -1448,6 +1479,8 @@ async function applyOrderDeleteInventoryRestore({
   req,
   mongoSession = null,
   logUrl = "/api/order/order_delete",
+  referenceName = "Order Delete",
+  qtyDeltaReason = "order_delete_restore",
 }) {
   const inventoryLogContext = salesWarehouseInventoryLogContext(
     orderId,
@@ -1498,7 +1531,7 @@ async function applyOrderDeleteInventoryRestore({
         productStockUpdates.push({
           ...whChange,
           source: "warehouse_inventory",
-          qty_delta_reason: "order_delete_restore",
+          qty_delta_reason: qtyDeltaReason,
         });
       }
     } catch (whErr) {
@@ -1532,7 +1565,7 @@ async function applyOrderDeleteInventoryRestore({
       companyId,
       companyIdOid,
       mongoSession,
-      referenceName: "Order Delete",
+      referenceName,
     });
     reversalMovementsInserted += 1;
 
@@ -2543,6 +2576,25 @@ async function order_save(req, res) {
     // step 6 start — order header sync from line items
     await Order.syncHeaderTotalsFromLineItems(orderId, lineItemSessionOpts);
     // step 6 end
+
+    // step 6b — initial order_status_updates history row
+    const actorUserId = coalesceObjectId(req.user?._id);
+    await OrderStatusUpdates.create(
+      [
+        {
+          order_id: orderId,
+          order_status:
+            String(
+              response.data.order_status || req.body.order_status || "",
+            ).trim() || "placed",
+          company_id: companyIdForMovement,
+          created_by: actorUserId || undefined,
+          updated_by: actorUserId || undefined,
+          status: "active",
+        },
+      ],
+      lineItemSessionOpts,
+    );
   };
 
   // step 7 start — MongoDB transaction wrapper (or standalone retry)
@@ -2753,9 +2805,7 @@ async function orderUpdateAuditSnapshot(req, order, lineItems) {
     : { ...(order || {}) };
   const companyId = coalesceObjectId(order?.company_id || req.user?.company_id);
   const customerId = coalesceObjectId(order?.customer_id);
-  const paymentAccountId = coalesceObjectId(
-    order?.payment_method_accounts_id,
-  );
+  const paymentAccountId = coalesceObjectId(order?.payment_method_accounts_id);
 
   const [customer, paymentAccount] = await Promise.all([
     customerId ?
@@ -2776,9 +2826,11 @@ async function orderUpdateAuditSnapshot(req, order, lineItems) {
         line.toObject({ depopulate: true })
       : { ...(line || {}) };
     const populatedProduct =
-      line?.product_id &&
-      typeof line.product_id === "object" &&
-      line.product_id._id ?
+      (
+        line?.product_id &&
+        typeof line.product_id === "object" &&
+        line.product_id._id
+      ) ?
         line.product_id
       : null;
     const productId = coalesceObjectId(
@@ -5563,7 +5615,8 @@ async function applyOrderStatusStockTransition({
   const orderId = order._id;
   const orderNo = order.order_no || null;
   const companyId =
-    coalesceObjectId(order.company_id) || coalesceObjectId(req.user?.company_id);
+    coalesceObjectId(order.company_id) ||
+    coalesceObjectId(req.user?.company_id);
   const companyIdOid =
     companyId && mongoose.Types.ObjectId.isValid(String(companyId)) ?
       new mongoose.Types.ObjectId(String(companyId))
@@ -5656,6 +5709,8 @@ async function applyOrderStatusStockTransition({
     req,
     mongoSession,
     logUrl,
+    referenceName: orderStatusRestoreReferenceName(nextStatus),
+    qtyDeltaReason: `order_${nextStatus}_restore`,
   });
 
   return {
@@ -5766,7 +5821,9 @@ async function order_update_status(req, res) {
   let txnError = null;
   let stockResult = null;
   let updatedOrder = null;
+  let statusUpdateRow = null;
   const logUrl = req.originalUrl || req.path || "/api/order/update-status";
+  const actorUserId = coalesceObjectId(req.user?._id);
 
   const runBody = async (mongoSession) => {
     stockResult = await applyOrderStatusStockTransition({
@@ -5780,8 +5837,8 @@ async function order_update_status(req, res) {
     const $set = {
       order_status: nextStatus,
     };
-    if (req.user?._id) {
-      $set.updated_by = coalesceObjectId(req.user._id);
+    if (actorUserId) {
+      $set.updated_by = actorUserId;
     }
 
     updatedOrder = await Order.findOneAndUpdate(
@@ -5798,6 +5855,22 @@ async function order_update_status(req, res) {
     if (!updatedOrder) {
       throw new Error("Order not found or already deleted");
     }
+
+    const [createdStatusUpdate] = await OrderStatusUpdates.create(
+      [
+        {
+          order_id: orderId,
+          order_status: nextStatus,
+          company_id: companyId,
+          created_by: actorUserId || undefined,
+          updated_by: actorUserId || undefined,
+          status: "active",
+        },
+      ],
+      orderSessionOpts(mongoSession),
+    );
+    statusUpdateRow =
+      createdStatusUpdate?.toObject?.() || createdStatusUpdate || null;
   };
 
   try {
@@ -5814,6 +5887,7 @@ async function order_update_status(req, res) {
         );
         stockResult = null;
         updatedOrder = null;
+        statusUpdateRow = null;
         await runBody(null);
         txnError = null;
       } else {
@@ -5856,9 +5930,11 @@ async function order_update_status(req, res) {
     message: "Order status updated",
     data: {
       order: updatedOrder,
-      previous_status: stockResult?.previous_status ?? existingOrder.order_status,
+      previous_status:
+        stockResult?.previous_status ?? existingOrder.order_status,
       stock_action: stockResult?.action ?? "none",
       stock_updates: stockResult?.stock_updates ?? [],
+      status_update: statusUpdateRow,
     },
   });
 }

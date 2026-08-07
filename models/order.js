@@ -58,7 +58,7 @@ const ORDER_STATUS_VALUES = [
   "delivered", // Delivered
   "draft", // Draft / not finalized
   "pending", // Pending
-  "pending_payment", // Received, payment not started (unpaid)
+  // "pending_payment", // Received, payment not started (unpaid)
   "on_hold", // Awaiting payment confirmation (e.g. bank transfer)
   "cancelled", // Cancelled by admin or customer
   "failed", // Payment failed or declined
@@ -79,8 +79,7 @@ const ORDER_STATUS_STOCK = Object.freeze({
     "confirmed",
     "packed",
     "delivered",
-    "pending",
-    "pending_payment",
+    // "pending_payment",
     "processing",
     // website / legacy (not in ORDER_STATUS_VALUES)
     "shipped",
@@ -89,6 +88,7 @@ const ORDER_STATUS_STOCK = Object.freeze({
   in: Object.freeze([
     "duplicate",
     "draft",
+    "pending",
     "on_hold",
     "cancelled",
     "failed",
