@@ -6472,6 +6472,310 @@ async function order_update_tags(req, res) {
   });
 }
 
+/**
+ * POST /api/order/validate-address
+ * Body (any one):
+ *   { address: "full string" }
+ *   { address, city, state, zip, country, street, area, house }
+ *   { order_id: "..." } — load address fields from an existing order
+ */
+async function order_validate_address(req, res) {
+  const {
+    validateAddress,
+    validateOrderAddressFields,
+  } = require("../validators/addressValidator");
+
+  const orderId = String(req.body?.order_id || req.body?.orderId || "").trim();
+  let input = null;
+
+  if (orderId) {
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid order_id",
+        type: "invalid_id",
+      });
+    }
+    const companyId = coalesceObjectId(req.user?.company_id);
+    const filter = {
+      _id: orderId,
+      status: "active",
+      deletedAt: null,
+    };
+    if (companyId) filter.company_id = companyId;
+
+    const order = await Order.findOne(filter)
+      .select("address city state zip country name phone order_no")
+      .lean();
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Order not found",
+        type: "not_found",
+      });
+    }
+    input = {
+      address: order.address,
+      city: order.city,
+      state: order.state,
+      zip: order.zip,
+      country: order.country,
+    };
+    const validation = validateOrderAddressFields(input, {
+      config: req.body?.config || null,
+    });
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Address validated",
+      data: {
+        order_id: order._id,
+        order_no: order.order_no,
+        address_validation: validation,
+        ...validation,
+      },
+    });
+  }
+
+  if (typeof req.body?.address === "string" && !req.body?.city && !req.body?.street) {
+    // Prefer full string when only `address` is sent
+    input = req.body.address;
+  } else if (
+    req.body &&
+    (req.body.address != null ||
+      req.body.city != null ||
+      req.body.street != null ||
+      req.body.full_address != null)
+  ) {
+    if (req.body.full_address) {
+      input = String(req.body.full_address);
+    } else {
+      input = {
+        address: req.body.address,
+        house: req.body.house,
+        building: req.body.building,
+        street: req.body.street,
+        area: req.body.area,
+        city: req.body.city,
+        postalCode: req.body.postalCode || req.body.postal_code || req.body.zip,
+        zip: req.body.zip,
+        country: req.body.country,
+      };
+    }
+  }
+
+  if (input == null || input === "") {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Address input required",
+      details:
+        "Send { address }, structured fields, or { order_id } of an existing order",
+      type: "validation",
+    });
+  }
+
+  const validation = validateAddress(input, {
+    config: req.body?.config || null,
+  });
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Address validated",
+    data: {
+      address_validation: validation,
+      ...validation,
+    },
+  });
+}
+
+/**
+ * PATCH|POST /api/order/update-address/:id
+ * Body: { address?, city?, state?, zip?, country?, name?, email?, phone? }
+ * Optional: { validate: true, strict: true } — run quality check; strict → 400 if severe
+ */
+async function order_update_address(req, res) {
+  const {
+    validateOrderAddressFields,
+  } = require("../validators/addressValidator");
+  const {
+    loadAddressValidationConfig,
+  } = require("../config/addressValidation");
+
+  const orderId = String(req.params?.id || "").trim();
+  if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid id",
+      details: "id must be a valid order ObjectId",
+      type: "invalid_id",
+    });
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      details: "Authenticated user must have company_id",
+      type: "validation",
+    });
+  }
+
+  const ADDRESS_KEYS = [
+    "address",
+    "city",
+    "state",
+    "zip",
+    "country",
+    "name",
+    "email",
+    "phone",
+  ];
+  const raw = normalizeOrderAddressFields({ ...(req.body || {}) });
+  const $set = {};
+  for (const key of ADDRESS_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(req.body || {}, key)) continue;
+    if (raw[key] === undefined) continue;
+    $set[key] = raw[key];
+  }
+
+  if (Object.keys($set).length === 0) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "No address fields provided",
+      details: `Send one or more of: ${ADDRESS_KEYS.join(", ")}`,
+      type: "validation",
+    });
+  }
+
+  const existingOrder = await Order.findOne({
+    _id: orderId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  }).lean();
+
+  if (!existingOrder) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      details: `order with id "${orderId}" not found`,
+      type: "not_found",
+    });
+  }
+
+  const mergedForValidation = {
+    address: $set.address !== undefined ? $set.address : existingOrder.address,
+    city: $set.city !== undefined ? $set.city : existingOrder.city,
+    state: $set.state !== undefined ? $set.state : existingOrder.state,
+    zip: $set.zip !== undefined ? $set.zip : existingOrder.zip,
+    country: $set.country !== undefined ? $set.country : existingOrder.country,
+  };
+
+  const wantValidate =
+    req.body?.validate === true ||
+    req.body?.validate === "true" ||
+    req.query?.validate === "1" ||
+    req.query?.validate === "true";
+  const strict =
+    req.body?.strict === true ||
+    req.body?.strict === "true" ||
+    req.query?.strict === "1" ||
+    req.query?.strict === "true";
+
+  let addressValidation = null;
+  if (wantValidate || strict) {
+    addressValidation = validateOrderAddressFields(mergedForValidation);
+    const cfg = loadAddressValidationConfig();
+    const severe = cfg.severeScoreThreshold ?? cfg.minimumScore ?? 40;
+    if (strict && addressValidation.score < severe) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Address is too incomplete for delivery",
+        type: "address_validation",
+        address_validation: addressValidation,
+      });
+    }
+  }
+
+  const actorUserId = coalesceObjectId(req.user?._id);
+  if (actorUserId) $set.updated_by = actorUserId;
+
+  let updatedOrder;
+  try {
+    updatedOrder = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      },
+      { $set },
+      { new: true, runValidators: true },
+    ).lean();
+  } catch (err) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: err.message || "Failed to update address",
+      type: "validation",
+    });
+  }
+
+  if (!updatedOrder) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Record not found",
+      type: "not_found",
+    });
+  }
+
+  // Auto-tag incomplete_address when validated and score is low
+  if (
+    addressValidation &&
+    addressValidation.score < 70 &&
+    Array.isArray(Order.ORDER_TAG_VALUES) &&
+    Order.ORDER_TAG_VALUES.includes("incomplete_address")
+  ) {
+    await Order.updateOne(
+      { _id: orderId },
+      { $addToSet: { tags: "incomplete_address" } },
+    );
+    updatedOrder = await Order.findById(orderId).lean();
+  } else if (
+    addressValidation &&
+    addressValidation.isValid &&
+    (updatedOrder.tags || []).includes("incomplete_address")
+  ) {
+    await Order.updateOne(
+      { _id: orderId },
+      { $pull: { tags: "incomplete_address" } },
+    );
+    updatedOrder = await Order.findById(orderId).lean();
+  }
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Order address updated",
+    data: {
+      order: updatedOrder,
+      updated_fields: Object.keys($set).filter((k) => k !== "updated_by"),
+      address_validation: addressValidation,
+    },
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -6481,6 +6785,8 @@ module.exports = {
   order_update,
   order_update_status,
   order_update_tags,
+  order_update_address,
+  order_validate_address,
   order_merge,
   order_delete,
   applyOrderStatusStockTransition,

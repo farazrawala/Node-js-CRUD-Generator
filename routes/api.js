@@ -95,6 +95,8 @@ const {
   order_update,
   order_update_status,
   order_update_tags,
+  order_update_address,
+  order_validate_address,
   order_delete,
   order_merge,
   getOrderByorderItem,
@@ -115,6 +117,9 @@ const {
   findAccountsReceivableSummary,
   invoiceUpdate,
 } = require("../controllers/order");
+const {
+  validateOrderAddressMiddleware,
+} = require("../middlewares/validateOrderAddress");
 const {
   getReceivablesSummary,
   getReceivablesAging,
@@ -683,12 +688,19 @@ router.post("/amount_transfer/save", amountTransferCreate);
 router.patch("/amount_transfer/update_record/:id", amountTransferUpdate);
 
 // Order routes
-router.post("/order/order_save", order_save);
+router.post(
+  "/order/order_save",
+  validateOrderAddressMiddleware({ soft: true }),
+  order_save,
+);
 router.patch("/order/order_update/:id", order_update);
 router.patch("/order/update-status/:id", order_update_status);
 router.post("/order/update-status/:id", order_update_status);
 router.patch("/order/update-tags/:id", order_update_tags);
 router.post("/order/update-tags/:id", order_update_tags);
+router.patch("/order/update-address/:id", order_update_address);
+router.post("/order/update-address/:id", order_update_address);
+router.post("/order/validate-address", order_validate_address);
 router.post("/order/order_merge", order_merge);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);

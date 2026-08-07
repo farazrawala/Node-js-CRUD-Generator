@@ -1,0 +1,11 @@
+{
+  "_comment": "Optional overrides merged onto addressValidation.defaults.js. Edit this file without changing source code.",
+  "cities": [],
+  "streetKeywords": [],
+  "blacklist": [],
+  "postalCodePatterns": {},
+  "weights": {},
+  "minimumLength": null,
+  "minimumWords": null,
+  "minimumScore": null
+}
