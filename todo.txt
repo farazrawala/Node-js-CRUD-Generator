@@ -209,45 +209,54 @@ node scripts/run-shopify-parts-import.js --local --dry-run --company-id YOUR_ID
 
 
 
-//beta.
-Processing (Order Placed)
-On Hold
-On Hold (merge)
-Coupon Hold
-LO Return
-Incomplete Address
-Payment Pending
-Today Not Answering
-Not Answering
-Confirmed
-Stock Awaiting
-Ready
-Duplicate
-Cancelled
-Customer Cancel
-Not Available
+// Beta
+  Processing (Order Placed)
+  On Hold
+  On Hold (merge)
+  Coupon Hold
+
+  LO Return
+  Incomplete Address
+  Payment Pending
+  Today Not Answering
+  Not Answering
+  Confirmed
+  Stock Awaiting
+  Ready
+  Duplicate
+  Cancelled
+  Customer Cancel
+  Not Available
+
+//Tags
+  coupon,
+  last_order_return,
+  incomplete_address,
+  not_answering,
+  stock_awaiting,
+  customer_cancel,
+  previous_data,
+  confirmed_by_email,
+  confirmed_by_sms,
+  confirmed_by_whatsapp,
+  confirmed_by_call,
 
 
-
-
-
- "active",
+// Status 
+  "active",
   "placed",
   "confirmed",
+  "duplicate",
   "packed",
-  "shipped",
   "delivered",
-  "drafted",
   "draft",
-  "checkout_draft",
-  "pending",
+  "pending", 
   "pending_payment",
   "on_hold",
-  "completed",
   "cancelled",
-  "refunded",
   "failed",
   "processing",
   "return",
+  "return_received",
 
 

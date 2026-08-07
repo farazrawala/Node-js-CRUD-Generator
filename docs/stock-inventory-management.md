@@ -3,6 +3,8 @@
 This document describes how stock is tracked and updated in the Node.js CRUD Generator API **as implemented today**. It is the operational guide for developers working on purchase, sales, returns, adjustments, and inventory APIs.
 
 > **Related (older / alternate docs):** `docs/warehouse-inventory-usage.md` describes an embedded `warehouse_inventory` array on products. The **live path** for warehouse stock is the **`inventory_movements` ledger** plus **`product.stock`**. The `warehouse_inventory` Mongoose model file is currently commented out.
+>
+> **Order status → stock in/out:** see `docs/order-status-stock.md` (`ORDER_STATUS_VALUES`, `ORDER_STATUS_STOCK`, transition rules).
 
 ---
 

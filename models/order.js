@@ -50,52 +50,52 @@ function isPlausibleEmail(s) {
  * - checkout_draft — in-progress block-checkout order (newer draft state)
  */
 const ORDER_STATUS_VALUES = [
-  "active",
-  "placed",
-  "confirmed",
-  "packed",
-  "shipped",
-  "delivered",
-  "drafted",
-  "draft",
-  "checkout_draft",
-  "pending",
-  "pending_payment",
-  "on_hold",
-  "completed",
-  "cancelled",
-  "refunded",
-  "failed",
-  "processing",
-  "return",
+  "active", // Live / open POS-style order
+  "placed", // Order placed
+  "confirmed", // Confirmed for fulfillment
+  "duplicate", // Marked duplicate
+  "packed", // Packed
+  "delivered", // Delivered
+  "draft", // Draft / not finalized
+  "pending", // Pending
+  "pending_payment", // Received, payment not started (unpaid)
+  "on_hold", // Awaiting payment confirmation (e.g. bank transfer)
+  "cancelled", // Cancelled by admin or customer
+  "failed", // Payment failed or declined
+  "processing", // Payment received, awaiting fulfillment
+  "return", // Return in progress / recorded
+  "return_received", // Return received
 ];
 
 /**
  * Stock effect by order_status (warehouse_inventory + inventory_movements).
  * Transition only when effect changes: IN→OUT deducts, OUT→IN restores, same→same no-op.
+ * See docs/order-status-stock.md.
  */
 const ORDER_STATUS_STOCK = Object.freeze({
   out: Object.freeze([
-    "placed",
-    "processing",
     "active",
+    "placed",
     "confirmed",
     "packed",
-    "shipped",
     "delivered",
+    "pending",
+    "pending_payment",
+    "processing",
+    // website / legacy (not in ORDER_STATUS_VALUES)
+    "shipped",
     "completed",
   ]),
   in: Object.freeze([
-    "drafted",
+    "duplicate",
     "draft",
-    "checkout_draft",
-    "pending",
-    "pending_payment",
     "on_hold",
     "cancelled",
-    "refunded",
     "failed",
     "return",
+    "return_received",
+    // website / legacy (not in ORDER_STATUS_VALUES)
+    "refunded",
   ]),
 });
 
