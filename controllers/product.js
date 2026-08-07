@@ -15,11 +15,16 @@ const {
 const Product = require("../models/product");
 const OrderItem = require("../models/order_item");
 const PurchaseOrderItem = require("../models/purchase_order_item");
+const SalesReturnItem = require("../models/sales_return_item");
+const PurchaseReturnItem = require("../models/purchase_return_item");
+const Integration = require("../models/integration");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
 const { generateProductBarcode } = require("../utils/barcodeGenerator");
-const { generateUniqueProductBarcode } = require("../utils/fetchProductBarcode");
+const {
+  generateUniqueProductBarcode,
+} = require("../utils/fetchProductBarcode");
 const {
   logControllerError,
   logRollbackFailure,
@@ -45,7 +50,10 @@ const {
   updateBarcodesFromText,
   BARCODE_IMPORT_COLUMNS,
 } = require("../utils/productBarcodeImport");
-const { enqueueProductWebsiteSyncJobs, enqueueBulkSyncProductJobsByCompany } = require("../utils/productSyncQueue");
+const {
+  enqueueProductWebsiteSyncJobs,
+  enqueueBulkSyncProductJobsByCompany,
+} = require("../utils/productSyncQueue");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -94,7 +102,9 @@ function applyProductTypeFilter(filter, query = {}) {
 function applyPosProductStatusFilter(filter, query = {}) {
   const includeInactive =
     query.include_inactive === "true" || query.include_inactive === "1";
-  const rawStatus = String(query.status ?? "").trim().toLowerCase();
+  const rawStatus = String(query.status ?? "")
+    .trim()
+    .toLowerCase();
 
   if (includeInactive || rawStatus === "all") {
     return filter;
@@ -2805,18 +2815,34 @@ async function findProductsWithDuplicateBarcodes(req, res) {
 }
 
 /** Default lookback for recent line-item product_id collection. */
-const RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES = 70;
+const RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES = 62;
 
 /**
- * GET unique `product_id`s from `order_item` and `purchase_order_item`
- * created in the last 70 minutes across all companies (public).
- * Variants with a different `parent_product_id` are replaced by that parent id.
- * Then bulk-inserts `sync_product` process rows grouped by each product's company.
- * Optional query `minutes` overrides the lookback window (1–1440).
+ * GET /api/product/recent-product-ids
+ *
+ * Prefetch companies with active integrations, collect unique `product_id`s
+ * from recent line items for those companies only, resolve variants to their
+ * parent, then enqueue `sync_product` jobs.
+ * Optional query `minutes` overrides the lookback window (1–1440; default
+ * `RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES`).
+ *
+ * | Step | Action | Notes |
+ * |------|--------|-------|
+ * |    1 | Parse lookback window | `?minutes` or default; reject invalid |
+ * |    2 | Prefetch integrated company_ids | active `integration` rows (`deletedAt: null`) |
+ * |    3 | Build date + company match filter | active lines in window, `company_id ∈` step 2 |
+ * |    4 | Distinct product_ids from 4 collections | order_item, purchase_order_item, sales_return_item, purchase_return_item |
+ * |    5 | Merge + dedupe ids | single `rawProductIds` list |
+ * |    6 | Load products for parent map | `_id`, `parent_product_id` |
+ * |    7 | Collapse variants → parent ids | final `product_ids` |
+ * |    8 | Enqueue sync_product jobs | per company via `enqueueBulkSyncProductJobsByCompany` |
+ * |    9 | Return 200 payload | counts + product_ids + process stats |
+ * |   20 | Failure path | application / controller logs, then 500 |
  */
 async function getRecentLineItemProductIds(req, res) {
   let resolvedProductIds = [];
   try {
+    // step 1 start — parse lookback window (`?minutes` or default)
     let minutes = RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES;
     const rawMinutes = req.query?.minutes;
     if (rawMinutes != null && String(rawMinutes).trim() !== "") {
@@ -2831,7 +2857,52 @@ async function getRecentLineItemProductIds(req, res) {
       }
       minutes = Math.floor(parsed);
     }
+    // step 1 end
 
+    // step 2 start — company_ids that have at least one active integration
+    const integratedCompanyIds = (
+      await Integration.distinct("company_id", {
+        status: "active",
+        deletedAt: null,
+        company_id: { $ne: null },
+      })
+    ).filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)));
+
+    if (!integratedCompanyIds.length) {
+      const toDate = new Date();
+      const fromDate = new Date(toDate.getTime() - minutes * 60 * 1000);
+      console.log(
+        `[recent-product-ids] minutes=${minutes} companies_with_integration=0 — nothing to sync`,
+      );
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        minutes,
+        from: fromDate.toISOString(),
+        to: toDate.toISOString(),
+        count: 0,
+        order_item_product_count: 0,
+        purchase_order_item_product_count: 0,
+        sales_return_item_product_count: 0,
+        purchase_return_item_product_count: 0,
+        companies_with_integration_count: 0,
+        product_ids: [],
+        process: {
+          action: "sync_product",
+          created_count: 0,
+          jobs_planned: 0,
+          skipped: 0,
+          by_company: {},
+          failed: [],
+          created: [],
+          logs: [],
+          reason: "no_active_integrations",
+        },
+      });
+    }
+    // step 2 end
+
+    // step 3 start — createdAt window + company_id scoped to integrated companies
     const toDate = new Date();
     const fromDate = new Date(toDate.getTime() - minutes * 60 * 1000);
     const match = {
@@ -2839,22 +2910,40 @@ async function getRecentLineItemProductIds(req, res) {
       deletedAt: null,
       createdAt: { $gte: fromDate, $lte: toDate },
       product_id: { $ne: null },
+      company_id: { $in: integratedCompanyIds },
     };
+    // step 3 end
 
-    const [orderItemProductIds, purchaseOrderItemProductIds] =
-      await Promise.all([
-        OrderItem.distinct("product_id", match),
-        PurchaseOrderItem.distinct("product_id", match),
-      ]);
+    // step 4 start — distinct product_id from order / PO / sales return / purchase return lines
+    const [
+      orderItemProductIds,
+      purchaseOrderItemProductIds,
+      salesReturnItemProductIds,
+      purchaseReturnItemProductIds,
+    ] = await Promise.all([
+      OrderItem.distinct("product_id", match),
+      PurchaseOrderItem.distinct("product_id", match),
+      SalesReturnItem.distinct("product_id", match),
+      PurchaseReturnItem.distinct("product_id", match),
+    ]);
+    // step 4 end
 
+    // step 5 start — merge + dedupe into one string id list
     const rawProductIds = [
       ...new Set(
-        [...orderItemProductIds, ...purchaseOrderItemProductIds]
+        [
+          ...orderItemProductIds,
+          ...purchaseOrderItemProductIds,
+          ...salesReturnItemProductIds,
+          ...purchaseReturnItemProductIds,
+        ]
           .filter(Boolean)
           .map((id) => String(id)),
       ),
     ];
+    // step 5 end
 
+    // step 6 start — load products for parent_product_id lookup
     const objectIds = rawProductIds
       .filter((id) => mongoose.Types.ObjectId.isValid(id))
       .map((id) => new mongoose.Types.ObjectId(id));
@@ -2869,7 +2958,9 @@ async function getRecentLineItemProductIds(req, res) {
     const parentById = new Map(
       products.map((p) => [String(p._id), p.parent_product_id]),
     );
+    // step 6 end
 
+    // step 7 start — collapse variant product_ids to parent when parent differs
     const productIdSet = new Set();
     for (const id of rawProductIds) {
       const parentId = parentById.get(id);
@@ -2881,7 +2972,9 @@ async function getRecentLineItemProductIds(req, res) {
     }
     const product_ids = [...productIdSet];
     resolvedProductIds = product_ids;
+    // step 7 end
 
+    // step 8 start — enqueue sync_product process jobs grouped by company
     const processQueue = await enqueueBulkSyncProductJobsByCompany({
       req,
       productIds: product_ids,
@@ -2889,11 +2982,13 @@ async function getRecentLineItemProductIds(req, res) {
       remarks: `Auto-queued sync_product from recent line items (${minutes}m)`,
       priority: 50,
     });
+    // step 8 end
 
     console.log(
-      `[recent-product-ids] minutes=${minutes} products=${product_ids.length} processes=${processQueue.count}`,
+      `[recent-product-ids] minutes=${minutes} companies=${integratedCompanyIds.length} products=${product_ids.length} processes=${processQueue.count}`,
     );
 
+    // step 9 start — success response
     return res.status(200).json({
       success: true,
       status: 200,
@@ -2903,6 +2998,9 @@ async function getRecentLineItemProductIds(req, res) {
       count: product_ids.length,
       order_item_product_count: orderItemProductIds.length,
       purchase_order_item_product_count: purchaseOrderItemProductIds.length,
+      sales_return_item_product_count: salesReturnItemProductIds.length,
+      purchase_return_item_product_count: purchaseReturnItemProductIds.length,
+      companies_with_integration_count: integratedCompanyIds.length,
       product_ids,
       process: {
         action: "sync_product",
@@ -2915,9 +3013,11 @@ async function getRecentLineItemProductIds(req, res) {
         logs: processQueue.logs || [],
       },
     });
+    // step 9 end
   } catch (error) {
     console.error("❌ getRecentLineItemProductIds:", error);
 
+    // step 20 start — failure logs (per company when known, else controller log)
     try {
       const fallbackCompanyIds = [];
       const seen = new Set();
@@ -2952,7 +3052,8 @@ async function getRecentLineItemProductIds(req, res) {
             createApplicationLog(
               req,
               {
-                action: "Recent line items sync_product failed :: endpoint error",
+                action:
+                  "Recent line items sync_product failed :: endpoint error",
                 url: req.originalUrl || "/api/product/recent-product-ids",
                 tags: [
                   "product",
@@ -2999,6 +3100,7 @@ async function getRecentLineItemProductIds(req, res) {
         logErr?.message || logErr,
       );
     }
+    // step 20 end
 
     return res.status(500).json({
       success: false,

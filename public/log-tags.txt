@@ -23,6 +23,7 @@ create
 create-product-variation
 created
 cron job
+cron_sync
 custom-create
 custom-update
 delete

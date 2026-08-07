@@ -309,7 +309,7 @@ async function enqueueBulkSyncProductJobsByCompany({
     status: "active",
     deletedAt: null,
   })
-    .select("_id company_id")
+    .select("_id company_id name")
     .lean();
 
   console.log(
@@ -317,6 +317,7 @@ async function enqueueBulkSyncProductJobsByCompany({
   );
 
   const integrationsByCompany = new Map();
+  const integrationNameById = new Map();
   for (const row of integrations) {
     const companyKey = String(row.company_id);
     if (!integrationsByCompany.has(companyKey)) {
@@ -324,8 +325,11 @@ async function enqueueBulkSyncProductJobsByCompany({
     }
     const integrationId = coalesceObjectId(row._id);
     if (!integrationId) continue;
+    const integrationKey = String(integrationId);
+    const storeName = String(row.name || "").trim() || integrationKey;
+    integrationNameById.set(integrationKey, storeName);
     const list = integrationsByCompany.get(companyKey);
-    if (!list.some((id) => String(id) === String(integrationId))) {
+    if (!list.some((id) => String(id) === integrationKey)) {
       list.push(integrationId);
     }
   }
@@ -481,58 +485,82 @@ async function enqueueBulkSyncProductJobsByCompany({
   }
 
   for (const [companyKey, rows] of createdByCompany.entries()) {
-    const { companyProductIds, product_names, namesList, product_count } =
-      companyProductSummary(companyKey);
-    const failedForCompany = failed.filter((f) => f.company_id === companyKey);
-    const integrationCount = new Set(
-      rows.map((r) => String(r.integration_id)),
-    ).size;
-    const logResult = await createApplicationLog(
-      req,
-      {
-        action: `Recent line items sync_product :: ${product_count} product(s) going in sync`,
-        url: logUrl,
-        tags: [
-          "product",
-          "process",
-          "sync_product",
-          "recent-product-ids",
-          "bulk",
-          "cron job",
-        ],
-        description: {
-          message: `${product_count} product(s) going in sync: ${namesList}`,
-          action: "sync_product",
-          process_count: rows.length,
-          product_count,
-          product_ids: companyProductIds,
-          product_names,
-          products_going_in_sync: namesList,
-          integration_count: integrationCount,
-          process_ids: rows.map((r) => String(r._id)),
-          failed_count: failedForCompany.length,
-          failed: failedForCompany,
-          remarks,
+    // One chat log per integration store for this company
+    const rowsByIntegration = new Map();
+    for (const row of rows) {
+      const integrationKey = String(row.integration_id);
+      if (!rowsByIntegration.has(integrationKey)) {
+        rowsByIntegration.set(integrationKey, []);
+      }
+      rowsByIntegration.get(integrationKey).push(row);
+    }
+
+    for (const [integrationKey, integRows] of rowsByIntegration.entries()) {
+      const storeName =
+        integrationNameById.get(integrationKey) || integrationKey;
+      const seenProductIds = new Set();
+      const productIds = [];
+      const product_names = [];
+      for (const row of integRows) {
+        const productIdStr = String(row.product_id);
+        if (seenProductIds.has(productIdStr)) continue;
+        seenProductIds.add(productIdStr);
+        productIds.push(productIdStr);
+        product_names.push(
+          productNameById.get(productIdStr) || productIdStr,
+        );
+      }
+      const product_count = productIds.length;
+      const namesList = product_names.join(", ");
+      const message = `${product_count} product, ${namesList} and has been sent to sync on ${storeName}`;
+      const failedForCompany = failed.filter(
+        (f) =>
+          f.company_id === companyKey && f.integration_id === integrationKey,
+      );
+
+      const logResult = await createApplicationLog(
+        req,
+        {
+          action: message,
+          url: logUrl,
+          tags: ["sync", "cron_sync"],
+          description: {
+            message,
+            action: "sync_product",
+            process_count: integRows.length,
+            product_count,
+            product_ids: productIds,
+            product_names,
+            products_going_in_sync: namesList,
+            integration_id: integrationKey,
+            integration_store_name: storeName,
+            process_ids: integRows.map((r) => String(r._id)),
+            failed_count: failedForCompany.length,
+            failed: failedForCompany,
+            remarks,
+          },
+          company_id: companyKey,
+          created_by: actor,
+          reference_type: "integration",
+          reference_id: integrationKey,
         },
+        { silent: true },
+      );
+      logs.push({
         company_id: companyKey,
-        created_by: actor,
-        reference_type: "process",
-        reference_id: rows[0]?._id || null,
-      },
-      { silent: true },
-    );
-    logs.push({
-      company_id: companyKey,
-      ok: !!logResult?.ok,
-      log_id: logResult?._id ? String(logResult._id) : null,
-      type: "queued",
-      product_count,
-      product_names,
-      skipped: logResult?.skipped || null,
-    });
-    console.log(
-      `[recent-sync] log company=${companyKey} products=${product_count} names=${namesList} jobs=${rows.length} log_ok=${!!logResult?.ok}`,
-    );
+        integration_id: integrationKey,
+        integration_store_name: storeName,
+        ok: !!logResult?.ok,
+        log_id: logResult?._id ? String(logResult._id) : null,
+        type: "queued",
+        product_count,
+        product_names,
+        skipped: logResult?.skipped || null,
+      });
+      console.log(
+        `[recent-sync] log company=${companyKey} store=${storeName} products=${product_count} names=${namesList} jobs=${integRows.length} log_ok=${!!logResult?.ok}`,
+      );
+    }
   }
 
   // Companies with products but no successful creates
