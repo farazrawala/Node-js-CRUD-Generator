@@ -89,6 +89,7 @@ skipped_woocommerce
 soft_delete
 stock
 stock_alert
+stock_recount
 stock_transfer
 sync
 sync_product

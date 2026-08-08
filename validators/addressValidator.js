@@ -164,6 +164,28 @@ function extractPostalCandidate(text) {
   return null;
 }
 
+/** True house/flat/plot number — not postal-code digits alone. */
+function detectHouseNumber(text, housePart = "") {
+  if (hasDigit(housePart)) return true;
+  const s = normalizeText(text);
+  if (!s) return false;
+  if (
+    /\b(?:house|hous|plot|flat|flt|apt|apartment|appartment|shop|unit|suite|building|bldg)\s*(?:no\.?|number|#)?\s*[A-Za-z0-9\-_/]*\d[A-Za-z0-9\-_/]*/i.test(
+      s,
+    )
+  ) {
+    return true;
+  }
+  // Leading street number: "12 Street 4", "456 First Ave"
+  if (/^\d+[A-Za-z]?(?:\s|$)/.test(s)) return true;
+  // Any remaining digit after stripping postal / ZIP tokens
+  const withoutPostal = s
+    .replace(/\b\d{5}-\d{4}\b/g, " ")
+    .replace(/\b\d{5}\b/g, " ")
+    .replace(/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/gi, " ");
+  return hasDigit(withoutPostal);
+}
+
 function validatePostalCode(postal, countryKey, patterns) {
   if (!postal) return { ok: false, reason: "missing" };
   const key = String(countryKey || "default").toLowerCase();
@@ -348,11 +370,8 @@ function validateAddress(input, options = {}) {
   );
   const countryPart = normalizeText(structured?.country || "");
 
-  // 4. House / building number
-  details.hasHouseNumber =
-    hasDigit(housePart) ||
-    hasDigit(fullAddress) ||
-    /\b(house|plot|flat|apt|apartment|shop)\s*#?\s*\d+/i.test(fullAddress);
+  // 4. House / building number (do not treat postal-code digits as a house no.)
+  details.hasHouseNumber = detectHouseNumber(fullAddress, housePart);
   if (!details.hasHouseNumber) {
     warnings.push("No house/building number found.");
     suggestions.push("Please include your house number.");

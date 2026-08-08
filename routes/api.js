@@ -153,6 +153,11 @@ const {
   getQueueWorkerStatus,
 } = require("../controllers/process");
 const { logControllerError } = require("../utils/logControllerError");
+const {
+  stockRecountStart,
+  stockRecountCount,
+  stockRecountPost,
+} = require("../controllers/stock_recount");
 
 const {
   apiCreateStockTransfer,
@@ -932,6 +937,41 @@ registerAllModelRoutes(router, {
           method: "POST",
           path: "/whatsapp_messages/create",
           handler: whatsappMessageCreate,
+        },
+      ],
+    },
+    stock_recount: {
+      enabled: true,
+      customRoutes: [
+        {
+          method: "POST",
+          path: "/stock_recount/start",
+          handler: stockRecountStart,
+        },
+        {
+          method: "POST",
+          path: "/stock_recounts/start",
+          handler: stockRecountStart,
+        },
+        {
+          method: "PATCH",
+          path: "/stock_recount/count/:id",
+          handler: stockRecountCount,
+        },
+        {
+          method: "PATCH",
+          path: "/stock_recounts/count/:id",
+          handler: stockRecountCount,
+        },
+        {
+          method: "POST",
+          path: "/stock_recount/post",
+          handler: stockRecountPost,
+        },
+        {
+          method: "POST",
+          path: "/stock_recounts/post",
+          handler: stockRecountPost,
         },
       ],
     },

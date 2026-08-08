@@ -6516,12 +6516,28 @@ async function order_validate_address(req, res) {
         type: "not_found",
       });
     }
+    // Prefer request body when the client re-validates an edited address.
+    const bodyAddress = String(req.body?.address ?? "").trim();
     input = {
-      address: order.address,
-      city: order.city,
-      state: order.state,
-      zip: order.zip,
-      country: order.country,
+      address: bodyAddress || order.address,
+      city:
+        req.body?.city != null && String(req.body.city).trim() !== ""
+          ? req.body.city
+          : order.city,
+      state:
+        req.body?.state != null && String(req.body.state).trim() !== ""
+          ? req.body.state
+          : order.state,
+      zip:
+        req.body?.zip != null && String(req.body.zip).trim() !== ""
+          ? req.body.zip
+          : req.body?.postal_code != null && String(req.body.postal_code).trim() !== ""
+            ? req.body.postal_code
+            : order.zip,
+      country:
+        req.body?.country != null && String(req.body.country).trim() !== ""
+          ? req.body.country
+          : order.country,
     };
     const validation = validateOrderAddressFields(input, {
       config: req.body?.config || null,
