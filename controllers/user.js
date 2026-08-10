@@ -10,6 +10,7 @@ const {
   handleGenericGetById,
   handleGenericFindOne,
   coalesceObjectId,
+  generateSlug,
 } = require("../utils/modelHelper");
 const { performAccountCreate } = require("./account");
 const Company = require("../models/company");
@@ -779,6 +780,22 @@ async function countTotalUsers(req, res) {
  * Tenant bootstrap inside a transaction when the deployment supports it.
  * @returns {Promise<object>} Success payload for JSON response (`data` key).
  */
+async function allocateUniqueCompanySlug(baseSlug, session = null) {
+  const root = String(baseSlug || "company").trim() || "company";
+  for (let n = 1; n <= 1000; n += 1) {
+    const candidate = n === 1 ? root : `${root}-${n}`;
+    const filter = { company_slug: candidate };
+    const exists =
+      session ?
+        await Company.exists(filter).session(session)
+      : await Company.exists(filter);
+    if (!exists) return candidate;
+  }
+  const err = new Error("Could not allocate a unique company_slug");
+  err.statusCode = 400;
+  throw err;
+}
+
 async function runUserCompanySignupBody(req, session, tracker) {
   const emailRaw = req.body && req.body.email;
   const email =
@@ -797,6 +814,30 @@ async function runUserCompanySignupBody(req, session, tracker) {
       data.company_address =
         req.body.company_address || req.body.address || "Default Address";
       data.status = "active";
+
+      const sentSlug = String(req.body.company_slug || "").trim();
+      if (sentSlug) {
+        const slug = generateSlug(sentSlug) || sentSlug;
+        const taken =
+          session ?
+            await Company.exists({ company_slug: slug }).session(session)
+          : await Company.exists({ company_slug: slug });
+        if (taken) {
+          return {
+            success: false,
+            status: 400,
+            error: "Company slug is already taken",
+            message: "Company slug is already taken",
+            company_slug: slug,
+          };
+        }
+        data.company_slug = slug;
+      } else {
+        data.company_slug = await allocateUniqueCompanySlug(
+          generateSlug(cn) || "company",
+          session,
+        );
+      }
     },
   });
   if (!create_company.success) {

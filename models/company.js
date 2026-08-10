@@ -77,6 +77,13 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    company_slug: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+      // required: true,
+    },
     company_phone: {
       type: String,
       // required: true,

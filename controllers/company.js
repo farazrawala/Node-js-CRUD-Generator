@@ -892,8 +892,66 @@ async function removeCompanyDraftOrder(req, res) {
   }
 }
 
+function normalizeCompanySlug(value) {
+  if (value == null) return "";
+  return String(value).trim();
+}
+
+/**
+ * Check whether `company_slug` is free (matches unique sparse index).
+ * Query: `company_slug` / `slug`, or path `:slug`. Optional `exclude_id` when editing.
+ */
+async function checkCompanySlugAvailable(req, res) {
+  try {
+    const slug = normalizeCompanySlug(
+      req.params?.slug ??
+        req.query?.company_slug ??
+        req.query?.slug ??
+        req.body?.company_slug ??
+        req.body?.slug,
+    );
+
+    if (!slug) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        available: false,
+        message: "company_slug is required",
+      });
+    }
+
+    const filter = { company_slug: slug };
+    const excludeId = coalesceObjectId(
+      req.query?.exclude_id ?? req.body?.exclude_id,
+    );
+    if (excludeId) {
+      filter._id = { $ne: excludeId };
+    }
+
+    const existing = await Company.exists(filter);
+    const available = !existing;
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      available,
+      company_slug: slug,
+      message: available ? "Company slug is available" : "Company slug is already taken",
+    });
+  } catch (error) {
+    console.error("❌ checkCompanySlugAvailable:", error?.message || error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      available: false,
+      message: error?.message || "Failed to check company slug",
+    });
+  }
+}
+
 module.exports = {
   companyCreate,
+  checkCompanySlugAvailable,
   getMyBranches,
   getAllForListing,
   removeCache,

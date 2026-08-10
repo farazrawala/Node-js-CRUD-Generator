@@ -202,6 +202,7 @@ const {
 } = require("../controllers/sales_return");
 const {
   companyCreate,
+  checkCompanySlugAvailable,
   getMyBranches,
   getAllForListing,
   removeCache,
@@ -566,6 +567,11 @@ router.get("/process/run-queue-worker/:id", runQueueWorker);
 router.get("/process/queue-worker-status", getQueueWorkerStatus);
 
 // Company routes
+router.get("/company/slug-available", checkCompanySlugAvailable);
+router.get("/company/slug-available/:slug", checkCompanySlugAvailable);
+router.get("/companies/slug-available", checkCompanySlugAvailable);
+router.get("/companies/slug-available/:slug", checkCompanySlugAvailable);
+
 router.get("/company/get-my-branches", getMyBranches);
 router.get("/company/get-all-for-listing", getAllForListing);
 

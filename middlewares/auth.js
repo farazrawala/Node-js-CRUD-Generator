@@ -149,6 +149,14 @@ async function checkHeaderAuthentication(req, res, next) {
     // '/api/user/get-all',               // Public user routes
     "/user/user_company",
     "/api/user/user_company",
+    "/company/slug-available",
+    "/api/company/slug-available",
+    "/companies/slug-available",
+    "/api/companies/slug-available",
+    /^\/company\/slug-available\/.*/,
+    /^\/api\/company\/slug-available\/.*/,
+    /^\/companies\/slug-available\/.*/,
+    /^\/api\/companies\/slug-available\/.*/,
     /^\/api\/blog\/get\/.*/, // /api/blog/get/:id
     // /^\/api\/product\/get\/.*/, // /api/product/get/:id
     /^\/api\/user\/get\/.*/, // /api/user/get/:id

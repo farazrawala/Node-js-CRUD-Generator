@@ -14,8 +14,8 @@ const {
 
 const ACTIVE_STATUSES = ["pending", "approved"];
 const CONNECTION_POPULATE = [
-  { path: "company_id", select: "company_name company_email company_phone company_logo company_banner status" },
-  { path: "target_company_id", select: "company_name company_email company_phone company_logo company_banner status" },
+  { path: "company_id", select: "company_name company_slug company_email company_phone company_logo company_banner status" },
+  { path: "target_company_id", select: "company_name company_slug company_email company_phone company_logo company_banner status" },
   { path: "requested_by", select: "name email" },
   { path: "approved_by", select: "name email" },
 ];
@@ -692,6 +692,27 @@ function companyIdQueryValues(companyIds) {
 }
 
 /**
+ * Resolve marketplace `:companyId` as ObjectId or `company_slug`.
+ */
+async function resolveMarketplaceCompanyId(companyIdParam) {
+  const raw = String(companyIdParam ?? "").trim();
+  if (!raw) return null;
+
+  if (isValidObjectId(raw)) {
+    const oid = coalesceObjectId(raw);
+    if (oid) return oid;
+  }
+
+  const company = await Company.findOne({
+    company_slug: raw,
+    deletedAt: null,
+  })
+    .select("_id")
+    .lean();
+  return coalesceObjectId(company?._id) || null;
+}
+
+/**
  * Shared access check for marketplace browse of another (or own) company.
  * @returns {Promise<{ ok: true, myCompanyId, partnerCompanyId, approved, access } | { ok: false, status, message }>}
  */
@@ -701,9 +722,9 @@ async function resolveMarketplaceBrowseAccess(req, companyIdParam) {
     return { ok: false, status: 403, message: "Forbidden" };
   }
 
-  const partnerCompanyId = coalesceObjectId(companyIdParam);
-  if (!partnerCompanyId || !isValidObjectId(partnerCompanyId)) {
-    return { ok: false, status: 400, message: "Invalid company id" };
+  const partnerCompanyId = await resolveMarketplaceCompanyId(companyIdParam);
+  if (!partnerCompanyId) {
+    return { ok: false, status: 404, message: "Company not found" };
   }
 
   if (String(myCompanyId) === String(partnerCompanyId)) {
@@ -1177,9 +1198,9 @@ async function getPartnerCompany(req, res) {
       return jsonError(res, 403, "Forbidden");
     }
 
-    const partnerCompanyId = coalesceObjectId(req.params.companyId);
-    if (!partnerCompanyId || !isValidObjectId(partnerCompanyId)) {
-      return jsonError(res, 400, "Invalid company id");
+    const partnerCompanyId = await resolveMarketplaceCompanyId(req.params.companyId);
+    if (!partnerCompanyId) {
+      return jsonError(res, 404, "Company not found");
     }
 
     const company = await Company.findOne({
@@ -1618,9 +1639,9 @@ async function getFetchedProductIds(req, res) {
       return jsonError(res, 403, "Forbidden");
     }
 
-    const sourceCompanyId = coalesceObjectId(req.params.companyId);
-    if (!sourceCompanyId || !isValidObjectId(sourceCompanyId)) {
-      return jsonError(res, 400, "Invalid company id");
+    const sourceCompanyId = await resolveMarketplaceCompanyId(req.params.companyId);
+    if (!sourceCompanyId) {
+      return jsonError(res, 404, "Company not found");
     }
     if (String(sourceCompanyId) === String(myCompanyId)) {
       return jsonError(
@@ -1707,17 +1728,14 @@ async function getFetchedProducts(req, res) {
     };
 
     // Prefer path param when browsing a specific partner store.
-    const pathCompanyId = coalesceObjectId(req.params.companyId);
-    const queryCompanyId = coalesceObjectId(
+    const pathCompanyId = await resolveMarketplaceCompanyId(req.params.companyId);
+    const queryCompanyId = await resolveMarketplaceCompanyId(
       req.query.fetch_from_company_id ?? req.query.fetchFromCompanyId,
     );
     const sourceCompanyId = pathCompanyId || queryCompanyId;
 
     let sourceCompanyIds = null;
     if (sourceCompanyId) {
-      if (!isValidObjectId(sourceCompanyId)) {
-        return jsonError(res, 400, "Invalid company id");
-      }
       if (String(sourceCompanyId) === String(myCompanyId)) {
         return jsonError(
           res,

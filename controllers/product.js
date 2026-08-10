@@ -2108,9 +2108,35 @@ async function productDelete(req, res) {
   req.body = { deletedAt: new Date().toISOString() };
   const response = await handleGenericUpdate(req, "product", {
     filter: filter,
-    afterUpdate: async (record, req, existingRecord) => {
-      console.log(`✅ Product soft deleted successfully.`);
-      await invalidateProductListCache(req);
+    afterUpdate: async (record, reqInner, existingRecord) => {
+      const parentId = coalesceObjectId(
+        record?._id || existingRecord?._id || reqInner.params?.id,
+      );
+      let variantsDeleted = 0;
+      if (parentId) {
+        const now = record?.deletedAt ? new Date(record.deletedAt) : new Date();
+        const softDeleteSet = { deletedAt: now, status: "inactive" };
+        const uid = coalesceObjectId(reqInner.user?._id || reqInner.user?.id);
+        if (uid) softDeleteSet.updated_by = uid;
+
+        const childFilter = {
+          parent_product_id: parentId,
+          deletedAt: null,
+        };
+        const companyId = coalesceObjectId(
+          filter.company_id || reqInner.user?.company_id,
+        );
+        if (companyId) childFilter.company_id = companyId;
+
+        const variantResult = await Product.updateMany(childFilter, {
+          $set: softDeleteSet,
+        });
+        variantsDeleted = variantResult.modifiedCount || 0;
+      }
+      console.log(
+        `✅ Product soft deleted successfully. Variants deleted: ${variantsDeleted}`,
+      );
+      await invalidateProductListCache(reqInner);
     },
   });
   return res.status(response.status).json(response);
