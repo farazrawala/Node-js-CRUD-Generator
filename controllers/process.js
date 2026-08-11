@@ -16,6 +16,7 @@ const woocommerceProcess = require("./woocommerceProcess");
 const shopifyProcess = require("./shopifyProcess");
 const {
   queue_bigcommerce_product_reset,
+  apply_bigcommerce_product_reset,
 } = require("../utils/bigcommerceProductResetQueue");
 const {
   isQueueEnabled,
@@ -250,6 +251,7 @@ const PROCESS_ACTIONS = new Set([
   "fetch_order",
   "fetch_latest_order",
   "queue_bigcommerce_product_reset",
+  "apply_bigcommerce_product_reset",
 ]);
 
 function normalizeBulkProcessRow(row, { companyId, createdBy }) {
@@ -295,6 +297,9 @@ function validateProcessRow(row) {
   }
   if (row.action === "queue_bigcommerce_product_reset" && !row.product_id) {
     return "product_id is required for queue_bigcommerce_product_reset.";
+  }
+  if (row.action === "apply_bigcommerce_product_reset" && !row.product_id) {
+    return "product_id is required for apply_bigcommerce_product_reset.";
   }
   if (
     (row.action === "fetch_category" ||
@@ -1010,6 +1015,9 @@ async function runProcessAction(req, res, process) {
     }
     case "queue_bigcommerce_product_reset": {
       return queue_bigcommerce_product_reset(req, res, process);
+    }
+    case "apply_bigcommerce_product_reset": {
+      return apply_bigcommerce_product_reset(req, res, process);
     }
 
     default: {

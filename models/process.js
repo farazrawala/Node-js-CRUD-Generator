@@ -45,6 +45,7 @@ const modelSchema = new mongoose.Schema(
         "delete_order",
 
         "queue_bigcommerce_product_reset",
+        "apply_bigcommerce_product_reset",
       ],
       field_name: "Action",
     },

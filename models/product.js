@@ -184,6 +184,11 @@ const modelSchema = new mongoose.Schema(
       ref: "product",
       field_name: "Fetch From Product",
     },
+    origin_qty: {
+      type: Number,
+      field_name: "Origin Qty",
+      default: 0,
+    },
     fetch_from_company_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "company",

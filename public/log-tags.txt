@@ -29,6 +29,7 @@ custom-update
 delete
 error
 expense
+failed
 failed_bigcommerce
 failed_shopify
 failed_woocommerce
@@ -73,6 +74,7 @@ purchase_order_delete
 purchase_order_update
 purchase_return
 put
+queue_bigcommerce_product_reset
 recent-product-ids
 remove-cache
 rollback

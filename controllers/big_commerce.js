@@ -1092,6 +1092,54 @@ async function aggregateProductStockTotals(companyIds) {
   ]);
 }
 
+function roundStockQty(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+/**
+ * Map product_id → total active warehouse qty (missing products → 0).
+ * Used to snapshot partner stock onto me-too copies as `origin_qty`.
+ * @param {Array<string|import("mongoose").Types.ObjectId>} productIds
+ * @returns {Promise<Map<string, number>>}
+ */
+async function mapProductIdsToTotalStock(productIds) {
+  const oids = [
+    ...new Set(
+      (productIds || [])
+        .map((id) => coalesceObjectId(id))
+        .filter(Boolean)
+        .map((id) => String(id)),
+    ),
+  ].map((id) => coalesceObjectId(id));
+
+  const map = new Map();
+  for (const id of oids) {
+    map.set(String(id), 0);
+  }
+  if (!oids.length) return map;
+
+  const rows = await WarehouseInventory.aggregate([
+    {
+      $match: {
+        product_id: { $in: oids },
+        status: "active",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      },
+    },
+    {
+      $group: {
+        _id: "$product_id",
+        total_qty: { $sum: { $ifNull: ["$quantity", 0] } },
+      },
+    },
+  ]);
+
+  for (const row of rows) {
+    map.set(String(row._id), roundStockQty(row.total_qty));
+  }
+  return map;
+}
+
 /**
  * Resolve product id constraint for a stock filter.
  * @returns {Promise<null | { ids: any[], match?: object }>}
@@ -1589,6 +1637,7 @@ function buildFetchedProductPayload(source, {
   targetCompanyId,
   createdBy,
   parentProductId = null,
+  originQty = 0,
 }) {
   const payload = {
     company_id: targetCompanyId,
@@ -1598,6 +1647,7 @@ function buildFetchedProductPayload(source, {
     brand_id: null,
     category_id: [],
     product_relations: [],
+    origin_qty: roundStockQty(originQty),
     created_by: createdBy || null,
     updated_by: createdBy || null,
     deletedAt: null,
@@ -1619,7 +1669,9 @@ function buildFetchedProductPayload(source, {
 }
 
 /** Fields to overwrite when resetting a fetched copy from its origin. */
-function buildFetchedProductResetSet(source, updatedBy, syncSettings) {
+function buildFetchedProductResetSet(source, updatedBy, syncSettings, {
+  originQty = null,
+} = {}) {
   const $set = {
     fetch_from_product_id: source._id,
     fetch_from_company_id: source.company_id || null,
@@ -1630,6 +1682,11 @@ function buildFetchedProductResetSet(source, updatedBy, syncSettings) {
     if (source[field] !== undefined) {
       $set[field] = source[field];
     }
+  }
+
+  // Always refresh partner warehouse stock snapshot on reset.
+  if (originQty != null) {
+    $set.origin_qty = roundStockQty(originQty);
   }
 
   return $set;
@@ -1721,13 +1778,6 @@ async function duplicatePartnerProduct(req, res) {
     }
 
     const createdBy = userId(req);
-    const parentPayload = buildFetchedProductPayload(source, {
-      targetCompanyId: myCompanyId,
-      createdBy,
-      parentProductId: null,
-    });
-
-    const createdParent = await Product.create(parentPayload);
 
     // Match product edit: all non-deleted children (including inactive).
     const variants = await Product.find({
@@ -1736,6 +1786,20 @@ async function duplicatePartnerProduct(req, res) {
     })
       .sort({ createdAt: 1 })
       .lean();
+
+    const originStockById = await mapProductIdsToTotalStock([
+      source._id,
+      ...variants.map((v) => v._id),
+    ]);
+
+    const parentPayload = buildFetchedProductPayload(source, {
+      targetCompanyId: myCompanyId,
+      createdBy,
+      parentProductId: null,
+      originQty: originStockById.get(String(source._id)) ?? 0,
+    });
+
+    const createdParent = await Product.create(parentPayload);
 
     const createdVariants = [];
     for (const variant of variants) {
@@ -1754,6 +1818,7 @@ async function duplicatePartnerProduct(req, res) {
         targetCompanyId: myCompanyId,
         createdBy,
         parentProductId: createdParent._id,
+        originQty: originStockById.get(String(variant._id)) ?? 0,
       });
       const createdVariant = await Product.create(variantPayload);
       createdVariants.push(createdVariant.toObject());
@@ -1956,6 +2021,7 @@ async function getFetchedProducts(req, res) {
       BIG_COMMERCE_POS_PRODUCT_SELECT,
       "fetch_from_product_id",
       "fetch_from_company_id",
+      "origin_qty",
     ].join(" ");
 
     const [data, total] = await Promise.all([
@@ -1999,26 +2065,40 @@ async function getFetchedProducts(req, res) {
 }
 
 /**
- * POST /big-commerce/fetched-products/:productId/reset
+ * Shared Me-too reset core (HTTP + process queue).
+ * Company 2 resets its copy from the origin product (Company 1).
  *
- * Company 2 resets its Me-too copy from the origin product (Company 1):
- * - overwrites origin fields gated by company_connection sync_* toggles
- * - syncs child variants: update matched, create missing, soft-delete orphans
- *
- * :productId = your catalog product _id (the fetched copy), not the origin.
+ * @param {{
+ *   localProductId: import("mongoose").Types.ObjectId|string,
+ *   companyId: import("mongoose").Types.ObjectId|string,
+ *   updatedBy?: import("mongoose").Types.ObjectId|string|null,
+ * }} params
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   status: number,
+ *   message: string,
+ *   data?: object,
+ *   meta?: object,
+ *   code?: number,
+ * }>}
  */
-async function resetFetchedProductFromOrigin(req, res) {
+async function applyFetchedProductReset({
+  localProductId,
+  companyId,
+  updatedBy = null,
+}) {
+  const myCompanyId = coalesceObjectId(companyId);
+  const productId = coalesceObjectId(localProductId);
+  const actorId = coalesceObjectId(updatedBy);
+
+  if (!myCompanyId) {
+    return { ok: false, status: 403, message: "Forbidden" };
+  }
+  if (!productId || !isValidObjectId(productId)) {
+    return { ok: false, status: 400, message: "Invalid product id" };
+  }
+
   try {
-    const myCompanyId = tenantCompanyId(req);
-    if (!myCompanyId) {
-      return jsonError(res, 403, "Forbidden");
-    }
-
-    const productId = coalesceObjectId(req.params.productId);
-    if (!productId || !isValidObjectId(productId)) {
-      return jsonError(res, 400, "Invalid product id");
-    }
-
     const local = await Product.findOne({
       _id: productId,
       company_id: myCompanyId,
@@ -2027,16 +2107,20 @@ async function resetFetchedProductFromOrigin(req, res) {
     });
 
     if (!local) {
-      return jsonError(
-        res,
-        404,
-        "Fetched product not found in your catalog",
-      );
+      return {
+        ok: false,
+        status: 404,
+        message: "Fetched product not found in your catalog",
+      };
     }
 
     const originId = coalesceObjectId(local.fetch_from_product_id);
     if (!originId) {
-      return jsonError(res, 400, "Fetched product has no origin link");
+      return {
+        ok: false,
+        status: 400,
+        message: "Fetched product has no origin link",
+      };
     }
 
     const origin = await Product.findOne({
@@ -2045,7 +2129,11 @@ async function resetFetchedProductFromOrigin(req, res) {
     }).lean();
 
     if (!origin) {
-      return jsonError(res, 404, "Origin product not found or was deleted");
+      return {
+        ok: false,
+        status: 404,
+        message: "Origin product not found or was deleted",
+      };
     }
 
     const connection = await findApprovedConnectionForReset(
@@ -2053,18 +2141,6 @@ async function resetFetchedProductFromOrigin(req, res) {
       coalesceObjectId(origin.company_id),
     );
     const syncSettings = pickConnectionSyncSettings(connection);
-
-    const updatedBy = userId(req);
-    const parentSet = buildFetchedProductResetSet(origin, updatedBy, syncSettings);
-
-    // Keep this copy as a parent/standalone under company 2 even if origin
-    // is somehow a variant row.
-    if (origin.parent_product_id && !local.parent_product_id) {
-      parentSet.parent_product_id = null;
-      if (!parentSet.product_type) parentSet.product_type = "Single";
-    }
-
-    await Product.updateOne({ _id: local._id }, { $set: parentSet });
 
     // Match product edit: all non-deleted children (including inactive).
     // Previously status:"active" dropped inactive origin variants (e.g. 6 → 5).
@@ -2074,6 +2150,27 @@ async function resetFetchedProductFromOrigin(req, res) {
     })
       .sort({ createdAt: 1 })
       .lean();
+
+    const originStockById = await mapProductIdsToTotalStock([
+      origin._id,
+      ...originVariants.map((v) => v._id),
+    ]);
+
+    const parentSet = buildFetchedProductResetSet(
+      origin,
+      actorId,
+      syncSettings,
+      { originQty: originStockById.get(String(origin._id)) ?? 0 },
+    );
+
+    // Keep this copy as a parent/standalone under company 2 even if origin
+    // is somehow a variant row.
+    if (origin.parent_product_id && !local.parent_product_id) {
+      parentSet.parent_product_id = null;
+      if (!parentSet.product_type) parentSet.product_type = "Single";
+    }
+
+    await Product.updateOne({ _id: local._id }, { $set: parentSet });
 
     const localVariants = await Product.find({
       parent_product_id: local._id,
@@ -2095,13 +2192,15 @@ async function resetFetchedProductFromOrigin(req, res) {
     for (const originVariant of originVariants) {
       const originVariantId = String(originVariant._id);
       matchedOriginIds.add(originVariantId);
+      const originQty = originStockById.get(originVariantId) ?? 0;
 
       const existing = localByOriginId.get(originVariantId);
       if (existing) {
         const variantSet = buildFetchedProductResetSet(
           originVariant,
-          updatedBy,
+          actorId,
           syncSettings,
+          { originQty },
         );
         variantSet.parent_product_id = local._id;
         await Product.updateOne({ _id: existing._id }, { $set: variantSet });
@@ -2114,8 +2213,9 @@ async function resetFetchedProductFromOrigin(req, res) {
 
       const variantPayload = buildFetchedProductPayload(originVariant, {
         targetCompanyId: myCompanyId,
-        createdBy: updatedBy,
+        createdBy: actorId,
         parentProductId: local._id,
+        originQty,
       });
       const createdVariant = await Product.create(variantPayload);
       createdVariants.push(createdVariant.toObject());
@@ -2125,7 +2225,7 @@ async function resetFetchedProductFromOrigin(req, res) {
     const softDeleteSet = {
       deletedAt: now,
       status: "inactive",
-      updated_by: updatedBy || null,
+      updated_by: actorId || null,
     };
 
     const orphanIds = localVariants
@@ -2156,15 +2256,15 @@ async function resetFetchedProductFromOrigin(req, res) {
       .sort({ createdAt: 1 })
       .lean();
 
-    return jsonSuccess(
-      res,
-      200,
-      {
+    return {
+      ok: true,
+      status: 200,
+      message: "Fetched product reset from origin",
+      data: {
         ...refreshed,
         variants: refreshedVariants,
       },
-      "Fetched product reset from origin",
-      {
+      meta: {
         fetch_from_product_id: origin._id,
         fetch_from_company_id: origin.company_id,
         connection_id: connection?._id || null,
@@ -2173,22 +2273,58 @@ async function resetFetchedProductFromOrigin(req, res) {
         variants_created: createdVariants.length,
         variants_removed: variantsRemoved,
       },
-    );
+    };
   } catch (error) {
-    console.error("[big_commerce] resetFetchedProductFromOrigin:", error);
+    console.error("[big_commerce] applyFetchedProductReset:", error);
     if (error?.code === 11000) {
-      return jsonError(
-        res,
-        409,
-        "A product with the same SKU or barcode already exists in your catalog",
-      );
+      return {
+        ok: false,
+        status: 409,
+        code: 11000,
+        message:
+          "A product with the same SKU or barcode already exists in your catalog",
+      };
     }
-    return jsonError(
-      res,
-      500,
-      error.message || "Failed to reset fetched product from origin",
-    );
+    return {
+      ok: false,
+      status: 500,
+      message: error.message || "Failed to reset fetched product from origin",
+    };
   }
+}
+
+/**
+ * POST /big-commerce/fetched-products/:productId/reset
+ *
+ * Company 2 resets its Me-too copy from the origin product (Company 1):
+ * - overwrites origin fields gated by company_connection sync_* toggles
+ * - syncs child variants: update matched, create missing, soft-delete orphans
+ *
+ * :productId = your catalog product _id (the fetched copy), not the origin.
+ */
+async function resetFetchedProductFromOrigin(req, res) {
+  const myCompanyId = tenantCompanyId(req);
+  if (!myCompanyId) {
+    return jsonError(res, 403, "Forbidden");
+  }
+
+  const result = await applyFetchedProductReset({
+    localProductId: req.params.productId,
+    companyId: myCompanyId,
+    updatedBy: userId(req),
+  });
+
+  if (!result.ok) {
+    return jsonError(res, result.status, result.message);
+  }
+
+  return jsonSuccess(
+    res,
+    result.status,
+    result.data,
+    result.message,
+    result.meta || {},
+  );
 }
 
 /**
@@ -2290,6 +2426,7 @@ module.exports = {
   duplicatePartnerProduct,
   getFetchedProductIds,
   getFetchedProducts,
+  applyFetchedProductReset,
   resetFetchedProductFromOrigin,
   softDeleteFetchedProduct,
 };

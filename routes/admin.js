@@ -2586,6 +2586,10 @@ const processAdminCRUD = adminCrudGenerator(
           value: "queue_bigcommerce_product_reset",
           label: "Queue BigCommerce product reset (me-too discovery)",
         },
+        {
+          value: "apply_bigcommerce_product_reset",
+          label: "Apply BigCommerce me-too product reset",
+        },
         { value: "sync_category", label: "Sync category (POS → store)" },
         { value: "sync_brand", label: "Sync brand (POS → store)" },
         { value: "delete_product", label: "Delete product" },

@@ -6,6 +6,11 @@
  * Process action: `queue_bigcommerce_product_reset`
  * - One process row per origin product_id (no integration required)
  * - Worker finds products with fetch_from_product_id = origin and insertMany
+ * - Then enqueues `apply_bigcommerce_product_reset` per me-too product
+ *
+ * Process action: `apply_bigcommerce_product_reset`
+ * - product_id = me-too (fetched) product _id
+ * - Runs the same core as POST /big-commerce/fetched-products/:id/reset
  *
  * @module utils/bigcommerceProductResetQueue
  */
@@ -18,6 +23,7 @@ const { enqueueProcess } = require("./processQueue");
 const { markProcessOutcome } = require("./processHelpers");
 
 const ACTION = "queue_bigcommerce_product_reset";
+const APPLY_ACTION = "apply_bigcommerce_product_reset";
 const INSERT_CHUNK = 500;
 
 /**
@@ -124,8 +130,79 @@ async function enqueueBigcommerceProductResetJobs({
 }
 
 /**
+ * Enqueue apply jobs for me-too products discovered from an origin.
+ *
+ * @param {Array<object>} linkedProducts
+ * @param {{ actorId?: unknown, remarks?: string, priority?: number }} opts
+ */
+async function enqueueApplyJobsForLinkedProducts(
+  linkedProducts,
+  {
+    actorId = null,
+    remarks = "Auto-queued BC me-too reset apply from discovery",
+    priority = 55,
+  } = {},
+) {
+  const created = [];
+  const failed = [];
+  let skipped = 0;
+
+  for (const row of linkedProducts || []) {
+    const productId = coalesceObjectId(row._id);
+    const companyId = coalesceObjectId(row.company_id);
+    if (!productId || !companyId) {
+      skipped += 1;
+      continue;
+    }
+
+    const ownerId = coalesceObjectId(row.created_by);
+    const createdBy = coalesceObjectId(actorId) || ownerId || null;
+
+    try {
+      const doc = await ProcessModel.create({
+        product_id: productId,
+        company_id: companyId,
+        action: APPLY_ACTION,
+        created_by: createdBy,
+        status: "active",
+        progress: "not_started",
+        priority,
+        limit: 1,
+        page: 1,
+        offset: 0,
+        count: 0,
+        hits: 0,
+        remarks,
+      });
+      await enqueueProcess(doc);
+      created.push({
+        _id: doc._id,
+        product_id: doc.product_id,
+        company_id: doc.company_id,
+        action: doc.action,
+        progress: doc.progress,
+      });
+    } catch (err) {
+      failed.push({
+        product_id: String(productId),
+        company_id: String(companyId),
+        error: err?.message || "Insert failed",
+      });
+    }
+  }
+
+  return {
+    created,
+    count: created.length,
+    skipped,
+    failed,
+    action: APPLY_ACTION,
+  };
+}
+
+/**
  * Worker handler: for one origin product_id, queue me-too copies into
- * bigcommerce_product_reset.
+ * bigcommerce_product_reset, then enqueue apply jobs.
  *
  * @param {import("express").Request} req
  * @param {import("express").Response} res
@@ -136,7 +213,8 @@ async function queue_bigcommerce_product_reset(req, res, process) {
     process.product_id?._id || process.product_id,
   );
   if (!originId) {
-    const msg = "product_id (origin) is required for queue_bigcommerce_product_reset";
+    const msg =
+      "product_id (origin) is required for queue_bigcommerce_product_reset";
     await markProcessOutcome(process._id, "failed", msg);
     return res.status(400).json({
       success: false,
@@ -164,6 +242,7 @@ async function queue_bigcommerce_product_reset(req, res, process) {
     return res.status(200).json({
       success: true,
       inserted: 0,
+      apply_jobs_created: 0,
       origin_product_id: String(originId),
       message: msg,
       process_id: process._id,
@@ -198,21 +277,120 @@ async function queue_bigcommerce_product_reset(req, res, process) {
     inserted += result.length;
   }
 
-  const msg = `Queued ${inserted} bigcommerce_product_reset row(s) for origin ${originId}`;
+  const applyQueue = await enqueueApplyJobsForLinkedProducts(linkedProducts, {
+    actorId,
+    remarks: `Auto-queued BC me-too reset apply for origin ${originId}`,
+    priority: Number(process.priority) || 55,
+  });
+
+  const msg = `Queued ${inserted} bigcommerce_product_reset row(s) and ${applyQueue.count} apply job(s) for origin ${originId}`;
   await markProcessOutcome(process._id, "completed", msg);
 
   return res.status(200).json({
     success: true,
     inserted,
     linked_found: linkedProducts.length,
+    apply_jobs_created: applyQueue.count,
+    apply_jobs_failed: applyQueue.failed || [],
     origin_product_id: String(originId),
     message: msg,
     process_id: process._id,
   });
 }
 
+/**
+ * Worker handler: apply Me-too reset for one fetched product
+ * (same core as POST /big-commerce/fetched-products/:productId/reset).
+ *
+ * @param {import("express").Request} req
+ * @param {import("express").Response} res
+ * @param {object} process
+ */
+async function apply_bigcommerce_product_reset(req, res, process) {
+  const localProductId = coalesceObjectId(
+    process.product_id?._id || process.product_id,
+  );
+  const companyId = coalesceObjectId(
+    process.company_id?._id || process.company_id,
+  );
+
+  if (!localProductId || !companyId) {
+    const msg =
+      "product_id (me-too) and company_id are required for apply_bigcommerce_product_reset";
+    await markProcessOutcome(process._id, "failed", msg);
+    return res.status(400).json({
+      success: false,
+      message: msg,
+      process_id: process._id,
+    });
+  }
+
+  const actorId =
+    coalesceObjectId(req.user?._id) ||
+    coalesceObjectId(process.created_by?._id || process.created_by) ||
+    null;
+
+  const resetRow = await BigcommerceProductReset.findOne({
+    product_id: String(localProductId),
+    company_id: companyId,
+    reset_status: "not_started",
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  }).sort({ createdAt: -1 });
+
+  if (resetRow) {
+    resetRow.reset_status = "inprogress";
+    resetRow.reset_message = "Applying me-too reset from origin";
+    resetRow.updated_by = actorId || resetRow.updated_by || null;
+    await resetRow.save();
+  }
+
+  // Lazy require avoids circular load with controllers that import this queue.
+  const { applyFetchedProductReset } = require("../controllers/big_commerce");
+  const result = await applyFetchedProductReset({
+    localProductId,
+    companyId,
+    updatedBy: actorId,
+  });
+
+  if (resetRow) {
+    resetRow.reset_status = result.ok ? "completed" : "failed";
+    resetRow.reset_message = result.message || "";
+    resetRow.updated_by = actorId || resetRow.updated_by || null;
+    await resetRow.save();
+  }
+
+  if (!result.ok) {
+    await markProcessOutcome(process._id, "failed", result.message);
+    return res.status(result.status || 500).json({
+      success: false,
+      message: result.message,
+      process_id: process._id,
+      product_id: String(localProductId),
+      company_id: String(companyId),
+    });
+  }
+
+  const msg =
+    result.message ||
+    `Me-too product ${localProductId} reset from origin`;
+  await markProcessOutcome(process._id, "completed", msg);
+
+  return res.status(200).json({
+    success: true,
+    message: msg,
+    process_id: process._id,
+    product_id: String(localProductId),
+    company_id: String(companyId),
+    meta: result.meta || {},
+  });
+}
+
 module.exports = {
   ACTION,
+  APPLY_ACTION,
   enqueueBigcommerceProductResetJobs,
+  enqueueApplyJobsForLinkedProducts,
   queue_bigcommerce_product_reset,
+  apply_bigcommerce_product_reset,
 };

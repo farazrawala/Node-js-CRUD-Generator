@@ -9,7 +9,7 @@ const modelSchema = new mongoose.Schema(
     reset_status: {
       type: String,
       required: true,
-      enum: ["not_started", "inprogress", "failed"],
+      enum: ["not_started", "inprogress", "completed", "failed"],
       default: "not_started",
     },
     reset_message: {

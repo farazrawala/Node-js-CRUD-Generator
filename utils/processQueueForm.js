@@ -36,6 +36,7 @@ const PROCESS_QUEUE_FORM_FIELDS = {
       "fetch_order",
       "fetch_latest_order",
       "queue_bigcommerce_product_reset",
+      "apply_bigcommerce_product_reset",
     ],
   },
   status: { type: "string", default: "active" },
