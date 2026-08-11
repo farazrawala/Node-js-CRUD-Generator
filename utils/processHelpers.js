@@ -4,6 +4,7 @@ const Brand = require("../models/brands");
 const Product = require("../models/product");
 const Order = require("../models/order");
 const User = require("../models/user");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const { createApplicationLog } = require("./applicationLogs");
 const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
@@ -14,6 +15,73 @@ const {
   findIntegrationIfActive,
   logIntegrationInactiveSkip,
 } = require("./integrationActiveGuard");
+
+/**
+ * Stock qty to push during sync_product.
+ * Default: sum of active warehouse_inventory on-hand.
+ * If a product has fetch_from_product_id set (partner-fetched / me-too),
+ * use origin_qty instead of local warehouse stock.
+ *
+ * @param {Array<string|import("mongoose").Types.ObjectId>} productIds
+ * @param {string|import("mongoose").Types.ObjectId|null} companyId
+ * @returns {Promise<Map<string, number>>} productId (string) -> quantity
+ */
+async function resolveSyncStockTotals(productIds, companyId) {
+  const ids = (Array.isArray(productIds) ? productIds : [])
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
+  if (!ids.length) {
+    return new Map();
+  }
+
+  const matchFilter = {
+    product_id: { $in: ids },
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+  const scopedCompanyId = coalesceObjectId(companyId);
+  if (scopedCompanyId) {
+    matchFilter.company_id = scopedCompanyId;
+  }
+
+  let stockMap = new Map();
+  try {
+    const grouped = await WarehouseInventory.aggregate([
+      { $match: matchFilter },
+      { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
+    ]);
+    stockMap = new Map(
+      grouped.map((row) => [String(row._id), Number(row.total) || 0]),
+    );
+  } catch (error) {
+    console.warn(
+      "Failed to aggregate warehouse inventory for product sync:",
+      error?.message,
+    );
+  }
+
+  try {
+    const originProducts = await Product.find({
+      _id: { $in: ids },
+      fetch_from_product_id: { $exists: true, $ne: null },
+      deletedAt: null,
+    })
+      .select("_id origin_qty fetch_from_product_id")
+      .lean();
+
+    for (const row of originProducts) {
+      if (!row?.fetch_from_product_id) continue;
+      stockMap.set(String(row._id), Number(row.origin_qty) || 0);
+    }
+  } catch (error) {
+    console.warn(
+      "Failed to apply origin_qty stock overrides for product sync:",
+      error?.message,
+    );
+  }
+
+  return stockMap;
+}
 
 /** Same default as POS add-customer UI. */
 const POS_DEFAULT_CUSTOMER_PASSWORD = "123456";
@@ -1818,6 +1886,7 @@ module.exports = {
   categorySlugFromName,
   resolveCompanyId,
   resolveIntegrationId,
+  resolveSyncStockTotals,
   upsertSyncCategoryMapping,
   upsertSyncBrandMapping,
   upsertSyncProductMapping,

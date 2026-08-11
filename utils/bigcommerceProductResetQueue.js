@@ -371,9 +371,31 @@ async function apply_bigcommerce_product_reset(req, res, process) {
     });
   }
 
+  // After origin_qty (and other fields) are refreshed on the me-too POS product,
+  // queue store sync so company-2 websites pick up the new stock without needing
+  // a second recent-product-ids hit.
+  let websiteSync = { created: [], count: 0 };
+  try {
+    const { enqueueProductWebsiteSyncJobs } = require("./productSyncQueue");
+    websiteSync = await enqueueProductWebsiteSyncJobs({
+      productId: localProductId,
+      companyId,
+      createdBy: actorId,
+      remarks:
+        "Auto-queued sync_product after me-too reset (origin_qty → store)",
+      priority: Number(process.priority) || 50,
+    });
+  } catch (err) {
+    console.warn(
+      "[bc-reset-apply] enqueue website sync after me-too reset failed:",
+      err?.message || err,
+    );
+  }
+
+  const syncCount = Number(websiteSync?.count) || 0;
   const msg =
-    result.message ||
-    `Me-too product ${localProductId} reset from origin`;
+    (result.message || `Me-too product ${localProductId} reset from origin`) +
+    (syncCount > 0 ? ` — queued ${syncCount} sync_product job(s)` : "");
   await markProcessOutcome(process._id, "completed", msg);
 
   return res.status(200).json({
@@ -382,6 +404,7 @@ async function apply_bigcommerce_product_reset(req, res, process) {
     process_id: process._id,
     product_id: String(localProductId),
     company_id: String(companyId),
+    website_sync_jobs: syncCount,
     meta: result.meta || {},
   });
 }

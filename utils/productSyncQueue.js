@@ -73,6 +73,8 @@ async function enqueueProductWebsiteSyncJobs({
   productId,
   companyId,
   createdBy,
+  remarks = "Auto-queued sync_product after product edit",
+  priority = 50,
 }) {
   const product_id = coalesceObjectId(productId);
   const company_id = coalesceObjectId(companyId);
@@ -197,13 +199,13 @@ async function enqueueProductWebsiteSyncJobs({
       created_by: actor,
       status: "active",
       progress: "not_started",
-      priority: 50,
+      priority: Number(priority) || 50,
       limit: 1,
       page: 1,
       offset: 0,
       count: 0,
       hits: 0,
-      remarks: "Auto-queued sync_product after product edit",
+      remarks,
     });
     await enqueueProcess(doc);
     created.push(doc);

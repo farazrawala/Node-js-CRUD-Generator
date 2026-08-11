@@ -63,6 +63,7 @@ const {
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  resolveSyncStockTotals,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -528,40 +529,9 @@ async function resolveShopifyVariantStockQuantity(variant, client) {
 /** When the token lacks write_inventory, skip pushing stock for the rest of the run. */
 let shopifyInventoryWriteUnavailable = false;
 
-/** Sum POS on-hand quantity per product from warehouse_inventory (push side). */
+/** Sum POS on-hand qty for sync push; uses origin_qty when fetch_from_product_id is set. */
 async function resolveShopifyStockTotals(productIds, companyId) {
-  const ids = (Array.isArray(productIds) ? productIds : [])
-    .map((id) => coalesceObjectId(id))
-    .filter(Boolean);
-  if (!ids.length) {
-    return new Map();
-  }
-
-  const matchFilter = {
-    product_id: { $in: ids },
-    status: "active",
-    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-  };
-  const scopedCompanyId = coalesceObjectId(companyId);
-  if (scopedCompanyId) {
-    matchFilter.company_id = scopedCompanyId;
-  }
-
-  try {
-    const grouped = await WarehouseInventory.aggregate([
-      { $match: matchFilter },
-      { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
-    ]);
-    return new Map(
-      grouped.map((row) => [String(row._id), Number(row.total) || 0]),
-    );
-  } catch (error) {
-    console.warn(
-      "Failed to aggregate warehouse inventory for Shopify sync:",
-      error?.message,
-    );
-    return new Map();
-  }
+  return resolveSyncStockTotals(productIds, companyId);
 }
 
 /** Resolve the Shopify location to write inventory against (prefer active). */

@@ -212,6 +212,7 @@ const modelSchema = new mongoose.Schema(
     bigcommerce_hold_qty: {
       type: Number,
       field_name: "BigCommerce Hold Qty",
+      default: 0,
     },
     bigcommerce_isbn: {
       type: String,

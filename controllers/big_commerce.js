@@ -1097,8 +1097,9 @@ function roundStockQty(value) {
 }
 
 /**
- * Map product_id → total active warehouse qty (missing products → 0).
- * Used to snapshot partner stock onto me-too copies as `origin_qty`.
+ * Map product_id → available qty for me-too `origin_qty`:
+ * warehouse on-hand − bigcommerce_hold_qty (floored at 0).
+ * Missing products / inventory → 0.
  * @param {Array<string|import("mongoose").Types.ObjectId>} productIds
  * @returns {Promise<Map<string, number>>}
  */
@@ -1137,6 +1138,18 @@ async function mapProductIdsToTotalStock(productIds) {
   for (const row of rows) {
     map.set(String(row._id), roundStockQty(row.total_qty));
   }
+
+  const products = await Product.find({ _id: { $in: oids } })
+    .select("_id bigcommerce_hold_qty")
+    .lean();
+
+  for (const product of products) {
+    const key = String(product._id);
+    const onHand = Number(map.get(key)) || 0;
+    const holdQty = Number(product.bigcommerce_hold_qty) || 0;
+    map.set(key, roundStockQty(Math.max(0, onHand - holdQty)));
+  }
+
   return map;
 }
 
@@ -1684,7 +1697,8 @@ function buildFetchedProductResetSet(source, updatedBy, syncSettings, {
     }
   }
 
-  // Always refresh partner warehouse stock snapshot on reset.
+  // Always refresh available partner stock snapshot on reset
+  // (warehouse on-hand − bigcommerce_hold_qty).
   if (originQty != null) {
     $set.origin_qty = roundStockQty(originQty);
   }

@@ -16,7 +16,6 @@ const { recordOrderStatusUpdate } = require("../utils/orderStatusHistory");
 const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
 const Attribute = require("../models/attribute");
-const WarehouseInventory = require("../models/warehouse_inventory");
 const Company = require("../models/company");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
@@ -62,6 +61,7 @@ const {
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  resolveSyncStockTotals,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -72,44 +72,9 @@ const {
   hasSyncPayloadFields,
 } = require("../utils/integrationProductSync");
 
-/**
- * Sum active warehouse_inventory on-hand quantity per product. Mirrors how POS
- * computes displayed stock (status active, not soft-deleted, scoped to company).
- * @returns {Promise<Map<string, number>>} productId (string) -> total quantity
- */
+/** @returns {Promise<Map<string, number>>} productId -> qty (origin_qty when fetch_from_product_id is set). */
 async function resolveProductStockTotals(productIds, companyId) {
-  const ids = (Array.isArray(productIds) ? productIds : [])
-    .map((id) => coalesceObjectId(id))
-    .filter(Boolean);
-  if (!ids.length) {
-    return new Map();
-  }
-
-  const matchFilter = {
-    product_id: { $in: ids },
-    status: "active",
-    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-  };
-  const scopedCompanyId = coalesceObjectId(companyId);
-  if (scopedCompanyId) {
-    matchFilter.company_id = scopedCompanyId;
-  }
-
-  try {
-    const grouped = await WarehouseInventory.aggregate([
-      { $match: matchFilter },
-      { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
-    ]);
-    return new Map(
-      grouped.map((row) => [String(row._id), Number(row.total) || 0]),
-    );
-  } catch (error) {
-    console.warn(
-      "Failed to aggregate warehouse inventory for WooCommerce sync:",
-      error?.message,
-    );
-    return new Map();
-  }
+  return resolveSyncStockTotals(productIds, companyId);
 }
 
 async function resolveCompanyDefaultArAccountId(companyId) {
