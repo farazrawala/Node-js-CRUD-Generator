@@ -6,6 +6,7 @@ const Product = require("../models/product");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const WarehouseInventory = require("../models/warehouse_inventory");
+const { createApplicationLog } = require("../utils/applicationLogs");
 const {
   coalesceObjectId,
   activeNotDeletedCriteria,
@@ -2100,6 +2101,7 @@ async function applyFetchedProductReset({
   localProductId,
   companyId,
   updatedBy = null,
+  req = null,
 }) {
   const myCompanyId = coalesceObjectId(companyId);
   const productId = coalesceObjectId(localProductId);
@@ -2128,6 +2130,58 @@ async function applyFetchedProductReset({
       };
     }
 
+    const localName =
+      String(local.product_name || "").trim() || String(local._id);
+
+    // Company 2 me-too must opt in (BC SYNC toggle).
+    if (local.bigcommerce_sync_status !== true) {
+      const message =
+        "Skipped reset: local product bigcommerce_sync_status is off";
+      await createApplicationLog(
+        req,
+        {
+          action: `Skipped BigCommerce product sync :: ${localName}`,
+          url:
+            req?.originalUrl ||
+            `/api/big-commerce/fetched-products/${local._id}/reset`,
+          tags: [
+            "bigcommerce",
+            "bigCommerce product sync",
+            "skipped",
+            "product",
+            "skipped_bigcommerce",
+          ],
+          description: {
+            message,
+            reason: "local_bigcommerce_sync_status_off",
+            product_id: String(local._id),
+            product_name: localName,
+            company_id: String(myCompanyId),
+            fetch_from_product_id: local.fetch_from_product_id
+              ? String(local.fetch_from_product_id)
+              : null,
+            bigcommerce_sync_status: false,
+          },
+          company_id: myCompanyId,
+          created_by: actorId,
+          reference_type: "product",
+          reference_id: local._id,
+        },
+        { silent: true },
+      );
+      return {
+        ok: true,
+        status: 200,
+        skipped: true,
+        message,
+        data: local.toObject ? local.toObject() : local,
+        meta: {
+          product_id: local._id,
+          bigcommerce_sync_status: false,
+        },
+      };
+    }
+
     const originId = coalesceObjectId(local.fetch_from_product_id);
     if (!originId) {
       return {
@@ -2147,6 +2201,60 @@ async function applyFetchedProductReset({
         ok: false,
         status: 404,
         message: "Origin product not found or was deleted",
+      };
+    }
+
+    // Company 1 origin must also opt in.
+    if (origin.bigcommerce_sync_status !== true) {
+      const originName =
+        String(origin.product_name || "").trim() || String(origin._id);
+      const message =
+        "Skipped reset: origin product bigcommerce_sync_status is off";
+      await createApplicationLog(
+        req,
+        {
+          action: `Skipped BigCommerce origin sync :: ${originName}`,
+          url:
+            req?.originalUrl ||
+            `/api/big-commerce/fetched-products/${local._id}/reset`,
+          tags: [
+            "bigcommerce",
+            "BigCommerce origin sync",
+            "skipped",
+            "product",
+            "skipped_bigcommerce",
+          ],
+          description: {
+            message,
+            reason: "origin_bigcommerce_sync_status_off",
+            product_id: String(local._id),
+            product_name: localName,
+            company_id: String(myCompanyId),
+            fetch_from_product_id: String(origin._id),
+            origin_product_name: originName,
+            origin_company_id: origin.company_id
+              ? String(origin.company_id)
+              : null,
+            bigcommerce_sync_status: false,
+          },
+          company_id: myCompanyId,
+          created_by: actorId,
+          reference_type: "product",
+          reference_id: local._id,
+        },
+        { silent: true },
+      );
+      return {
+        ok: true,
+        status: 200,
+        skipped: true,
+        message,
+        data: local.toObject ? local.toObject() : local,
+        meta: {
+          fetch_from_product_id: origin._id,
+          fetch_from_company_id: origin.company_id,
+          bigcommerce_sync_status: false,
+        },
       };
     }
 
@@ -2326,6 +2434,7 @@ async function resetFetchedProductFromOrigin(req, res) {
     localProductId: req.params.productId,
     companyId: myCompanyId,
     updatedBy: userId(req),
+    req,
   });
 
   if (!result.ok) {

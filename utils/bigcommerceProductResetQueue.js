@@ -351,6 +351,7 @@ async function apply_bigcommerce_product_reset(req, res, process) {
     localProductId,
     companyId,
     updatedBy: actorId,
+    req,
   });
 
   if (resetRow) {
@@ -368,6 +369,24 @@ async function apply_bigcommerce_product_reset(req, res, process) {
       process_id: process._id,
       product_id: String(localProductId),
       company_id: String(companyId),
+    });
+  }
+
+  // Skipped (e.g. origin bigcommerce_sync_status off) — no POS change, no store sync.
+  if (result.skipped) {
+    const skipMsg =
+      result.message ||
+      `Skipped me-too reset for product ${localProductId}`;
+    await markProcessOutcome(process._id, "completed", skipMsg);
+    return res.status(200).json({
+      success: true,
+      skipped: true,
+      message: skipMsg,
+      process_id: process._id,
+      product_id: String(localProductId),
+      company_id: String(companyId),
+      website_sync_jobs: 0,
+      meta: result.meta || {},
     });
   }
 

@@ -9,6 +9,8 @@ attribute
 authenticated
 before_after
 bigcommerce
+BigCommerce origin sync
+bigCommerce product sync
 booking_failed
 brands
 bulk

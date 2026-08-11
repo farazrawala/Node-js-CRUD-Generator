@@ -177,7 +177,7 @@ const modelSchema = new mongoose.Schema(
       field_name: "Gallery Thumbnails",
     },
 
-    // BigCommerce Settings //
+    // Second company BigCommerce Settings //
 
     fetch_from_product_id: {
       type: mongoose.Schema.Types.ObjectId,
@@ -199,7 +199,9 @@ const modelSchema = new mongoose.Schema(
       field_name: "BigCommerce Sync Status",
       default: false,
     },
+    // Second company BigCommerce Settings //
 
+    // First company bigcommerce settings //
     show_on_bigcommerce: {
       type: Boolean,
       field_name: "Show On BigCommerce",
@@ -214,15 +216,15 @@ const modelSchema = new mongoose.Schema(
       field_name: "BigCommerce Hold Qty",
       default: 0,
     },
-    bigcommerce_isbn: {
-      type: String,
-      field_name: "BigCommerce ISBN",
-    },
-    bigcommerce_mpn: {
-      type: String,
-      field_name: "BigCommerce MPN",
-    },
-    // BigCommerce Settings //
+    // bigcommerce_isbn: {
+    //   type: String,
+    //   field_name: "BigCommerce ISBN",
+    // },
+    // bigcommerce_mpn: {
+    //   type: String,
+    //   field_name: "BigCommerce MPN",
+    // },
+    // First company bigcommerce settings //
 
     created_by: {
       type: mongoose.Schema.Types.ObjectId,
