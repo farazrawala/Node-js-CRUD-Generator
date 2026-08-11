@@ -54,6 +54,9 @@ const {
   enqueueProductWebsiteSyncJobs,
   enqueueBulkSyncProductJobsByCompany,
 } = require("../utils/productSyncQueue");
+const {
+  enqueueBigcommerceProductResetJobs,
+} = require("../utils/bigcommerceProductResetQueue");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -2862,6 +2865,7 @@ const RECENT_LINE_ITEM_PRODUCT_IDS_MINUTES = 62;
  * |    6 | Load products for parent map | `_id`, `parent_product_id` |
  * |    7 | Collapse variants → parent ids | final `product_ids` |
  * |    8 | Enqueue sync_product jobs | per company via `enqueueBulkSyncProductJobsByCompany` |
+ * |   21 | Enqueue BC reset discovery | one `queue_bigcommerce_product_reset` process per origin id (worker inserts me-too rows) |
  * |    9 | Return 200 payload | counts + product_ids + process stats |
  * |   20 | Failure path | application / controller logs, then 500 |
  */
@@ -3010,8 +3014,17 @@ async function getRecentLineItemProductIds(req, res) {
     });
     // step 8 end
 
+    // step 21 start — enqueue process jobs (worker finds me-too copies + insertMany)
+    const bigcommerceResetQueue = await enqueueBigcommerceProductResetJobs({
+      productIds: product_ids,
+      createdBy: req.user?._id || null,
+      remarks: `Auto-queued BC reset discovery from recent line items (${minutes}m)`,
+      priority: 60,
+    });
+    // step 21 end
+
     console.log(
-      `[recent-product-ids] minutes=${minutes} companies=${integratedCompanyIds.length} products=${product_ids.length} processes=${processQueue.count}`,
+      `[recent-product-ids] minutes=${minutes} companies=${integratedCompanyIds.length} products=${product_ids.length} processes=${processQueue.count} bc_reset_jobs=${bigcommerceResetQueue.count}`,
     );
 
     // step 9 start — success response
@@ -3028,6 +3041,13 @@ async function getRecentLineItemProductIds(req, res) {
       purchase_return_item_product_count: purchaseReturnItemProductIds.length,
       companies_with_integration_count: integratedCompanyIds.length,
       product_ids,
+      bigcommerce_product_reset: {
+        action: "queue_bigcommerce_product_reset",
+        process_jobs_created: bigcommerceResetQueue.count,
+        skipped: bigcommerceResetQueue.skipped ?? 0,
+        failed: bigcommerceResetQueue.failed || [],
+        created: bigcommerceResetQueue.created || [],
+      },
       process: {
         action: "sync_product",
         created_count: processQueue.count,

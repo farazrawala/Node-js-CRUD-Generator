@@ -22,6 +22,67 @@ const CONNECTION_POPULATE = [
 
 const CONNECTION_STATUSES = ["pending", "approved", "rejected", "cancelled"];
 
+const CONNECTION_SYNC_FIELDS = [
+  "sync_product_name",
+  "sync_product_slug",
+  "sync_product_image",
+  "sync_product_quantity",
+  "sync_product_description",
+  "sync_product_status",
+];
+
+function toYesNo(value, fallback = "yes") {
+  if (value === "yes" || value === "no") return value;
+  if (value === true || value === "true" || value === 1 || value === "1") return "yes";
+  if (value === false || value === "false" || value === 0 || value === "0") return "no";
+  return fallback;
+}
+
+function pickConnectionSyncSettings(row) {
+  const settings = {};
+  for (const key of CONNECTION_SYNC_FIELDS) {
+    settings[key] = toYesNo(row?.[key], "yes");
+  }
+  return settings;
+}
+
+function isConnectionSyncEnabled(settings, key) {
+  return toYesNo(settings?.[key], "yes") === "yes";
+}
+
+/** Connection toggle → product fields overwritten on me-too reset. */
+const CONNECTION_SYNC_TO_PRODUCT_FIELDS = {
+  sync_product_name: ["product_name"],
+  sync_product_slug: ["product_slug"],
+  sync_product_image: [
+    "product_image",
+    "product_image_thumbnail_url",
+    "multi_images",
+    "multi_image_thumbnails",
+  ],
+  sync_product_quantity: ["alert_qty"],
+  sync_product_description: ["product_description"],
+  sync_product_status: ["status"],
+};
+
+const GATED_RESET_PRODUCT_FIELDS = new Set(
+  Object.values(CONNECTION_SYNC_TO_PRODUCT_FIELDS).flat(),
+);
+
+function getResetCopyFields(syncSettings) {
+  const fields = FETCH_PRODUCT_COPY_FIELDS.filter(
+    (field) => !GATED_RESET_PRODUCT_FIELDS.has(field),
+  );
+  for (const [flag, productFields] of Object.entries(
+    CONNECTION_SYNC_TO_PRODUCT_FIELDS,
+  )) {
+    if (isConnectionSyncEnabled(syncSettings, flag)) {
+      fields.push(...productFields);
+    }
+  }
+  return fields;
+}
+
 function groupConnectionsByStatus(rows) {
   const grouped = {
     pending: [],
@@ -51,6 +112,7 @@ function mapReceivedRequest(row) {
     remarks: row.remarks,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    ...pickConnectionSyncSettings(row),
   };
 }
 
@@ -127,6 +189,36 @@ async function findActiveConnectionBetween(a, b) {
     $or: [
       { company_id: a, target_company_id: b },
       { company_id: b, target_company_id: a },
+    ],
+  }).lean();
+}
+
+/** Approved connection whose sync toggles apply to a me-too reset. */
+async function findApprovedConnectionForReset(myCompanyId, originCompanyId) {
+  if (!myCompanyId || !originCompanyId) return null;
+
+  const direct = await CompanyConnection.findOne({
+    status: "approved",
+    $or: [
+      { company_id: myCompanyId, target_company_id: originCompanyId },
+      { company_id: originCompanyId, target_company_id: myCompanyId },
+    ],
+  }).lean();
+  if (direct) return direct;
+
+  const [myCatalog, originCatalog] = await Promise.all([
+    resolveMarketplaceCatalogCompanyIds(myCompanyId),
+    resolveMarketplaceCatalogCompanyIds(originCompanyId),
+  ]);
+  const myValues = companyIdQueryValues(myCatalog);
+  const originValues = companyIdQueryValues(originCatalog);
+  if (!myValues.length || !originValues.length) return null;
+
+  return CompanyConnection.findOne({
+    status: "approved",
+    $or: [
+      { company_id: { $in: myValues }, target_company_id: { $in: originValues } },
+      { company_id: { $in: originValues }, target_company_id: { $in: myValues } },
     ],
   }).lean();
 }
@@ -601,6 +693,66 @@ async function disconnectConnection(req, res) {
   } catch (error) {
     console.error("[big_commerce] disconnectConnection:", error);
     return jsonError(res, 500, error.message || "Failed to disconnect companies");
+  }
+}
+
+/**
+ * PATCH /big-commerce/connection/:id/settings
+ * Update product sync settings for an approved connection (either party).
+ */
+async function updateConnectionSettings(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Company context is required");
+    }
+
+    const { connection, error } = await loadOwnedConnection(req.params.id, myCompanyId);
+    if (error) return jsonError(res, error.status, error.message);
+
+    if (connection.status !== "approved") {
+      return jsonError(res, 400, "Only approved connections can update sync settings");
+    }
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const nested =
+      body.product_settings && typeof body.product_settings === "object"
+        ? body.product_settings
+        : body;
+
+    let changed = false;
+    for (const key of CONNECTION_SYNC_FIELDS) {
+      if (nested[key] == null) continue;
+      const next = toYesNo(nested[key], null);
+      if (next !== "yes" && next !== "no") {
+        return jsonError(res, 400, `${key} must be "yes" or "no"`);
+      }
+      if (connection[key] !== next) {
+        connection[key] = next;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await connection.save();
+    }
+
+    const row = await CompanyConnection.findById(connection._id)
+      .populate(CONNECTION_POPULATE)
+      .lean();
+
+    return jsonSuccess(
+      res,
+      200,
+      {
+        ...row,
+        ...pickConnectionSyncSettings(row),
+      },
+      changed ? "Connection settings updated" : "No settings changes",
+    );
+  } catch (error) {
+    console.error("[big_commerce] updateConnectionSettings:", error);
+    return jsonError(res, 500, error.message || "Failed to update connection settings");
   }
 }
 
@@ -1466,6 +1618,23 @@ function buildFetchedProductPayload(source, {
   return payload;
 }
 
+/** Fields to overwrite when resetting a fetched copy from its origin. */
+function buildFetchedProductResetSet(source, updatedBy, syncSettings) {
+  const $set = {
+    fetch_from_product_id: source._id,
+    fetch_from_company_id: source.company_id || null,
+    updated_by: updatedBy || null,
+  };
+
+  for (const field of getResetCopyFields(syncSettings)) {
+    if (source[field] !== undefined) {
+      $set[field] = source[field];
+    }
+  }
+
+  return $set;
+}
+
 /**
  * POST /big-commerce/products/:productId/duplicate
  * POST /big-commerce/products/fetch/:productId
@@ -1475,7 +1644,7 @@ function buildFetchedProductPayload(source, {
  * - fetch_from_product_id = A's product _id
  * - fetch_from_company_id = A's company_id
  *
- * Variable parents also copy active variants.
+ * Variable parents also copy non-deleted variants (including inactive).
  * Access: same as marketplace browse (approved connection OR marketplace store).
  * Idempotent: if already fetched, returns the existing copy.
  */
@@ -1560,9 +1729,9 @@ async function duplicatePartnerProduct(req, res) {
 
     const createdParent = await Product.create(parentPayload);
 
+    // Match product edit: all non-deleted children (including inactive).
     const variants = await Product.find({
       parent_product_id: source._id,
-      status: "active",
       deletedAt: null,
     })
       .sort({ createdAt: 1 })
@@ -1830,6 +1999,199 @@ async function getFetchedProducts(req, res) {
 }
 
 /**
+ * POST /big-commerce/fetched-products/:productId/reset
+ *
+ * Company 2 resets its Me-too copy from the origin product (Company 1):
+ * - overwrites origin fields gated by company_connection sync_* toggles
+ * - syncs child variants: update matched, create missing, soft-delete orphans
+ *
+ * :productId = your catalog product _id (the fetched copy), not the origin.
+ */
+async function resetFetchedProductFromOrigin(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Forbidden");
+    }
+
+    const productId = coalesceObjectId(req.params.productId);
+    if (!productId || !isValidObjectId(productId)) {
+      return jsonError(res, 400, "Invalid product id");
+    }
+
+    const local = await Product.findOne({
+      _id: productId,
+      company_id: myCompanyId,
+      deletedAt: null,
+      fetch_from_product_id: { $exists: true, $ne: null },
+    });
+
+    if (!local) {
+      return jsonError(
+        res,
+        404,
+        "Fetched product not found in your catalog",
+      );
+    }
+
+    const originId = coalesceObjectId(local.fetch_from_product_id);
+    if (!originId) {
+      return jsonError(res, 400, "Fetched product has no origin link");
+    }
+
+    const origin = await Product.findOne({
+      _id: originId,
+      deletedAt: null,
+    }).lean();
+
+    if (!origin) {
+      return jsonError(res, 404, "Origin product not found or was deleted");
+    }
+
+    const connection = await findApprovedConnectionForReset(
+      myCompanyId,
+      coalesceObjectId(origin.company_id),
+    );
+    const syncSettings = pickConnectionSyncSettings(connection);
+
+    const updatedBy = userId(req);
+    const parentSet = buildFetchedProductResetSet(origin, updatedBy, syncSettings);
+
+    // Keep this copy as a parent/standalone under company 2 even if origin
+    // is somehow a variant row.
+    if (origin.parent_product_id && !local.parent_product_id) {
+      parentSet.parent_product_id = null;
+      if (!parentSet.product_type) parentSet.product_type = "Single";
+    }
+
+    await Product.updateOne({ _id: local._id }, { $set: parentSet });
+
+    // Match product edit: all non-deleted children (including inactive).
+    // Previously status:"active" dropped inactive origin variants (e.g. 6 → 5).
+    const originVariants = await Product.find({
+      parent_product_id: origin._id,
+      deletedAt: null,
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const localVariants = await Product.find({
+      parent_product_id: local._id,
+      company_id: myCompanyId,
+      deletedAt: null,
+    }).lean();
+
+    const localByOriginId = new Map();
+    for (const variant of localVariants) {
+      if (variant.fetch_from_product_id) {
+        localByOriginId.set(String(variant.fetch_from_product_id), variant);
+      }
+    }
+
+    const matchedOriginIds = new Set();
+    const updatedVariants = [];
+    const createdVariants = [];
+
+    for (const originVariant of originVariants) {
+      const originVariantId = String(originVariant._id);
+      matchedOriginIds.add(originVariantId);
+
+      const existing = localByOriginId.get(originVariantId);
+      if (existing) {
+        const variantSet = buildFetchedProductResetSet(
+          originVariant,
+          updatedBy,
+          syncSettings,
+        );
+        variantSet.parent_product_id = local._id;
+        await Product.updateOne({ _id: existing._id }, { $set: variantSet });
+        updatedVariants.push({
+          _id: existing._id,
+          fetch_from_product_id: originVariant._id,
+        });
+        continue;
+      }
+
+      const variantPayload = buildFetchedProductPayload(originVariant, {
+        targetCompanyId: myCompanyId,
+        createdBy: updatedBy,
+        parentProductId: local._id,
+      });
+      const createdVariant = await Product.create(variantPayload);
+      createdVariants.push(createdVariant.toObject());
+    }
+
+    const now = new Date();
+    const softDeleteSet = {
+      deletedAt: now,
+      status: "inactive",
+      updated_by: updatedBy || null,
+    };
+
+    const orphanIds = localVariants
+      .filter((variant) => {
+        const fromId = variant.fetch_from_product_id
+          ? String(variant.fetch_from_product_id)
+          : null;
+        // Soft-delete: no origin link, or origin variant no longer exists (deleted).
+        return !fromId || !matchedOriginIds.has(fromId);
+      })
+      .map((variant) => variant._id);
+
+    let variantsRemoved = 0;
+    if (orphanIds.length) {
+      const result = await Product.updateMany(
+        { _id: { $in: orphanIds }, company_id: myCompanyId, deletedAt: null },
+        { $set: softDeleteSet },
+      );
+      variantsRemoved = result.modifiedCount || 0;
+    }
+
+    const refreshed = await Product.findById(local._id).lean();
+    const refreshedVariants = await Product.find({
+      parent_product_id: local._id,
+      company_id: myCompanyId,
+      deletedAt: null,
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    return jsonSuccess(
+      res,
+      200,
+      {
+        ...refreshed,
+        variants: refreshedVariants,
+      },
+      "Fetched product reset from origin",
+      {
+        fetch_from_product_id: origin._id,
+        fetch_from_company_id: origin.company_id,
+        connection_id: connection?._id || null,
+        sync_settings: syncSettings,
+        variants_updated: updatedVariants.length,
+        variants_created: createdVariants.length,
+        variants_removed: variantsRemoved,
+      },
+    );
+  } catch (error) {
+    console.error("[big_commerce] resetFetchedProductFromOrigin:", error);
+    if (error?.code === 11000) {
+      return jsonError(
+        res,
+        409,
+        "A product with the same SKU or barcode already exists in your catalog",
+      );
+    }
+    return jsonError(
+      res,
+      500,
+      error.message || "Failed to reset fetched product from origin",
+    );
+  }
+}
+
+/**
  * DELETE /big-commerce/fetched-products/:productId
  * Soft-delete a product you previously fetched from a partner store.
  * Matches the same fetched rows as GET fetched-product-ids (copy must have
@@ -1918,6 +2280,7 @@ module.exports = {
   rejectConnection,
   cancelConnection,
   disconnectConnection,
+  updateConnectionSettings,
   listConnectionLogs,
   getPartnerCompany,
   getPartnerProducts,
@@ -1927,5 +2290,6 @@ module.exports = {
   duplicatePartnerProduct,
   getFetchedProductIds,
   getFetchedProducts,
+  resetFetchedProductFromOrigin,
   softDeleteFetchedProduct,
 };

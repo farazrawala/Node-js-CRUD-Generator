@@ -2582,6 +2582,10 @@ const processAdminCRUD = adminCrudGenerator(
           label: "Fetch latest orders (new only, store → POS)",
         },
         { value: "sync_product", label: "Sync product" },
+        {
+          value: "queue_bigcommerce_product_reset",
+          label: "Queue BigCommerce product reset (me-too discovery)",
+        },
         { value: "sync_category", label: "Sync category (POS → store)" },
         { value: "sync_brand", label: "Sync brand (POS → store)" },
         { value: "delete_product", label: "Delete product" },

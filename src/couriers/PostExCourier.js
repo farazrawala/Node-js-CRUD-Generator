@@ -170,7 +170,11 @@ class PostExCourier extends BaseCourier {
       shipping.city || order.city || customer.city || settings.default_city;
     if (!cityName) throw invalidCity(cityName);
 
-    const items = Math.max(1, Math.round(Number(order.pieces) || 1));
+    // PostEx: items = parcel count; API requires greater than 0 and less than 100.
+    const items = Math.min(
+      99,
+      Math.max(1, Math.round(Number(order.pieces) || 1)),
+    );
     const invoiceDivision = Math.max(
       1,
       Math.round(Number(settings.invoiceDivision || settings.invoice_division || 1)),

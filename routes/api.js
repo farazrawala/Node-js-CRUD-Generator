@@ -285,6 +285,7 @@ const {
   rejectConnection,
   cancelConnection,
   disconnectConnection,
+  updateConnectionSettings,
   listConnectionLogs,
   getPartnerCompany,
   getPartnerProducts,
@@ -294,6 +295,7 @@ const {
   duplicatePartnerProduct,
   getFetchedProductIds,
   getFetchedProducts,
+  resetFetchedProductFromOrigin,
   softDeleteFetchedProduct,
 } = require("../controllers/big_commerce");
 
@@ -614,6 +616,8 @@ router.post("/big-commerce/request/:id/reject", rejectConnection);
 router.post("/big-commerce/connection/cancel/:id", cancelConnection);
 router.post("/big-commerce/request/:id/cancel", cancelConnection);
 router.delete("/big-commerce/request/:id", disconnectConnection);
+router.patch("/big-commerce/connection/:id/settings", updateConnectionSettings);
+router.patch("/big-commerce/request/:id/settings", updateConnectionSettings);
 router.get("/big-commerce/connection/:id/logs", listConnectionLogs);
 router.get("/big-commerce/company/:companyId", getPartnerCompany);
 router.get(
@@ -626,6 +630,10 @@ router.get(
 );
 router.get("/big-commerce/fetched-products", getFetchedProducts);
 router.get("/big-commerce/fetched-products/:companyId", getFetchedProducts);
+router.post(
+  "/big-commerce/fetched-products/:productId/reset",
+  resetFetchedProductFromOrigin,
+);
 router.delete(
   "/big-commerce/fetched-products/:productId/delete",
   softDeleteFetchedProduct,

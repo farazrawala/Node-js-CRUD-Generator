@@ -15,6 +15,9 @@ const Brand = require("../models/brands");
 const woocommerceProcess = require("./woocommerceProcess");
 const shopifyProcess = require("./shopifyProcess");
 const {
+  queue_bigcommerce_product_reset,
+} = require("../utils/bigcommerceProductResetQueue");
+const {
   isQueueEnabled,
   enqueueProcess,
   releaseProcessFromQueue,
@@ -246,6 +249,7 @@ const PROCESS_ACTIONS = new Set([
   // "delete_brand",
   "fetch_order",
   "fetch_latest_order",
+  "queue_bigcommerce_product_reset",
 ]);
 
 function normalizeBulkProcessRow(row, { companyId, createdBy }) {
@@ -288,6 +292,9 @@ function validateProcessRow(row) {
   }
   if (row.action === "sync_product" && !row.product_id) {
     return "product_id is required for sync_product.";
+  }
+  if (row.action === "queue_bigcommerce_product_reset" && !row.product_id) {
+    return "product_id is required for queue_bigcommerce_product_reset.";
   }
   if (
     (row.action === "fetch_category" ||
@@ -1000,6 +1007,9 @@ async function runProcessAction(req, res, process) {
         woocommerce: woocommerceProcess.fetch_latest_order,
         shopify: shopifyProcess.fetch_latest_order,
       });
+    }
+    case "queue_bigcommerce_product_reset": {
+      return queue_bigcommerce_product_reset(req, res, process);
     }
 
     default: {

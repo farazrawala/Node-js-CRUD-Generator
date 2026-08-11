@@ -101,10 +101,15 @@ async function loadOrderContext(orderId, opts = {}) {
     return sum + w * (Number(it.qty) || 1);
   }, 0);
   const weightKg = Math.max(0.5, totalWeightFromItems || 0.5);
-  const pieces = Math.max(
-    1,
-    enrichedItems.reduce((n, it) => n + (Number(it.qty) || 0), 0) || 1,
+  // Courier "pieces" = physical packages in the consignment, not retail SKU qty.
+  // (Summing line qty breaks providers like PostEx that require items in 1..99.)
+  const explicitPackages = Number(
+    order.no_of_pieces ?? order.package_count ?? order.packages ?? order.pieces,
   );
+  const pieces =
+    Number.isFinite(explicitPackages) && explicitPackages > 0
+      ? Math.max(1, Math.round(explicitPackages))
+      : 1;
 
   const totalAmount = Number(order.total_amount) || 0;
   const amountReceived = Number(order.amount_received) || 0;

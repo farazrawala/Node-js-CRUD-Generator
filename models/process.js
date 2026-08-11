@@ -43,6 +43,8 @@ const modelSchema = new mongoose.Schema(
         "fetch_latest_order",
         "sync_order",
         "delete_order",
+
+        "queue_bigcommerce_product_reset",
       ],
       field_name: "Action",
     },
@@ -121,7 +123,7 @@ const modelSchema = new mongoose.Schema(
 );
 
 /**
- * On insert: if the same product_id already has progress not_started,
+ * On insert: if the same product_id + action already has progress not_started,
  * mark those rows as added_new (superseded) then allow the new insert.
  */
 modelSchema.pre("save", async function markSupersededNotStarted() {
@@ -131,6 +133,7 @@ modelSchema.pre("save", async function markSupersededNotStarted() {
 
   const filter = {
     product_id: this.product_id,
+    action: this.action,
     progress: "not_started",
     deletedAt: null,
   };
