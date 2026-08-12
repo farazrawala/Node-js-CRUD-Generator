@@ -181,6 +181,22 @@ const userSchema = new mongoose.Schema(
       default: {},
       field_name: "Permissions",
     },
+    city: {
+      type: String,
+      field_name: "City",
+    },
+    state: {
+      type: String,
+      field_name: "State",
+    },
+    country: {
+      type: String,
+      field_name: "Country",
+    },
+    zip_code: {
+      type: String,
+      field_name: "Zip Code",
+    },
     /**
      * Tenant scope. Required in pre("validate") unless role is exclusively ADMIN.
      * See unique index (company_id, email) for active tenant users.
