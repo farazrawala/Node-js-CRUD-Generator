@@ -2,20 +2,36 @@ const pino = require("pino");
 const pinoHttp = require("pino-http");
 const { shouldSkipRequestLog } = require("./config");
 
-function createRequestLogger() {
-  const level = process.env.LOG_LEVEL || "debug";
+function shouldUsePrettyLogs() {
+  if (process.env.PINO_PRETTY === "false") return false;
+  if (process.env.PINO_PRETTY === "true") return true;
+  if (process.env.NODE_ENV === "production") return false;
+  try {
+    require.resolve("pino-pretty");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  const logger = pino({
-    level,
-    transport: {
+function createRequestLogger() {
+  const level =
+    process.env.LOG_LEVEL ||
+    (process.env.NODE_ENV === "production" ? "info" : "debug");
+
+  const pinoOptions = { level };
+  if (shouldUsePrettyLogs()) {
+    pinoOptions.transport = {
       target: "pino-pretty",
       options: {
         colorize: true,
         translateTime: "SYS:standard",
         ignore: "pid,hostname",
       },
-    },
-  });
+    };
+  }
+
+  const logger = pino(pinoOptions);
 
   const middleware = pinoHttp({
     logger,

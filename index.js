@@ -1,5 +1,27 @@
 require("dotenv").config();
 
+const noopMonitoring = {
+  isMonitoringEnabled: () => false,
+  initMonitoring: () => null,
+  applyRequestMonitoring: () => {},
+  registerMetricsRoute: () => {},
+  setupMonitoringErrorHandling: () => {},
+  logMonitoringStartup: () => {},
+  captureException: () => {},
+  attachHttpServer: () => {},
+  recordExpressError: () => {},
+};
+
+let monitoringApi = noopMonitoring;
+try {
+  monitoringApi = require("./utils/monitoring");
+} catch (err) {
+  console.error(
+    "❌ Monitoring module failed to load — API will continue without it:",
+    err?.message || err,
+  );
+}
+
 const {
   isMonitoringEnabled,
   initMonitoring,
@@ -10,9 +32,20 @@ const {
   captureException,
   attachHttpServer,
   recordExpressError,
-} = require("./utils/monitoring");
+} = monitoringApi;
 
-const monitoring = isMonitoringEnabled() ? initMonitoring() : null;
+let monitoring = null;
+try {
+  if (isMonitoringEnabled()) {
+    monitoring = initMonitoring();
+  }
+} catch (err) {
+  console.error(
+    "❌ Monitoring failed to start — API will continue without it:",
+    err?.message || err,
+  );
+  monitoring = null;
+}
 
 const fileLogger = require("./utils/fileLogger");
 fileLogger.installConsoleCapture();

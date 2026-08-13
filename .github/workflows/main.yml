@@ -25,6 +25,7 @@ jobs:
         run: |
           npm ci --omit=dev
           node -e "require('iconv-lite').encodingExists('utf8')"
+          NODE_ENV=production node -e "require('./utils/monitoring').initMonitoring(); console.log('monitoring init ok')"
           echo "npm ci OK ($(du -sh node_modules | cut -f1))"
 
       - name: Bump deploy version (MAJOR.MINOR.<run#> on every push)
