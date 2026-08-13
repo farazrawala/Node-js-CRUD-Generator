@@ -11,6 +11,7 @@ const {
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericSoftDelete,
+  handleGenericRestore,
   handleGenericGetById,
   handleGenericGetAll,
   parseSearchFieldsFromQuery,
@@ -775,6 +776,71 @@ function generateControllerFunctions(modelName) {
       });
     },
 
+    // Get soft-deleted rows (`deletedAt` set). Must be registered before `/get/:id`.
+    getDeleted: async (req, res) => {
+      return runCachedListHandler(req, res, {
+        module: modelName,
+        action: "get-deleted",
+        fetch: async () => {
+          let filter = { deletedAt: { $exists: true, $ne: null } };
+
+          const tenantCo = tenantCompanyIdFromUser(req.user);
+          if (tenantCo) {
+            applyTenantFilterForModel(filter, modelName, tenantCo);
+          }
+          filter = applyQueryFilters(filter, req.query, modelName);
+          if (modelName === "chat") {
+            filter = applyChatNumberQueryFilter(filter, req.query);
+          }
+          const roleFilter = applyUserRoleQueryFilter(
+            filter,
+            req.query,
+            modelName,
+          );
+          if (roleFilter.error) {
+            return roleFilter.error;
+          }
+          filter = roleFilter.filter;
+          filter = applyIncludeExcludeIdQueryFilter(filter, req.query);
+          if (modelName === "logs") {
+            filter = applyLogsTagQueryFilter(filter, req.query);
+          }
+          const sort = buildSortFromQuery(req.query, {
+            deletedAt: -1,
+            createdAt: -1,
+          });
+
+          return handleGenericGetAll(req, modelName, {
+            excludeFields: ["password"],
+            sort,
+            limit: req.query.limit ? parseInt(req.query.limit) : null,
+            skip: req.query.skip ? parseInt(req.query.skip) : 0,
+            filter,
+            search: req.query.search,
+            searchFields: parseSearchFieldsFromQuery(req.query.searchFields),
+            populate: buildPopulateFromQuery(req.query, modelName),
+          });
+        },
+      });
+    },
+
+    restore: async (req, res) => {
+      const filter = {};
+      const tenantCo = tenantCompanyIdFromUser(req.user);
+      if (tenantCo) {
+        applyTenantFilterForModel(filter, modelName, tenantCo);
+      }
+
+      const response = await handleGenericRestore(req, modelName, {
+        filter,
+        excludeFields: ["password"],
+        afterRestore: async () => {
+          await invalidateModuleListCachesForReq(req, modelName);
+        },
+      });
+      return res.status(response.status).json(response);
+    },
+
     // Delete (soft delete)
     delete: async (req, res) => {
       console.log(`🔐 ${modelName} delete attempt:`, {
@@ -849,6 +915,14 @@ function registerModelRoutes(router, modelName, options = {}) {
 
     if (!excludedRoutes.includes("update")) {
       router.patch(`/${routeName}/update/:id`, controller.update);
+    }
+
+    if (!excludedRoutes.includes("getDeleted")) {
+      router.get(`/${routeName}/get-deleted`, controller.getDeleted);
+    }
+
+    if (!excludedRoutes.includes("restore")) {
+      router.post(`/${routeName}/restore/:id`, controller.restore);
     }
 
     if (!excludedRoutes.includes("getById")) {

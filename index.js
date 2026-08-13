@@ -1,5 +1,19 @@
 require("dotenv").config();
 
+const {
+  isMonitoringEnabled,
+  initMonitoring,
+  applyRequestMonitoring,
+  registerMetricsRoute,
+  setupMonitoringErrorHandling,
+  logMonitoringStartup,
+  captureException,
+  attachHttpServer,
+  recordExpressError,
+} = require("./utils/monitoring");
+
+const monitoring = isMonitoringEnabled() ? initMonitoring() : null;
+
 const fileLogger = require("./utils/fileLogger");
 fileLogger.installConsoleCapture();
 
@@ -120,7 +134,7 @@ app.use(
       "Access-Control-Request-Method",
       "Access-Control-Request-Headers",
     ],
-    exposedHeaders: ["Content-Range", "X-Content-Range"],
+    exposedHeaders: ["Content-Range", "X-Content-Range", "X-Request-ID"],
     preflightContinue: false,
     optionsSuccessStatus: 204,
   }),
@@ -132,6 +146,10 @@ app.set("views", path.resolve("./views"));
 
 // Proxy sends /pos_admin/... — strip prefix before route matching
 app.use(createStripBasePathMiddleware());
+
+if (monitoring) {
+  applyRequestMonitoring(app, monitoring);
+}
 
 // Serve static files from uploads directory (public — no auth)
 const uploadsStaticRoot = path.join(__dirname, "uploads");
@@ -345,6 +363,10 @@ app.get("/api/health", (req, res) => {
   res.status(200).json(getHealthPayload(BASE_PATH || null));
 });
 
+if (monitoring) {
+  registerMetricsRoute(app, monitoring);
+}
+
 app.use(checkForAuthentication); // <--- This line must be enabled
 
 app.use("/admin/debug", debugLogsRoute);
@@ -392,8 +414,20 @@ app.use((req, res) => {
   });
 });
 
+if (monitoring) {
+  setupMonitoringErrorHandling(app);
+}
+
 /** Log unhandled route errors (e.g. body-parser / iconv-lite failures) */
 app.use((err, req, res, next) => {
+  if (monitoring) {
+    recordExpressError(monitoring, req, err);
+    captureException(err, {
+      type: "express_error",
+      method: req.method,
+      url: req.originalUrl || req.url,
+    });
+  }
   fileLogger.logRequestError(req, err, { type: "express_error" });
   if (res.headersSent) return next(err);
   return res.status(err.status || 500).json({
@@ -404,6 +438,12 @@ app.use((err, req, res, next) => {
 });
 
 process.on("unhandledRejection", (reason) => {
+  if (monitoring) {
+    captureException(
+      reason instanceof Error ? reason : new Error(String(reason)),
+      { type: "unhandledRejection" },
+    );
+  }
   fileLogger.error("unhandledRejection", {
     message: reason?.message || String(reason),
     stack: reason?.stack,
@@ -411,13 +451,16 @@ process.on("unhandledRejection", (reason) => {
 });
 
 process.on("uncaughtException", (err) => {
+  if (monitoring) {
+    captureException(err, { type: "uncaughtException" });
+  }
   fileLogger.error("uncaughtException", {
     message: err?.message,
     stack: err?.stack,
   });
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   const version = getDeployVersionPayload();
   fileLogger.logStartup({
     port,
@@ -429,6 +472,10 @@ app.listen(port, () => {
     gitCommitShort: version.gitCommitShort,
     buildLabel: version.buildLabel,
   });
+  if (monitoring) {
+    logMonitoringStartup(monitoring, port);
+    attachHttpServer(server, monitoring);
+  }
   console.log("🚀 Server started at port " + port);
   console.log(
     `📁 BASE_PATH=${BASE_PATH || "(unset)"} cookiePath=${getCookiePath()}`,

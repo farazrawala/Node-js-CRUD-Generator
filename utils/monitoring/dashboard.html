@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live API Load</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #121a2b;
+      --line: #22304a;
+      --text: #e8eefc;
+      --muted: #8ea0c0;
+      --ok: #3dd68c;
+      --warn: #f5c542;
+      --bad: #ff6b6b;
+      --accent: #5b8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 20px; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 10px var(--ok);
+    }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+    .dot.bad { background: var(--bad); box-shadow: 0 0 10px var(--bad); }
+    button, select, input {
+      background: #1b2740;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    input { cursor: text; min-width: 160px; }
+    main { padding: 20px 24px 40px; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+    .cards .card { margin-bottom: 0; }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    .value { font-size: 28px; font-weight: 700; margin-top: 8px; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .charts .card { margin-bottom: 0; }
+    canvas { width: 100%; height: 140px; display: block; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); font-size: 13px; }
+    th { color: var(--muted); font-weight: 600; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover { background: #1b2740; }
+    .err { color: var(--bad); }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .status-pill {
+      display: inline-block;
+      min-width: 42px;
+      text-align: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .status-5 { background: rgba(255, 107, 107, 0.18); color: var(--bad); }
+    .status-4 { background: rgba(245, 197, 66, 0.18); color: var(--warn); }
+    .status-2 { background: rgba(61, 214, 140, 0.18); color: var(--ok); }
+    .tables {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 12px;
+    }
+    .tables .card { margin-bottom: 0; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 12px; align-items: center; }
+    .bar { height: 8px; background: #1b2740; border-radius: 99px; overflow: hidden; margin-top: 8px; }
+    .bar > span { display: block; height: 100%; background: var(--accent); }
+    .bar.warn > span { background: var(--warn); }
+    .bar.bad > span { background: var(--bad); }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+    .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 16px; font-size: 13px; }
+    .kv div { color: var(--muted); }
+    .kv strong { color: var(--text); display: block; margin-top: 2px; }
+    .reasons { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+    .drawer {
+      position: fixed; top: 0; right: 0; width: min(420px, 100%); height: 100%;
+      background: var(--panel); border-left: 1px solid var(--line);
+      transform: translateX(100%); transition: transform .2s ease; z-index: 20;
+      padding: 20px; overflow: auto;
+    }
+    .drawer.open { transform: translateX(0); }
+    .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 19; }
+    .overlay.open { display: block; }
+    @media (max-width: 800px) {
+      .charts, .tables { grid-template-columns: 1fr; }
+      header { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Live API load</h1>
+      <div class="sub">Polling Prometheus metrics every 1s</div>
+    </div>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">Connecting…</span>
+      <select id="rangeSel">
+        <option value="1m">Last 1 minute</option>
+        <option value="5m">Last 5 minutes</option>
+        <option value="15m">Last 15 minutes</option>
+        <option value="1h">Last 1 hour</option>
+        <option value="6h">Last 6 hours</option>
+        <option value="24h">Last 24 hours</option>
+      </select>
+      <button id="pauseBtn">Pause</button>
+    </div>
+  </header>
+  <main>
+    <section class="cards" id="topCards">
+      <div class="card"><div class="label">Application health</div><div class="value" id="healthScore">—</div><div class="hint" id="healthStatus">Calculating</div></div>
+      <div class="card"><div class="label">In flight</div><div class="value" id="inFlight">0</div><div class="hint">Requests being handled now</div></div>
+      <div class="card"><div class="label">Live RPS</div><div class="value" id="rps">0</div><div class="hint">Requests per second</div></div>
+      <div class="card"><div class="label">Failed APIs</div><div class="value" id="failedRate">0</div><div class="hint">4xx + 5xx in the last interval</div></div>
+      <div class="card"><div class="label">Error rate</div><div class="value" id="errorRate">0%</div><div class="hint">5xx in the last interval</div></div>
+      <div class="card"><div class="label">Avg latency</div><div class="value" id="avgMs">0ms</div><div class="hint">p95: <span id="p95Ms">0ms</span></div></div>
+      <div class="card"><div class="label">Event loop lag</div><div class="value" id="lag">0ms</div><div class="hint">High lag means the process is busy</div></div>
+      <div class="card"><div class="label">Memory</div><div class="value" id="memory">0</div><div class="hint">Resident set size</div></div>
+      <div class="card"><div class="label">CPU</div><div class="value" id="cpu">0%</div><div class="bar" id="cpuBar"><span style="width:0%"></span></div></div>
+      <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">0s</div><div class="hint">Process uptime</div></div>
+    </section>
+    <ul class="reasons" id="healthReasons"></ul>
+
+    <section class="charts">
+      <div class="card"><div class="label">RPS</div><canvas id="rpsChart" width="600" height="140"></canvas></div>
+      <div class="card"><div class="label">In-flight</div><canvas id="flightChart" width="600" height="140"></canvas></div>
+      <div class="card"><div class="label">Latency p95</div><canvas id="latChart" width="600" height="140"></canvas></div>
+      <div class="card"><div class="label">Error rate</div><canvas id="errChart" width="600" height="140"></canvas></div>
+      <div class="card"><div class="label">Event loop</div><canvas id="loopChart" width="600" height="140"></canvas></div>
+      <div class="card"><div class="label">Heap used</div><canvas id="heapChart" width="600" height="140"></canvas></div>
+    </section>
+
+    <section class="card" data-collapse>
+      <div class="section-head"><div class="label">System health</div><span>▾</span></div>
+      <div class="kv" id="systemKv"></div>
+    </section>
+
+    <section class="tables">
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Memory / heap</div><span>▾</span></div>
+        <div class="kv" id="memKv"></div>
+        <div class="bar" id="heapBar"><span style="width:0%"></span></div>
+        <div class="hint" id="leakHint"></div>
+      </div>
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Event loop</div><span>▾</span></div>
+        <div class="kv" id="loopKv"></div>
+      </div>
+    </section>
+
+    <section class="tables">
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Database health</div><span>▾</span></div>
+        <div class="kv" id="dbKv"></div>
+        <table><thead><tr><th>Operation</th><th>Collection</th><th>Ms</th><th>Time</th><th>Status</th></tr></thead><tbody id="slowQueries"></tbody></table>
+      </div>
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Dependencies</div><span>▾</span></div>
+        <table><thead><tr><th>Service</th><th>Status</th><th>Latency</th><th>Last checked</th></tr></thead><tbody id="deps"></tbody></table>
+        <div class="label" style="margin-top:12px">GC / diagnostics</div>
+        <div class="kv" id="diagKv"></div>
+      </div>
+    </section>
+
+    <section class="card" data-collapse>
+      <div class="section-head"><div class="label">Top routes</div><span>▾</span></div>
+      <div class="toolbar">
+        <select id="routeMethod"><option value="">All methods</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>
+        <select id="routeSort">
+          <option value="requests">Most requests</option>
+          <option value="slowest">Slowest</option>
+          <option value="errors">Highest error rate</option>
+          <option value="p95">Highest p95</option>
+          <option value="failures">Most failures</option>
+        </select>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Method</th><th>Route</th><th>Count</th><th>Failed</th><th>Err %</th><th>Avg</th><th>p50</th><th>p95</th><th>p99</th><th>Max</th>
+          </tr>
+        </thead>
+        <tbody id="routes"></tbody>
+      </table>
+    </section>
+
+    <section class="tables">
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Recent failed APIs</div><span>▾</span></div>
+        <table>
+          <thead><tr><th>Time</th><th>Method</th><th>Route</th><th>Status</th><th>Ms</th></tr></thead>
+          <tbody id="failures"></tbody>
+        </table>
+      </div>
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Slow APIs</div><span>▾</span></div>
+        <table>
+          <thead><tr><th>Time</th><th>Method</th><th>Route</th><th>Ms</th><th>Status</th></tr></thead>
+          <tbody id="slowApis"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tables">
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Grouped errors</div><span>▾</span></div>
+        <div class="kv" id="statusKv"></div>
+        <table>
+          <thead><tr><th>Error</th><th>Count</th><th>First</th><th>Last</th></tr></thead>
+          <tbody id="errorGroups"></tbody>
+        </table>
+      </div>
+      <div class="card" data-collapse>
+        <div class="section-head"><div class="label">Alerts</div><span>▾</span></div>
+        <table>
+          <thead><tr><th>Check</th><th>State</th><th>Value</th></tr></thead>
+          <tbody id="alerts"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" data-collapse>
+      <div class="section-head"><div class="label">Application logs</div><span>▾</span></div>
+      <div class="toolbar">
+        <select id="logLevel"><option value="">All levels</option><option>error</option><option>warn</option><option>info</option><option>debug</option></select>
+        <input id="logQ" placeholder="Search message / request id / route" />
+        <button id="logClear">Clear filters</button>
+      </div>
+      <table>
+        <thead><tr><th>Time</th><th>Level</th><th>Message</th><th>Request</th></tr></thead>
+        <tbody id="logs"></tbody>
+      </table>
+    </section>
+  </main>
+  <div class="overlay" id="overlay"></div>
+  <aside class="drawer" id="drawer"></aside>
+  <script>
+    const base = location.pathname.replace(/\/monitor\/?$/, "");
+    const liveUrl = base + "/api/monitor/live";
+    const api = (path) => base + "/api/monitoring" + path;
+    const rpsPoints = [];
+    const flightPoints = [];
+    const latPoints = [];
+    const errPoints = [];
+    const loopPoints = [];
+    const heapPoints = [];
+    let prev = null;
+    let paused = false;
+    let overview = {};
+    let historyPoints = [];
+    let range = "1m";
+
+    function fmtBytes(n) {
+      n = Number(n) || 0;
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+      return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+    }
+    function fmtDur(sec) {
+      sec = Number(sec) || 0;
+      if (sec < 60) return Math.round(sec) + "s";
+      if (sec < 3600) return Math.floor(sec / 60) + "m";
+      return Math.floor(sec / 3600) + "h " + Math.floor((sec % 3600) / 60) + "m";
+    }
+    function pushPoint(arr, value) {
+      arr.push(value);
+      if (arr.length > 60) arr.shift();
+    }
+    function drawChart(canvas, points, color) {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = "#22304a";
+      ctx.beginPath();
+      ctx.moveTo(0, h - 20);
+      ctx.lineTo(w, h - 20);
+      ctx.stroke();
+      if (!points || points.length < 2) return;
+      const max = Math.max(1, ...points);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      points.forEach((p, i) => {
+        const x = (i / (points.length - 1)) * w;
+        const y = h - 8 - (p / max) * (h - 24);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+    function setBar(id, pct, warn, crit) {
+      const el = document.getElementById(id);
+      const value = Math.max(0, Math.min(100, pct || 0));
+      el.className = "bar" + (value >= crit ? " bad" : value >= warn ? " warn" : "");
+      el.firstElementChild.style.width = value + "%";
+    }
+    function setStatus(kind, text) {
+      const dot = document.getElementById("dot");
+      dot.className = "dot" + (kind === "ok" ? "" : " " + kind);
+      document.getElementById("statusText").textContent = text;
+    }
+    function pill(status) {
+      const cls = status >= 500 ? "status-5" : status >= 400 ? "status-4" : "status-2";
+      return `<span class="status-pill ${cls}">${status}</span>`;
+    }
+    function openDrawer(html) {
+      document.getElementById("drawer").innerHTML = html + '<p><button id="closeDrawer">Close</button></p>';
+      document.getElementById("drawer").classList.add("open");
+      document.getElementById("overlay").classList.add("open");
+      document.getElementById("closeDrawer").onclick = closeDrawer;
+    }
+    function closeDrawer() {
+      document.getElementById("drawer").classList.remove("open");
+      document.getElementById("overlay").classList.remove("open");
+    }
+    document.getElementById("overlay").onclick = closeDrawer;
+
+    async function openRequest(id) {
+      if (!id) return;
+      const res = await fetch(api("/request/" + encodeURIComponent(id)), { cache: "no-store" });
+      if (!res.ok) return openDrawer(`<h3>Request</h3><p>Not in recent buffer.</p><p>${id}</p>`);
+      const data = await res.json();
+      const r = data.request || {};
+      const db = (r.dbOps || []).map((d) => `<li>${d.operation} ${d.collection} ${d.durationMs}ms ${d.status}</li>`).join("") || "<li>None captured</li>";
+      openDrawer(`
+        <h3>Request detail</h3>
+        <div class="kv">
+          <div>Request ID<strong>${r.requestId || id}</strong></div>
+          <div>Time<strong>${r.ts ? new Date(r.ts).toLocaleString() : ""}</strong></div>
+          <div>Method<strong>${r.method || ""}</strong></div>
+          <div>Route<strong>${r.route || ""}</strong></div>
+          <div>Status<strong>${r.status || ""}</strong></div>
+          <div>Duration<strong>${r.durationMs || 0}ms</strong></div>
+          <div>IP<strong>${r.ip || ""}</strong></div>
+          <div>User agent<strong>${r.userAgent || ""}</strong></div>
+          <div>Response size<strong>${fmtBytes(r.bytesOut)}</strong></div>
+          <div>Error<strong>${(r.error && r.error.message) || r.message || "none"}</strong></div>
+        </div>
+        <p class="label">Database operations</p>
+        <ul>${db}</ul>
+      `);
+    }
+
+    function renderKv(id, rows) {
+      document.getElementById(id).innerHTML = rows.map(([k, v]) => `<div>${k}<strong>${v}</strong></div>`).join("");
+    }
+
+    async function tick() {
+      if (paused) return;
+      try {
+        const res = await fetch(liveUrl, { cache: "no-store" });
+        if (res.status === 401) {
+          setStatus("bad", "Admin login required");
+          return;
+        }
+        const data = await res.json();
+        const dt = prev ? Math.max((data.ts - prev.ts) / 1000, 0.001) : 1;
+        const reqDelta = prev ? Math.max(data.totalRequests - prev.totalRequests, 0) : 0;
+        const errDelta = prev ? Math.max(data.totalErrors - prev.totalErrors, 0) : 0;
+        const failDelta = prev ? Math.max(data.totalFailures - prev.totalFailures, 0) : 0;
+        const rps = data.rps != null ? data.rps : (reqDelta / dt);
+        const errorRate = data.health ? (reqDelta > 0 ? (errDelta / reqDelta) * 100 : 0) : (reqDelta > 0 ? (errDelta / reqDelta) * 100 : 0);
+
+        document.getElementById("inFlight").textContent = data.inFlight;
+        document.getElementById("rps").textContent = Number(rps).toFixed(1);
+        document.getElementById("failedRate").textContent = failDelta;
+        document.getElementById("errorRate").textContent = errorRate.toFixed(1) + "%";
+        document.getElementById("avgMs").textContent = (data.avgMs || 0) + "ms";
+        document.getElementById("p95Ms").textContent = (data.p95Ms || 0) + "ms";
+        document.getElementById("lag").textContent = (data.eventLoopLagMs || 0) + "ms";
+        document.getElementById("memory").textContent = fmtBytes(data.memoryBytes);
+        document.getElementById("cpu").textContent = (data.cpuPercent || 0).toFixed(1) + "%";
+        document.getElementById("uptime").textContent = fmtDur(data.uptimeSec);
+        setBar("cpuBar", data.cpuPercent || 0, 70, 90);
+
+        const health = data.health || {};
+        document.getElementById("healthScore").textContent = health.score != null ? health.score + "%" : "—";
+        document.getElementById("healthStatus").textContent = health.status || "";
+        document.getElementById("healthReasons").innerHTML = (health.reasons || []).map((r) => {
+          const mark = r.level === "ok" ? "✓" : r.level === "critical" ? "✕" : "⚠";
+          return `<li class="${r.level === "ok" ? "ok" : r.level === "critical" ? "err" : "warn"}">${mark} ${r.text}</li>`;
+        }).join("");
+
+        const failureRows = (data.recentFailures || []).map((f) => `
+          <tr class="clickable" data-id="${f.requestId || ""}">
+            <td>${new Date(f.ts).toLocaleTimeString()}</td>
+            <td>${f.method}</td>
+            <td>${f.route}</td>
+            <td>${pill(f.status)}</td>
+            <td>${f.durationMs}ms</td>
+          </tr>`).join("");
+        document.getElementById("failures").innerHTML = failureRows || "<tr><td colspan='5'>No failed APIs yet. 4xx and 5xx will appear here.</td></tr>";
+
+        const slowRows = (data.slowRequests || []).map((f) => `
+          <tr class="clickable" data-id="${f.requestId || ""}">
+            <td>${new Date(f.ts).toLocaleTimeString()}</td>
+            <td>${f.method}</td>
+            <td>${f.route}</td>
+            <td class="${f.durationMs >= 3000 ? "err" : "warn"}">${f.durationMs}ms</td>
+            <td>${pill(f.status)}</td>
+          </tr>`).join("");
+        document.getElementById("slowApis").innerHTML = slowRows || "<tr><td colspan='5'>No slow APIs yet.</td></tr>";
+
+        renderRoutes(data.routes || []);
+
+        const chartSource = range === "1m" ? null : historyPoints;
+        if (chartSource && chartSource.length) {
+          drawChart(document.getElementById("rpsChart"), chartSource.map((p) => p.rps), "#5b8cff");
+          drawChart(document.getElementById("flightChart"), chartSource.map((p) => p.inFlight), "#3dd68c");
+          drawChart(document.getElementById("latChart"), chartSource.map((p) => p.p95), "#f5c542");
+          drawChart(document.getElementById("errChart"), chartSource.map((p) => p.errorRate), "#ff6b6b");
+          drawChart(document.getElementById("loopChart"), chartSource.map((p) => p.lag), "#5b8cff");
+          drawChart(document.getElementById("heapChart"), chartSource.map((p) => p.heapUsed), "#3dd68c");
+        } else {
+          pushPoint(rpsPoints, rps);
+          pushPoint(flightPoints, data.inFlight);
+          pushPoint(latPoints, data.p95Ms || 0);
+          pushPoint(errPoints, errorRate);
+          pushPoint(loopPoints, data.eventLoopLagMs || 0);
+          pushPoint(heapPoints, data.memoryBytes || 0);
+          drawChart(document.getElementById("rpsChart"), rpsPoints, "#5b8cff");
+          drawChart(document.getElementById("flightChart"), flightPoints, "#3dd68c");
+          drawChart(document.getElementById("latChart"), latPoints, "#f5c542");
+          drawChart(document.getElementById("errChart"), errPoints, "#ff6b6b");
+          drawChart(document.getElementById("loopChart"), loopPoints, "#5b8cff");
+          drawChart(document.getElementById("heapChart"), heapPoints, "#3dd68c");
+        }
+
+        if (errorRate >= 5 || failDelta >= 3 || (data.eventLoopLagMs || 0) >= 100 || health.status === "critical") setStatus("bad", "Failures detected");
+        else if (errorRate > 0 || failDelta > 0 || data.inFlight > 0 || health.status === "warning") setStatus("warn", "Live · " + new Date(data.ts).toLocaleTimeString());
+        else setStatus("ok", "Live · " + new Date(data.ts).toLocaleTimeString());
+
+        prev = data;
+      } catch (err) {
+        setStatus("bad", "Cannot reach live metrics");
+      }
+    }
+
+    function renderRoutes(rows) {
+      const method = document.getElementById("routeMethod").value;
+      const sort = document.getElementById("routeSort").value;
+      let list = rows.slice();
+      if (method) list = list.filter((r) => r.method === method);
+      const sorters = {
+        requests: (a, b) => b.count - a.count,
+        slowest: (a, b) => (b.avgMs || 0) - (a.avgMs || 0),
+        errors: (a, b) => (b.errorRate || 0) - (a.errorRate || 0),
+        p95: (a, b) => (b.p95 || 0) - (a.p95 || 0),
+        failures: (a, b) => (b.failures || 0) - (a.failures || 0),
+      };
+      list.sort(sorters[sort] || sorters.requests);
+      document.getElementById("routes").innerHTML = list.map((r) => `
+        <tr>
+          <td>${r.method}</td>
+          <td>${r.route}</td>
+          <td>${r.count}</td>
+          <td class="${r.failures ? "err" : ""}">${r.failures}</td>
+          <td>${(r.errorRate || 0).toFixed ? r.errorRate.toFixed(1) : r.errorRate || 0}%</td>
+          <td>${r.avgMs}ms</td>
+          <td>${r.p50 || 0}ms</td>
+          <td>${r.p95 || 0}ms</td>
+          <td>${r.p99 || 0}ms</td>
+          <td>${r.maxMs || 0}ms</td>
+        </tr>`).join("") || "<tr><td colspan='10'>No traffic yet. Hit any API.</td></tr>";
+    }
+
+    async function tickSlow() {
+      if (paused) return;
+      try {
+        const [ov, db, deps, alerts, errors, logs, sys] = await Promise.all([
+          fetch(api("/overview")).then((r) => r.json()),
+          fetch(api("/database")).then((r) => r.json()),
+          fetch(api("/dependencies")).then((r) => r.json()),
+          fetch(api("/alerts")).then((r) => r.json()),
+          fetch(api("/errors")).then((r) => r.json()),
+          fetch(api("/logs") + logQuery()).then((r) => r.json()),
+          fetch(api("/system")).then((r) => r.json()),
+        ]);
+        overview = ov;
+        const s = ov.sample || {};
+        const sysInfo = sys.system || s.system || {};
+        const mem = sys.memory || s.memory || {};
+        renderKv("systemKv", [
+          ["Node.js", sysInfo.nodeVersion || ""],
+          ["PID", sysInfo.pid || ""],
+          ["Environment", sysInfo.env || ""],
+          ["Process uptime", fmtDur(sysInfo.processUptimeSec)],
+          ["Server uptime", fmtDur(sysInfo.osUptimeSec)],
+          ["Platform", sysInfo.platform || ""],
+          ["Arch", sysInfo.arch || ""],
+          ["Hostname", sysInfo.hostname || ""],
+          ["CPU cores", sysInfo.cpuCount || ""],
+        ]);
+        renderKv("memKv", [
+          ["RSS", fmtBytes(mem.rss)],
+          ["Heap used", fmtBytes(mem.heapUsed)],
+          ["Heap total", fmtBytes(mem.heapTotal)],
+          ["External", fmtBytes(mem.external)],
+          ["Array buffers", fmtBytes(mem.arrayBuffers)],
+          ["Heap %", ((mem.heapPct || 0) * 100).toFixed(1) + "%"],
+          ["System total", fmtBytes(mem.systemTotal)],
+          ["System free", fmtBytes(mem.systemFree)],
+          ["System used", ((mem.systemUsedPct || 0) * 100).toFixed(1) + "%"],
+        ]);
+        setBar("heapBar", (mem.heapPct || 0) * 100, 70, 85);
+        document.getElementById("leakHint").textContent = s.possibleLeak ? "Heap has been rising steadily (possible leak)" : "";
+        renderKv("loopKv", [
+          ["Current lag", Math.round(s.lagMs || 0) + "ms"],
+          ["Average", Math.round(s.lagAvgMs || 0) + "ms"],
+          ["p95", Math.round(s.lagP95Ms || 0) + "ms"],
+          ["p99", Math.round(s.lagP99Ms || 0) + "ms"],
+          ["Max", Math.round(s.lagMaxMs || 0) + "ms"],
+          ["Utilization", ((s.elu || 0) * 100).toFixed(1) + "%"],
+        ]);
+        const mongo = db.mongo || {};
+        renderKv("dbKv", [
+          ["Status", mongo.status || "unknown"],
+          ["Database", mongo.dbName || ""],
+          ["Queries", mongo.queries || 0],
+          ["Failed queries", mongo.failed || 0],
+          ["Avg latency", (mongo.avgMs || 0) + "ms"],
+          ["p95 latency", (mongo.p95Ms || 0) + "ms"],
+          ["Pool size", mongo.pool?.size || 0],
+          ["Active", mongo.pool?.current || 0],
+          ["Available", mongo.pool?.available || 0],
+          ["Waiting", mongo.pool?.pending || 0],
+        ]);
+        document.getElementById("slowQueries").innerHTML = (db.slowQueries || []).slice(0, 20).map((q) => `
+          <tr><td>${q.operation}</td><td>${q.collection}</td><td>${q.durationMs}ms</td><td>${new Date(q.ts).toLocaleTimeString()}</td><td>${q.failed ? "error" : "ok"}</td></tr>
+        `).join("") || "<tr><td colspan='5'>No slow queries</td></tr>";
+        document.getElementById("deps").innerHTML = (deps.dependencies || []).map((d) => `
+          <tr><td>${d.service}</td><td class="${d.status === "up" ? "ok" : d.status === "down" ? "err" : ""}">${d.status}</td><td>${d.latencyMs || 0}ms</td><td>${d.lastChecked ? new Date(d.lastChecked).toLocaleTimeString() : ""}</td></tr>
+        `).join("") || "<tr><td colspan='4'>No dependency checks yet</td></tr>";
+        const gc = sys.gc || s.gc || {};
+        const http = sys.http || {};
+        const handles = sys.handles || {};
+        renderKv("diagKv", [
+          ["GC count", gc.count || 0],
+          ["Minor GC", gc.minor || 0],
+          ["Major GC", gc.major || 0],
+          ["Avg GC", Math.round(gc.avgMs || 0) + "ms"],
+          ["Max GC", Math.round(gc.maxMs || 0) + "ms"],
+          ["HTTP active", http.active || 0],
+          ["HTTP opened", http.opened || 0],
+          ["HTTP closed", http.closed || 0],
+          ["Keep-alive", http.keepAlive || 0],
+          ["Handles", handles.handles || 0],
+        ]);
+        document.getElementById("alerts").innerHTML = (alerts.alerts || []).map((a) => `
+          <tr><td>${a.name}</td><td class="${a.state === "critical" ? "err" : a.state === "warning" ? "warn" : "ok"}">${a.state || a.level}</td><td>${Number(a.value || 0).toFixed(1)}${a.unit || ""}</td></tr>
+        `).join("") || "<tr><td colspan='3'>All checks healthy</td></tr>";
+        const codes = [400,401,403,404,409,422,429,500,502,503];
+        const byCode = errors.statusCounts || {};
+        renderKv("statusKv", codes.map((c) => [String(c), byCode[c] || 0]));
+        document.getElementById("errorGroups").innerHTML = (errors.groups || []).map((g) => `
+          <tr class="clickable" data-id="${g.requestId || ""}"><td><strong>${g.type}</strong><br>${g.message}</td><td>${g.count}</td><td>${new Date(g.firstSeen).toLocaleTimeString()}</td><td>${new Date(g.lastSeen).toLocaleTimeString()}</td></tr>
+        `).join("") || "<tr><td colspan='4'>No grouped errors</td></tr>";
+        document.getElementById("logs").innerHTML = (logs.logs || []).slice(0, 80).map((l) => `
+          <tr><td>${new Date(l.ts).toLocaleTimeString()}</td><td>${l.level}</td><td>${l.message}</td><td>${l.requestId || ""}</td></tr>
+        `).join("") || "<tr><td colspan='4'>No logs in buffer</td></tr>";
+      } catch (err) {
+        // keep live cards working even if overview fails
+      }
+    }
+
+    function logQuery() {
+      const level = document.getElementById("logLevel").value;
+      const q = document.getElementById("logQ").value;
+      const params = new URLSearchParams();
+      if (level) params.set("level", level);
+      if (q) params.set("q", q);
+      const s = params.toString();
+      return s ? ("?" + s) : "";
+    }
+
+    async function loadHistory() {
+      range = document.getElementById("rangeSel").value;
+      if (range === "1m") { historyPoints = []; return; }
+      const res = await fetch(api("/history?range=" + range), { cache: "no-store" });
+      const data = await res.json();
+      historyPoints = data.points || [];
+    }
+
+    document.getElementById("pauseBtn").addEventListener("click", () => {
+      paused = !paused;
+      document.getElementById("pauseBtn").textContent = paused ? "Resume" : "Pause";
+      if (!paused) tick();
+    });
+    document.getElementById("rangeSel").addEventListener("change", loadHistory);
+    document.getElementById("routeMethod").addEventListener("change", () => prev && renderRoutes(prev.routes || []));
+    document.getElementById("routeSort").addEventListener("change", () => prev && renderRoutes(prev.routes || []));
+    document.getElementById("logClear").addEventListener("click", () => {
+      document.getElementById("logLevel").value = "";
+      document.getElementById("logQ").value = "";
+      tickSlow();
+    });
+    document.body.addEventListener("click", (e) => {
+      const row = e.target.closest("tr.clickable");
+      if (row && row.dataset.id) openRequest(row.dataset.id);
+    });
+    document.querySelectorAll("[data-collapse] .section-head").forEach((el) => {
+      el.addEventListener("click", () => {
+        const body = [...el.parentElement.children].slice(1);
+        const hidden = body[0] && body[0].style.display === "none";
+        body.forEach((n) => { n.style.display = hidden ? "" : "none"; });
+        el.lastElementChild.textContent = hidden ? "▾" : "▸";
+      });
+    });
+
+    tick();
+    tickSlow();
+    setInterval(tick, 1000);
+    setInterval(tickSlow, 5000);
+    setInterval(() => { if (range !== "1m") loadHistory(); }, 5000);
+  </script>
+</body>
+</html>

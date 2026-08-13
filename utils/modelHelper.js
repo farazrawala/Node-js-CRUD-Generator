@@ -2556,6 +2556,181 @@ const handleGenericSoftDelete = async (req, controllerName, options = {}) => {
   }
 };
 
+/**
+ * Restore a soft-deleted row: `deletedAt` back to null, `status` to `active` when the schema allows it.
+ */
+const handleGenericRestore = async (req, controllerName, options = {}) => {
+  const modelName =
+    controllerName && controllerName.trim() !== "" ?
+      controllerName
+    : getControllerName();
+
+  if (!modelName) {
+    return {
+      success: false,
+      status: 500,
+      error: "Controller name is required",
+      details: "Please provide the controller name as the second parameter",
+      type: "configuration",
+    };
+  }
+
+  const {
+    idParam = "id",
+    excludeFields = [],
+    filter = {},
+    afterRestore = null,
+    errorHandlers = {},
+    session = null,
+  } = options;
+
+  const recordId = req.params[idParam];
+  if (!recordId) {
+    return {
+      success: false,
+      status: 400,
+      error: "Record ID is required",
+      details: `Please provide ${idParam} in the URL parameters`,
+      type: "missing_id",
+    };
+  }
+
+  try {
+    const Model = getModelFromController(modelName);
+    const modelSchema = Model.schema.obj;
+
+    if (!modelSchema.deletedAt) {
+      return {
+        success: false,
+        status: 400,
+        error: "Restore not supported",
+        details: `${modelName} schema has no deletedAt field`,
+        type: "configuration",
+      };
+    }
+
+    const findCriteria = {
+      $and: [
+        { _id: recordId, ...filter },
+        { deletedAt: { $exists: true, $ne: null } },
+      ],
+    };
+
+    let existingQ = Model.findOne(findCriteria);
+    if (session) existingQ = existingQ.session(session);
+    const existingRecord = await existingQ;
+    if (!existingRecord) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with ID ${recordId} not found or not deleted`,
+        type: "not_found",
+      };
+    }
+
+    const updateData = { deletedAt: null };
+    const statusEnum = modelSchema.status?.enum;
+    if (
+      modelSchema.status &&
+      Array.isArray(statusEnum) &&
+      statusEnum.includes("active")
+    ) {
+      updateData.status = "active";
+    }
+
+    if (req.user && req.user._id && modelSchema.updated_by) {
+      updateData.updated_by = req.user._id;
+    }
+
+    const updatedRecord = await Model.findByIdAndUpdate(recordId, updateData, {
+      new: true,
+      runValidators: true,
+      ...(session ? { session } : {}),
+    });
+
+    if (!updatedRecord) {
+      return {
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `${modelName} with ID ${recordId} not found`,
+        type: "not_found",
+      };
+    }
+
+    if (afterRestore) {
+      await afterRestore(updatedRecord, req, existingRecord, session);
+    }
+
+    const responseData = { ...updatedRecord.toObject({ flattenMaps: true }) };
+    excludeFields.forEach((field) => {
+      delete responseData[field];
+    });
+
+    const transformedData = transformImageUrls(responseData, Model, req);
+    stripPasswordFieldsDeep(transformedData);
+
+    return {
+      success: true,
+      status: 200,
+      message: `${modelName} restored successfully`,
+      data: transformedData,
+    };
+  } catch (error) {
+    console.error("❌ Restore error:", error);
+
+    if (errorHandlers[error.code]) {
+      return errorHandlers[error.code](error);
+    }
+
+    switch (error.name) {
+      case "CastError":
+        if (error.path === "_id") {
+          return {
+            success: false,
+            status: 400,
+            error: "Invalid ID format",
+            details: "The provided ID is not valid",
+            type: "invalid_id",
+          };
+        }
+        return {
+          success: false,
+          status: 400,
+          error: "Invalid data type",
+          details: `${error.path} should be ${error.kind}`,
+          type: "cast",
+        };
+
+      default: {
+        const httpHandled = responseFromExplicitHttpError(error);
+        if (httpHandled) return httpHandled;
+
+        const msg =
+          (
+            error &&
+            typeof error.message === "string" &&
+            error.message.trim().length > 0
+          ) ?
+            error.message.trim()
+          : String(error);
+        return {
+          success: false,
+          status: 500,
+          error: msg,
+          details:
+            process.env.NODE_ENV === "development" && error.stack ?
+              `${msg}\n${error.stack}`
+            : msg,
+          type: "internal",
+          timestamp: new Date().toISOString(),
+        };
+      }
+    }
+  }
+};
+
 /** @deprecated Use `handleGenericSoftDelete` — same implementation. */
 const handleGenericDelete = handleGenericSoftDelete;
 
@@ -3893,6 +4068,7 @@ module.exports = {
   handleGenericCreate,
   handleGenericUpdate,
   handleGenericSoftDelete,
+  handleGenericRestore,
   handleGenericDelete,
   handleGenericGetById,
   handleGenericGetAll,

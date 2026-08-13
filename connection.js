@@ -72,7 +72,7 @@ async function connectMonogodb(url) {
     console.warn("⚠️ MongoDB disconnected");
   });
 
-  return mongoose.connect(resolvedUrl);
+  return mongoose.connect(resolvedUrl, { monitorCommands: true });
 }
 
 module.exports = {

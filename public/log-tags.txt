@@ -42,6 +42,7 @@ generic_update
 get
 get-all
 get-all-active
+get-deleted
 head
 imported_bigcommerce
 imported_shopify

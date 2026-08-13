@@ -189,6 +189,10 @@ const userSchema = new mongoose.Schema(
       type: String,
       field_name: "State",
     },
+    area: {
+      type: String,
+      field_name: "Area",
+    },
     country: {
       type: String,
       field_name: "Country",
