@@ -741,7 +741,8 @@ async function getShopProducts(req, res) {
           $or: [
             { parent_product_id: null },
             { parent_product_id: { $exists: false } },
-            { parent_product_id: "" },
+            // Legacy rows store "" or point at themselves; both are parents.
+            { $expr: { $eq: ["$parent_product_id", ""] } },
             { $expr: { $eq: ["$parent_product_id", "$_id"] } },
           ],
         },
