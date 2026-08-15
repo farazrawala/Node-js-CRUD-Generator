@@ -49,6 +49,7 @@ const PERMISSION_MODULE_KEYS = [
   "transactions",
   "logs",
   "support-tickets",
+  "tasks",
   // Legacy / SPA aliases — keep so existing saved permissions are not stripped
   "order",
   "proces",

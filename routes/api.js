@@ -253,6 +253,7 @@ const {
 const { chatCreate, fetchRandomChat, markChatSent, markChatNotAvailable, canSendUnknownWhatsapp, resetUnknownWhatsappUsage, resetUnknownWhatsappUsageOnly } = require("../controllers/chat");
 
 const supportTicketCtrl = require("../controllers/support_ticket");
+const taskCtrl = require("../controllers/task_management");
 
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
@@ -836,6 +837,82 @@ router.post("/support-tickets/upload-attachment", supportTicketCtrl.uploadAttach
 router.delete("/support-ticket/delete-attachment/:id", supportTicketCtrl.deleteAttachment);
 router.delete("/support-tickets/delete-attachment/:id", supportTicketCtrl.deleteAttachment);
 
+// ─── Task Management routes ───────────────────────────────────────────
+router.get("/task-board/get-all", taskCtrl.listBoards);
+router.get("/task-boards/get-all", taskCtrl.listBoards);
+router.get("/task-board/get/:id", taskCtrl.getBoard);
+router.get("/task-boards/get/:id", taskCtrl.getBoard);
+router.get("/task-board/kanban/:id", taskCtrl.getBoardKanban);
+router.get("/task-boards/kanban/:id", taskCtrl.getBoardKanban);
+router.post("/task-board/create", taskCtrl.createBoard);
+router.post("/task-boards/create", taskCtrl.createBoard);
+router.put("/task-board/update/:id", taskCtrl.updateBoard);
+router.put("/task-boards/update/:id", taskCtrl.updateBoard);
+router.put("/task-board/archive/:id", taskCtrl.archiveBoard);
+router.put("/task-boards/archive/:id", taskCtrl.archiveBoard);
+router.delete("/task-board/delete/:id", taskCtrl.deleteBoard);
+router.delete("/task-boards/delete/:id", taskCtrl.deleteBoard);
+router.post("/task-board/duplicate/:id", taskCtrl.duplicateBoard);
+router.post("/task-boards/duplicate/:id", taskCtrl.duplicateBoard);
+router.post("/task-board/members/:id", taskCtrl.addBoardMember);
+router.post("/task-boards/members/:id", taskCtrl.addBoardMember);
+router.delete("/task-board/members/:id/:userId", taskCtrl.removeBoardMember);
+router.delete("/task-boards/members/:id/:userId", taskCtrl.removeBoardMember);
+
+router.get("/task-column/get-all", taskCtrl.listColumns);
+router.get("/task-columns/get-all", taskCtrl.listColumns);
+router.post("/task-column/create", taskCtrl.createColumn);
+router.post("/task-columns/create", taskCtrl.createColumn);
+router.put("/task-column/update/:id", taskCtrl.updateColumn);
+router.put("/task-columns/update/:id", taskCtrl.updateColumn);
+router.put("/task-column/archive/:id", taskCtrl.archiveColumn);
+router.put("/task-columns/archive/:id", taskCtrl.archiveColumn);
+router.put("/task-column/reorder", taskCtrl.reorderColumns);
+router.put("/task-columns/reorder", taskCtrl.reorderColumns);
+
+router.get("/task/get-all", taskCtrl.listTasks);
+router.get("/tasks/get-all", taskCtrl.listTasks);
+router.get("/task/get/:id", taskCtrl.getTask);
+router.get("/tasks/get/:id", taskCtrl.getTask);
+router.post("/task/create", taskCtrl.createTask);
+router.post("/tasks/create", taskCtrl.createTask);
+router.put("/task/update/:id", taskCtrl.updateTask);
+router.put("/tasks/update/:id", taskCtrl.updateTask);
+router.put("/task/move/:id", taskCtrl.moveTask);
+router.put("/tasks/move/:id", taskCtrl.moveTask);
+router.put("/task/reorder", taskCtrl.reorderTasks);
+router.put("/tasks/reorder", taskCtrl.reorderTasks);
+router.put("/task/bulk", taskCtrl.bulkTasks);
+router.put("/tasks/bulk", taskCtrl.bulkTasks);
+router.put("/task/archive/:id", taskCtrl.archiveTask);
+router.put("/tasks/archive/:id", taskCtrl.archiveTask);
+router.delete("/task/delete/:id", taskCtrl.deleteTask);
+router.delete("/tasks/delete/:id", taskCtrl.deleteTask);
+
+router.post("/task/comments/:id", taskCtrl.addComment);
+router.post("/tasks/comments/:id", taskCtrl.addComment);
+router.put("/task/comments/:id/:commentId", taskCtrl.updateComment);
+router.put("/tasks/comments/:id/:commentId", taskCtrl.updateComment);
+router.delete("/task/comments/:id/:commentId", taskCtrl.deleteComment);
+router.delete("/tasks/comments/:id/:commentId", taskCtrl.deleteComment);
+
+router.post("/task/checklists/:id", taskCtrl.addChecklist);
+router.post("/tasks/checklists/:id", taskCtrl.addChecklist);
+router.put("/task/checklists/:id/:checklistId", taskCtrl.updateChecklist);
+router.put("/tasks/checklists/:id/:checklistId", taskCtrl.updateChecklist);
+router.delete("/task/checklists/:id/:checklistId", taskCtrl.deleteChecklist);
+router.delete("/tasks/checklists/:id/:checklistId", taskCtrl.deleteChecklist);
+
+router.post("/task/upload-attachment", taskCtrl.uploadAttachment);
+router.post("/tasks/upload-attachment", taskCtrl.uploadAttachment);
+router.delete("/task/delete-attachment/:id/:attachmentId", taskCtrl.deleteAttachment);
+router.delete("/tasks/delete-attachment/:id/:attachmentId", taskCtrl.deleteAttachment);
+
+router.get("/task/activity/:id", taskCtrl.getActivity);
+router.get("/tasks/activity/:id", taskCtrl.getActivity);
+router.post("/task/seed-demo", taskCtrl.seedDemo);
+router.post("/tasks/seed-demo", taskCtrl.seedDemo);
+
 // Register dynamic CRUD routes for all models
 // This automatically creates routes like: /{model}/create, /{model}/update/:id, /{model}/get/:id, etc.
 registerAllModelRoutes(router, {
@@ -854,6 +931,13 @@ registerAllModelRoutes(router, {
     "support_attachment",
     "support_ticket_read",
     "support_ticket_counter",
+    // Task management uses custom controller routes
+    "task_board",
+    "task_column",
+    "task",
+    "task_comment",
+    "task_activity",
+    "task_counter",
   ],
   modelConfigs: {
     // You can configure specific models here if needed

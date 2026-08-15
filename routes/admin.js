@@ -154,6 +154,7 @@ const userAdminCRUD = adminCrudGenerator(
           { key: "transactions", label: "Transactions" },
           { key: "logs", label: "Logs" },
           { key: "support-tickets", label: "Support Tickets" },
+          { key: "tasks", label: "Task Management" },
         ],
         actions: [
           { key: "view", label: "View" },
