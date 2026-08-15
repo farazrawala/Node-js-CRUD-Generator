@@ -245,6 +245,11 @@ async function checkHeaderAuthentication(req, res, next) {
     // Recent line-item product_ids (public; all companies)
     "/product/recent-product-ids",
     "/api/product/recent-product-ids",
+    // Public guest storefront (`controllers/shop.js`)
+    "/shop",
+    "/api/shop",
+    /^\/shop\/.*/,
+    /^\/api\/shop\/.*/,
   ];
 
   const pathCandidates = [

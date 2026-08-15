@@ -299,6 +299,16 @@ const {
   softDeleteFetchedProduct,
 } = require("../controllers/big_commerce");
 
+const {
+  getShopStore,
+  getShopCategories,
+  getShopBrands,
+  getShopProducts,
+  validateShopCart,
+  createShopOrder,
+  getShopOrder,
+} = require("../controllers/shop");
+
 // Note: Company routes are now handled dynamically
 // const {
 //   companyCreate,
@@ -649,6 +659,15 @@ router.post(
 );
 router.get("/big-commerce/categories/:companyId", getPartnerCategories);
 router.get("/big-commerce/brands/:companyId", getPartnerBrands);
+
+// Public guest storefront (no auth — allowlisted in middlewares/auth.js)
+router.get("/shop/:companySlug", getShopStore);
+router.get("/shop/:companySlug/categories", getShopCategories);
+router.get("/shop/:companySlug/brands", getShopBrands);
+router.get("/shop/:companySlug/products", getShopProducts);
+router.post("/shop/:companySlug/cart/validate", validateShopCart);
+router.post("/shop/:companySlug/orders", createShopOrder);
+router.get("/shop/:companySlug/orders/:orderId", getShopOrder);
 
 // Product warehouse inventory management routes
 // router.patch("/product/:id/warehouse-quantity", updateWarehouseQuantity);
