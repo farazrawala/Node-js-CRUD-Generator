@@ -734,8 +734,18 @@ async function getShopProducts(req, res) {
         : { $in: loaded.companyIdValues },
       status: "active",
       deletedAt: null,
-      // "Variable" rows are grouping parents; only their "Single" variants sell.
-      product_type: { $ne: "Variable" },
+      // List one card per product family: standalone products + parent rows.
+      // Hide child variants (parent_product_id pointing at another product).
+      $and: [
+        {
+          $or: [
+            { parent_product_id: null },
+            { parent_product_id: { $exists: false } },
+            { parent_product_id: "" },
+            { $expr: { $eq: ["$parent_product_id", "$_id"] } },
+          ],
+        },
+      ],
     };
 
     const rawCategory =
@@ -978,7 +988,6 @@ async function createShopOrder(req, res) {
         : { $in: loaded.companyIdValues },
       status: "active",
       deletedAt: null,
-      product_type: { $ne: "Variable" },
     })
       .select(SHOP_PRODUCT_SELECT)
       .lean();
