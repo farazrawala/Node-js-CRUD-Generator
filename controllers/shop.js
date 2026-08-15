@@ -732,9 +732,10 @@ async function getShopProducts(req, res) {
         loaded.companyIdValues.length === 1 ?
           loaded.companyIdValues[0]
         : { $in: loaded.companyIdValues },
-      show_on_bigcommerce: true,
       status: "active",
       deletedAt: null,
+      // "Variable" rows are grouping parents; only their "Single" variants sell.
+      product_type: { $ne: "Variable" },
     };
 
     const rawCategory =
@@ -975,9 +976,9 @@ async function createShopOrder(req, res) {
         loaded.companyIdValues.length === 1 ?
           loaded.companyIdValues[0]
         : { $in: loaded.companyIdValues },
-      show_on_bigcommerce: true,
       status: "active",
       deletedAt: null,
+      product_type: { $ne: "Variable" },
     })
       .select(SHOP_PRODUCT_SELECT)
       .lean();
