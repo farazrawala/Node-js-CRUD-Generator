@@ -110,11 +110,15 @@ function parseBigcommerceSettings(company) {
   return parseMaybeJson(company?.bigcommerce_settings, {});
 }
 
-/** Resolve store unit price: ecommerce price when set, else product_price. */
-function resolveShopUnitPrice(product) {
+/** Resolve store unit price: ecommerce price when set, else product_price, else fallback. */
+function resolveShopUnitPrice(product, fallback = 0) {
   const bc = Number(product?.bigcommerce_price);
   if (Number.isFinite(bc) && bc > 0) return roundMoney2(bc);
-  return roundMoney2(Number(product?.product_price) || 0);
+  const price = Number(product?.product_price);
+  if (Number.isFinite(price) && price > 0) return roundMoney2(price);
+  const fb = Number(fallback);
+  if (Number.isFinite(fb) && fb > 0) return roundMoney2(fb);
+  return 0;
 }
 
 function companyIdQueryValues(companyIds) {
@@ -364,10 +368,16 @@ async function mapProductIdsToAvailableQty(productIds, catalogCompanyIds) {
   return map;
 }
 
-function enrichProductRow(row, availableQty, allowOversell) {
+function enrichProductRow(row, availableQty, allowOversell, priceFallback = 0) {
   const qty = Number(availableQty) || 0;
-  const unit_price = resolveShopUnitPrice(row);
-  const list_price = roundMoney2(Number(row.product_price) || 0);
+  const unit_price = resolveShopUnitPrice(row, priceFallback);
+  const ownList = Number(row.product_price);
+  const list_price = roundMoney2(
+    Number.isFinite(ownList) && ownList > 0 ?
+      ownList
+    : Number(priceFallback) > 0 ? Number(priceFallback)
+    : 0,
+  );
   const is_available = allowOversell || qty > 0;
   let discount_percent = null;
   if (list_price > 0 && unit_price < list_price) {
@@ -388,6 +398,7 @@ function enrichProductRow(row, availableQty, allowOversell) {
     category_id: row.category_id,
     status: row.status,
     product_type: row.product_type,
+    parent_product_id: row.parent_product_id || null,
     createdAt: row.createdAt,
     unit_price,
     list_price: list_price > unit_price ? list_price : null,
@@ -396,6 +407,24 @@ function enrichProductRow(row, availableQty, allowOversell) {
     in_stock: qty > 0,
     is_available,
     stock_status: qty > 0 ? "in_stock" : "out_of_stock",
+  };
+}
+
+/** Prefer variant media; fall back to parent when the variant has none. */
+function applyParentMediaFallback(variantDto, parentRow) {
+  if (!variantDto || !parentRow) return variantDto;
+  const parentImage = parentRow.product_image || null;
+  const parentThumb =
+    parentRow.product_image_thumbnail_url || parentRow.product_image || null;
+  const hasImage = Boolean(variantDto.product_image);
+  const hasThumb = Boolean(variantDto.product_image_thumbnail_url);
+  if (hasImage && hasThumb) return variantDto;
+  return {
+    ...variantDto,
+    product_image: hasImage ? variantDto.product_image : parentImage,
+    product_image_thumbnail_url: hasThumb
+      ? variantDto.product_image_thumbnail_url
+      : parentThumb || parentImage,
   };
 }
 
@@ -869,13 +898,23 @@ async function getShopProducts(req, res) {
       allProductIds,
       loaded.catalogCompanyIds,
     );
+    const parentPriceById = new Map(
+      rows.map((row) => [String(row._id), resolveShopUnitPrice(row)]),
+    );
+    const parentRowById = new Map(rows.map((row) => [String(row._id), row]));
     const variantsByParent = new Map();
     for (const variant of variants) {
       const key = String(variant.parent_product_id);
-      const enriched = enrichProductRow(
-        variant,
-        qtyMap.get(String(variant._id)),
-        allowOversell,
+      const parentRow = parentRowById.get(key);
+      const parentPrice = parentPriceById.get(key) || 0;
+      const enriched = applyParentMediaFallback(
+        enrichProductRow(
+          variant,
+          qtyMap.get(String(variant._id)),
+          allowOversell,
+          parentPrice,
+        ),
+        parentRow,
       );
       variantsByParent.set(key, [
         ...(variantsByParent.get(key) || []),
@@ -895,12 +934,29 @@ async function getShopProducts(req, res) {
       const availableVariants = productVariants.filter(
         (variant) => variant.is_available,
       );
-      const displayVariant = availableVariants[0] || productVariants[0];
+      const pricedVariants = productVariants.filter(
+        (variant) => Number(variant.unit_price) > 0,
+      );
+      const displayVariant =
+        availableVariants.find((variant) => Number(variant.unit_price) > 0) ||
+        pricedVariants[0] ||
+        availableVariants[0] ||
+        productVariants[0];
+
+      const unit_price =
+        Number(displayVariant?.unit_price) > 0 ?
+          displayVariant.unit_price
+        : enriched.unit_price;
+
       return {
         ...enriched,
-        unit_price: displayVariant.unit_price,
-        list_price: displayVariant.list_price,
-        discount_percent: displayVariant.discount_percent,
+        unit_price,
+        list_price:
+          Number(displayVariant?.list_price) > 0 ?
+            displayVariant.list_price
+          : enriched.list_price,
+        discount_percent:
+          displayVariant?.discount_percent ?? enriched.discount_percent,
         available_qty: productVariants.reduce(
           (sum, variant) => sum + (Number(variant.available_qty) || 0),
           0,
@@ -1065,6 +1121,39 @@ async function createShopOrder(req, res) {
       );
     }
 
+    const parentIds = [
+      ...new Set(
+        products
+          .map((product) => coalesceObjectId(product.parent_product_id))
+          .filter(
+            (parentId) =>
+              parentId &&
+              !productById.has(String(parentId)) &&
+              !products.some((p) => String(p._id) === String(parentId)),
+          )
+          .map((id) => String(id)),
+      ),
+    ].map((id) => coalesceObjectId(id));
+
+    const parentRows =
+      parentIds.length ?
+        await Product.find({
+          _id: { $in: parentIds },
+          company_id:
+            loaded.companyIdValues.length === 1 ?
+              loaded.companyIdValues[0]
+            : { $in: loaded.companyIdValues },
+          status: "active",
+          deletedAt: null,
+        })
+          .select("_id product_price bigcommerce_price parent_product_id")
+          .lean()
+      : [];
+    const parentById = new Map(parentRows.map((p) => [String(p._id), p]));
+    for (const product of products) {
+      parentById.set(String(product._id), product);
+    }
+
     const allowOversell = allowAddToCartWhenStockInsufficient(loaded.company);
     const qtyMap = await mapProductIdsToAvailableQty(
       productIds,
@@ -1140,7 +1229,13 @@ async function createShopOrder(req, res) {
 
     lines.forEach((line, index) => {
       const product = productById.get(String(line.product_id));
-      const price = resolveShopUnitPrice(product);
+      const parentId = coalesceObjectId(product?.parent_product_id);
+      const parent =
+        parentId && String(parentId) !== String(product?._id) ?
+          parentById.get(String(parentId))
+        : null;
+      const parentPrice = parent ? resolveShopUnitPrice(parent) : 0;
+      const price = resolveShopUnitPrice(product, parentPrice);
       orderBody[`product_id[${index}]`] = String(line.product_id);
       orderBody[`qty[${index}]`] = String(line.qty);
       orderBody[`price[${index}]`] = String(price);
