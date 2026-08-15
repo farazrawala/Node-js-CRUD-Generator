@@ -841,14 +841,76 @@ async function getShopProducts(req, res) {
       Product.countDocuments(filter),
     ]);
 
+    const parentIds = rows.map((row) => row._id);
+    const variants =
+      parentIds.length ?
+        await Product.find({
+          parent_product_id: { $in: parentIds },
+          _id: { $nin: parentIds },
+          company_id:
+            loaded.companyIdValues.length === 1 ?
+              loaded.companyIdValues[0]
+            : { $in: loaded.companyIdValues },
+          status: "active",
+          deletedAt: null,
+        })
+          .select(SHOP_PRODUCT_SELECT)
+          .populate("brand_id", "name")
+          .populate("category_id", "name")
+          .sort({ product_name: 1 })
+          .lean({ virtuals: true })
+      : [];
+
+    const allProductIds = [
+      ...parentIds,
+      ...variants.map((variant) => variant._id),
+    ];
     const qtyMap = await mapProductIdsToAvailableQty(
-      rows.map((r) => r._id),
+      allProductIds,
       loaded.catalogCompanyIds,
     );
+    const variantsByParent = new Map();
+    for (const variant of variants) {
+      const key = String(variant.parent_product_id);
+      const enriched = enrichProductRow(
+        variant,
+        qtyMap.get(String(variant._id)),
+        allowOversell,
+      );
+      variantsByParent.set(key, [
+        ...(variantsByParent.get(key) || []),
+        enriched,
+      ]);
+    }
 
-    const data = rows.map((row) =>
-      enrichProductRow(row, qtyMap.get(String(row._id)), allowOversell),
-    );
+    const data = rows.map((row) => {
+      const enriched = enrichProductRow(
+        row,
+        qtyMap.get(String(row._id)),
+        allowOversell,
+      );
+      const productVariants = variantsByParent.get(String(row._id)) || [];
+      if (!productVariants.length) return { ...enriched, variants: [] };
+
+      const availableVariants = productVariants.filter(
+        (variant) => variant.is_available,
+      );
+      const displayVariant = availableVariants[0] || productVariants[0];
+      return {
+        ...enriched,
+        unit_price: displayVariant.unit_price,
+        list_price: displayVariant.list_price,
+        discount_percent: displayVariant.discount_percent,
+        available_qty: productVariants.reduce(
+          (sum, variant) => sum + (Number(variant.available_qty) || 0),
+          0,
+        ),
+        is_available: availableVariants.length > 0,
+        in_stock: availableVariants.length > 0,
+        stock_status: availableVariants.length > 0 ? "in_stock" : "out_of_stock",
+        variants: productVariants,
+      };
+    });
 
     return jsonSuccess(res, 200, data, null, {
       total,
