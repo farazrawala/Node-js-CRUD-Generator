@@ -739,10 +739,9 @@ async function getShopProducts(req, res) {
       $and: [
         {
           $or: [
-            { parent_product_id: null },
-            { parent_product_id: { $exists: false } },
-            // Legacy rows store "" or point at themselves; both are parents.
-            { $expr: { $eq: ["$parent_product_id", ""] } },
+            // null, missing, or legacy "" all mean "not a child".
+            { parent_product_id: { $not: { $type: "objectId" } } },
+            // Legacy parents point at themselves.
             { $expr: { $eq: ["$parent_product_id", "$_id"] } },
           ],
         },
