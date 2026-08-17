@@ -205,6 +205,16 @@ async function loadPublicShopCompany(companySlug) {
   };
 }
 
+function normalizeThemeColor(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/^#/, "");
+  if (!/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(raw)) return null;
+  // Expand shorthand (#f80) so clients always receive a 6-digit hex.
+  const hex = raw.length === 3 ? raw.replace(/./g, (char) => char + char) : raw;
+  return `#${hex.toLowerCase()}`;
+}
+
 function toPublicStoreDto(company) {
   const shipping = parseShippingSettings(company);
   const bcSettings = parseBigcommerceSettings(company);
@@ -284,6 +294,7 @@ function toPublicStoreDto(company) {
     company_email: company.company_email || null,
     company_address: company.company_address || null,
     whatsapp_number: company.whatsapp_number || null,
+    theme_color: normalizeThemeColor(company.theme_color),
     tagline,
     store_status,
     delivery_methods,

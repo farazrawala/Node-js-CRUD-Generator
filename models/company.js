@@ -158,6 +158,11 @@ const modelSchema = new mongoose.Schema(
       },
     ],
 
+    theme_color: {
+      type: String,
+      field_name: "Theme Color",
+    },
+
     google_address: {
       type: String,
       field_name: "Google Address",
