@@ -86,6 +86,7 @@ const {
 const {
   expenseCreate,
   expenseUpdate,
+  expenseDelete,
   findExpenseSummary,
   findExpenseByAccount,
 } = require("../controllers/expense");
@@ -430,6 +431,8 @@ router.get(
 // Expense routes
 router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
+router.delete("/expense/delete/:id", expenseDelete);
+router.delete("/expenses/delete/:id", expenseDelete);
 router.get("/expense/summary", findExpenseSummary);
 router.get("/expense/by-account", findExpenseByAccount);
 
@@ -982,6 +985,10 @@ registerAllModelRoutes(router, {
     complain: {
       enabled: true,
       excludedRoutes: ["delete"], // Complain doesn't have delete route
+    },
+    expense: {
+      enabled: true,
+      excludedRoutes: ["delete"],
     },
     purchase_order: {
       enabled: true,

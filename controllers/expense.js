@@ -9,6 +9,7 @@ const {
 const {
   handleGenericCreate,
   handleGenericUpdate,
+  handleGenericSoftDelete,
   activeNotDeletedCriteria,
 } = require("../utils/modelHelper");
 const {
@@ -153,6 +154,8 @@ function buildExpenseGlItems(record, transaction_number, req = null) {
 }
 
 async function softDeleteExpenseGlRows(expenseReq, expenseId, session = null) {
+  if (!expenseId) return { modifiedCount: 0 };
+
   const softDeleteSet = { deletedAt: new Date(), status: "inactive" };
   const uid = pickObjectId(expenseReq?.user?._id ?? expenseReq?.user);
   if (uid) softDeleteSet.updated_by = uid;
@@ -172,6 +175,7 @@ async function softDeleteExpenseGlRows(expenseReq, expenseId, session = null) {
   if (result.modifiedCount > 0) {
     console.log("✅ Expense GL rows soft-deleted:", result.modifiedCount);
   }
+  return result;
 }
 
 async function postExpenseGlTransactions(
@@ -280,6 +284,65 @@ async function expenseUpdate(req, res) {
   }
 
   return res.status(response.status).json(response);
+}
+
+/**
+ * Soft-delete an expense and its linked GL transaction rows
+ * (`reference_id.module` = expense, `reference_id.ref_id` = expense id).
+ */
+async function expenseDelete(req, res) {
+  let response = null;
+  let transactionsDeleted = 0;
+  const txnError = await runExpenseWithOptionalTransaction(
+    async (mongoSession) => {
+      const filter = {};
+      const tenantCo = pickObjectId(req.user?.company_id);
+      if (tenantCo) filter.company_id = tenantCo;
+
+      response = await handleGenericSoftDelete(req, "expense", {
+        ...(mongoSession ? { session: mongoSession } : {}),
+        filter,
+        afterSoftDelete: async (record, expenseReq, _existing, sess) => {
+          const gl = await softDeleteExpenseGlRows(
+            expenseReq,
+            record._id,
+            sess,
+          );
+          transactionsDeleted = gl?.modifiedCount || 0;
+        },
+      });
+      if (!response?.success) {
+        throwWithGenericFailure(response, "Expense delete failed");
+      }
+    },
+  );
+
+  if (txnError) {
+    await logRollbackFailure(req, txnError, {
+      action: "EXPENSE DELETE ROLLBACK",
+      tags: ["expense", "delete"],
+      fallbackUrl: `/api/expense/delete/${req.params?.id || ""}`,
+      context: expenseLogContext(req, { expense_id: req.params?.id }),
+    });
+    if (txnError.clientErrorPayload) {
+      return res
+        .status(txnError.clientErrorPayload.status || 400)
+        .json(txnError.clientErrorPayload);
+    }
+    return res.status(txnError.statusCode || 500).json({
+      success: false,
+      status: txnError.statusCode || 500,
+      error: txnError.message || "Expense delete failed",
+      message: txnError.message || "Expense delete failed",
+      details: txnError.details || txnError.message,
+      type: txnError.responseType || "internal",
+    });
+  }
+
+  return res.status(response.status).json({
+    ...response,
+    transactions_deleted: transactionsDeleted,
+  });
 }
 
 /**
@@ -491,6 +554,7 @@ async function findExpenseByAccount(req, res) {
 module.exports = {
   expenseCreate,
   expenseUpdate,
+  expenseDelete,
   findExpenseSummary,
   findExpenseByAccount,
 };

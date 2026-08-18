@@ -342,6 +342,7 @@ Dynamic CRUD: `/purchase_return/*`, `/purchase_return_item/*`.
 | ------ | ---- | ---- | ----------- |
 | `POST` | `/expense/save` | Yes | Create expense |
 | `PATCH` | `/expense/update/:id` | Yes | Update |
+| `DELETE` | `/expense/delete/:id` | Yes | Soft-delete expense and linked GL transactions |
 | `GET` | `/expense/summary` | Yes | Expense summary |
 | `GET` | `/expense/by-account` | Yes | Expense by account |
 
