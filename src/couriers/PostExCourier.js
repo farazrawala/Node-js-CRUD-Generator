@@ -360,14 +360,50 @@ class PostExCourier extends BaseCourier {
       url,
     });
 
-    const dist = res.data?.dist || res.data || {};
-    const history = Array.isArray(dist.transactionHistory)
-      ? dist.transactionHistory
-      : Array.isArray(dist.trackingHistory)
-        ? dist.trackingHistory
-        : Array.isArray(dist.history)
-          ? dist.history
-          : [];
+    const dist =
+      res.data?.dist && typeof res.data.dist === "object"
+        ? res.data.dist
+        : res.data && typeof res.data === "object"
+          ? res.data
+          : {};
+    const hasPayload = Boolean(
+      dist.trackingNumber ||
+        dist.transactionStatus ||
+        (Array.isArray(dist.trackDetail) && dist.trackDetail.length) ||
+        (Array.isArray(dist.transactionHistory) && dist.transactionHistory.length),
+    );
+    const bodyFailed =
+      res.data &&
+      typeof res.data === "object" &&
+      res.data.statusCode != null &&
+      !this.isSuccessStatus(res.data);
+
+    if (res.status >= 400 || bodyFailed || !hasPayload) {
+      throw fromProviderMessage(
+        this.extractErrorMessage(res, "PostEx tracking failed"),
+        {
+          provider: this.providerName,
+          details: {
+            httpStatus: res.status,
+            url,
+            response: res.data,
+            statusMessage:
+              typeof res.data === "object" ? res.data?.statusMessage : null,
+          },
+          httpStatus: res.status >= 400 ? res.status : 502,
+          retryable: res.status >= 500,
+        },
+      );
+    }
+    const history = Array.isArray(dist.trackDetail)
+      ? dist.trackDetail
+      : Array.isArray(dist.transactionHistory)
+        ? dist.transactionHistory
+        : Array.isArray(dist.trackingHistory)
+          ? dist.trackingHistory
+          : Array.isArray(dist.history)
+            ? dist.history
+            : [];
 
     const events = history.map((ev) => {
       const mapped = mapPostExStatus(ev);
@@ -379,7 +415,7 @@ class PostExCourier extends BaseCourier {
           ev.message ||
           ev.remarks ||
           "",
-        location: ev.cityName || ev.location || null,
+        location: ev.station || ev.cityName || ev.location || null,
         eventTime: parseLooseDate(
           ev.transactionDate || ev.dateTime || ev.datetime || ev.createdAt,
         ),
@@ -387,12 +423,18 @@ class PostExCourier extends BaseCourier {
       };
     });
 
+    events.sort((a, b) => {
+      const ta = a.eventTime ? new Date(a.eventTime).getTime() : 0;
+      const tb = b.eventTime ? new Date(b.eventTime).getTime() : 0;
+      return tb - ta;
+    });
+
     if (!events.length) {
       events.push({
         status: mapPostExStatus(dist),
         description:
           dist.transactionStatus || dist.orderStatus || dist.statusMessage || "",
-        location: dist.cityName || null,
+        location: dist.destination || dist.cityName || null,
         eventTime: parseLooseDate(dist.transactionDate || dist.orderDate),
         raw: dist,
       });
@@ -403,10 +445,18 @@ class PostExCourier extends BaseCourier {
       description: "",
     };
 
+    const lastStatus =
+      dist.transactionStatus ||
+      dist.orderStatus ||
+      latest.description ||
+      latest.status ||
+      null;
+
     return {
       trackingNumber: String(cn),
       status: latest.status,
-      statusCode: dist.transactionStatus || dist.orderStatus || null,
+      statusCode: lastStatus,
+      lastStatus,
       events,
       raw: res.data,
     };

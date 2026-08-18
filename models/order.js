@@ -418,6 +418,15 @@ const modelSchema = new mongoose.Schema(
     /**
      * Sales lifecycle tags (OMS / ops labels). Prefer `ORDER_TAG_VALUES`.
      */
+    tracking_status: {
+      type: String,
+      field_name: "Tracking Status",
+    },
+    tracking_details: {
+      type: String,
+      field_name: "Tracking Details",
+    },
+
     tags: {
       type: [String],
       enum: {

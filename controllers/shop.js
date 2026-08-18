@@ -194,7 +194,8 @@ async function loadPublicShopCompany(companySlug) {
   }
 
   const companyId = coalesceObjectId(company._id);
-  const catalogCompanyIds = await resolveMarketplaceCatalogCompanyIds(companyId);
+  const catalogCompanyIds =
+    await resolveMarketplaceCatalogCompanyIds(companyId);
 
   return {
     ok: true,
@@ -246,11 +247,10 @@ function toPublicStoreDto(company) {
       0,
   );
 
-  const methodsFromSettings = Array.isArray(shipping.methods)
-    ? shipping.methods
-    : Array.isArray(shipping.delivery_methods)
-      ? shipping.delivery_methods
-      : null;
+  const methodsFromSettings =
+    Array.isArray(shipping.methods) ? shipping.methods
+    : Array.isArray(shipping.delivery_methods) ? shipping.delivery_methods
+    : null;
 
   let delivery_methods =
     methodsFromSettings && methodsFromSettings.length ?
@@ -275,7 +275,9 @@ function toPublicStoreDto(company) {
 
   if (
     pickupEnabled &&
-    !delivery_methods.some((m) => /pickup/i.test(m.id) || /pickup/i.test(m.label))
+    !delivery_methods.some(
+      (m) => /pickup/i.test(m.id) || /pickup/i.test(m.label),
+    )
   ) {
     delivery_methods.push({
       id: "pickup",
@@ -384,15 +386,16 @@ function enrichProductRow(row, availableQty, allowOversell, priceFallback = 0) {
   const unit_price = resolveShopUnitPrice(row, priceFallback);
   const ownList = Number(row.product_price);
   const list_price = roundMoney2(
-    Number.isFinite(ownList) && ownList > 0 ?
-      ownList
+    Number.isFinite(ownList) && ownList > 0 ? ownList
     : Number(priceFallback) > 0 ? Number(priceFallback)
     : 0,
   );
   const is_available = allowOversell || qty > 0;
   let discount_percent = null;
   if (list_price > 0 && unit_price < list_price) {
-    discount_percent = Math.round(((list_price - unit_price) / list_price) * 100);
+    discount_percent = Math.round(
+      ((list_price - unit_price) / list_price) * 100,
+    );
   }
 
   return {
@@ -433,8 +436,9 @@ function applyParentMediaFallback(variantDto, parentRow) {
   return {
     ...variantDto,
     product_image: hasImage ? variantDto.product_image : parentImage,
-    product_image_thumbnail_url: hasThumb
-      ? variantDto.product_image_thumbnail_url
+    product_image_thumbnail_url:
+      hasThumb ?
+        variantDto.product_image_thumbnail_url
       : parentThumb || parentImage,
   };
 }
@@ -643,7 +647,9 @@ function resolveDeliveryCharge(company, deliveryMethodId) {
     return dto.delivery_methods[0]?.charge ?? 0;
   }
   const match = dto.delivery_methods.find(
-    (m) => String(m.id) === methodId || String(m.label).toLowerCase() === methodId.toLowerCase(),
+    (m) =>
+      String(m.id) === methodId ||
+      String(m.label).toLowerCase() === methodId.toLowerCase(),
   );
   if (match) return roundMoney2(match.charge);
   if (/pickup/i.test(methodId)) return 0;
@@ -816,10 +822,7 @@ async function getShopProducts(req, res) {
     }
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(
-      parseInt(req.query.limit, 10) || 20,
-      100,
-    );
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const skip =
       req.query.skip != null ?
         Math.max(parseInt(req.query.skip, 10) || 0, 0)
@@ -974,7 +977,8 @@ async function getShopProducts(req, res) {
         ),
         is_available: availableVariants.length > 0,
         in_stock: availableVariants.length > 0,
-        stock_status: availableVariants.length > 0 ? "in_stock" : "out_of_stock",
+        stock_status:
+          availableVariants.length > 0 ? "in_stock" : "out_of_stock",
         variants: productVariants,
       };
     });
@@ -1053,15 +1057,16 @@ async function createShopOrder(req, res) {
     if (!loaded.ok) return jsonError(res, loaded.status, loaded.message);
 
     const body = req.body && typeof req.body === "object" ? req.body : {};
-    const customer = body.customer && typeof body.customer === "object" ?
-      body.customer
-    : body;
+    const customer =
+      body.customer && typeof body.customer === "object" ? body.customer : body;
 
     const name = String(
       customer.customer_name || customer.name || customer.full_name || "",
     ).trim();
     const phone = String(customer.phone || customer.mobile || "").trim();
-    const address = String(customer.address || customer.delivery_address || "").trim();
+    const address = String(
+      customer.address || customer.delivery_address || "",
+    ).trim();
     const area = String(
       customer.area || customer.locality || customer.state || "",
     ).trim();
@@ -1084,8 +1089,9 @@ async function createShopOrder(req, res) {
     if (idempotencyKey) {
       const existing = await Order.findOne({
         company_id: {
-          $in: loaded.companyIdValues.length
-            ? loaded.companyIdValues
+          $in:
+            loaded.companyIdValues.length ?
+              loaded.companyIdValues
             : [loaded.companyId],
         },
         integration_order_id: `shop:${idempotencyKey}`,
@@ -1205,14 +1211,16 @@ async function createShopOrder(req, res) {
       address,
       state: area,
       city,
-      zip: String(customer.postal_code || customer.zip || "").trim() || undefined,
+      zip:
+        String(customer.postal_code || customer.zip || "").trim() || undefined,
       country: String(customer.country || "").trim() || undefined,
-      description: String(
-        customer.delivery_instructions ||
-          customer.additional_instructions ||
-          customer.description ||
-          "",
-      ).trim() || undefined,
+      description:
+        String(
+          customer.delivery_instructions ||
+            customer.additional_instructions ||
+            customer.description ||
+            "",
+        ).trim() || undefined,
       discount,
       discount_percentage: 0,
       shipment,
@@ -1319,7 +1327,10 @@ async function getShopOrder(req, res) {
       order_type: { $in: ["website", "online"] },
     };
 
-    let order = await Order.findOne({ ...companyFilter, order_no: param }).lean();
+    let order = await Order.findOne({
+      ...companyFilter,
+      order_no: param,
+    }).lean();
     if (!order && isValidObjectId(param)) {
       order = await Order.findOne({
         ...companyFilter,

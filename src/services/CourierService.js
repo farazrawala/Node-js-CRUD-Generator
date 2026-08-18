@@ -504,7 +504,21 @@ async function refreshTrackingForShipment(shipment, options = {}) {
   }
 
   const { driver } = await resolveDriver(company, shipment.courier);
-  const result = await driver.getTracking(shipment.tracking_number);
+
+  let result;
+  try {
+    result = await driver.getTracking(shipment.tracking_number);
+  } catch (err) {
+    courierLogger.apiError({
+      event: "tracking_live_failed",
+      provider: shipment.courier,
+      trackingNumber: shipment.tracking_number,
+      orderId: String(shipment.order_id || ""),
+      error: err.message,
+    });
+    if (options.allowStale === false) throw err;
+    return loadPreviousTrackingResponse(shipment, options, err);
+  }
 
   for (const event of result.events || []) {
     await appendTrackingEvent({
@@ -529,20 +543,123 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     },
   );
 
+  await persistOrderTracking(shipment, result);
+
+  const lastStatus =
+    result.lastStatus ||
+    result.statusCode ||
+    result.status ||
+    null;
+
   const history = await CourierTracking.find({ shipment_id: shipment._id })
     .sort({ event_time: -1, created_at: -1 })
     .lean();
 
   return {
     success: true,
+    stale: false,
     order_id: shipment.order_id,
     tracking_number: shipment.tracking_number,
     courier: shipment.courier,
     status: result.status,
     status_code: result.statusCode,
+    tracking_status: lastStatus,
+    tracking_details: result.raw ?? null,
     history,
+    last_tracking_sync: new Date(),
     raw: options.includeRaw ? result.raw : undefined,
   };
+}
+
+function parseStoredTrackingDetails(value) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Return last saved order tracking so the UI still has records
+ * when the live courier API fails.
+ */
+async function loadPreviousTrackingResponse(shipment, options = {}, err) {
+  const Order = mongoose.model("order");
+  const order = shipment.order_id
+    ? await Order.findById(shipment.order_id)
+        .select("tracking_status tracking_details")
+        .lean()
+    : null;
+
+  const history = await CourierTracking.find({ shipment_id: shipment._id })
+    .sort({ event_time: -1, created_at: -1 })
+    .lean();
+
+  const trackingDetails = parseStoredTrackingDetails(order?.tracking_details);
+  const trackingStatus =
+    order?.tracking_status ||
+    shipment.status_code ||
+    shipment.shipment_status ||
+    null;
+
+  return {
+    success: true,
+    stale: true,
+    order_id: shipment.order_id,
+    tracking_number: shipment.tracking_number,
+    courier: shipment.courier,
+    status: shipment.shipment_status,
+    status_code: shipment.status_code,
+    tracking_status: trackingStatus,
+    tracking_details: trackingDetails,
+    history,
+    last_tracking_sync: shipment.last_tracking_sync || null,
+    warning: err?.message || "Courier tracking unavailable; showing last saved records",
+    raw: options.includeRaw ? trackingDetails : undefined,
+  };
+}
+
+/**
+ * Persist courier last status + full tracking payload onto the order.
+ * `tracking_status` is the latest provider status (e.g. PostEx "Out For Delivery").
+ * `tracking_details` stores the full API response as JSON.
+ */
+async function persistOrderTracking(shipment, result) {
+  if (!shipment?.order_id) return;
+
+  const lastStatus =
+    result.lastStatus ||
+    result.statusCode ||
+    result.events?.[0]?.description ||
+    result.status ||
+    null;
+
+  let details = null;
+  if (result.raw != null) {
+    details =
+      typeof result.raw === "string"
+        ? result.raw
+        : JSON.stringify(result.raw);
+  }
+
+  const update = {};
+  if (lastStatus) update.tracking_status = String(lastStatus);
+  if (details) update.tracking_details = details;
+  if (!Object.keys(update).length) return;
+
+  try {
+    await mongoose.model("order").findByIdAndUpdate(shipment.order_id, {
+      $set: update,
+    });
+  } catch (err) {
+    courierLogger.apiError({
+      event: "order_tracking_persist_failed",
+      orderId: String(shipment.order_id),
+      error: err.message,
+    });
+  }
 }
 
 /**
@@ -675,7 +792,7 @@ async function syncOpenShipments(options = {}) {
 
   for (const shipment of open) {
     try {
-      await refreshTrackingForShipment(shipment);
+      await refreshTrackingForShipment(shipment, { allowStale: false });
       summary.updated += 1;
     } catch (err) {
       summary.errors += 1;
