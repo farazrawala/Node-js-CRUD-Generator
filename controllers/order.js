@@ -97,6 +97,17 @@ function buildPublicCourierTrackingUrl(provider, trackingId) {
   if (key === "trax") {
     return `https://sonic.pk/tracking?tracking_number=${encodeURIComponent(id)}`;
   }
+  if (key === "postex" || key === "post-ex" || key === "postex.pk") {
+    return `https://postex.pk/tracking?cn=${encodeURIComponent(id)}`;
+  }
+  if (
+    key === "flagship" ||
+    key === "flaship" ||
+    key === "flag-ship" ||
+    key === "flash-ip"
+  ) {
+    return `https://partners.flaship.pk`;
+  }
   return "";
 }
 
@@ -2186,7 +2197,7 @@ async function getOrderByorderItem(req, res) {
   return getOrdersWithItems(req, res);
 }
 
-/** GET /api/order/get-online-order-by-order-item — same as above, `order_type != "offline"` (online, bigcommerce, website, …). */
+/** GET /api/order/get-online-order-by-order-item — same as above, `order_type != "offline"` (online, bigcommerce, website, shop, …). */
 async function getOnlineOrders(req, res) {
   return getOrdersWithItems(req, res, { order_type: { $ne: "offline" } });
 }

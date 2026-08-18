@@ -399,7 +399,7 @@ const modelSchema = new mongoose.Schema(
     },
     order_type: {
       type: String,
-      enum: ["offline", "online", "bigcommerce", "website"],
+      enum: ["offline", "online", "bigcommerce", "website", "shop"],
       default: "offline",
     },
     local_sms: {

@@ -109,6 +109,15 @@ class BaseCourier {
   }
 
   /**
+   * Aggregator extras for the booking UI (e.g. Flaship underlying companies).
+   * Direct couriers return requires_company: false.
+   * @returns {Promise<{ requires_company: boolean, companies?: string[], rate_cards?: object, pickup_addresses?: object[], prompt?: string }>}
+   */
+  async getBookingOptions() {
+    return { requires_company: false, companies: [] };
+  }
+
+  /**
    * Map provider status text into unified status.
    * Override in subclasses for provider-specific maps.
    * @param {string|object} statusOrEvent

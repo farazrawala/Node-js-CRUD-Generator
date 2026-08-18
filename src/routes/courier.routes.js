@@ -19,6 +19,7 @@ router.post("/cancel/:orderId", CourierController.cancelShipment);
 router.get("/label/:orderId", CourierController.printLabel);
 
 router.get("/providers", CourierController.listProviders);
+router.get("/booking-options", CourierController.getBookingOptions);
 router.post("/sync", CourierController.syncTracking);
 
 /** Verify saved (or form-override) courier API credentials. */

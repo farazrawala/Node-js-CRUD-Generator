@@ -110,6 +110,22 @@ const POSTEX_CODE_MAP = Object.freeze({
   Canceled: UNIFIED_STATUSES.CANCELLED,
 });
 
+/** Flaship / Flagship order_status strings (docs/Courier/Flaship_API_Documentation.pdf). */
+const FLASHIP_CODE_MAP = Object.freeze({
+  Booked: UNIFIED_STATUSES.BOOKED,
+  "Picked up": UNIFIED_STATUSES.PICKED,
+  "Picked Up": UNIFIED_STATUSES.PICKED,
+  "In Transit": UNIFIED_STATUSES.IN_TRANSIT,
+  "Out for Delivery": UNIFIED_STATUSES.OUT_FOR_DELIVERY,
+  "Out For Delivery": UNIFIED_STATUSES.OUT_FOR_DELIVERY,
+  Delivered: UNIFIED_STATUSES.DELIVERED,
+  Cancelled: UNIFIED_STATUSES.CANCELLED,
+  Canceled: UNIFIED_STATUSES.CANCELLED,
+  "Return Received": UNIFIED_STATUSES.RETURNED,
+  "Return in Transit": UNIFIED_STATUSES.RETURNED,
+  "Shipper Advise": UNIFIED_STATUSES.EXCEPTION,
+});
+
 /**
  * Map a PostEx tracking / order status to a unified status.
  * @param {{ status?: string, transactionStatus?: string, orderStatus?: string }} event
@@ -128,6 +144,23 @@ function mapPostExStatus(event = {}) {
 }
 
 /**
+ * Map a Flaship tracking / order status to a unified status.
+ * @param {{ status?: string, order_status?: string, orderStatus?: string }} event
+ * @returns {string}
+ */
+function mapFlashipStatus(event = {}) {
+  const raw =
+    event.order_status ||
+    event.orderStatus ||
+    event.status ||
+    event.description ||
+    "";
+  const key = String(raw).trim();
+  if (key && FLASHIP_CODE_MAP[key]) return FLASHIP_CODE_MAP[key];
+  return mapByRules(key);
+}
+
+/**
  * Generic mapper used by future providers until they supply their own.
  * @param {string} providerStatus
  * @returns {string}
@@ -140,9 +173,11 @@ module.exports = {
   mapTcsStatus,
   mapLeopardStatus,
   mapPostExStatus,
+  mapFlashipStatus,
   mapGenericStatus,
   mapByRules,
   TCS_CODE_MAP,
   LEOPARD_CODE_MAP,
   POSTEX_CODE_MAP,
+  FLASHIP_CODE_MAP,
 };

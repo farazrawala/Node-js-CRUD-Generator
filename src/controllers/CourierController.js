@@ -36,7 +36,10 @@ function sendError(res, err) {
         response: providerResponse,
         errorList: err.details.errorList,
         sentWeights: err.details.sentWeights,
-        // omit full request from API response (still in file/DB logs)
+        prompt: err.details.prompt || null,
+        companies: err.details.companies,
+        rate_cards: err.details.rate_cards,
+        pickup_addresses: err.details.pickup_addresses,
       }
     : undefined;
 
@@ -79,6 +82,21 @@ async function createShipment(req, res) {
       queueOnUnavailable:
         req.body?.queueOnUnavailable === true ||
         req.query?.queueOnUnavailable === "1",
+      courierCompany:
+        req.body?.courier_company ||
+        req.body?.courierCompany ||
+        req.query?.courier_company ||
+        null,
+      courierOption:
+        req.body?.courier_option ||
+        req.body?.courierOption ||
+        req.query?.courier_option ||
+        null,
+      pickuplocation:
+        req.body?.pickuplocation ||
+        req.body?.pickup_location ||
+        req.query?.pickuplocation ||
+        null,
     });
 
     return res.status(result.queued ? 202 : 201).json(result);
@@ -233,6 +251,28 @@ async function testCredentials(req, res) {
   }
 }
 
+async function getBookingOptions(req, res) {
+  try {
+    const result = await CourierService.getBookingOptions({
+      companyId: companyIdFromReq(req),
+      provider: req.query?.provider || req.body?.provider,
+      courierId:
+        req.query?.courier_id ||
+        req.query?.courierId ||
+        req.body?.courier_id ||
+        req.body?.courierId ||
+        null,
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    await logControllerError(req, err.message, {
+      action: "COURIER BOOKING OPTIONS",
+      tags: ["courier", "booking_options", "error"],
+    });
+    return sendError(res, err);
+  }
+}
+
 module.exports = {
   createShipment,
   getTrackingByNumber,
@@ -242,4 +282,5 @@ module.exports = {
   listProviders,
   syncTracking,
   testCredentials,
+  getBookingOptions,
 };

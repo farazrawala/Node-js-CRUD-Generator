@@ -34,6 +34,7 @@ const PROVIDERS = Object.freeze({
   CALL_COURIER: "Call Courier",
   TRAX: "Trax",
   POSTEX: "PostEx",
+  FLAGSHIP: "Flagship",
 });
 
 const PROVIDER_ALIASES = Object.freeze({
@@ -59,6 +60,13 @@ const PROVIDER_ALIASES = Object.freeze({
   PostEx: PROVIDERS.POSTEX,
   "post-ex": PROVIDERS.POSTEX,
   "post ex": PROVIDERS.POSTEX,
+  flagship: PROVIDERS.FLAGSHIP,
+  Flagship: PROVIDERS.FLAGSHIP,
+  "flag-ship": PROVIDERS.FLAGSHIP,
+  "flag ship": PROVIDERS.FLAGSHIP,
+  flaship: PROVIDERS.FLAGSHIP,
+  Flaship: PROVIDERS.FLAGSHIP,
+  "flash-ip": PROVIDERS.FLAGSHIP,
 });
 
 /**

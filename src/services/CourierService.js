@@ -61,6 +61,14 @@ function buildPublicCourierTrackingUrl(provider, trackingId) {
   if (key === "postex" || key === "post-ex" || key === "postex.pk") {
     return `https://postex.pk/tracking?cn=${encodeURIComponent(id)}`;
   }
+  if (
+    key === "flagship" ||
+    key === "flaship" ||
+    key === "flag-ship" ||
+    key === "flash-ip"
+  ) {
+    return `https://partners.flaship.pk`;
+  }
   return "";
 }
 
@@ -103,6 +111,8 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     settings.client_secret = settings.client_secret || clientSecret;
   }
 
+  const isTokenAuth = /postex|flagship|flaship/i.test(String(providerKey));
+
   return {
     company_id: legacy.company_id,
     provider: providerKey,
@@ -119,12 +129,13 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
         if (legacy.sandbox === true || legacy.sandbox === "true") return true;
         return /devconnect|staging|sandbox|uat/i.test(String(legacy.url || ""));
       })(),
-    api_key: clientId || settings.api_key || null,
+    api_key: clientId || settings.api_key || (isTokenAuth ? token : null) || null,
     secret: clientSecret || settings.secret || null,
     account_no: legacy.account_no || settings.account_no || null,
     pickup_location:
       legacy.cost_center ||
       legacy.pickup_location ||
+      settings.pickuplocation ||
       settings.costcentercode ||
       settings.cost_center ||
       settings.pickup_location ||
@@ -172,7 +183,9 @@ async function loadProviderConfig(companyId, providerKey, courierId = null) {
               ? "TCS"
               : String(legacy.type || "").toLowerCase().includes("postex")
                 ? "PostEx"
-                : key;
+                : /flagship|flaship/.test(String(legacy.type || "").toLowerCase())
+                  ? "Flagship"
+                  : key;
         return mapLegacyCourierToConfig(
           legacy,
           normalizeProviderKey(fromType) || key,
@@ -208,6 +221,7 @@ async function loadProviderConfig(companyId, providerKey, courierId = null) {
       String(key).toLowerCase().includes("leopard") ? "leopard"
       : String(key).toLowerCase().includes("tcs") ? "tcs"
       : String(key).toLowerCase().includes("postex") ? "postex"
+      : /flagship|flaship/.test(String(key).toLowerCase()) ? "flagship"
       : String(key).toLowerCase();
 
     const legacy = await LegacyCourier.findOne({
@@ -334,6 +348,21 @@ async function createShipment(orderId, options = {}) {
         throw providerUnavailable(providerKey, { message: msg });
       }
     }
+
+    order.bookingOptions = {
+      courierCompany:
+        options.courierCompany ||
+        options.courier_company ||
+        null,
+      courierOption:
+        options.courierOption ||
+        options.courier_option ||
+        null,
+      pickuplocation:
+        options.pickuplocation ||
+        options.pickup_location ||
+        null,
+    };
 
     const result = await driver.createShipment(order);
 
@@ -891,16 +920,28 @@ async function testCredentials(options = {}) {
       httpStatus: 400,
     });
   }
-  if (!merged.login || !String(merged.login).trim()) {
+  const typeKey = String(merged.type || overrides.type || "tcs")
+    .trim()
+    .toLowerCase();
+  const isTokenCourier = /postex|flagship|flaship/.test(typeKey);
+
+  if (isTokenCourier) {
+    const hasKey = [merged.token, merged.login, merged.password].some((v) =>
+      String(v || "").trim(),
+    );
+    if (!hasKey) {
+      throw new CourierError("API key (Token) is required", {
+        code: "VALIDATION_ERROR",
+        httpStatus: 400,
+      });
+    }
+  } else if (!merged.login || !String(merged.login).trim()) {
     throw new CourierError("Login is required", {
       code: "VALIDATION_ERROR",
       httpStatus: 400,
     });
   }
 
-  const typeKey = String(merged.type || overrides.type || "tcs")
-    .trim()
-    .toLowerCase();
   const providerKey =
     normalizeProviderKey(typeKey) ||
     normalizeProviderKey(overrides.provider) ||
@@ -908,7 +949,7 @@ async function testCredentials(options = {}) {
 
   if (!providerKey || !CourierFactory.isRegistered(providerKey)) {
     throw new CourierError(
-      `Credential check is not available for courier type "${merged.type || typeKey}". Supported: TCS, Leopard, PostEx.`,
+      `Credential check is not available for courier type "${merged.type || typeKey}". Supported: TCS, Leopard, PostEx, Flagship.`,
       {
         code: "UNSUPPORTED_COURIER",
         httpStatus: 400,
@@ -940,6 +981,48 @@ async function testCredentials(options = {}) {
   };
 }
 
+/**
+ * Aggregator booking extras (Flaship underlying companies, rate cards, pickups).
+ * @param {object} options
+ * @param {string} options.companyId
+ * @param {string} [options.provider]
+ * @param {string} [options.courierId]
+ */
+async function getBookingOptions(options = {}) {
+  const companyId = options.companyId;
+  if (!companyId) {
+    throw new CourierError("Company id is required", {
+      code: "COMPANY_NOT_FOUND",
+      httpStatus: 400,
+    });
+  }
+
+  const company = await mongoose.model("company").findById(companyId).lean();
+  if (!company) {
+    throw new CourierError("Company not found", {
+      code: "COMPANY_NOT_FOUND",
+      httpStatus: 400,
+    });
+  }
+
+  const { driver, providerKey } = await resolveDriver(
+    company,
+    options.provider,
+    options.courierId,
+  );
+
+  const extras =
+    typeof driver.getBookingOptions === "function"
+      ? await driver.getBookingOptions()
+      : { requires_company: false, companies: [] };
+
+  return {
+    success: true,
+    provider: providerKey,
+    ...extras,
+  };
+}
+
 module.exports = {
   createShipment,
   getTracking,
@@ -948,6 +1031,7 @@ module.exports = {
   printLabel,
   syncOpenShipments,
   testCredentials,
+  getBookingOptions,
   loadProviderConfig,
   resolveDriver,
   appendTrackingEvent,

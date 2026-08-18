@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const {
   mapTcsStatus,
   mapLeopardStatus,
+  mapFlashipStatus,
 } = require("../src/couriers/statusMap");
 const { UNIFIED_STATUSES, normalizeProviderKey } = require("../src/couriers/constants");
 const CourierFactory = require("../src/couriers/CourierFactory");
@@ -33,18 +34,29 @@ describe("courier status mapping", () => {
     assert.equal(mapLeopardStatus({ status: "Delivered" }), UNIFIED_STATUSES.DELIVERED);
     assert.equal(mapLeopardStatus({ status: "Dispatched" }), UNIFIED_STATUSES.IN_TRANSIT);
   });
+
+  it("maps Flaship statuses", () => {
+    assert.equal(mapFlashipStatus({ order_status: "Out for Delivery" }), UNIFIED_STATUSES.OUT_FOR_DELIVERY);
+    assert.equal(mapFlashipStatus({ status: "Picked up" }), UNIFIED_STATUSES.PICKED);
+    assert.equal(mapFlashipStatus({ status: "Return in Transit" }), UNIFIED_STATUSES.RETURNED);
+  });
 });
 
 describe("courier factory", () => {
-  it("registers TCS and Leopard", () => {
+  it("registers TCS, Leopard, PostEx, and Flagship", () => {
     assert.ok(CourierFactory.isRegistered("TCS"));
     assert.ok(CourierFactory.isRegistered("leopard"));
+    assert.ok(CourierFactory.isRegistered("postex"));
+    assert.ok(CourierFactory.isRegistered("flagship"));
+    assert.ok(CourierFactory.isRegistered("flaship"));
   });
 
   it("normalizes provider aliases", () => {
     assert.equal(normalizeProviderKey("tcs"), "TCS");
     assert.equal(normalizeProviderKey("LCS"), "Leopard");
     assert.equal(normalizeProviderKey("M&P"), "M&P");
+    assert.equal(normalizeProviderKey("flagship"), "Flagship");
+    assert.equal(normalizeProviderKey("Flaship"), "Flagship");
   });
 
   it("builds TCS driver from config", () => {
@@ -61,6 +73,19 @@ describe("courier factory", () => {
       },
     );
     assert.equal(driver.providerName, "TCS");
+  });
+
+  it("builds Flagship driver from config", () => {
+    const driver = CourierFactory.get(
+      { _id: "c1", preferred_courier: "Flagship" },
+      {
+        provider: "Flagship",
+        token: "test-api-key",
+        sandbox: true,
+        settings: {},
+      },
+    );
+    assert.equal(driver.providerName, "Flagship");
   });
 });
 

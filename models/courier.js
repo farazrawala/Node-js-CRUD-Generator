@@ -13,6 +13,7 @@ const modelSchema = new mongoose.Schema(
         "call_courier",
         "trax",
         "postex",
+        "flagship",
       ],
       default: "tcs",
       field_name: "Courier",

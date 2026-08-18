@@ -1226,7 +1226,7 @@ async function createShopOrder(req, res) {
       shipment,
       amount_received: roundMoney2(body.amount_received ?? 0),
       change_given: 0,
-      order_type: "website",
+      order_type: "shop",
       order_status: "placed",
     };
 
@@ -1324,7 +1324,7 @@ async function getShopOrder(req, res) {
         : { $in: loaded.companyIdValues },
       status: "active",
       deletedAt: null,
-      order_type: { $in: ["website", "online"] },
+      order_type: { $in: ["shop", "website", "online"] },
     };
 
     let order = await Order.findOne({
