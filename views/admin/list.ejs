@@ -919,7 +919,8 @@
             try {
                 const response = await fetch(`<%= basePath %>/admin/users/${resetPasswordUserId}/reset-password`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    credentials: 'same-origin',
                     body: JSON.stringify({ password, confirmPassword: confirm }),
                 });
                 const data = await response.json().catch(() => ({}));
