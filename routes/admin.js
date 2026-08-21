@@ -23,6 +23,7 @@ const Integration = require("../models/integration");
 const stockTransferController = require("../controllers/stockTransfer");
 const adminOrphanProductImagesController = require("../controllers/adminOrphanProductImages");
 const adminSupportTicketController = require("../controllers/adminSupportTicket");
+const adminUserPasswordController = require("../controllers/adminUserPassword");
 const Process = require("../models/process");
 const Brands = require("../models/brands");
 const Attribute = require("../models/attribute");
@@ -307,58 +308,10 @@ const userAdminCRUD = adminCrudGenerator(
       },
     },
     mountExtraRoutes: (userRouter) => {
-      userRouter.post("/:id/reset-password", async (req, res) => {
-        try {
-          const userId = String(req.params.id || "").trim();
-          if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({
-              success: false,
-              message: "Invalid user id",
-            });
-          }
-
-          const password = String(req.body?.password || "").trim();
-          const confirmPassword = String(
-            req.body?.confirmPassword || req.body?.confirm_password || "",
-          ).trim();
-
-          if (!password || password.length < 6) {
-            return res.status(400).json({
-              success: false,
-              message: "Password must be at least 6 characters",
-            });
-          }
-          if (password !== confirmPassword) {
-            return res.status(400).json({
-              success: false,
-              message: "Passwords do not match",
-            });
-          }
-
-          const user = await User.findOne({ _id: userId, deletedAt: null });
-          if (!user) {
-            return res.status(404).json({
-              success: false,
-              message: "User not found",
-            });
-          }
-
-          // Plain password — user model pre-save hook hashes it once
-          user.password = password;
-          await user.save();
-
-          return res.json({
-            success: true,
-            message: `Password reset for ${user.name || user.email || "user"}`,
-          });
-        } catch (error) {
-          console.error("Admin reset password error:", error);
-          return res.status(500).json({
-            success: false,
-            message: error.message || "Failed to reset password",
-          });
-        }
-      });
+      userRouter.post(
+        "/:id/reset-password",
+        adminUserPasswordController.resetUserPassword,
+      );
     },
   },
 );
@@ -3696,6 +3649,12 @@ router.post(
 router.post(
   "/support-tickets/:id/assign",
   adminSupportTicketController.assignTicket,
+);
+
+// Explicit password reset (must work even if CRUD mountExtraRoutes is stale on old process)
+router.post(
+  "/users/:id/reset-password",
+  adminUserPasswordController.resetUserPassword,
 );
 
 // Mount all registered CRUD routes dynamically

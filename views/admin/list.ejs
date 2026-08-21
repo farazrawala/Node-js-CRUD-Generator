@@ -924,7 +924,12 @@
                 });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok || data.success === false) {
-                    throw new Error(data.message || 'Failed to reset password');
+                    throw new Error(
+                        data.message ||
+                        data.error ||
+                        data.details ||
+                        'Failed to reset password'
+                    );
                 }
                 closeResetPasswordModal();
                 alert(data.message || 'Password reset successfully');
