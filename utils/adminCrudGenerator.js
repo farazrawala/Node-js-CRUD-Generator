@@ -65,6 +65,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     baseUrl = process.env.BASE_URL || "http://localhost:8000",
     // Register extra routes before /:id (e.g. /unused-images, /stock-transfer)
     mountExtraRoutes = null,
+    // Optional async () => extras merged into list view locals
+    listExtras = null,
   } = options;
 
   // Convert modelName to singular and title case
@@ -152,17 +154,39 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       fieldsToFilter.forEach((field) => {
         if (filters[field] !== undefined && filters[field] !== "") {
+          const rawValue = Array.isArray(filters[field])
+            ? filters[field][filters[field].length - 1]
+            : filters[field];
+          if (rawValue === undefined || rawValue === "") return;
+
+          const schemaPath = Model.schema.paths[field];
+          const isObjectIdField =
+            schemaPath &&
+            (schemaPath.instance === "ObjectID" ||
+              schemaPath.instance === "ObjectId" ||
+              (schemaPath.options &&
+                schemaPath.options.type === mongoose.Schema.Types.ObjectId));
+
           if (
-            typeof filters[field] === "string" &&
-            filters[field].includes(",")
+            typeof rawValue === "string" &&
+            rawValue.includes(",")
           ) {
-            query[field] = { $in: filters[field].split(",") };
-          } else if (filters[field] === "true" || filters[field] === "false") {
-            query[field] = filters[field] === "true";
-          } else if (!isNaN(filters[field])) {
-            query[field] = Number(filters[field]);
+            query[field] = { $in: rawValue.split(",") };
+          } else if (rawValue === "true" || rawValue === "false") {
+            query[field] = rawValue === "true";
+          } else if (isObjectIdField) {
+            const oid = coalesceObjectId(rawValue);
+            if (oid) query[field] = oid;
+          } else if (
+            typeof rawValue === "string" &&
+            rawValue.trim() !== "" &&
+            !Number.isNaN(Number(rawValue)) &&
+            String(Number(rawValue)) === rawValue.trim()
+          ) {
+            // Only coerce plain numeric strings (avoid ObjectId hex → Number)
+            query[field] = Number(rawValue);
           } else {
-            query[field] = filters[field];
+            query[field] = rawValue;
           }
         }
       });
@@ -197,15 +221,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         query = await middleware.applyFilters(query, req);
       }
 
-      // Handle company_id from URL query parameter (for filtering by company)
-      if (
-        req.query.company_id &&
-        mongoose.Types.ObjectId.isValid(req.query.company_id)
-      ) {
-        query.company_id = new mongoose.Types.ObjectId(req.query.company_id);
-        console.log(
-          `🔍 list - Filtering by company_id from URL: ${req.query.company_id}`,
-        );
+      // Always honor company_id from the filter dropdown when the model has it
+      if (Model.schema.paths.company_id) {
+        const rawCompanyId = Array.isArray(req.query.company_id)
+          ? req.query.company_id[req.query.company_id.length - 1]
+          : req.query.company_id;
+        const companyObjectId = coalesceObjectId(rawCompanyId);
+        if (
+          companyObjectId &&
+          companyObjectId instanceof mongoose.Types.ObjectId
+        ) {
+          query.company_id = companyObjectId;
+        }
       }
 
       // Build sort object
@@ -294,23 +321,52 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           // Apply filters to deleted records
           filterableFields.forEach((field) => {
             if (filters[field] !== undefined && filters[field] !== "") {
+              const rawValue = Array.isArray(filters[field])
+                ? filters[field][filters[field].length - 1]
+                : filters[field];
+              if (rawValue === undefined || rawValue === "") return;
+
+              const schemaPath = Model.schema.paths[field];
+              const isObjectIdField =
+                schemaPath &&
+                (schemaPath.instance === "ObjectID" ||
+                  schemaPath.instance === "ObjectId");
+
               if (
-                typeof filters[field] === "string" &&
-                filters[field].includes(",")
+                typeof rawValue === "string" &&
+                rawValue.includes(",")
               ) {
-                deletedQuery[field] = { $in: filters[field].split(",") };
+                deletedQuery[field] = { $in: rawValue.split(",") };
+              } else if (rawValue === "true" || rawValue === "false") {
+                deletedQuery[field] = rawValue === "true";
+              } else if (isObjectIdField) {
+                const oid = coalesceObjectId(rawValue);
+                if (oid) deletedQuery[field] = oid;
               } else if (
-                filters[field] === "true" ||
-                filters[field] === "false"
+                typeof rawValue === "string" &&
+                rawValue.trim() !== "" &&
+                !Number.isNaN(Number(rawValue)) &&
+                String(Number(rawValue)) === rawValue.trim()
               ) {
-                deletedQuery[field] = filters[field] === "true";
-              } else if (!isNaN(filters[field])) {
-                deletedQuery[field] = Number(filters[field]);
+                deletedQuery[field] = Number(rawValue);
               } else {
-                deletedQuery[field] = filters[field];
+                deletedQuery[field] = rawValue;
               }
             }
           });
+
+          if (Model.schema.paths.company_id) {
+            const rawCompanyId = Array.isArray(req.query.company_id)
+              ? req.query.company_id[req.query.company_id.length - 1]
+              : req.query.company_id;
+            const companyObjectId = coalesceObjectId(rawCompanyId);
+            if (
+              companyObjectId &&
+              companyObjectId instanceof mongoose.Types.ObjectId
+            ) {
+              deletedQuery.company_id = companyObjectId;
+            }
+          }
 
           // Only show deleted records
           deletedQuery.deletedAt = { $exists: true, $ne: null };
@@ -360,6 +416,16 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         listFieldConfig[fieldName] = field;
       });
 
+      let extras = {};
+      if (typeof listExtras === "function") {
+        try {
+          extras = (await listExtras(req, { query, total, records })) || {};
+        } catch (extrasErr) {
+          console.error(`listExtras failed for ${modelName}:`, extrasErr);
+          extras = {};
+        }
+      }
+
       // Render the list view
       res.render("admin/list", {
         title: `${titleCase}s`,
@@ -381,6 +447,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           itemsPerPage: actualLimit,
           hasNextPage: page < totalPages,
           hasPrevPage: page > 1,
+          sortBy,
+          sortOrder,
         },
         filters: {
           search,
@@ -388,7 +456,10 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           searchable: searchableFields,
           filterable: filterableFields,
           sortable: sortableFields,
-          company_id: filters.company_id || "",
+          company_id: (() => {
+            const raw = filters.company_id || req.query.company_id || "";
+            return Array.isArray(raw) ? raw[raw.length - 1] || "" : raw;
+          })(),
         },
         companies: companyOptions,
         cssClasses,
@@ -396,6 +467,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         baseUrl: getBaseUrl(),
         customTabs: routeTabs,
         customTabsActivePath: activePath || undefined,
+        ...extras,
       });
     } catch (error) {
       const errorResponse = await handleError(error, "list", req);

@@ -32,43 +32,7 @@
     <!-- Sidebar -->
     <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white shadow-lg z-40">
         <nav class="mt-8">
-            <div class="px-4 py-2">
-                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
-            </div>
-            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
-                <% routes.forEach(route => { %>
-                    <a href="<%= basePath %><%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                        <i class="<%= route.icon %> mr-3"></i>
-                        <span><%= route.name %></span>
-                    </a>
-                <% }); %>
-            <% } else { %>
-                <!-- Fallback static routes if dynamic routes are not available -->
-                <a href="<%= basePath %>/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                    <i class="fas fa-users mr-3"></i>
-                    <span>Users</span>
-                </a>
-                <a href="<%= basePath %>/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                    <i class="fas fa-box mr-3"></i>
-                    <span>Products</span>
-                </a>
-                <a href="<%= basePath %>/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                    <i class="fas fa-blog mr-3"></i>
-                    <span>Blogs</span>
-                </a>
-                <a href="<%= basePath %>/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                    <i class="fas fa-shopping-cart mr-3"></i>
-                    <span>Orders</span>
-                </a>
-                <a href="<%= basePath %>/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                    <i class="fas fa-tags mr-3"></i>
-                    <span>Categories</span>
-                </a>
-                <a href="<%= basePath %>/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
-                    <i class="fas fa-code-branch mr-3"></i>
-                    <span>Branches</span>
-                </a>
-            <% } %>
+            <%- include('partials/sidebar-nav') %>
             
             <!-- Route Management Section -->
             <div class="px-4 py-2 mt-6">

@@ -1,0 +1,39 @@
+<% 
+  const bp = typeof basePath !== 'undefined' ? basePath : '';
+  const currentModel = typeof modelName !== 'undefined' ? modelName : '';
+  const onDashboard = typeof activeNav !== 'undefined' && activeNav === 'dashboard';
+%>
+<a href="<%= bp %>/admin/dashboard"
+   class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= onDashboard ? 'bg-blue-50 text-blue-700' : '' %>">
+    <i class="fas fa-tachometer-alt mr-3"></i>
+    <span>Dashboard</span>
+</a>
+<div class="px-4 py-2 mt-2">
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+</div>
+<% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+    <% routes.forEach(route => { %>
+        <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
+            <a href="<%= bp %><%= route.path %>"
+               class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= currentModel === route.path.replace('/admin/', '') ? 'bg-blue-50 text-blue-700' : '' %>"
+               <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
+                <i class="<%= route.icon %> mr-3"></i>
+                <span><%= route.name %></span>
+                <% if (route.subMenus && route.subMenus.length > 0) { %>
+                    <i class="fas fa-chevron-down ml-auto text-xs chevron"></i>
+                <% } %>
+            </a>
+            <% if (route.subMenus && route.subMenus.length > 0) { %>
+                <div class="sub-menu ml-4">
+                    <% route.subMenus.forEach(subMenu => { %>
+                        <a href="<%= bp %><%= subMenu.path %>"
+                           class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800 <%= currentModel === subMenu.path.replace('/admin/', '') ? 'bg-blue-25 text-blue-600' : '' %>">
+                            <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
+                            <span><%= subMenu.name %></span>
+                        </a>
+                    <% }); %>
+                </div>
+            <% } %>
+        </div>
+    <% }); %>
+<% } %>

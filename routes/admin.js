@@ -33,6 +33,7 @@ const {
   validateDefaultVendorFlag,
   syncDefaultVendorFlag,
 } = require("../utils/userDefaultVendor");
+const { getTodayOrdersByCompanyChart } = require("../utils/todayOrdersByCompany");
 
 /**
  * Auto-generate Admin CRUD with UI Forms for User model
@@ -66,7 +67,7 @@ const userAdminCRUD = adminCrudGenerator(
       "createdAt",
     ],
     searchableFields: ["name", "email", "phone"],
-    filterableFields: ["role"],
+    filterableFields: ["role", "company_id"],
     sortableFields: ["name", "email", "phone", "createdAt"],
     // Base URL for assets
     softDelete: true, // Enable soft delete functionality
@@ -1608,6 +1609,18 @@ const orderAdminCRUD = adminCrudGenerator(
       email: "email",
       phone: "number",
       user_id: "select",
+    },
+    listExtras: async () => {
+      try {
+        const todayOrdersChart = await getTodayOrdersByCompanyChart(
+          Order,
+          Company,
+        );
+        return { todayOrdersChart };
+      } catch (err) {
+        console.error("todayOrdersChart error:", err);
+        return { todayOrdersChart: null };
+      }
     },
     middleware: {
       afterQuery: async (records, req) => {
@@ -3755,6 +3768,7 @@ router.get("/dashboard", async (req, res) => {
 
     res.render("admin/dashboard", {
       title: "Admin Dashboard",
+      activeNav: "dashboard",
       stats,
       recentActivity: {
         users: recentUsers,

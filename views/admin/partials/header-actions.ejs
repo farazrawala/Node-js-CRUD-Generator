@@ -1,14 +1,17 @@
 <% 
   const v = typeof appVersion !== 'undefined' && appVersion ? appVersion : {};
-  const versionLabel = v.deployVersion || v.packageVersion || 'dev';
+  const versionLabel = v.deployVersion || v.packageVersion || '…';
   const versionTitle = [
     v.buildLabel ? ('Build ' + v.buildLabel) : null,
     v.gitCommitShort ? ('commit ' + v.gitCommitShort) : null,
     v.deployedAt ? ('deployed ' + v.deployedAt) : null,
   ].filter(Boolean).join(' · ') || ('v' + versionLabel);
+  const versionApiUrl = (typeof basePath !== 'undefined' ? basePath : '') + '/api/version';
 %>
-<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono text-gray-500 bg-gray-100 border border-gray-200"
-      title="<%= versionTitle %>">
+<span id="app-version-badge"
+      class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono text-gray-600 bg-gray-100 border border-gray-200"
+      title="<%= versionTitle %>"
+      data-version-url="<%= versionApiUrl %>">
     v<%= versionLabel %>
 </span>
 <a href="<%= typeof basePath !== 'undefined' ? basePath : '' %>/admin/dashboard" class="text-gray-600 hover:text-gray-900">
@@ -17,3 +20,26 @@
 <a href="<%= typeof basePath !== 'undefined' ? basePath : '' %>/admin/logout" class="text-red-600 hover:text-red-800">
     <i class="fas fa-sign-out-alt mr-2"></i>Logout
 </a>
+<script>
+(function () {
+  var el = document.getElementById('app-version-badge');
+  if (!el) return;
+  var url = el.getAttribute('data-version-url');
+  if (!url) return;
+  fetch(url, { credentials: 'same-origin' })
+    .then(function (r) { return r.json(); })
+    .then(function (body) {
+      var ver = (body && body.version) || (body && body.data) || body || {};
+      var label = ver.deployVersion || ver.packageVersion;
+      if (!label) return;
+      el.textContent = 'v' + label;
+      var tip = [];
+      if (ver.buildLabel) tip.push('Build ' + ver.buildLabel);
+      if (ver.gitCommitShort) tip.push('commit ' + ver.gitCommitShort);
+      if (ver.deployedAt) tip.push('deployed ' + ver.deployedAt);
+      if (typeof ver.processUptimeSec === 'number') tip.push('uptime ' + ver.processUptimeSec + 's');
+      if (tip.length) el.title = tip.join(' · ');
+    })
+    .catch(function () { /* keep SSR label */ });
+})();
+</script>
