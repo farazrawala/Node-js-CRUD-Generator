@@ -58,6 +58,7 @@ const ORDER_STATUS_VALUES = [
   "delivered", // Delivered
   "draft", // Draft / not finalized
   "pending", // Pending
+  "in_transit", // In transit
   // "pending_payment", // Received, payment not started (unpaid)
   "on_hold", // Awaiting payment confirmation (e.g. bank transfer)
   "cancelled", // Cancelled by admin or customer
@@ -95,6 +96,7 @@ const ORDER_STATUS_STOCK = Object.freeze({
     "confirmed",
     "packed",
     "delivered",
+    "in_transit",
     // "pending_payment",
     "processing",
     // website / legacy (not in ORDER_STATUS_VALUES)
@@ -196,7 +198,7 @@ const ORDER_STATUS_GROUPS = {
     "processing",
   ]),
   /** Physical / digital fulfillment */
-  fulfillment: new Set(["packed", "shipped", "delivered"]),
+  fulfillment: new Set(["packed", "in_transit", "shipped", "delivered"]),
   /** Closed — no further fulfillment; adjust stock/GL rules carefully per value */
   terminal: new Set(["completed", "cancelled", "refunded", "failed"]),
 };

@@ -4,8 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "node --watch index.js",
-    "devs": "nodemon -L index.js",
+    "dev": "nodemon -L --ignore logs/ --ignore uploads/ --ignore public/ --ignore data/ --ignore .git/ index.js",
+    "devs": "nodemon -L --ignore logs/ --ignore uploads/ --ignore public/ --ignore data/ --ignore .git/ index.js",
+    "dev:watch": "node --watch index.js",
     "server": "node index.js",
     "start": "node index.js",
     "test": "node --test tests/**/*.test.js",

@@ -12,6 +12,7 @@ const {
   normalizeProviderKey,
   readCourierSandboxEnv,
 } = require("../couriers/constants");
+const { mapCourierStatusToOrderStatus } = require("../couriers/statusMap");
 const {
   CourierError,
   alreadyShipped,
@@ -572,7 +573,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     },
   );
 
-  await persistOrderTracking(shipment, result);
+  const orderTracking = await persistOrderTracking(shipment, result);
 
   const lastStatus =
     result.lastStatus ||
@@ -593,6 +594,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     status: result.status,
     status_code: result.statusCode,
     tracking_status: lastStatus,
+    order_status: orderTracking?.order_status || null,
     tracking_details: result.raw ?? null,
     history,
     last_tracking_sync: new Date(),
@@ -618,7 +620,7 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
   const Order = mongoose.model("order");
   const order = shipment.order_id
     ? await Order.findById(shipment.order_id)
-        .select("tracking_status tracking_details")
+        .select("tracking_status tracking_details order_status")
         .lean()
     : null;
 
@@ -642,6 +644,7 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     status: shipment.shipment_status,
     status_code: shipment.status_code,
     tracking_status: trackingStatus,
+    order_status: order?.order_status || null,
     tracking_details: trackingDetails,
     history,
     last_tracking_sync: shipment.last_tracking_sync || null,
@@ -654,9 +657,12 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
  * Persist courier last status + full tracking payload onto the order.
  * `tracking_status` is the latest provider status (e.g. PostEx "Out For Delivery").
  * `tracking_details` stores the full API response as JSON.
+ * `order_status` is set from the last courier scan (Delivered → delivered, etc.).
+ *
+ * @returns {Promise<{ order_status: string|null }>}
  */
 async function persistOrderTracking(shipment, result) {
-  if (!shipment?.order_id) return;
+  if (!shipment?.order_id) return { order_status: null };
 
   const lastStatus =
     result.lastStatus ||
@@ -665,30 +671,102 @@ async function persistOrderTracking(shipment, result) {
     result.status ||
     null;
 
+  const mappedOrderStatus =
+    mapCourierStatusToOrderStatus(result.status) ||
+    mapCourierStatusToOrderStatus(result.statusCode) ||
+    mapCourierStatusToOrderStatus(lastStatus);
+
   let details = null;
   if (result.raw != null) {
     details =
-      typeof result.raw === "string"
-        ? result.raw
-        : JSON.stringify(result.raw);
+      typeof result.raw === "string" ? result.raw : JSON.stringify(result.raw);
+  }
+
+  const Order = mongoose.model("order");
+  let order = null;
+  try {
+    order = await Order.findById(shipment.order_id)
+      .select("order_status company_id deletedAt status")
+      .lean();
+  } catch (err) {
+    courierLogger.apiError({
+      event: "order_tracking_load_failed",
+      orderId: String(shipment.order_id),
+      error: err.message,
+    });
   }
 
   const update = {};
   if (lastStatus) update.tracking_status = String(lastStatus);
   if (details) update.tracking_details = details;
-  if (!Object.keys(update).length) return;
+
+  const currentStatus = String(order?.order_status || "").trim();
+  const shouldSetOrderStatus = Boolean(
+    order &&
+      !order.deletedAt &&
+      mappedOrderStatus &&
+      mappedOrderStatus !== currentStatus,
+  );
+
+  if (shouldSetOrderStatus) {
+    try {
+      const { applyOrderStatusStockTransition } = require("../../controllers/order");
+      await applyOrderStatusStockTransition({
+        order,
+        toStatus: mappedOrderStatus,
+        req: {
+          user: { company_id: order.company_id || shipment.company_id },
+          originalUrl: "/api/courier/tracking",
+        },
+        logUrl: "/api/courier/tracking",
+      });
+    } catch (err) {
+      courierLogger.apiError({
+        event: "order_status_stock_from_tracking_failed",
+        orderId: String(shipment.order_id),
+        from: currentStatus,
+        to: mappedOrderStatus,
+        error: err.message,
+      });
+    }
+    update.order_status = mappedOrderStatus;
+  }
+
+  if (!Object.keys(update).length) {
+    return { order_status: currentStatus || mappedOrderStatus || null };
+  }
 
   try {
-    await mongoose.model("order").findByIdAndUpdate(shipment.order_id, {
-      $set: update,
-    });
+    await Order.findByIdAndUpdate(shipment.order_id, { $set: update });
   } catch (err) {
     courierLogger.apiError({
       event: "order_tracking_persist_failed",
       orderId: String(shipment.order_id),
       error: err.message,
     });
+    return { order_status: currentStatus || null };
   }
+
+  if (shouldSetOrderStatus) {
+    try {
+      const { recordOrderStatusUpdate } = require("../../utils/orderStatusHistory");
+      await recordOrderStatusUpdate({
+        orderId: shipment.order_id,
+        orderStatus: mappedOrderStatus,
+        companyId: order.company_id || shipment.company_id,
+      });
+    } catch (err) {
+      courierLogger.apiError({
+        event: "order_status_history_from_tracking_failed",
+        orderId: String(shipment.order_id),
+        error: err.message,
+      });
+    }
+  }
+
+  return {
+    order_status: update.order_status || currentStatus || mappedOrderStatus || null,
+  };
 }
 
 /**

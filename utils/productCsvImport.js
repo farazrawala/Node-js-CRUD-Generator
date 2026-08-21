@@ -385,6 +385,23 @@ async function applyImportProductImages(
     product_image: saved.featured,
     multi_images: saved.gallery || [],
   };
+  try {
+    const { deleteOrphanedUploadFiles } = require("./productImageThumbnail");
+    await deleteOrphanedUploadFiles(product.product_image, update.product_image);
+    await deleteOrphanedUploadFiles(product.multi_images, update.multi_images);
+    if (product.product_image_thumbnail_url) {
+      await deleteOrphanedUploadFiles(
+        product.product_image_thumbnail_url,
+        null,
+      );
+    }
+  } catch (delErr) {
+    console.warn(
+      "⚠️ Failed to delete previous import product images:",
+      delErr.message,
+    );
+  }
+
   const thumbFields = await buildProductThumbnailFields(update);
   Object.assign(update, thumbFields);
 

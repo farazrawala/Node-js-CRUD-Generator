@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %> - Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar { transition: transform 0.3s ease-in-out; }
+        .sidebar.collapsed { transform: translateX(-100%); }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .main-content.expanded { margin-left: 0; }
+        .sub-menu { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-in-out; }
+        .sub-menu.expanded { max-height: 200px; }
+        .menu-item.has-submenu .chevron { transition: transform 0.3s ease-in-out; }
+        .menu-item.has-submenu.expanded .chevron { transform: rotate(180deg); }
+        .thumb-preview {
+            width: 56px;
+            height: 56px;
+            object-fit: cover;
+            border-radius: 0.5rem;
+            border: 1px solid #e5e7eb;
+            background: #f9fafb;
+        }
+        .path-cell {
+            max-width: 420px;
+            word-break: break-all;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 11px;
+            color: #4b5563;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <header class="bg-white shadow-sm border-b border-gray-200 fixed top-0 left-0 right-0 z-50">
+        <div class="flex items-center justify-between px-6 py-4">
+            <div class="flex items-center">
+                <button id="sidebarToggle" class="text-gray-500 hover:text-gray-700 mr-4">
+                    <i class="fas fa-bars text-xl"></i>
+                </button>
+                <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+                </a>
+                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <aside id="sidebar" class="sidebar fixed top-16 left-0 h-full w-64 bg-white shadow-lg z-40">
+        <nav class="mt-8">
+            <div class="px-4 py-2">
+                <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Management</h3>
+            </div>
+            <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
+                <% routes.forEach(route => { %>
+                    <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
+                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= route.path === '/admin/products' ? 'bg-blue-50 text-blue-700' : '' %>"
+                           <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
+                            <i class="<%= route.icon %> mr-3"></i>
+                            <span><%= route.name %></span>
+                            <% if (route.subMenus && route.subMenus.length > 0) { %>
+                                <i class="fas fa-chevron-down ml-auto text-xs chevron"></i>
+                            <% } %>
+                        </a>
+                        <% if (route.subMenus && route.subMenus.length > 0) { %>
+                            <div class="sub-menu ml-4">
+                                <% route.subMenus.forEach(subMenu => { %>
+                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800">
+                                        <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
+                                        <span><%= subMenu.name %></span>
+                                    </a>
+                                <% }); %>
+                            </div>
+                        <% } %>
+                    </div>
+                <% }); %>
+            <% } %>
+        </nav>
+    </aside>
+
+    <main id="mainContent" class="main-content ml-64 mt-16 p-6">
+        <% const successMsg = Array.isArray(success) ? success.filter(Boolean).join(' ') : (success || ''); %>
+        <% const errorMsg = Array.isArray(error) ? error.filter(Boolean).join(' ') : (error || ''); %>
+        <% if (successMsg) { %>
+            <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4"><%= successMsg %></div>
+        <% } %>
+        <% if (errorMsg) { %>
+            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4"><%= errorMsg %></div>
+        <% } %>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
+            <div>
+                <h2 class="text-3xl font-bold text-gray-900"><%= title %></h2>
+                <p class="text-gray-600">Files on disk that are not linked to any product record.</p>
+            </div>
+            <a href="/admin/products" class="bg-white border border-gray-300 text-gray-700 hover:text-gray-900 hover:border-gray-400 px-5 py-2.5 rounded-lg font-medium transition duration-200">
+                <i class="fas fa-arrow-left mr-2"></i>Back to Products
+            </a>
+        </div>
+
+        <% if (customTabs && customTabs.length > 0) { %>
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
+            <nav class="flex flex-wrap">
+                <a href="/admin/<%= modelName %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 <%= (!customTabsActivePath || customTabsActivePath === '/admin/' + modelName) ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50' %>">
+                    <i class="fas fa-table mr-2 text-xs"></i>
+                    <span>List</span>
+                </a>
+                <% customTabs.forEach(tab => { %>
+                    <a href="<%= tab.path %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 flex items-center gap-2 <%= (typeof customTabsActivePath !== 'undefined' && customTabsActivePath === tab.path) ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50' %>">
+                        <% if (tab.icon) { %><i class="<%= tab.icon %> text-xs"></i><% } else { %><i class="fas fa-layer-group text-xs"></i><% } %>
+                        <span><%= tab.name %></span>
+                    </a>
+                <% }); %>
+            </nav>
+        </div>
+        <% } %>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+                <p class="text-xs uppercase tracking-wide text-gray-500">Unused files</p>
+                <p class="text-2xl font-bold text-gray-900 mt-1"><%= stats.orphanCount %></p>
+            </div>
+            <div class="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+                <p class="text-xs uppercase tracking-wide text-gray-500">Disk size (filtered)</p>
+                <p class="text-2xl font-bold text-gray-900 mt-1"><%= stats.orphanSizeLabel %></p>
+            </div>
+            <div class="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+                <p class="text-xs uppercase tracking-wide text-gray-500">Linked paths</p>
+                <p class="text-2xl font-bold text-gray-900 mt-1"><%= stats.linkedPaths %></p>
+            </div>
+            <div class="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+                <p class="text-xs uppercase tracking-wide text-gray-500">Files on disk</p>
+                <p class="text-2xl font-bold text-gray-900 mt-1"><%= stats.filesOnDisk %></p>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
+            <form method="GET" action="/admin/products/unused-images" class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Company</label>
+                    <select name="company_id" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">All companies</option>
+                        <% companies.forEach(c => { %>
+                            <option value="<%= c._id %>" <%= String(filters.company_id) === String(c._id) ? 'selected' : '' %>>
+                                <%= c.company_name || c._id %>
+                            </option>
+                        <% }); %>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Search path / file</label>
+                    <input type="text" name="search" value="<%= filters.search || '' %>" placeholder="e.g. product_image_1787" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Per page</label>
+                    <select name="limit" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <% [25, 50, 100, 200].forEach(n => { %>
+                            <option value="<%= n %>" <%= Number(filters.limit) === n ? 'selected' : '' %>><%= n %></option>
+                        <% }); %>
+                    </select>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <label class="inline-flex items-center gap-2 text-sm text-gray-700 mr-2">
+                        <input type="checkbox" name="active_only" value="1" <%= filters.active_only ? 'checked' : '' %> class="rounded border-gray-300">
+                        Active products only
+                    </label>
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium">
+                        <i class="fas fa-filter mr-1"></i>Apply
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <form id="orphanDeleteForm" method="POST" action="/admin/products/unused-images/delete">
+            <input type="hidden" name="company_id" value="<%= filters.company_id || '' %>">
+            <input type="hidden" name="search" value="<%= filters.search || '' %>">
+            <input type="hidden" name="limit" value="<%= filters.limit || 50 %>">
+            <input type="hidden" name="page" value="<%= pagination.currentPage %>">
+            <% if (filters.active_only) { %><input type="hidden" name="active_only" value="1"><% } %>
+
+            <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <div class="text-sm text-gray-600">
+                    Showing <%= orphans.length ? ((pagination.currentPage - 1) * pagination.itemsPerPage + 1) : 0 %>–
+                    <%= Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems) %>
+                    of <%= pagination.totalItems %>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <button type="button" id="selectAllBtn" class="bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-md text-sm hover:bg-gray-50">
+                        Select page
+                    </button>
+                    <button type="submit" name="delete_selected" value="1" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-medium"
+                            onclick="return confirm('Delete selected unused images from disk? This cannot be undone.');">
+                        <i class="fas fa-trash mr-1"></i>Delete selected
+                    </button>
+                    <button type="submit" name="delete_all" value="1" class="bg-red-800 hover:bg-red-900 text-white px-4 py-2 rounded-md text-sm font-medium"
+                            onclick="return confirm('Delete ALL <%= pagination.totalItems %> unused image(s) matching the current filters? This cannot be undone.');">
+                        <i class="fas fa-trash-alt mr-1"></i>Delete all filtered
+                    </button>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-10">
+                                    <input type="checkbox" id="checkAll" class="rounded border-gray-300">
+                                </th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Preview</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">File</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product ID</th>
+                                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            <% if (!orphans.length) { %>
+                                <tr>
+                                    <td colspan="7" class="px-4 py-10 text-center text-gray-500">
+                                        <i class="fas fa-check-circle text-green-500 mr-2"></i>
+                                        No unused product images found for the current filters.
+                                    </td>
+                                </tr>
+                            <% } %>
+                            <% orphans.forEach(item => { %>
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-4 py-3">
+                                        <input type="checkbox" name="keys" value="<%= item.key %>" class="orphan-check rounded border-gray-300">
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <a href="<%= item.url %>" target="_blank" rel="noopener">
+                                            <img src="<%= item.url %>" alt="" class="thumb-preview" loading="lazy"
+                                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                                            <div class="thumb-preview hidden items-center justify-center text-gray-400 text-xs">N/A</div>
+                                        </a>
+                                    </td>
+                                    <td class="px-4 py-3 text-sm text-gray-900 font-medium"><%= item.fileName %></td>
+                                    <td class="px-4 py-3"><div class="path-cell"><%= item.key %></div></td>
+                                    <td class="px-4 py-3 text-sm text-gray-700 whitespace-nowrap"><%= item.sizeLabel %></td>
+                                    <td class="px-4 py-3 text-sm text-gray-600">
+                                        <% if (item.productId) { %>
+                                            <a href="/admin/products/<%= item.productId %>/edit" class="text-blue-600 hover:underline"><%= item.productId %></a>
+                                        <% } else { %>
+                                            —
+                                        <% } %>
+                                    </td>
+                                    <td class="px-4 py-3 text-right">
+                                        <button type="submit" name="keys" value="<%= item.key %>"
+                                                class="text-red-600 hover:text-red-800 text-sm font-medium"
+                                                onclick="return confirm('Delete this file from disk?');">
+                                            <i class="fas fa-trash"></i> Delete
+                                        </button>
+                                    </td>
+                                </tr>
+                            <% }); %>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </form>
+
+        <% if (pagination.totalPages > 1) { %>
+        <div class="flex items-center justify-between mt-4">
+            <div class="text-sm text-gray-600">Page <%= pagination.currentPage %> of <%= pagination.totalPages %></div>
+            <div class="flex gap-2">
+                <% if (pagination.prevUrl) { %>
+                    <a href="<%= pagination.prevUrl %>" class="px-3 py-2 bg-white border border-gray-300 rounded-md text-sm hover:bg-gray-50">Previous</a>
+                <% } %>
+                <% if (pagination.nextUrl) { %>
+                    <a href="<%= pagination.nextUrl %>" class="px-3 py-2 bg-white border border-gray-300 rounded-md text-sm hover:bg-gray-50">Next</a>
+                <% } %>
+            </div>
+        </div>
+        <% } %>
+    </main>
+
+    <script>
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('mainContent');
+        document.getElementById('sidebarToggle')?.addEventListener('click', () => {
+            sidebar.classList.toggle('collapsed');
+            mainContent.classList.toggle('expanded');
+        });
+
+        function toggleSubMenu(event, el) {
+            if (el.parentElement.classList.contains('has-submenu')) {
+                event.preventDefault();
+                el.parentElement.classList.toggle('expanded');
+                el.parentElement.querySelector('.sub-menu')?.classList.toggle('expanded');
+            }
+        }
+
+        const checkAll = document.getElementById('checkAll');
+        const orphanChecks = () => Array.from(document.querySelectorAll('.orphan-check'));
+        checkAll?.addEventListener('change', () => {
+            orphanChecks().forEach((c) => { c.checked = checkAll.checked; });
+        });
+        document.getElementById('selectAllBtn')?.addEventListener('click', () => {
+            orphanChecks().forEach((c) => { c.checked = true; });
+            if (checkAll) checkAll.checked = true;
+        });
+    </script>
+</body>
+</html>

@@ -8,6 +8,10 @@ const {
   buildProductImageRelativePath,
   toIdString,
 } = require("./productImagePaths");
+const {
+  companyAllowsOriginalProductImages,
+  replaceLocalImageWithThumbnail,
+} = require("./productImageThumbnail");
 
 function sanitizeFileName(baseName, fallbackExt = ".jpg") {
   if (!baseName || typeof baseName !== "string") {
@@ -156,6 +160,8 @@ async function saveProductImagesFromUrls(
   if (!uploadRoot) return null;
   await fs.promises.mkdir(uploadRoot, { recursive: true });
 
+  const allowOriginal =
+    await companyAllowsOriginalProductImages(companyIdString);
   const savedPaths = [];
 
   for (const sourceUrl of normalized) {
@@ -178,6 +184,10 @@ async function saveProductImagesFromUrls(
     try {
       if (!fs.existsSync(targetPath)) {
         await downloadImageToFile(sourceUrl, targetPath);
+      }
+      // Skip keeping full-size originals when company setting is false
+      if (!allowOriginal) {
+        await replaceLocalImageWithThumbnail(relativePath);
       }
       urlCache?.set(cacheKey, relativePath);
       savedPaths.push(relativePath);

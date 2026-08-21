@@ -63,6 +63,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     listHiddenFields = [],
     // Base URL for assets and links
     baseUrl = process.env.BASE_URL || "http://localhost:8000",
+    // Register extra routes before /:id (e.g. /unused-images, /stock-transfer)
+    mountExtraRoutes = null,
   } = options;
 
   // Convert modelName to singular and title case
@@ -1470,11 +1472,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             }
           }
 
+          // company.allow_upload_product_image_original === false → thumb size only
+          let finalPaths = storedPaths;
+          if (isProductUploadModel(singularName) && storedPaths.length) {
+            const {
+              enforceProductImageOriginalPolicy,
+            } = require("./productImageThumbnail");
+            finalPaths = await enforceProductImageOriginalPolicy(storedPaths, {
+              companyId,
+              fieldName,
+            });
+          }
+
           // If schema expects array store array else single string
           const expectsArray =
             Array.isArray(Model.schema.obj[fieldName]?.type) ||
             Model.schema.paths[fieldName]?.instance === "Array";
-          savedRecord[fieldName] = expectsArray ? storedPaths : storedPaths[0];
+          savedRecord[fieldName] = expectsArray ? finalPaths : finalPaths[0];
         }
 
         // Save the record again with image paths
@@ -2155,7 +2169,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         }
       });
 
-      Object.keys(fieldConfig).forEach((fieldName) => {
+      for (const fieldName of Object.keys(fieldConfig)) {
         const field = fieldConfig[fieldName];
         const expectsArray =
           Array.isArray(Model.schema.obj[fieldName]?.type) ||
@@ -2195,6 +2209,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             console.log(
               `🗑️ Removed ${removedImages.length} images from array field ${fieldName}, ${filteredImages.length} images remaining`,
             );
+
+            try {
+              const {
+                deleteLocalUploadFiles,
+              } = require("./productImageThumbnail");
+              await deleteLocalUploadFiles(removedImages);
+            } catch (delErr) {
+              console.warn(
+                `⚠️ Failed to delete removed images for ${fieldName}:`,
+                delErr.message,
+              );
+            }
           } else {
             // For single image fields, clear the field if the image is removed
             const currentImage = record[fieldName];
@@ -2203,13 +2229,31 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             if (removedImages.includes(currentImage)) {
               updateData[fieldName] = "";
               console.log(`🗑️ Removed single image from field ${fieldName}`);
+              try {
+                const {
+                  deleteLocalUploadFiles,
+                } = require("./productImageThumbnail");
+                const toDelete = [...removedImages];
+                if (
+                  fieldName === "product_image" &&
+                  record.product_image_thumbnail_url
+                ) {
+                  toDelete.push(record.product_image_thumbnail_url);
+                }
+                await deleteLocalUploadFiles(toDelete);
+              } catch (delErr) {
+                console.warn(
+                  `⚠️ Failed to delete removed image for ${fieldName}:`,
+                  delErr.message,
+                );
+              }
             }
           }
 
           // Remove the removal tracking field from updateData
           delete updateData[`removed_images_${fieldName}[]`];
         }
-      });
+      }
 
       // Handle file uploads for file fields
       // Products → uploads/products/<company_id>/<product_id>/
@@ -2288,6 +2332,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             continue;
           }
 
+          // company.allow_upload_product_image_original === false → thumb size only
+          let finalPaths = storedPaths;
+          if (isProductUploadModel(singularName)) {
+            const {
+              enforceProductImageOriginalPolicy,
+            } = require("./productImageThumbnail");
+            finalPaths = await enforceProductImageOriginalPolicy(storedPaths, {
+              companyId,
+              fieldName,
+            });
+          }
+
           const expectsArray =
             Array.isArray(Model.schema.obj[fieldName]?.type) ||
             Model.schema.paths[fieldName]?.instance === "Array";
@@ -2310,13 +2366,34 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
                 );
             }
 
-            updateData[fieldName] = [...existingImages, ...storedPaths];
+            updateData[fieldName] = [...existingImages, ...finalPaths];
             console.log(
-              `📷 Appending ${storedPaths.length} new images to existing ${existingImages.length} images for field ${fieldName}`,
+              `📷 Appending ${finalPaths.length} new images to existing ${existingImages.length} images for field ${fieldName}`,
             );
           } else {
-            // For single image fields, replace the existing image
-            updateData[fieldName] = storedPaths[0];
+            // For single image fields, replace the existing image and delete the old file
+            const previousImage = String(record[fieldName] || "").trim();
+            updateData[fieldName] = finalPaths[0];
+            if (previousImage && previousImage !== finalPaths[0]) {
+              try {
+                const {
+                  deleteLocalUploadFiles,
+                } = require("./productImageThumbnail");
+                const toDelete = [previousImage];
+                if (
+                  fieldName === "product_image" &&
+                  record.product_image_thumbnail_url
+                ) {
+                  toDelete.push(record.product_image_thumbnail_url);
+                }
+                await deleteLocalUploadFiles(toDelete);
+              } catch (delErr) {
+                console.warn(
+                  `⚠️ Failed to delete previous ${fieldName}:`,
+                  delErr.message,
+                );
+              }
+            }
           }
         }
       }
@@ -2994,9 +3071,23 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     router.get("/", list); // LIST view
     router.get("/create", createForm); // CREATE form
     router.post("/", insert); // INSERT action
-    router.get("/:id/edit", editForm); // EDIT form (must come before /:id)
-    router.get("/:id", (req, res) => {
-      // VIEW/EDIT redirect - redirect to edit form
+
+    // Custom module routes must be registered before /:id or they are treated as IDs
+    if (typeof mountExtraRoutes === "function") {
+      mountExtraRoutes(router);
+    }
+
+    router.get("/:id/edit", (req, res, next) => {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        return next("route");
+      }
+      return editForm(req, res, next);
+    }); // EDIT form (must come before /:id)
+    router.get("/:id", (req, res, next) => {
+      // VIEW/EDIT redirect - only for real ObjectIds (skip slugs like unused-images)
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        return next("route");
+      }
       res.redirect(`/admin/${modelName}/${req.params.id}/edit`);
     });
     router.put("/:id", update); // UPDATE action

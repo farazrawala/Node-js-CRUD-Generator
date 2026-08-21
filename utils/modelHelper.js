@@ -5,7 +5,10 @@ const {
   getPublicAssetBaseUrl,
   normalizePublicUploadUrl,
 } = require("./basePath");
-const { buildProductThumbnailFields } = require("./productImageThumbnail");
+const {
+  buildProductThumbnailFields,
+  enforceProductImageOriginalPolicy,
+} = require("./productImageThumbnail");
 /**
  * Generate URL-friendly slug from text
  * @param {string} text - The text to convert to slug
@@ -422,7 +425,17 @@ const handleImageUpload = async (
     const paths = await Promise.all(
       filesArray.map((f, idx) => moveOne(f, idx)),
     );
-    return Array.isArray(uploaded) ? paths : paths[0];
+    const uploadedPaths = Array.isArray(uploaded) ? paths : paths[0];
+
+    // company.allow_upload_product_image_original === false → keep thumb size only
+    if (isProductUploadModel(modelName)) {
+      return enforceProductImageOriginalPolicy(uploadedPaths, {
+        companyId,
+        fieldName,
+      });
+    }
+
+    return uploadedPaths;
   } catch (error) {
     console.error("❌ Image upload error:", error);
     throw error;
@@ -2054,6 +2067,37 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
       (updateData.product_image !== undefined ||
         updateData.multi_images !== undefined)
     ) {
+      try {
+        const { deleteOrphanedUploadFiles } = require("./productImageThumbnail");
+        if (updateData.product_image !== undefined) {
+          await deleteOrphanedUploadFiles(
+            existingRecord.product_image,
+            updateData.product_image,
+          );
+          if (
+            existingRecord.product_image_thumbnail_url &&
+            String(existingRecord.product_image || "") !==
+              String(updateData.product_image || "")
+          ) {
+            await deleteOrphanedUploadFiles(
+              existingRecord.product_image_thumbnail_url,
+              null,
+            );
+          }
+        }
+        if (updateData.multi_images !== undefined) {
+          await deleteOrphanedUploadFiles(
+            existingRecord.multi_images,
+            updateData.multi_images,
+          );
+        }
+      } catch (delErr) {
+        console.warn(
+          "⚠️ Failed to delete orphaned product images:",
+          delErr.message,
+        );
+      }
+
       const thumbFields = await buildProductThumbnailFields({
         product_image: updatedRecord.product_image,
         multi_images: updatedRecord.multi_images,
@@ -2090,13 +2134,44 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
           const expectsArray =
             Array.isArray(Model.schema.obj[imageField]?.type) ||
             Model.schema.paths[imageField]?.instance === "Array";
-          updatedRecord[imageField] =
+          const previousValue = existingRecord?.[imageField];
+          const nextValue =
             expectsArray ?
               Array.isArray(uploaded) ?
                 uploaded
               : [uploaded]
             : Array.isArray(uploaded) ? uploaded[0]
             : uploaded;
+
+          try {
+            const {
+              deleteOrphanedUploadFiles,
+              deleteLocalUploadFiles,
+            } = require("./productImageThumbnail");
+            if (expectsArray) {
+              await deleteOrphanedUploadFiles(previousValue, nextValue);
+            } else {
+              const prev = String(previousValue || "").trim();
+              const next = String(nextValue || "").trim();
+              if (prev && prev !== next) {
+                const toDelete = [prev];
+                if (
+                  imageField === "product_image" &&
+                  existingRecord?.product_image_thumbnail_url
+                ) {
+                  toDelete.push(existingRecord.product_image_thumbnail_url);
+                }
+                await deleteLocalUploadFiles(toDelete);
+              }
+            }
+          } catch (delErr) {
+            console.warn(
+              `⚠️ Failed to delete previous ${imageField} files:`,
+              delErr.message,
+            );
+          }
+
+          updatedRecord[imageField] = nextValue;
           await updatedRecord.save(session ? { session } : {});
         }
       } catch (error) {

@@ -42,6 +42,32 @@ describe("courier status mapping", () => {
   });
 });
 
+describe("courier status to order_status", () => {
+  const { mapCourierStatusToOrderStatus } = require("../src/couriers/statusMap");
+
+  it("maps delivered scans to order.order_status delivered", () => {
+    assert.equal(mapCourierStatusToOrderStatus("Delivered"), "delivered");
+    assert.equal(mapCourierStatusToOrderStatus("OK"), "delivered");
+    assert.equal(mapCourierStatusToOrderStatus(UNIFIED_STATUSES.DELIVERED), "delivered");
+  });
+
+  it("maps in-transit style scans", () => {
+    assert.equal(mapCourierStatusToOrderStatus("Out For Delivery"), "in_transit");
+    assert.equal(mapCourierStatusToOrderStatus("In Transit"), "in_transit");
+    assert.equal(mapCourierStatusToOrderStatus("Dispatched"), "in_transit");
+  });
+
+  it("maps booked/picked to packed", () => {
+    assert.equal(mapCourierStatusToOrderStatus("Booked"), "packed");
+    assert.equal(mapCourierStatusToOrderStatus("Picked up"), "packed");
+  });
+
+  it("maps returned and cancelled", () => {
+    assert.equal(mapCourierStatusToOrderStatus("Returned"), "return");
+    assert.equal(mapCourierStatusToOrderStatus("Cancelled"), "cancelled");
+  });
+});
+
 describe("courier factory", () => {
   it("registers TCS, Leopard, PostEx, and Flagship", () => {
     assert.ok(CourierFactory.isRegistered("TCS"));

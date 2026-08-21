@@ -163,6 +163,12 @@ const modelSchema = new mongoose.Schema(
       field_name: "Theme Color",
     },
 
+    allow_upload_product_image_original: {
+      type: Boolean,
+      field_name: "Allow Upload Product Image Original",
+      default: false,
+    },
+
     google_address: {
       type: String,
       field_name: "Google Address",

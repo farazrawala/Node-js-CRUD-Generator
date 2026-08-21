@@ -20,6 +20,7 @@ const Account = require("../models/account");
 const Warehouse = require("../models/warehouse");
 const Integration = require("../models/integration");
 const stockTransferController = require("../controllers/stockTransfer");
+const adminOrphanProductImagesController = require("../controllers/adminOrphanProductImages");
 const adminSupportTicketController = require("../controllers/adminSupportTicket");
 const Process = require("../models/process");
 const Brands = require("../models/brands");
@@ -329,6 +330,7 @@ const companyAdminCRUD = adminCrudGenerator(
     "default_shipping_account",
     "default_equity_account_id",
     "default_adjustment_account",
+    "allow_upload_product_image_original",
     "warehouse_id",
     "status",
   ], // Headings.
@@ -351,6 +353,7 @@ const companyAdminCRUD = adminCrudGenerator(
       "default_shipping_account",
       "default_equity_account_id",
       "default_adjustment_account",
+      "allow_upload_product_image_original",
       "warehouse_id",
     ],
     searchableFields: ["company_name", "company_email", "company_phone"],
@@ -364,6 +367,7 @@ const companyAdminCRUD = adminCrudGenerator(
       status: "select",
       deletedAt: "hidden",
       warehouse_id: "select",
+      allow_upload_product_image_original: "checkbox",
       default_cash_account: "select",
       default_sales_account: "select",
       default_purchase_account: "select",
@@ -383,6 +387,7 @@ const companyAdminCRUD = adminCrudGenerator(
       company_email: "Email",
       company_address: "Address",
       warehouse_id: "Default Store",
+      allow_upload_product_image_original: "Allow Upload Product Image Original",
       default_cash_account: "Default Cash Account",
       default_sales_account: "Default Sales Account",
       default_purchase_account: "Default Purchase Account",
@@ -2210,6 +2215,24 @@ const productAdminCRUD = adminCrudGenerator(
         }
       },
     },
+    mountExtraRoutes: (productRouter) => {
+      productRouter.get(
+        "/unused-images",
+        adminOrphanProductImagesController.renderUnusedImages,
+      );
+      productRouter.post(
+        "/unused-images/delete",
+        adminOrphanProductImagesController.deleteUnusedImages,
+      );
+      productRouter.get(
+        "/stock-transfer",
+        stockTransferController.renderStockTransfer,
+      );
+      productRouter.post(
+        "/stock-transfer",
+        stockTransferController.handleStockTransfer,
+      );
+    },
   },
 );
 
@@ -3514,6 +3537,13 @@ routeRegistry.addCustomTab("products", {
   description: "Move stock between warehouses",
 });
 
+routeRegistry.addCustomTab("products", {
+  name: "Unused Images",
+  path: "/admin/products/unused-images",
+  icon: "fas fa-images",
+  description: "List and remove product images not linked to any product",
+});
+
 // Add routes data to all requests for dynamic menu rendering (after all routes are registered)
 router.use((req, res, next) => {
   req.routes = routeRegistry.getEnabledRoutes();
@@ -3568,6 +3598,16 @@ router.get(
 router.post(
   "/products/stock-transfer",
   stockTransferController.handleStockTransfer,
+);
+
+// Unused / orphan product images on disk
+router.get(
+  "/products/unused-images",
+  adminOrphanProductImagesController.renderUnusedImages,
+);
+router.post(
+  "/products/unused-images/delete",
+  adminOrphanProductImagesController.deleteUnusedImages,
 );
 
 // Support ticket management

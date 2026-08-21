@@ -29,6 +29,59 @@
         .menu-item.has-submenu.expanded .chevron {
             transform: rotate(180deg);
         }
+
+        .column-visibility-menu { position: relative; }
+        .column-visibility-panel {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: calc(100% + 6px);
+            z-index: 40;
+            width: 240px;
+            max-height: 360px;
+            overflow: hidden;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.12);
+        }
+        .column-visibility-panel.is-open { display: block; }
+        .column-visibility-options {
+            max-height: 300px;
+            overflow-y: auto;
+            padding: 0.25rem 0 0.5rem;
+        }
+        .column-visibility-option {
+            display: flex;
+            align-items: center;
+            gap: 0.625rem;
+            width: 100%;
+            padding: 0.5rem 0.875rem;
+            text-align: left;
+            font-size: 0.875rem;
+            color: #374151;
+            background: transparent;
+            border: 0;
+            cursor: pointer;
+        }
+        .column-visibility-option:hover { background: #f9fafb; }
+        .column-visibility-check {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.125rem;
+            height: 1.125rem;
+            border: 1.5px solid #d1d5db;
+            border-radius: 0.25rem;
+            flex-shrink: 0;
+            color: #fff;
+            font-size: 0.65rem;
+        }
+        .column-visibility-option.is-checked .column-visibility-check {
+            background: #2563eb;
+            border-color: #2563eb;
+        }
+        th.col-hidden, td.col-hidden { display: none !important; }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -262,13 +315,30 @@
                     </div>
                 </div>
                 
-                <div class="flex justify-between items-center">
-                    <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-md transition duration-200">
-                        <i class="fas fa-search mr-2"></i>Apply Filters
-                    </button>
-                    <a href="/admin/<%= modelName %>" class="text-gray-600 hover:text-gray-800">
-                        <i class="fas fa-times mr-2"></i>Clear Filters
-                    </a>
+                <div class="flex justify-between items-center gap-3 flex-wrap">
+                    <div class="flex items-center gap-3">
+                        <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-md transition duration-200">
+                            <i class="fas fa-search mr-2"></i>Apply Filters
+                        </button>
+                        <a href="/admin/<%= modelName %>" class="text-gray-600 hover:text-gray-800">
+                            <i class="fas fa-times mr-2"></i>Clear Filters
+                        </a>
+                    </div>
+                    <div class="column-visibility-menu">
+                        <button type="button" id="columnVisibilityToggle"
+                                class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 shadow-sm"
+                                title="Show / hide columns" aria-expanded="false" aria-haspopup="true">
+                            <i class="fas fa-columns text-blue-600"></i>
+                            Columns
+                        </button>
+                        <div id="columnVisibilityPanel" class="column-visibility-panel" role="menu" aria-labelledby="columnVisibilityToggle">
+                            <div class="flex items-center justify-between px-3 pt-3 pb-2 border-b border-gray-100">
+                                <span class="text-sm font-semibold text-gray-800">Show columns</span>
+                                <button type="button" id="columnVisibilityReset" class="text-xs font-medium text-blue-600 hover:text-blue-800">Reset</button>
+                            </div>
+                            <div id="columnVisibilityOptions" class="column-visibility-options"></div>
+                        </div>
+                    </div>
                 </div>
             </form>
         </div>
@@ -276,7 +346,7 @@
         <!-- Records Table -->
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="px-6 py-4 border-b border-gray-200">
-                <div class="flex justify-between items-center">
+                <div class="flex justify-between items-center gap-3">
                     <h3 class="text-lg font-medium text-gray-900">
                         <%= pagination.totalItems %> <%= singularName.toLowerCase() %>(s) found
                     </h3>
@@ -287,18 +357,18 @@
             </div>
             
             <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200">
+                <table id="adminListTable" class="min-w-full divide-y divide-gray-200" data-model="<%= modelName %>">
                     <thead class="bg-gray-50">
                         <tr>
                             <% Object.keys(listFieldConfig).forEach(function(fieldName) { var field = listFieldConfig[fieldName]; %>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                <th data-col="<%= fieldName %>" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                     <%= field.label %>
                                 </th>
                             <% }); %>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            <th data-col="createdAt" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                 Created
                             </th>
-                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            <th data-col="actions" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                                 Actions
                             </th>
                         </tr>
@@ -308,7 +378,7 @@
                             <% records.forEach(record => { %>
                                 <tr class="hover:bg-gray-50">
                                     <% Object.keys(listFieldConfig).forEach(function(fieldName) { var field = listFieldConfig[fieldName]; %>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                        <td data-col="<%= fieldName %>" class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                                             <% if (field.type === 'select' && record[fieldName]) { %>
                                                 <% 
                                                 // Handle select field with options
@@ -500,10 +570,10 @@
                                             <% } %>
                                         </td>
                                     <% }); %>
-                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                    <td data-col="createdAt" class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                                         <%= new Date(record.createdAt).toLocaleDateString() %>
                                     </td>
-                                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                    <td data-col="actions" class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                                         <div class="flex justify-end space-x-2">
                                             <% if (typeof softDelete !== 'undefined' && softDelete && typeof showDeleted !== 'undefined' && showDeleted) { %>
                                                 <!-- Actions for deleted records (only if soft delete is enabled) -->
@@ -840,6 +910,133 @@
                 }
             }
         }
+
+        // Column show / hide (persisted per model in localStorage)
+        (function initColumnVisibility() {
+            const table = document.getElementById('adminListTable');
+            const toggleBtn = document.getElementById('columnVisibilityToggle');
+            const panel = document.getElementById('columnVisibilityPanel');
+            const optionsEl = document.getElementById('columnVisibilityOptions');
+            const resetBtn = document.getElementById('columnVisibilityReset');
+            if (!table || !toggleBtn || !panel || !optionsEl) return;
+
+            const modelName = table.getAttribute('data-model') || 'list';
+            const storageKey = 'adminColumns:' + modelName;
+            const headerCells = Array.from(table.querySelectorAll('thead th[data-col]'));
+            const columns = headerCells.map((th) => ({
+                key: th.getAttribute('data-col'),
+                label: (th.textContent || '').trim() || th.getAttribute('data-col'),
+                alwaysVisible: th.getAttribute('data-col') === 'actions',
+            })).filter((c) => c.key);
+
+            function defaultVisible(key) {
+                if (key === 'actions') return true;
+                // Company list is very wide — hide default GL account columns until enabled.
+                if (modelName === 'company' && /account/i.test(key) && /default_|receivable|payable/i.test(key)) {
+                    return false;
+                }
+                return true;
+            }
+
+            function buildDefaults() {
+                const out = {};
+                columns.forEach((col) => {
+                    out[col.key] = col.alwaysVisible ? true : defaultVisible(col.key);
+                });
+                return out;
+            }
+
+            function loadVisibility() {
+                const defaults = buildDefaults();
+                try {
+                    const raw = localStorage.getItem(storageKey);
+                    if (!raw) return defaults;
+                    const saved = JSON.parse(raw);
+                    const next = { ...defaults };
+                    columns.forEach((col) => {
+                        if (col.alwaysVisible) next[col.key] = true;
+                        else if (typeof saved?.[col.key] === 'boolean') next[col.key] = saved[col.key];
+                    });
+                    return next;
+                } catch (_) {
+                    return defaults;
+                }
+            }
+
+            let visibility = loadVisibility();
+
+            function persist() {
+                try {
+                    localStorage.setItem(storageKey, JSON.stringify(visibility));
+                } catch (_) { /* ignore */ }
+            }
+
+            function applyVisibility() {
+                columns.forEach((col) => {
+                    const show = visibility[col.key] !== false;
+                    table.querySelectorAll('[data-col="' + col.key + '"]').forEach((el) => {
+                        el.classList.toggle('col-hidden', !show);
+                    });
+                });
+                renderOptions();
+            }
+
+            function renderOptions() {
+                optionsEl.innerHTML = '';
+                columns.filter((c) => !c.alwaysVisible).forEach((col) => {
+                    const checked = visibility[col.key] !== false;
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'column-visibility-option' + (checked ? ' is-checked' : '');
+                    btn.setAttribute('role', 'menuitemcheckbox');
+                    btn.setAttribute('aria-checked', checked ? 'true' : 'false');
+                    btn.innerHTML =
+                        '<span class="column-visibility-check">' +
+                        (checked ? '<i class="fas fa-check"></i>' : '') +
+                        '</span><span class="column-visibility-label"></span>';
+                    btn.querySelector('.column-visibility-label').textContent = col.label;
+                    btn.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        visibility[col.key] = visibility[col.key] === false;
+                        persist();
+                        applyVisibility();
+                    });
+                    optionsEl.appendChild(btn);
+                });
+            }
+
+            function setOpen(open) {
+                panel.classList.toggle('is-open', open);
+                toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }
+
+            toggleBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setOpen(!panel.classList.contains('is-open'));
+            });
+
+            resetBtn?.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                visibility = buildDefaults();
+                persist();
+                applyVisibility();
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!panel.classList.contains('is-open')) return;
+                if (panel.contains(e.target) || toggleBtn.contains(e.target)) return;
+                setOpen(false);
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') setOpen(false);
+            });
+
+            applyVisibility();
+        })();
     </script>
 </body>
 </html>

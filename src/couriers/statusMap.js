@@ -169,13 +169,52 @@ function mapGenericStatus(providerStatus) {
   return mapByRules(providerStatus);
 }
 
+/**
+ * Unified courier status → POS `order.order_status` (models/order.js ORDER_STATUS_VALUES).
+ * Exception has no POS equivalent and is omitted.
+ */
+const COURIER_TO_ORDER_STATUS = Object.freeze({
+  [UNIFIED_STATUSES.BOOKED]: "packed",
+  [UNIFIED_STATUSES.PICKED]: "packed",
+  [UNIFIED_STATUSES.IN_TRANSIT]: "in_transit",
+  [UNIFIED_STATUSES.ARRIVED]: "in_transit",
+  [UNIFIED_STATUSES.OUT_FOR_DELIVERY]: "in_transit",
+  [UNIFIED_STATUSES.DELIVERED]: "delivered",
+  [UNIFIED_STATUSES.RETURNED]: "return",
+  [UNIFIED_STATUSES.CANCELLED]: "cancelled",
+  [UNIFIED_STATUSES.FAILED]: "failed",
+});
+
+/**
+ * Map the courier's last tracking status to `order.order_status`.
+ * Accepts unified values (`Delivered`) or raw provider text (`OK`, `Out For Delivery`).
+ * @param {string|null|undefined} unifiedOrRaw
+ * @returns {string|null}
+ */
+function mapCourierStatusToOrderStatus(unifiedOrRaw) {
+  const raw = String(unifiedOrRaw || "").trim();
+  if (!raw) return null;
+  if (COURIER_TO_ORDER_STATUS[raw]) return COURIER_TO_ORDER_STATUS[raw];
+
+  const slug = raw.toLowerCase().replace(/[\s-]+/g, "_");
+  if (COURIER_TO_ORDER_STATUS[slug]) return COURIER_TO_ORDER_STATUS[slug];
+
+  const unified = mapGenericStatus(raw);
+  if (unified && COURIER_TO_ORDER_STATUS[unified]) {
+    return COURIER_TO_ORDER_STATUS[unified];
+  }
+  return null;
+}
+
 module.exports = {
   mapTcsStatus,
   mapLeopardStatus,
   mapPostExStatus,
   mapFlashipStatus,
   mapGenericStatus,
+  mapCourierStatusToOrderStatus,
   mapByRules,
+  COURIER_TO_ORDER_STATUS,
   TCS_CODE_MAP,
   LEOPARD_CODE_MAP,
   POSTEX_CODE_MAP,

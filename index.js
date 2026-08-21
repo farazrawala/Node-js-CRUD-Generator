@@ -176,6 +176,10 @@ app.use(
 app.use(cookieParser());
 app.set("view engine", "ejs");
 app.set("views", path.resolve("./views"));
+// Avoid stale admin templates while iterating locally (NODE_ENV=production caches EJS).
+if (String(process.env.VIEW_CACHE || "").toLowerCase() !== "true") {
+  app.set("view cache", false);
+}
 
 // Proxy sends /pos_admin/... — strip prefix before route matching
 app.use(createStripBasePathMiddleware());
