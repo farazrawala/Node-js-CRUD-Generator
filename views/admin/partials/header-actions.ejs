@@ -1,0 +1,19 @@
+<% 
+  const v = typeof appVersion !== 'undefined' && appVersion ? appVersion : {};
+  const versionLabel = v.deployVersion || v.packageVersion || 'dev';
+  const versionTitle = [
+    v.buildLabel ? ('Build ' + v.buildLabel) : null,
+    v.gitCommitShort ? ('commit ' + v.gitCommitShort) : null,
+    v.deployedAt ? ('deployed ' + v.deployedAt) : null,
+  ].filter(Boolean).join(' · ') || ('v' + versionLabel);
+%>
+<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono text-gray-500 bg-gray-100 border border-gray-200"
+      title="<%= versionTitle %>">
+    v<%= versionLabel %>
+</span>
+<a href="<%= typeof basePath !== 'undefined' ? basePath : '' %>/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
+</a>
+<a href="<%= typeof basePath !== 'undefined' ? basePath : '' %>/admin/logout" class="text-red-600 hover:text-red-800">
+    <i class="fas fa-sign-out-alt mr-2"></i>Logout
+</a>

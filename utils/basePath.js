@@ -104,6 +104,40 @@ function normalizePublicUploadUrl(url) {
   return url.replace(/\/api\/uploads\//i, "/uploads/");
 }
 
+/**
+ * Turn a DB/upload path into a browser URL under BASE_PATH.
+ * Handles: full URLs, /uploads/..., uploads/..., and accidental /uploads/uploads/.
+ */
+function toPublicUploadUrl(assetPath, req = null) {
+  if (!assetPath || typeof assetPath !== "string") return "";
+
+  let p = assetPath.trim().replace(/\\/g, "/");
+  if (!p) return "";
+
+  if (p.startsWith("http://") || p.startsWith("https://")) {
+    return normalizePublicUploadUrl(p);
+  }
+
+  while (p.includes("/uploads/uploads/")) {
+    p = p.replace("/uploads/uploads/", "/uploads/");
+  }
+  while (p.startsWith("uploads/uploads/")) {
+    p = p.replace("uploads/uploads/", "uploads/");
+  }
+
+  if (p.startsWith("uploads/")) {
+    p = `/${p}`;
+  } else if (!p.startsWith("/uploads/")) {
+    p = p.startsWith("/") ? `/uploads${p}` : `/uploads/${p}`;
+  }
+
+  while (p.startsWith("/uploads/uploads/")) {
+    p = p.replace("/uploads/uploads/", "/uploads/");
+  }
+
+  return `${getPublicAssetBaseUrl(req)}${p}`;
+}
+
 module.exports = {
   normalizeBasePath,
   getBasePath,
@@ -113,4 +147,5 @@ module.exports = {
   isSecureCookie,
   getPublicAssetBaseUrl,
   normalizePublicUploadUrl,
+  toPublicUploadUrl,
 };

@@ -95,12 +95,7 @@
                 <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
             </div>
             <div class="flex items-center space-x-4">
-                <a href="<%= basePath %>/admin/dashboard" class="text-gray-600 hover:text-gray-900">
-                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
-                </a>
-                <a href="<%= basePath %>/admin/logout" class="text-red-600 hover:text-red-800">
-                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
-                </a>
+                <%- include('partials/header-actions') %>
             </div>
         </div>
     </header>
@@ -429,21 +424,23 @@
                                                 // Clean up image paths
                                                 const cleanImagePath = (imagePath) => {
                                                     if (!imagePath || typeof imagePath !== 'string') return '';
-                                                    
-                                                    // Clean up the path to avoid double /uploads/
-                                                    if (imagePath.includes('/uploads/uploads/')) {
-                                                        imagePath = imagePath.replace('/uploads/uploads/', '/uploads/');
+                                                    if (typeof toPublicUploadUrl === 'function') {
+                                                        return toPublicUploadUrl(imagePath);
                                                     }
-                                                    // Use baseUrl if available
+                                                    let p = imagePath.replace(/\\/g, '/');
+                                                    if (p.startsWith('http://') || p.startsWith('https://')) return p;
+                                                    if (p.startsWith('uploads/')) p = '/' + p;
+                                                    else if (!p.startsWith('/')) p = '/' + p;
+                                                    while (p.includes('/uploads/uploads/')) {
+                                                        p = p.replace('/uploads/uploads/', '/uploads/');
+                                                    }
+                                                    if (typeof basePath !== 'undefined' && basePath) {
+                                                        return basePath + p;
+                                                    }
                                                     if (typeof baseUrl !== 'undefined' && baseUrl) {
-                                                        if (imagePath.startsWith('/')) {
-                                                            imagePath = baseUrl + imagePath;
-                                                        } else {
-                                                            imagePath = baseUrl + '/' + imagePath;
-                                                        }
+                                                        return p.startsWith('/') ? baseUrl + p : baseUrl + '/' + p;
                                                     }
-                                                    
-                                                    return imagePath;
+                                                    return p;
                                                 };
                                                 
                                                 const cleanedImages = images.map(cleanImagePath).filter(img => img);
@@ -562,6 +559,19 @@
                                                         <div class="text-xs text-gray-500">Custom Field</div>
                                                     </div>
                                                 <% } %>
+                                            <% } else if (field.type === 'password') { %>
+                                                <% if (modelName === 'users') { %>
+                                                    <button type="button"
+                                                            class="js-reset-password inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition duration-150"
+                                                            data-user-id="<%= record._id %>"
+                                                            data-user-label="<%= (record.name || record.email || 'User') %>"
+                                                            title="Reset password">
+                                                        <i class="fas fa-key"></i>
+                                                        Reset
+                                                    </button>
+                                                <% } else { %>
+                                                    <span class="text-gray-400 text-xs">••••••••</span>
+                                                <% } %>
                                             <% } else { %>
                                                 <div>
                                                     <div class="font-medium"><%= record[fieldName] || '-' %></div>
@@ -594,6 +604,15 @@
                                                    title="Edit Record">
                                                     <i class="fas fa-edit"></i>
                                                 </a>
+                                                <% if (modelName === 'users') { %>
+                                                <button type="button"
+                                                        class="js-reset-password text-indigo-600 hover:text-indigo-900 transition duration-200"
+                                                        data-user-id="<%= record._id %>"
+                                                        data-user-label="<%= (record.name || record.email || 'User') %>"
+                                                        title="Reset Password">
+                                                    <i class="fas fa-key"></i>
+                                                </button>
+                                                <% } %>
                                                 <button onclick="deleteRecord('<%= record._id %>')" 
                                                         class="text-red-600 hover:text-red-900 transition duration-200" 
                                                         title="Delete Record">
@@ -693,6 +712,48 @@
         </div>
     </div>
 
+    <% if (modelName === 'users') { %>
+    <!-- Reset Password Modal -->
+    <div id="resetPasswordModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
+        <div class="flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+                <div class="flex items-center mb-4">
+                    <div class="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-indigo-100">
+                        <i class="fas fa-key text-indigo-600"></i>
+                    </div>
+                    <div class="ml-3">
+                        <h3 class="text-lg font-medium text-gray-900">Reset Password</h3>
+                        <p class="text-sm text-gray-500">For <span id="resetPasswordUserLabel" class="font-medium text-gray-700"></span></p>
+                    </div>
+                </div>
+                <div class="space-y-3 mb-4">
+                    <div>
+                        <label for="resetPasswordNew" class="block text-sm font-medium text-gray-700 mb-1">New password</label>
+                        <input type="password" id="resetPasswordNew" minlength="6" autocomplete="new-password"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                               placeholder="At least 6 characters">
+                    </div>
+                    <div>
+                        <label for="resetPasswordConfirm" class="block text-sm font-medium text-gray-700 mb-1">Confirm password</label>
+                        <input type="password" id="resetPasswordConfirm" minlength="6" autocomplete="new-password"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                               placeholder="Re-enter password">
+                    </div>
+                    <p id="resetPasswordError" class="text-sm text-red-600 hidden"></p>
+                </div>
+                <div class="flex space-x-3">
+                    <button type="button" onclick="closeResetPasswordModal()" class="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-md transition duration-200">
+                        Cancel
+                    </button>
+                    <button type="button" id="resetPasswordSubmitBtn" onclick="confirmResetPassword()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-md transition duration-200">
+                        Reset Password
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <% } %>
+
     <!-- Restore Confirmation Modal (only if soft delete is enabled) -->
     <% if (typeof softDelete !== 'undefined' && softDelete) { %>
     <div id="restoreModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
@@ -764,6 +825,82 @@
         let recordToDelete = null;
         let recordToRestore = null;
         let recordToPermanentDelete = null;
+        let resetPasswordUserId = null;
+
+        <% if (modelName === 'users') { %>
+        document.querySelectorAll('.js-reset-password').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                openResetPasswordModal(btn.dataset.userId, btn.dataset.userLabel || 'User');
+            });
+        });
+
+        function openResetPasswordModal(userId, userLabel) {
+            resetPasswordUserId = userId;
+            document.getElementById('resetPasswordUserLabel').textContent = userLabel || 'User';
+            document.getElementById('resetPasswordNew').value = '';
+            document.getElementById('resetPasswordConfirm').value = '';
+            const err = document.getElementById('resetPasswordError');
+            err.textContent = '';
+            err.classList.add('hidden');
+            document.getElementById('resetPasswordModal').classList.remove('hidden');
+            document.getElementById('resetPasswordNew').focus();
+        }
+
+        function closeResetPasswordModal() {
+            document.getElementById('resetPasswordModal').classList.add('hidden');
+            resetPasswordUserId = null;
+        }
+
+        function setResetPasswordError(message) {
+            const err = document.getElementById('resetPasswordError');
+            err.textContent = message;
+            err.classList.toggle('hidden', !message);
+        }
+
+        async function confirmResetPassword() {
+            if (!resetPasswordUserId) return;
+
+            const password = document.getElementById('resetPasswordNew').value;
+            const confirm = document.getElementById('resetPasswordConfirm').value;
+            const submitBtn = document.getElementById('resetPasswordSubmitBtn');
+
+            if (!password || password.length < 6) {
+                setResetPasswordError('Password must be at least 6 characters.');
+                return;
+            }
+            if (password !== confirm) {
+                setResetPasswordError('Passwords do not match.');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Saving...';
+            setResetPasswordError('');
+
+            try {
+                const response = await fetch(`<%= basePath %>/admin/users/${resetPasswordUserId}/reset-password`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password, confirmPassword: confirm }),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed to reset password');
+                }
+                closeResetPasswordModal();
+                alert(data.message || 'Password reset successfully');
+            } catch (error) {
+                setResetPasswordError(error.message || 'Failed to reset password');
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Reset Password';
+            }
+        }
+
+        document.getElementById('resetPasswordModal').addEventListener('click', (e) => {
+            if (e.target.id === 'resetPasswordModal') closeResetPasswordModal();
+        });
+        <% } %>
         
         function deleteRecord(id) {
             recordToDelete = id;

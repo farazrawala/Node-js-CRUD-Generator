@@ -9,6 +9,7 @@ const {
   deleteLocalUploadFiles,
   toAbsolutePath,
 } = require("./productImageThumbnail");
+const { toPublicUploadUrl } = require("./basePath");
 
 const IMAGE_FIELDS = [
   "product_image",
@@ -175,7 +176,7 @@ async function findOrphanProductImages(options = {}) {
       mtime,
       companyId: fileCompanyId,
       productId: fileProductId,
-      url: `/${key}`,
+      url: toPublicUploadUrl(key),
     });
   }
 

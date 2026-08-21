@@ -24,12 +24,7 @@
                 <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
             </div>
             <div class="flex items-center space-x-4">
-                <a href="<%= basePath %>/admin/dashboard" class="text-gray-600 hover:text-gray-900">
-                    <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
-                </a>
-                <a href="<%= basePath %>/admin/logout" class="text-red-600 hover:text-red-800">
-                    <i class="fas fa-sign-out-alt mr-2"></i>Logout
-                </a>
+                <%- include('partials/header-actions') %>
             </div>
         </div>
     </header>
@@ -300,28 +295,26 @@
                                     // Clean up image paths for display
                                     const cleanImagePath = (imagePath) => {
                                         if (!imagePath || typeof imagePath !== 'string') return '';
-                                        
-                                        // Clean up the path to avoid double /uploads/
-                                        if (imagePath.startsWith('/uploads/uploads/')) {
-                                            imagePath = imagePath.replace('/uploads/uploads/', '/uploads/');
-                                        } else if (!imagePath.startsWith('/uploads/')) {
-                                            if (imagePath.startsWith('/')) {
-                                                imagePath = '/uploads' + imagePath;
-                                            } else {
-                                                imagePath = '/uploads/' + imagePath;
-                                            }
+                                        if (typeof toPublicUploadUrl === 'function') {
+                                            return toPublicUploadUrl(imagePath);
                                         }
-                                        
-                                        // Use baseUrl if available
+                                        // Fallback if helper missing
+                                        let p = imagePath.replace(/\\/g, '/');
+                                        if (p.startsWith('http://') || p.startsWith('https://')) return p;
+                                        if (p.startsWith('uploads/')) p = '/' + p;
+                                        else if (!p.startsWith('/uploads/')) {
+                                            p = p.startsWith('/') ? '/uploads' + p : '/uploads/' + p;
+                                        }
+                                        while (p.startsWith('/uploads/uploads/')) {
+                                            p = p.replace('/uploads/uploads/', '/uploads/');
+                                        }
+                                        if (typeof basePath !== 'undefined' && basePath) {
+                                            return basePath + p;
+                                        }
                                         if (typeof baseUrl !== 'undefined' && baseUrl) {
-                                            if (imagePath.startsWith('/')) {
-                                                imagePath = baseUrl + imagePath;
-                                            } else {
-                                                imagePath = baseUrl + '/' + imagePath;
-                                            }
+                                            return baseUrl + p;
                                         }
-                                        
-                                        return imagePath;
+                                        return p;
                                     };
                                     
                                     // Store original paths for removal tracking

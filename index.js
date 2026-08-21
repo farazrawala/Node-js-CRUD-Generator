@@ -90,6 +90,7 @@ const {
   createStripBasePathMiddleware,
   getCookiePath,
   isSecureCookie,
+  toPublicUploadUrl,
 } = require("./utils/basePath");
 const {
   createServePublicUploadsMiddleware,
@@ -267,6 +268,9 @@ app.use((req, res, next) => {
     res.locals.basePath = BASE_PATH;
   }
   res.locals.withBasePath = withBasePath;
+  res.locals.toPublicUploadUrl = (assetPath) =>
+    toPublicUploadUrl(assetPath, req);
+  res.locals.appVersion = getDeployVersionPayload();
   next();
 });
 
