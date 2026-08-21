@@ -24,10 +24,10 @@
                 <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
             </div>
             <div class="flex items-center space-x-4">
-                <a href="/admin/dashboard" class="text-blue-600 font-medium">
+                <a href="<%= basePath %>/admin/dashboard" class="text-blue-600 font-medium">
                     <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
                 </a>
-                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                <a href="<%= basePath %>/admin/logout" class="text-red-600 hover:text-red-800">
                     <i class="fas fa-sign-out-alt mr-2"></i>Logout
                 </a>
             </div>
@@ -42,34 +42,34 @@
             </div>
             <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
                 <% routes.forEach(route => { %>
-                    <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                    <a href="<%= basePath %><%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                         <i class="<%= route.icon %> mr-3"></i>
                         <span><%= route.name %></span>
                     </a>
                 <% }); %>
             <% } else { %>
                 <!-- Fallback static routes if dynamic routes are not available -->
-                <a href="/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-users mr-3"></i>
                     <span>Users</span>
                 </a>
-                <a href="/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-box mr-3"></i>
                     <span>Products</span>
                 </a>
-                <a href="/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-blog mr-3"></i>
                     <span>Blogs</span>
                 </a>
-                <a href="/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-shopping-cart mr-3"></i>
                     <span>Orders</span>
                 </a>
-                <a href="/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-tags mr-3"></i>
                     <span>Categories</span>
                 </a>
-                <a href="/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-code-branch mr-3"></i>
                     <span>Branches</span>
                 </a>
@@ -79,11 +79,11 @@
             <div class="px-4 py-2 mt-6">
                 <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Route Management</h3>
             </div>
-            <a href="/admin/routes" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+            <a href="<%= basePath %>/admin/routes" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                 <i class="fas fa-route mr-3"></i>
                 <span>Manage Routes</span>
             </a>
-            <a href="/admin/routes/create" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+            <a href="<%= basePath %>/admin/routes/create" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                 <i class="fas fa-plus mr-3"></i>
                 <span>Create Route</span>
             </a>
@@ -114,7 +114,7 @@
                     </div>
                 </div>
                 <div class="mt-4">
-                    <a href="/admin/users" class="text-blue-600 hover:text-blue-800 text-sm font-medium">
+                    <a href="<%= basePath %>/admin/users" class="text-blue-600 hover:text-blue-800 text-sm font-medium">
                         View Users →
                     </a>
                 </div>
@@ -134,7 +134,7 @@
                     </div>
                 </div>
                 <div class="mt-4">
-                    <a href="/admin/products" class="text-green-600 hover:text-green-800 text-sm font-medium">
+                    <a href="<%= basePath %>/admin/products" class="text-green-600 hover:text-green-800 text-sm font-medium">
                         View Products →
                     </a>
                 </div>
@@ -154,7 +154,7 @@
                     </div>
                 </div>
                 <div class="mt-4">
-                    <a href="/admin/blogs" class="text-purple-600 hover:text-purple-800 text-sm font-medium">
+                    <a href="<%= basePath %>/admin/blogs" class="text-purple-600 hover:text-purple-800 text-sm font-medium">
                         View Blogs →
                     </a>
                 </div>
@@ -174,7 +174,7 @@
                     </div>
                 </div>
                 <div class="mt-4">
-                    <a href="/admin/orders" class="text-yellow-600 hover:text-yellow-800 text-sm font-medium">
+                    <a href="<%= basePath %>/admin/orders" class="text-yellow-600 hover:text-yellow-800 text-sm font-medium">
                         View Orders →
                     </a>
                 </div>
@@ -194,7 +194,7 @@
                     </div>
                 </div>
                 <div class="mt-4">
-                    <a href="/admin/categories" class="text-red-600 hover:text-red-800 text-sm font-medium">
+                    <a href="<%= basePath %>/admin/categories" class="text-red-600 hover:text-red-800 text-sm font-medium">
                         View Categories →
                     </a>
                 </div>
@@ -205,19 +205,19 @@
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
             <h3 class="text-lg font-medium text-gray-900 mb-4">Quick Actions</h3>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                <a href="/admin/users/create" class="flex items-center p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition duration-200">
+                <a href="<%= basePath %>/admin/users/create" class="flex items-center p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition duration-200">
                     <i class="fas fa-user-plus text-blue-600 mr-3"></i>
                     <span class="text-blue-800 font-medium">Add User</span>
                 </a>
-                <a href="/admin/products/create" class="flex items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition duration-200">
+                <a href="<%= basePath %>/admin/products/create" class="flex items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition duration-200">
                     <i class="fas fa-plus text-green-600 mr-3"></i>
                     <span class="text-green-800 font-medium">Add Product</span>
                 </a>
-                <a href="/admin/blogs/create" class="flex items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition duration-200">
+                <a href="<%= basePath %>/admin/blogs/create" class="flex items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition duration-200">
                     <i class="fas fa-edit text-purple-600 mr-3"></i>
                     <span class="text-purple-800 font-medium">Create Blog</span>
                 </a>
-                <a href="/admin/categories/create" class="flex items-center p-4 bg-red-50 rounded-lg hover:bg-red-100 transition duration-200">
+                <a href="<%= basePath %>/admin/categories/create" class="flex items-center p-4 bg-red-50 rounded-lg hover:bg-red-100 transition duration-200">
                     <i class="fas fa-tag text-red-600 mr-3"></i>
                     <span class="text-red-800 font-medium">Add Category</span>
                 </a>
@@ -230,7 +230,7 @@
             <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-medium text-gray-900">Recent Users</h3>
-                    <a href="/admin/users" class="text-blue-600 hover:text-blue-800 text-sm">View All</a>
+                    <a href="<%= basePath %>/admin/users" class="text-blue-600 hover:text-blue-800 text-sm">View All</a>
                 </div>
                 <div class="space-y-3">
                     <% if (recentActivity.users && recentActivity.users.length > 0) { %>
@@ -260,7 +260,7 @@
             <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-medium text-gray-900">Recent Products</h3>
-                    <a href="/admin/products" class="text-green-600 hover:text-green-800 text-sm">View All</a>
+                    <a href="<%= basePath %>/admin/products" class="text-green-600 hover:text-green-800 text-sm">View All</a>
                 </div>
                 <div class="space-y-3">
                     <% if (recentActivity.products && recentActivity.products.length > 0) { %>
@@ -290,7 +290,7 @@
             <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-medium text-gray-900">Recent Orders</h3>
-                    <a href="/admin/orders" class="text-yellow-600 hover:text-yellow-800 text-sm">View All</a>
+                    <a href="<%= basePath %>/admin/orders" class="text-yellow-600 hover:text-yellow-800 text-sm">View All</a>
                 </div>
                 <div class="space-y-3">
                     <% if (recentActivity.orders && recentActivity.orders.length > 0) { %>

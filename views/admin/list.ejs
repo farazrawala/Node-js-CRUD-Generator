@@ -95,10 +95,10 @@
                 <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
             </div>
             <div class="flex items-center space-x-4">
-                <a href="/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/dashboard" class="text-gray-600 hover:text-gray-900">
                     <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
                 </a>
-                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                <a href="<%= basePath %>/admin/logout" class="text-red-600 hover:text-red-800">
                     <i class="fas fa-sign-out-alt mr-2"></i>Logout
                 </a>
             </div>
@@ -114,7 +114,7 @@
             <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
                 <% routes.forEach(route => { %>
                     <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
-                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === route.path.replace('/admin/', '') ? 'bg-blue-50 text-blue-700' : '' %>" 
+                        <a href="<%= basePath %><%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === route.path.replace('/admin/', '') ? 'bg-blue-50 text-blue-700' : '' %>" 
                            <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
                             <i class="<%= route.icon %> mr-3"></i>
                             <span><%= route.name %></span>
@@ -125,7 +125,7 @@
                         <% if (route.subMenus && route.subMenus.length > 0) { %>
                             <div class="sub-menu ml-4">
                                 <% route.subMenus.forEach(subMenu => { %>
-                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800 <%= modelName === subMenu.path.replace('/admin/', '') ? 'bg-blue-25 text-blue-600' : '' %>">
+                                    <a href="<%= basePath %><%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800 <%= modelName === subMenu.path.replace('/admin/', '') ? 'bg-blue-25 text-blue-600' : '' %>">
                                         <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
                                         <span><%= subMenu.name %></span>
                                     </a>
@@ -136,31 +136,31 @@
                 <% }); %>
             <% } else { %>
                 <!-- Fallback static routes if dynamic routes are not available -->
-                <a href="/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'users' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'users' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-users mr-3"></i>
                     <span>Users</span>
                 </a>
-                <a href="/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'products' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'products' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-box mr-3"></i>
                     <span>Products</span>
                 </a>
-                <a href="/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'blogs' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'blogs' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-blog mr-3"></i>
                     <span>Blogs</span>
                 </a>
-                <a href="/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'orders' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'orders' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-shopping-cart mr-3"></i>
                     <span>Orders</span>
                 </a>
-                <a href="/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'categories' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'categories' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-tags mr-3"></i>
                     <span>Categories</span>
                 </a>
-                <a href="/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'branch' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'branch' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-code-branch mr-3"></i>
                     <span>Branches</span>
                 </a>
-                <a href="/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'complain' ? 'bg-blue-50 text-blue-700' : '' %>">
+                <a href="<%= basePath %>/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= modelName === 'complain' ? 'bg-blue-50 text-blue-700' : '' %>">
                     <i class="fas fa-exclamation-triangle mr-3"></i>
                     <span>Complaints</span>
                 </a>
@@ -189,7 +189,7 @@
                 <p class="text-gray-600">Manage your <%= singularName.toLowerCase() %> records</p>
             </div>
             <div class="flex items-center gap-3">
-                <a href="/admin/<%= modelName %>/create" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-medium transition duration-200">
+                <a href="<%= basePath %>/admin/<%= modelName %>/create" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-medium transition duration-200">
                     <i class="fas fa-plus mr-2"></i>Create <%= titleCase %>
                 </a>
             </div>
@@ -198,12 +198,12 @@
         <% if (customTabs && customTabs.length > 0) { %>
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
             <nav class="flex flex-wrap">
-                <a href="/admin/<%= modelName %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 <%= (!customTabsActivePath || customTabsActivePath === '/admin/' + modelName) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
+                <a href="<%= basePath %>/admin/<%= modelName %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 <%= (!customTabsActivePath || customTabsActivePath === '/admin/' + modelName) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
                     <i class="fas fa-table mr-2 text-xs"></i>
                     <span>List</span>
                 </a>
                 <% customTabs.forEach(tab => { %>
-                    <a href="<%= tab.path %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 flex items-center gap-2 <%= (typeof customTabsActivePath !== 'undefined' && customTabsActivePath === tab.path) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
+                    <a href="<%= basePath %><%= tab.path %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 flex items-center gap-2 <%= (typeof customTabsActivePath !== 'undefined' && customTabsActivePath === tab.path) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
                         <% if (tab.icon) { %>
                             <i class="<%= tab.icon %> text-xs"></i>
                         <% } else { %>
@@ -221,7 +221,7 @@
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
             <div class="border-b border-gray-200">
                 <nav class="-mb-px flex space-x-8" aria-label="Tabs">
-                    <a href="/admin/<%= modelName %>" 
+                    <a href="<%= basePath %>/admin/<%= modelName %>" 
                        class="<%= typeof showDeleted === 'undefined' || !showDeleted ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300' %> whitespace-nowrap py-4 px-6 border-b-2 font-medium text-sm">
                         <i class="fas fa-list mr-2"></i>Active Records
                         <% 
@@ -239,7 +239,7 @@
                             <span class="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full ml-2"><%= activeCount %></span>
                         <% } %>
                     </a>
-                    <a href="/admin/<%= modelName %>?deleted=true" 
+                    <a href="<%= basePath %>/admin/<%= modelName %>?deleted=true" 
                        class="<%= typeof showDeleted !== 'undefined' && showDeleted ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300' %> whitespace-nowrap py-4 px-6 border-b-2 font-medium text-sm">
                         <i class="fas fa-trash mr-2"></i>Deleted Records
                         <% 
@@ -320,7 +320,7 @@
                         <button type="submit" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-md transition duration-200">
                             <i class="fas fa-search mr-2"></i>Apply Filters
                         </button>
-                        <a href="/admin/<%= modelName %>" class="text-gray-600 hover:text-gray-800">
+                        <a href="<%= basePath %>/admin/<%= modelName %>" class="text-gray-600 hover:text-gray-800">
                             <i class="fas fa-times mr-2"></i>Clear Filters
                         </a>
                     </div>
@@ -589,7 +589,7 @@
                                                 </button>
                                             <% } else { %>
                                                 <!-- Actions for active records -->
-                                                <a href="/admin/<%= modelName %>/<%= record._id %>/edit" 
+                                                <a href="<%= basePath %>/admin/<%= modelName %>/<%= record._id %>/edit" 
                                                    class="text-blue-600 hover:text-blue-900 transition duration-200" 
                                                    title="Edit Record">
                                                     <i class="fas fa-edit"></i>
@@ -611,7 +611,7 @@
                                         <i class="fas fa-inbox text-4xl mb-4 text-gray-300"></i>
                                         <p class="text-lg font-medium">No <%= singularName.toLowerCase() %>s found</p>
                                         <p class="text-sm">Get started by creating your first <%= singularName.toLowerCase() %></p>
-                                        <a href="/admin/<%= modelName %>/create" class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md transition duration-200">
+                                        <a href="<%= basePath %>/admin/<%= modelName %>/create" class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md transition duration-200">
                                             Create <%= titleCase %>
                                         </a>
                                     </div>
@@ -777,7 +777,7 @@
         
         function confirmDelete() {
             if (recordToDelete) {
-                fetch(`/admin/<%= modelName %>/${recordToDelete}`, {
+                fetch(`<%= basePath %>/admin/<%= modelName %>/${recordToDelete}`, {
                     method: 'DELETE',
                     headers: {
                         'Content-Type': 'application/json'
@@ -813,7 +813,7 @@
         
         function confirmRestore() {
             if (recordToRestore) {
-                fetch(`/admin/<%= modelName %>/${recordToRestore}/restore`, {
+                fetch(`<%= basePath %>/admin/<%= modelName %>/${recordToRestore}/restore`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -848,7 +848,7 @@
         
         function confirmPermanentDelete() {
             if (recordToPermanentDelete) {
-                fetch(`/admin/<%= modelName %>/${recordToPermanentDelete}/permanent-delete`, {
+                fetch(`<%= basePath %>/admin/<%= modelName %>/${recordToPermanentDelete}/permanent-delete`, {
                     method: 'DELETE',
                     headers: {
                         'Content-Type': 'application/json'

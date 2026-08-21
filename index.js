@@ -266,6 +266,7 @@ app.use((req, res, next) => {
   if (res.locals.basePath === undefined) {
     res.locals.basePath = BASE_PATH;
   }
+  res.locals.withBasePath = withBasePath;
   next();
 });
 

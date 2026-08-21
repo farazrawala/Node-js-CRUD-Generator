@@ -6,6 +6,7 @@ const { coalesceObjectId } = require("./modelHelper");
 const {
   getPublicAssetBaseUrl,
   normalizePublicUploadUrl,
+  withBasePath,
 } = require("./basePath");
 
 /**
@@ -486,7 +487,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         titleCase,
         fieldConfig: finalFieldConfig,
         record: recordWithDefaults, // Record with default values
-        action: `/admin/${modelName}`,
+        action: withBasePath(`/admin/${modelName}`),
         method: "POST",
         errors: [],
         cssClasses,
@@ -522,7 +523,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             titleCase,
             fieldConfig,
             record: req.body,
-            action: `/admin/${modelName}`,
+            action: withBasePath(`/admin/${modelName}`),
             method: "POST",
             errors: validationResult.errors,
             cssClasses,
@@ -1514,7 +1515,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Redirect to list view with success message
       req.flash("success", `${titleCase} created successfully`);
-      res.redirect(`/admin/${modelName}`);
+      res.redirect(withBasePath(`/admin/${modelName}`));
     } catch (error) {
       const errorResponse = await handleError(error, "insert", req);
 
@@ -1533,7 +1534,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           titleCase,
           fieldConfig,
           record: req.body,
-          action: `/admin/${modelName}`,
+          action: withBasePath(`/admin/${modelName}`),
           method: "POST",
           errors,
           cssClasses,
@@ -1560,7 +1561,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           titleCase,
           fieldConfig,
           record: req.body,
-          action: `/admin/${modelName}`,
+          action: withBasePath(`/admin/${modelName}`),
           method: "POST",
           errors: [{ field: duplicateField, message: duplicateMessage }],
           cssClasses,
@@ -1578,7 +1579,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         titleCase,
         fieldConfig,
         record: req.body,
-        action: `/admin/${modelName}`,
+        action: withBasePath(`/admin/${modelName}`),
         method: "POST",
         errors: [
           {
@@ -1719,7 +1720,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         titleCase,
         fieldConfig: finalFieldConfig,
         record: responseData,
-        action: `/admin/${modelName}/${id}`,
+        action: withBasePath(`/admin/${modelName}/${id}`),
         method: "PUT",
         errors: [],
         cssClasses,
@@ -1776,7 +1777,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
             titleCase,
             fieldConfig,
             record: { ...req.body, _id: id },
-            action: `/admin/${modelName}/${id}`,
+            action: withBasePath(`/admin/${modelName}/${id}`),
             method: "PUT",
             errors: validationResult.errors,
             cssClasses,
@@ -2495,7 +2496,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
 
       // Redirect to list view with success message
       req.flash("success", `${titleCase} updated successfully`);
-      res.redirect(`/admin/${modelName}`);
+      res.redirect(withBasePath(`/admin/${modelName}`));
     } catch (error) {
       const errorResponse = await handleError(error, "update", req);
 
@@ -2514,7 +2515,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
           titleCase,
           fieldConfig,
           record: { ...req.body, _id: req.params.id },
-          action: `/admin/${modelName}/${req.params.id}`,
+          action: withBasePath(`/admin/${modelName}/${req.params.id}`),
           method: "PUT",
           errors,
           cssClasses,
@@ -3088,7 +3089,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
         return next("route");
       }
-      res.redirect(`/admin/${modelName}/${req.params.id}/edit`);
+      res.redirect(withBasePath(`/admin/${modelName}/${req.params.id}/edit`));
     });
     router.put("/:id", update); // UPDATE action
     router.post("/:id", update); // UPDATE action (fallback for method override issues)

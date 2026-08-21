@@ -11,6 +11,7 @@ const {
 } = require("../models/support_ticket");
 const { saveTicketFiles } = require("../utils/supportTicketUploads");
 const { coalesceObjectId } = require("../utils/modelHelper");
+const { withBasePath } = require("../utils/basePath");
 
 const USER_SELECT = "name email";
 const MODEL_NAME = "support-tickets";
@@ -104,7 +105,7 @@ function buildListUrl(query = {}) {
     }
   });
   const qs = params.toString();
-  return qs ? `/admin/support-tickets?${qs}` : "/admin/support-tickets";
+  return withBasePath(qs ? `/admin/support-tickets?${qs}` : "/admin/support-tickets");
 }
 
 async function listTickets(req, res) {
@@ -235,7 +236,7 @@ async function listTickets(req, res) {
   } catch (error) {
     console.error("❌ Admin support tickets list:", error);
     req.flash("error", "Unable to load support tickets.");
-    res.redirect("/admin/dashboard");
+    res.redirect(withBasePath("/admin/dashboard"));
   }
 }
 
@@ -244,7 +245,7 @@ async function viewTicket(req, res) {
     const ticketId = oid(req.params.id);
     if (!ticketId) {
       req.flash("error", "Invalid ticket id.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     const ticket = await SupportTicket.findOne({
@@ -259,7 +260,7 @@ async function viewTicket(req, res) {
 
     if (!ticket) {
       req.flash("error", "Ticket not found.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     const messages = await SupportMessage.find({
@@ -296,20 +297,19 @@ async function viewTicket(req, res) {
   } catch (error) {
     console.error("❌ Admin support ticket detail:", error);
     req.flash("error", "Unable to load ticket details.");
-    res.redirect("/admin/support-tickets");
+    res.redirect(withBasePath("/admin/support-tickets"));
   }
 }
 
 async function replyTicket(req, res) {
   const ticketId = oid(req.params.id);
   const redirectTo = ticketId
-    ? `/admin/support-tickets/${ticketId}`
-    : "/admin/support-tickets";
+    ? withBasePath(`/admin/support-tickets/${ticketId}`) : withBasePath("/admin/support-tickets");
 
   try {
     if (!ticketId) {
       req.flash("error", "Invalid ticket id.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     const message = (req.body.message || "").trim();
@@ -326,7 +326,7 @@ async function replyTicket(req, res) {
     });
     if (!ticket) {
       req.flash("error", "Ticket not found.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
     if (ticket.status === "closed") {
       req.flash("error", "Cannot reply to a closed ticket.");
@@ -392,13 +392,12 @@ async function replyTicket(req, res) {
 async function updateStatus(req, res) {
   const ticketId = oid(req.params.id);
   const redirectTo = ticketId
-    ? `/admin/support-tickets/${ticketId}`
-    : "/admin/support-tickets";
+    ? withBasePath(`/admin/support-tickets/${ticketId}`) : withBasePath("/admin/support-tickets");
 
   try {
     if (!ticketId) {
       req.flash("error", "Invalid request.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     const { status } = req.body;
@@ -414,7 +413,7 @@ async function updateStatus(req, res) {
     });
     if (!ticket) {
       req.flash("error", "Ticket not found.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
     if (ticket.status === "closed") {
       req.flash("error", "Cannot change status of a closed ticket.");
@@ -437,13 +436,12 @@ async function updateStatus(req, res) {
 async function updatePriority(req, res) {
   const ticketId = oid(req.params.id);
   const redirectTo = ticketId
-    ? `/admin/support-tickets/${ticketId}`
-    : "/admin/support-tickets";
+    ? withBasePath(`/admin/support-tickets/${ticketId}`) : withBasePath("/admin/support-tickets");
 
   try {
     if (!ticketId) {
       req.flash("error", "Invalid request.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     const { priority } = req.body;
@@ -459,7 +457,7 @@ async function updatePriority(req, res) {
     );
     if (!ticket) {
       req.flash("error", "Ticket not found.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     req.flash("success", `Priority updated to ${formatLabel(priority)}.`);
@@ -474,13 +472,12 @@ async function updatePriority(req, res) {
 async function assignTicket(req, res) {
   const ticketId = oid(req.params.id);
   const redirectTo = ticketId
-    ? `/admin/support-tickets/${ticketId}`
-    : "/admin/support-tickets";
+    ? withBasePath(`/admin/support-tickets/${ticketId}`) : withBasePath("/admin/support-tickets");
 
   try {
     if (!ticketId) {
       req.flash("error", "Invalid request.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     let assignedTo = null;
@@ -499,7 +496,7 @@ async function assignTicket(req, res) {
     );
     if (!ticket) {
       req.flash("error", "Ticket not found.");
-      return res.redirect("/admin/support-tickets");
+      return res.redirect(withBasePath("/admin/support-tickets"));
     }
 
     req.flash(

@@ -5,8 +5,10 @@ const {
   deleteOrphanProductImages,
   formatBytes,
 } = require("../utils/orphanProductImages");
+const { withBasePath } = require("../utils/basePath");
 
 const PAGE_PATH = "/admin/products/unused-images";
+const pageUrl = (qs = "") => withBasePath(`${PAGE_PATH}${qs}`);
 
 function parsePage(value, fallback = 1) {
   const n = Number.parseInt(String(value || ""), 10);
@@ -108,13 +110,17 @@ async function renderUnusedImages(req, res) {
         hasNextPage: currentPage < totalPages,
         hasPrevPage: currentPage > 1,
         prevUrl:
-          currentPage > 1 ?
-            `${PAGE_PATH}${buildQueryString({ ...filterParams, page: currentPage - 1 })}`
-          : null,
+          currentPage > 1
+            ? pageUrl(
+                buildQueryString({ ...filterParams, page: currentPage - 1 }),
+              )
+            : null,
         nextUrl:
-          currentPage < totalPages ?
-            `${PAGE_PATH}${buildQueryString({ ...filterParams, page: currentPage + 1 })}`
-          : null,
+          currentPage < totalPages
+            ? pageUrl(
+                buildQueryString({ ...filterParams, page: currentPage + 1 }),
+              )
+            : null,
       },
       success: req.flash ? req.flash("success") : [],
       error: req.flash ? req.flash("error") : [],
@@ -166,7 +172,7 @@ async function deleteUnusedImages(req, res) {
 
     if (!keys.length) {
       if (req.flash) req.flash("error", "No images selected for deletion.");
-      return res.redirect(`${PAGE_PATH}${redirectQs}`);
+      return res.redirect(pageUrl(redirectQs));
     }
 
     const result = await deleteOrphanProductImages(keys, {
@@ -189,13 +195,13 @@ async function deleteUnusedImages(req, res) {
       }
     }
 
-    return res.redirect(`${PAGE_PATH}${redirectQs}`);
+    return res.redirect(pageUrl(redirectQs));
   } catch (error) {
     console.error("Delete unused product images error:", error);
     if (req.flash) {
       req.flash("error", error.message || "Failed to delete unused images.");
     }
-    return res.redirect(`${PAGE_PATH}${redirectQs}`);
+    return res.redirect(pageUrl(redirectQs));
   }
 }
 

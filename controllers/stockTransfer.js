@@ -4,6 +4,7 @@ const Warehouse = require("../models/warehouse");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const StockTransfer = require("../models/stock_transfer");
 const routeRegistry = require("../utils/routeRegistry");
+const { withBasePath } = require("../utils/basePath");
 
 function buildActiveFilter(companyId) {
   const baseFilter = {
@@ -20,7 +21,7 @@ function buildActiveFilter(companyId) {
   return baseFilter;
 }
 
-function buildRedirectUrl(basePath, params = {}) {
+function buildRedirectUrl(path, params = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") {
@@ -28,7 +29,8 @@ function buildRedirectUrl(basePath, params = {}) {
     }
   });
   const queryString = query.toString();
-  return queryString ? `${basePath}?${queryString}` : basePath;
+  const fullPath = queryString ? `${path}?${queryString}` : path;
+  return withBasePath(fullPath);
 }
 
 async function renderStockTransfer(req, res) {
@@ -165,7 +167,7 @@ async function renderStockTransfer(req, res) {
   } catch (error) {
     console.error("❌ Stock transfer page error:", error);
     req.flash("error", "Unable to load stock transfer page. Please try again.");
-    res.redirect("/admin/products");
+    res.redirect(withBasePath("/admin/products"));
   }
 }
 

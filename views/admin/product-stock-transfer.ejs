@@ -42,10 +42,10 @@
                 <h1 class="text-2xl font-bold text-gray-900"><%= title %></h1>
             </div>
             <div class="flex items-center space-x-4">
-                <a href="/admin/dashboard" class="text-gray-600 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/dashboard" class="text-gray-600 hover:text-gray-900">
                     <i class="fas fa-tachometer-alt mr-2"></i>Dashboard
                 </a>
-                <a href="/admin/logout" class="text-red-600 hover:text-red-800">
+                <a href="<%= basePath %>/admin/logout" class="text-red-600 hover:text-red-800">
                     <i class="fas fa-sign-out-alt mr-2"></i>Logout
                 </a>
             </div>
@@ -61,7 +61,7 @@
             <% if (typeof routes !== 'undefined' && routes.length > 0) { %>
                 <% routes.forEach(route => { %>
                     <div class="menu-item <%= route.subMenus && route.subMenus.length > 0 ? 'has-submenu' : '' %>">
-                        <a href="<%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= route.path === '/admin/products' ? 'bg-blue-50 text-blue-700' : '' %>" 
+                        <a href="<%= basePath %><%= route.path %>" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900 <%= route.path === '/admin/products' ? 'bg-blue-50 text-blue-700' : '' %>" 
                            <% if (route.subMenus && route.subMenus.length > 0) { %>onclick="toggleSubMenu(event, this)"<% } %>>
                             <i class="<%= route.icon %> mr-3"></i>
                             <span><%= route.name %></span>
@@ -72,7 +72,7 @@
                         <% if (route.subMenus && route.subMenus.length > 0) { %>
                             <div class="sub-menu ml-4">
                                 <% route.subMenus.forEach(subMenu => { %>
-                                    <a href="<%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800">
+                                    <a href="<%= basePath %><%= subMenu.path %>" class="flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800">
                                         <i class="<%= subMenu.icon %> mr-2 text-xs"></i>
                                         <span><%= subMenu.name %></span>
                                     </a>
@@ -82,31 +82,31 @@
                     </div>
                 <% }); %>
             <% } else { %>
-                <a href="/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/users" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-users mr-3"></i>
                     <span>Users</span>
                 </a>
-                <a href="/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/products" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-box mr-3"></i>
                     <span>Products</span>
                 </a>
-                <a href="/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/blogs" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-blog mr-3"></i>
                     <span>Blogs</span>
                 </a>
-                <a href="/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/orders" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-shopping-cart mr-3"></i>
                     <span>Orders</span>
                 </a>
-                <a href="/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/categories" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-tags mr-3"></i>
                     <span>Categories</span>
                 </a>
-                <a href="/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/branch" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-code-branch mr-3"></i>
                     <span>Branches</span>
                 </a>
-                <a href="/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
+                <a href="<%= basePath %>/admin/complain" class="flex items-center px-4 py-3 text-gray-700 hover:bg-gray-100 hover:text-gray-900">
                     <i class="fas fa-exclamation-triangle mr-3"></i>
                     <span>Complaints</span>
                 </a>
@@ -134,7 +134,7 @@
                 <p class="text-gray-600">Transfer stock between warehouses for your products.</p>
             </div>
             <div class="flex items-center gap-3">
-                <a href="/admin/<%= modelName %>" class="bg-white border border-gray-300 text-gray-700 hover:text-gray-900 hover:border-gray-400 px-5 py-2.5 rounded-lg font-medium transition duration-200">
+                <a href="<%= basePath %>/admin/<%= modelName %>" class="bg-white border border-gray-300 text-gray-700 hover:text-gray-900 hover:border-gray-400 px-5 py-2.5 rounded-lg font-medium transition duration-200">
                     <i class="fas fa-arrow-left mr-2"></i>Back to Products
                 </a>
             </div>
@@ -143,12 +143,12 @@
         <% if (customTabs && customTabs.length > 0) { %>
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
             <nav class="flex flex-wrap">
-                <a href="/admin/<%= modelName %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 <%= (!customTabsActivePath || customTabsActivePath === '/admin/' + modelName) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
+                <a href="<%= basePath %>/admin/<%= modelName %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 <%= (!customTabsActivePath || customTabsActivePath === '/admin/' + modelName) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
                     <i class="fas fa-table mr-2 text-xs"></i>
                     <span>List</span>
                 </a>
                 <% customTabs.forEach(tab => { %>
-                    <a href="<%= tab.path %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 flex items-center gap-2 <%= (typeof customTabsActivePath !== 'undefined' && customTabsActivePath === tab.path) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
+                    <a href="<%= basePath %><%= tab.path %>" class="px-5 py-3 text-sm font-medium border-b-2 transition duration-150 flex items-center gap-2 <%= (typeof customTabsActivePath !== 'undefined' && customTabsActivePath === tab.path) ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50" %>">
                         <% if (tab.icon) { %>
                             <i class="<%= tab.icon %> text-xs"></i>
                         <% } else { %>
@@ -167,7 +167,7 @@
                 <i class="fas fa-exchange-alt text-blue-600"></i>
                 Stock Transfer Details
             </h3>
-            <form method="POST" action="/admin/products/stock-transfer" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <form method="POST" action="<%= basePath %>/admin/products/stock-transfer" class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div class="space-y-2">
                     <label for="product_id" class="text-sm font-medium text-gray-700">Product</label>
                     <select id="product_id" name="product_id" required class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">

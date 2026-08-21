@@ -302,12 +302,12 @@
     <div class="admin-nav">
         <div class="nav-links">
             <button class="sidebar-toggle" id="sidebarToggle">☰</button>
-            <a href="/admin/dashboard">Dashboard</a>
+            <a href="<%= basePath %>/admin/dashboard">Dashboard</a>
         </div>
         
         <div class="user-info">
             <span>Welcome, <%= user.name %> (<%= user.email %>)</span>
-            <a href="/admin/logout" class="logout-btn">Logout</a>
+            <a href="<%= basePath %>/admin/logout" class="logout-btn">Logout</a>
         </div>
     </div>
 
@@ -320,7 +320,7 @@
         <div class="sidebar-menu">
             <div class="menu-section">
                 <div class="menu-section-title">Main</div>
-                <a href="/admin/dashboard" class="menu-item active">
+                <a href="<%= basePath %>/admin/dashboard" class="menu-item active">
                     <i>📊</i>Dashboard
                 </a>
             </div>
@@ -328,35 +328,35 @@
             <div class="menu-section">
 
                 <div class="menu-section-title">User Management</div>
-                <a href="/admin/users" class="menu-item">
+                <a href="<%= basePath %>/admin/users" class="menu-item">
                     <i>👥</i>Users
                 </a>
 
                 <div class="menu-section-title">Product Management</div>
-                <a href="/admin/products" class="menu-item">
+                <a href="<%= basePath %>/admin/products" class="menu-item">
                     <i>📦</i>Products
                 </a>
 
                 <div class="menu-section-title">Blog Management</div>
-                <a href="/admin/blogs" class="menu-item">
+                <a href="<%= basePath %>/admin/blogs" class="menu-item">
                     <i>📝</i>Blogs
                 </a>
 
                 <div class="menu-section-title">Order Management</div>
-                <a href="/admin/orders" class="menu-item">
+                <a href="<%= basePath %>/admin/orders" class="menu-item">
                     <i>🛒</i>Orders
                 </a>
             </div>
             
             <div class="menu-section">
                 <div class="menu-section-title">Quick Actions</div>
-                <a href="/admin/users/create" class="menu-item">
+                <a href="<%= basePath %>/admin/users/create" class="menu-item">
                     <i>➕</i>Add User
                 </a>
-                <a href="/admin/products/create" class="menu-item">
+                <a href="<%= basePath %>/admin/products/create" class="menu-item">
                     <i>➕</i>Add Product
                 </a>
-                <a href="/admin/blogs/create" class="menu-item">
+                <a href="<%= basePath %>/admin/blogs/create" class="menu-item">
                     <i>➕</i>Create Blog
                 </a>
             </div>
@@ -391,10 +391,10 @@
         <div class="quick-actions">
             <h3>Quick Actions</h3>
             <div class="action-buttons">
-                <a href="/admin/users/create" class="action-btn">Add New User</a>
-                <a href="/admin/products/create" class="action-btn">Add New Product</a>
-                <a href="/admin/blogs/create" class="action-btn">Create New Blog</a>
-                <a href="/admin/orders" class="action-btn secondary">View Orders</a>
+                <a href="<%= basePath %>/admin/users/create" class="action-btn">Add New User</a>
+                <a href="<%= basePath %>/admin/products/create" class="action-btn">Add New Product</a>
+                <a href="<%= basePath %>/admin/blogs/create" class="action-btn">Create New Blog</a>
+                <a href="<%= basePath %>/admin/orders" class="action-btn secondary">View Orders</a>
             </div>
         </div>
     </div>
