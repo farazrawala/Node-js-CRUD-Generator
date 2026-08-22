@@ -107,6 +107,7 @@ function formatBytes(bytes) {
  *     size: number,
  *     sizeLabel: string,
  *     mtime: Date|null,
+ *     createdAt: Date|null,
  *     companyId: string|null,
  *     productId: string|null,
  *     url: string,
@@ -159,10 +160,15 @@ async function findOrphanProductImages(options = {}) {
 
     let size = 0;
     let mtime = null;
+    let createdAt = null;
     try {
       const stat = await fs.promises.stat(abs);
       size = stat.size;
-      mtime = stat.mtime;
+      mtime = stat.mtime || null;
+      // Prefer filesystem birthtime (creation); fall back to mtime when unavailable.
+      const birth =
+        stat.birthtime && Number(stat.birthtimeMs) > 0 ? stat.birthtime : null;
+      createdAt = birth || mtime;
     } catch {
       // ignore missing race
     }
@@ -174,6 +180,7 @@ async function findOrphanProductImages(options = {}) {
       size,
       sizeLabel: formatBytes(size),
       mtime,
+      createdAt,
       companyId: fileCompanyId,
       productId: fileProductId,
       url: toPublicUploadUrl(key),
