@@ -329,16 +329,6 @@ const companyAdminCRUD = adminCrudGenerator(
     "company_email",
     "company_address",
     "company_banner",
-    "default_cash_account",
-    "default_sales_account",
-    "default_purchase_account",
-    "default_sales_discount_account",
-    "default_purchase_discount_account",
-    "default_account_receivable_account",
-    "default_account_payable_account",
-    "default_shipping_account",
-    "default_equity_account_id",
-    "default_adjustment_account",
     "allow_upload_product_image_original",
     "warehouse_id",
     "status",
@@ -352,16 +342,6 @@ const companyAdminCRUD = adminCrudGenerator(
       "company_email",
       "company_address",
       "company_banner",
-      "default_cash_account",
-      "default_sales_account",
-      "default_purchase_account",
-      "default_sales_discount_account",
-      "default_purchase_discount_account",
-      "default_account_receivable_account",
-      "default_account_payable_account",
-      "default_shipping_account",
-      "default_equity_account_id",
-      "default_adjustment_account",
       "allow_upload_product_image_original",
       "warehouse_id",
       "status",
@@ -378,16 +358,6 @@ const companyAdminCRUD = adminCrudGenerator(
       deletedAt: "hidden",
       warehouse_id: "select",
       allow_upload_product_image_original: "checkbox",
-      default_cash_account: "select",
-      default_sales_account: "select",
-      default_purchase_account: "select",
-      default_sales_discount_account: "select",
-      default_purchase_discount_account: "select",
-      default_account_receivable_account: "select",
-      default_account_payable_account: "select",
-      default_shipping_account: "select",
-      default_equity_account_id: "select",
-      default_adjustment_account: "select",
     },
     fieldLabels: {
       company_logo: "Logo Image",
@@ -398,16 +368,6 @@ const companyAdminCRUD = adminCrudGenerator(
       company_address: "Address",
       warehouse_id: "Default Store",
       allow_upload_product_image_original: "Allow Upload Product Image Original",
-      default_cash_account: "Default Cash Account",
-      default_sales_account: "Default Sales Account",
-      default_purchase_account: "Default Purchase Account",
-      default_sales_discount_account: "Default Sales Discount Account",
-      default_purchase_discount_account: "Default Purchase Discount Account",
-      default_account_receivable_account: "Default Account Receivable Account",
-      default_account_payable_account: "Default Account Payable Account",
-      default_shipping_account: "Default Shipping Account",
-      default_equity_account_id: "Default Equity Account",
-      default_adjustment_account: "Default Adjustment Account",
     },
     fieldOptions: {
       status: [
@@ -488,30 +448,6 @@ const companyAdminCRUD = adminCrudGenerator(
       },
       beforeCreateForm: async (req, res) => {
         try {
-          const accountFields = [
-            "default_cash_account",
-            "default_sales_account",
-            "default_purchase_account",
-            "default_sales_discount_account",
-            "default_purchase_discount_account",
-            "default_account_receivable_account",
-            "default_account_payable_account",
-            "default_shipping_account",
-            "default_equity_account_id",
-          ];
-          console.log(
-            "🔍 beforeCreateForm - req.fieldConfig exists:",
-            !!req.fieldConfig,
-          );
-          console.log(
-            "🔍 beforeCreateForm - fieldConfig keys:",
-            req.fieldConfig ? Object.keys(req.fieldConfig) : "N/A",
-          );
-          console.log(
-            "🔍 beforeCreateForm - warehouse_id in fieldConfig:",
-            req.fieldConfig ? !!req.fieldConfig.warehouse_id : "N/A",
-          );
-
           const warehouses = await Warehouse.find({
             status: "active",
             $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
@@ -519,21 +455,7 @@ const companyAdminCRUD = adminCrudGenerator(
             .select("warehouse_name warehouse_address")
             .sort({ warehouse_name: 1 });
 
-          console.log(
-            "🔍 beforeCreateForm - warehouses found:",
-            warehouses.length,
-          );
-          console.log(
-            "🔍 beforeCreateForm - warehouse data:",
-            warehouses.map((w) => ({
-              id: w._id.toString(),
-              name: w.warehouse_name,
-            })),
-          );
-
-          // Ensure warehouse_id field exists in fieldConfig
           if (!req.fieldConfig.warehouse_id) {
-            console.log("⚠️ warehouse_id not in fieldConfig, creating it...");
             req.fieldConfig.warehouse_id = {
               name: "warehouse_id",
               type: "select",
@@ -556,48 +478,8 @@ const companyAdminCRUD = adminCrudGenerator(
           req.fieldConfig.warehouse_id.helpText =
             "Choose the warehouse for this company";
           req.warehouses = warehouses;
-
-          // Populate account dropdown options for all default account fields.
-          const accountFilter = {
-            status: "active",
-            $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
-          };
-          if (req.user?.company_id) {
-            accountFilter.company_id = req.user.company_id;
-          }
-          const accounts = await Account.find(accountFilter)
-            .select("name account_name account_number company_id")
-            .populate({ path: "company_id", select: "company_name" })
-            .sort({ name: 1 });
-          const accountOptions = accounts.map((account) => ({
-            value: account._id.toString(),
-            label: (() => {
-              const accountName =
-                account.name || account.account_name || "Unnamed Account";
-              const companyName =
-                account.company_id?.company_name || "No Company";
-              return `${accountName} (${companyName})`;
-            })(),
-          }));
-          accountFields.forEach((fieldName) => {
-            if (!req.fieldConfig[fieldName]) return;
-            req.fieldConfig[fieldName].type = "select";
-            req.fieldConfig[fieldName].options = accountOptions;
-            req.fieldConfig[fieldName].placeholder =
-              `Select ${req.fieldConfig[fieldName].label}`;
-          });
-
-          console.log(
-            "✅ beforeCreateForm - warehouse_id options set:",
-            req.fieldConfig.warehouse_id.options.length,
-          );
-          console.log(
-            "✅ beforeCreateForm - final warehouse_id config:",
-            JSON.stringify(req.fieldConfig.warehouse_id, null, 2),
-          );
         } catch (error) {
           console.error("❌ Error in beforeCreateForm for company:", error);
-          // Ensure fieldConfig.warehouse_id exists even on error
           if (!req.fieldConfig.warehouse_id) {
             req.fieldConfig.warehouse_id = {
               name: "warehouse_id",
@@ -614,27 +496,6 @@ const companyAdminCRUD = adminCrudGenerator(
       },
       beforeEditForm: async (req, res) => {
         try {
-          const accountFields = [
-            "default_cash_account",
-            "default_sales_account",
-            "default_purchase_account",
-            "default_sales_discount_account",
-            "default_purchase_discount_account",
-            "default_account_receivable_account",
-            "default_account_payable_account",
-            "default_shipping_account",
-            "default_equity_account_id",
-          ];
-          console.log("🔍 beforeEditForm called for company");
-          console.log(
-            "🔍 beforeEditForm - req.fieldConfig exists:",
-            !!req.fieldConfig,
-          );
-          console.log(
-            "🔍 beforeEditForm - fieldConfig keys:",
-            req.fieldConfig ? Object.keys(req.fieldConfig) : "N/A",
-          );
-
           const warehouses = await Warehouse.find({
             status: "active",
             $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
@@ -642,21 +503,7 @@ const companyAdminCRUD = adminCrudGenerator(
             .select("warehouse_name warehouse_address")
             .sort({ warehouse_name: 1 });
 
-          console.log(
-            "🔍 beforeEditForm - warehouses found:",
-            warehouses.length,
-          );
-          console.log(
-            "🔍 beforeEditForm - warehouse data:",
-            warehouses.map((w) => ({
-              id: w._id.toString(),
-              name: w.warehouse_name,
-            })),
-          );
-
-          // Ensure warehouse_id field exists in fieldConfig
           if (!req.fieldConfig.warehouse_id) {
-            console.log("⚠️ warehouse_id not in fieldConfig, creating it...");
             req.fieldConfig.warehouse_id = {
               name: "warehouse_id",
               type: "select",
@@ -679,47 +526,8 @@ const companyAdminCRUD = adminCrudGenerator(
           req.fieldConfig.warehouse_id.placeholder = "Select Warehouse";
           req.fieldConfig.warehouse_id.helpText =
             "Choose the warehouse for this company";
-
-          const accountFilter = {
-            status: "active",
-            $or: [{ deletedAt: { $exists: false } }, { deletedAt: null }],
-          };
-          if (req.user?.company_id) {
-            accountFilter.company_id = req.user.company_id;
-          }
-          const accounts = await Account.find(accountFilter)
-            .select("name account_name account_number company_id")
-            .populate({ path: "company_id", select: "company_name" })
-            .sort({ name: 1 });
-          const accountOptions = accounts.map((account) => ({
-            value: account._id.toString(),
-            label: (() => {
-              const accountName =
-                account.name || account.account_name || "Unnamed Account";
-              const companyName =
-                account.company_id?.company_name || "No Company";
-              return `${accountName} (${companyName})`;
-            })(),
-          }));
-          accountFields.forEach((fieldName) => {
-            if (!req.fieldConfig[fieldName]) return;
-            req.fieldConfig[fieldName].type = "select";
-            req.fieldConfig[fieldName].options = accountOptions;
-            req.fieldConfig[fieldName].placeholder =
-              `Select ${req.fieldConfig[fieldName].label}`;
-          });
-
-          console.log(
-            "✅ beforeEditForm - warehouse_id options set:",
-            req.fieldConfig.warehouse_id.options.length,
-          );
-          console.log(
-            "✅ beforeEditForm - final warehouse_id config:",
-            JSON.stringify(req.fieldConfig.warehouse_id, null, 2),
-          );
         } catch (error) {
           console.error("❌ Error in beforeEditForm for company:", error);
-          // Ensure fieldConfig.warehouse_id exists even on error
           if (!req.fieldConfig.warehouse_id) {
             req.fieldConfig.warehouse_id = {
               name: "warehouse_id",
