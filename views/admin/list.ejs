@@ -6,7 +6,7 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <% if (typeof todayOrdersChart !== 'undefined' && todayOrdersChart) { %>
+    <% if (typeof ordersTrendChart !== 'undefined' && ordersTrendChart) { %>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <% } %>
     <style>
@@ -85,6 +85,98 @@
             border-color: #2563eb;
         }
         th.col-hidden, td.col-hidden { display: none !important; }
+
+        .orders-trend-legend {
+            max-height: 7.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            padding: 0.25rem 0;
+        }
+        .orders-trend-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.75rem;
+            color: #4b5563;
+            cursor: pointer;
+            user-select: none;
+            padding: 0.15rem 0.35rem;
+            border-radius: 0.25rem;
+        }
+        .orders-trend-legend-item:hover { background: #f3f4f6; }
+        .orders-trend-legend-item.is-hidden {
+            opacity: 0.4;
+            text-decoration: line-through;
+        }
+        .orders-trend-swatch {
+            width: 0.65rem;
+            height: 0.65rem;
+            border-radius: 9999px;
+            flex-shrink: 0;
+        }
+        .orders-trend-chart-wrap {
+            position: relative;
+            width: 100%;
+            min-height: 320px;
+            height: clamp(320px, 42vh, 480px);
+        }
+
+        .status-toggle {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        .status-toggle input {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .status-toggle-track {
+            width: 2.75rem;
+            height: 1.5rem;
+            background: #d1d5db;
+            border-radius: 9999px;
+            position: relative;
+            transition: background 0.2s ease;
+            flex-shrink: 0;
+        }
+        .status-toggle-track::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 1.25rem;
+            height: 1.25rem;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 9999px;
+            transition: transform 0.2s ease;
+        }
+        .status-toggle input:checked + .status-toggle-track {
+            background: #16a34a;
+        }
+        .status-toggle input:checked + .status-toggle-track::after {
+            transform: translateX(1.25rem);
+            border-color: #fff;
+        }
+        .status-toggle.is-busy {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+        .status-toggle-label {
+            margin-left: 0.5rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #6b7280;
+        }
+        .status-toggle input:checked ~ .status-toggle-label {
+            color: #15803d;
+        }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -137,93 +229,209 @@
             </div>
         </div>
 
-        <% if (typeof todayOrdersChart !== 'undefined' && todayOrdersChart) { %>
-        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-            <div class="flex flex-wrap items-start justify-between gap-4 mb-4">
+        <% if (typeof ordersTrendChart !== 'undefined') { %>
+        <% if (!ordersTrendChart) { %>
+        <div class="bg-white rounded-lg shadow-sm border border-red-200 p-6 mb-6">
+            <h3 class="text-lg font-semibold text-gray-900 mb-1">Orders Trend — Last 30 Days</h3>
+            <p class="text-sm text-red-600">Could not load order analytics. Please refresh the page or try again later.</p>
+        </div>
+        <% } else { %>
+        <% const trendSummary = ordersTrendChart.summary || {}; %>
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6 overflow-hidden">
+            <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
                 <div>
-                    <h3 class="text-lg font-semibold text-gray-900">Today's Orders by Company</h3>
+                    <h3 class="text-lg font-semibold text-gray-900">Orders Trend — Last <%= ordersTrendChart.days || 30 %> Days</h3>
                     <p class="text-sm text-gray-500">
-                        <%= todayOrdersChart.dateLabel %>
-                        · <%= todayOrdersChart.timeZone || 'local' %>
+                        <%= ordersTrendChart.labelsShort && ordersTrendChart.labelsShort.length
+                              ? (ordersTrendChart.labelsShort[0] + ' – ' + ordersTrendChart.labelsShort[ordersTrendChart.labelsShort.length - 1])
+                              : '' %>
+                        · <%= ordersTrendChart.timeZone || 'local' %>
                     </p>
                 </div>
-                <div class="flex flex-wrap gap-4 text-sm">
-                    <div class="px-3 py-2 rounded-md bg-blue-50 text-blue-800 border border-blue-100">
-                        <span class="font-medium"><%= todayOrdersChart.totalOrders %></span> orders today
-                    </div>
-                    <div class="px-3 py-2 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-100">
-                        Total
-                        <span class="font-medium">
-                            <%= Number(todayOrdersChart.totalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 }) %>
-                        </span>
-                    </div>
+                <button type="button" id="ordersTrendShowAllBtn"
+                        class="text-xs font-medium text-blue-600 hover:text-blue-800 px-2 py-1 rounded border border-blue-100 bg-blue-50">
+                    Show all companies
+                </button>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+                <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+                    <p class="text-xs text-gray-500">Total Orders (<%= ordersTrendChart.days || 30 %>d)</p>
+                    <p class="text-lg font-semibold text-gray-900"><%= Number(trendSummary.totalOrders || 0).toLocaleString() %></p>
+                </div>
+                <div class="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2.5">
+                    <p class="text-xs text-blue-700">Orders Today</p>
+                    <p class="text-lg font-semibold text-blue-900"><%= Number(trendSummary.ordersToday || 0).toLocaleString() %></p>
+                </div>
+                <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+                    <p class="text-xs text-gray-500">Active Companies</p>
+                    <p class="text-lg font-semibold text-gray-900"><%= Number(trendSummary.activeCompanies || 0).toLocaleString() %></p>
+                </div>
+                <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+                    <p class="text-xs text-gray-500">Avg Orders / Day</p>
+                    <p class="text-lg font-semibold text-gray-900"><%= Number(trendSummary.avgOrdersPerDay || 0).toLocaleString() %></p>
+                </div>
+                <div class="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2.5">
+                    <p class="text-xs text-emerald-700">Top Company</p>
+                    <p class="text-sm font-semibold text-emerald-900 truncate" title="<%= trendSummary.topCompany ? trendSummary.topCompany.companyName : '—' %>">
+                        <%= trendSummary.topCompany ? trendSummary.topCompany.companyName : '—' %>
+                    </p>
+                    <% if (trendSummary.topCompany) { %>
+                        <p class="text-xs text-emerald-700"><%= Number(trendSummary.topCompany.total || 0).toLocaleString() %> orders</p>
+                    <% } %>
+                </div>
+                <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+                    <p class="text-xs text-gray-500">vs Prior <%= ordersTrendChart.days || 30 %>d</p>
+                    <% const growth = trendSummary.growthPct; %>
+                    <p class="text-lg font-semibold <%= growth > 0 ? 'text-emerald-700' : (growth < 0 ? 'text-red-600' : 'text-gray-900') %>">
+                        <%= growth > 0 ? '+' : '' %><%= growth == null ? '—' : growth %>%
+                    </p>
                 </div>
             </div>
-            <div class="relative w-full" style="min-height: 280px; height: 320px;">
-                <canvas id="todayOrdersByCompanyChart"></canvas>
-            </div>
-            <% if (!todayOrdersChart.totalOrders) { %>
-                <p class="text-center text-sm text-gray-500 mt-2">No orders placed today yet.</p>
+
+            <% if (!trendSummary.totalOrders) { %>
+                <div class="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-10 text-center text-sm text-gray-500">
+                    No orders placed in the last <%= ordersTrendChart.days || 30 %> days.
+                </div>
+            <% } else { %>
+                <div id="ordersTrendLegend" class="orders-trend-legend mb-3" aria-label="Company legend"></div>
+                <div class="orders-trend-chart-wrap">
+                    <canvas id="ordersTrendChartCanvas"></canvas>
+                </div>
             <% } %>
         </div>
+        <% if (trendSummary.totalOrders) { %>
         <script>
         (function () {
-            var chartData = <%- JSON.stringify({
-              labels: todayOrdersChart.labels,
-              counts: todayOrdersChart.counts,
-              amounts: todayOrdersChart.amounts,
+            var trend = <%- JSON.stringify({
+              labelsShort: ordersTrendChart.labelsShort,
+              labelsLong: ordersTrendChart.labelsLong,
+              series: (ordersTrendChart.series || []).map(function (s) {
+                return {
+                  companyId: s.companyId,
+                  companyName: s.companyName,
+                  color: s.color,
+                  total: s.total,
+                  points: s.points,
+                };
+              }),
             }) %>;
-            var canvas = document.getElementById('todayOrdersByCompanyChart');
+
+            var canvas = document.getElementById('ordersTrendChartCanvas');
             if (!canvas || typeof Chart === 'undefined') return;
-            new Chart(canvas.getContext('2d'), {
-                type: 'bar',
+
+            // Default: show companies with activity; zeros stay hidden until "Show all"
+            var visibleByDefault = {};
+            trend.series.forEach(function (s, i) {
+                visibleByDefault[i] = s.total > 0;
+            });
+
+            var datasets = trend.series.map(function (s, i) {
+                return {
+                    label: s.companyName,
+                    data: s.points,
+                    borderColor: s.color,
+                    backgroundColor: s.color,
+                    borderWidth: 2,
+                    tension: 0.25,
+                    pointRadius: 2,
+                    pointHoverRadius: 5,
+                    pointHitRadius: 8,
+                    fill: false,
+                    hidden: !visibleByDefault[i],
+                };
+            });
+
+            var chart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
                 data: {
-                    labels: chartData.labels,
-                    datasets: [{
-                        label: "Today's orders",
-                        data: chartData.counts,
-                        backgroundColor: 'rgba(37, 99, 235, 0.75)',
-                        borderColor: 'rgba(37, 99, 235, 1)',
-                        borderWidth: 1,
-                        borderRadius: 4,
-                        maxBarThickness: 48,
-                    }]
+                    labels: trend.labelsShort,
+                    datasets: datasets,
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', axis: 'x', intersect: false },
                     plugins: {
                         legend: { display: false },
                         tooltip: {
                             callbacks: {
-                                afterLabel: function (ctx) {
-                                    var amt = chartData.amounts[ctx.dataIndex];
-                                    if (amt == null) return '';
-                                    return 'Amount: ' + Number(amt).toLocaleString();
-                                }
-                            }
-                        }
+                                title: function (items) {
+                                    if (!items.length) return '';
+                                    var idx = items[0].dataIndex;
+                                    return trend.labelsLong[idx] || trend.labelsShort[idx] || '';
+                                },
+                                label: function (ctx) {
+                                    return ctx.dataset.label + ' — Orders: ' + (ctx.parsed.y || 0);
+                                },
+                            },
+                        },
                     },
                     scales: {
                         x: {
-                            ticks: {
-                                maxRotation: 45,
-                                minRotation: 0,
-                                autoSkip: true,
-                                maxTicksLimit: 20,
-                            },
                             grid: { display: false },
+                            ticks: {
+                                autoSkip: true,
+                                maxTicksLimit: 12,
+                                maxRotation: 0,
+                                minRotation: 0,
+                            },
                         },
                         y: {
                             beginAtZero: true,
                             ticks: { precision: 0 },
                             title: { display: true, text: 'Orders' },
-                        }
-                    }
-                }
+                            grid: { color: 'rgba(148, 163, 184, 0.25)' },
+                        },
+                    },
+                },
             });
+
+            var legendEl = document.getElementById('ordersTrendLegend');
+            function isHidden(i) {
+                return chart.isDatasetVisible
+                    ? !chart.isDatasetVisible(i)
+                    : !!chart.data.datasets[i].hidden;
+            }
+            function renderLegend() {
+                if (!legendEl) return;
+                legendEl.innerHTML = '';
+                chart.data.datasets.forEach(function (ds, i) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'orders-trend-legend-item' + (isHidden(i) ? ' is-hidden' : '');
+                    btn.innerHTML = '<span class="orders-trend-swatch" style="background:' + ds.borderColor + '"></span>' +
+                        '<span></span>';
+                    btn.querySelector('span:last-child').textContent = ds.label + ' (' + (trend.series[i].total || 0) + ')';
+                    btn.addEventListener('click', function () {
+                        if (chart.setDatasetVisibility) {
+                            chart.setDatasetVisibility(i, !chart.isDatasetVisible(i));
+                        } else {
+                            chart.data.datasets[i].hidden = !chart.data.datasets[i].hidden;
+                        }
+                        chart.update();
+                        renderLegend();
+                    });
+                    legendEl.appendChild(btn);
+                });
+            }
+            renderLegend();
+
+            var showAllBtn = document.getElementById('ordersTrendShowAllBtn');
+            if (showAllBtn) {
+                showAllBtn.addEventListener('click', function () {
+                    chart.data.datasets.forEach(function (ds, i) {
+                        if (chart.setDatasetVisibility) chart.setDatasetVisibility(i, true);
+                        else ds.hidden = false;
+                    });
+                    chart.update();
+                    renderLegend();
+                });
+            }
         })();
         </script>
+        <% } %>
+        <% } %>
         <% } %>
 
         <% if (customTabs && customTabs.length > 0) { %>
@@ -296,7 +504,10 @@
 
         <!-- Search and Filters -->
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-            <form method="GET" class="space-y-4">
+            <form id="listFiltersForm" method="GET" class="space-y-4">
+                <% if (typeof showDeleted !== 'undefined' && showDeleted) { %>
+                    <input type="hidden" name="deleted" value="true">
+                <% } %>
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <!-- Search -->
                     <div>
@@ -309,7 +520,8 @@
                     <!-- Sort By -->
                     <div>
                         <label for="sortBy" class="block text-sm font-medium text-gray-700 mb-2">Sort By</label>
-                        <select id="sortBy" name="sortBy" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <select id="sortBy" name="sortBy" onchange="this.form.submit()"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <option value="createdAt" <%= pagination.sortBy === 'createdAt' ? 'selected' : '' %>>Created Date</option>
                             <% if (filters.sortable && filters.sortable.includes('name')) { %>
                                 <option value="name" <%= pagination.sortBy === 'name' ? 'selected' : '' %>>Name</option>
@@ -323,7 +535,8 @@
                     <!-- Sort Order -->
                     <div>
                         <label for="sortOrder" class="block text-sm font-medium text-gray-700 mb-2">Sort Order</label>
-                        <select id="sortOrder" name="sortOrder" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <select id="sortOrder" name="sortOrder" onchange="this.form.submit()"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <option value="desc" <%= pagination.sortOrder === 'desc' ? 'selected' : '' %>>Newest First</option>
                             <option value="asc" <%= pagination.sortOrder === 'asc' ? 'selected' : '' %>>Oldest First</option>
                         </select>
@@ -332,7 +545,7 @@
                     <!-- Company -->
                     <div>
                         <label for="company_id" class="block text-sm font-medium text-gray-700 mb-2">Company</label>
-                        <select id="company_id" name="company_id"
+                        <select id="company_id" name="company_id" onchange="this.form.submit()"
                                 class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <option value="">All Companies</option>
                             <% if (companies && companies.length > 0) { %>
@@ -391,6 +604,9 @@
                 <table id="adminListTable" class="min-w-full divide-y divide-gray-200" data-model="<%= modelName %>">
                     <thead class="bg-gray-50">
                         <tr>
+                            <th data-col="serialNo" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-16">
+                                Serial No
+                            </th>
                             <% Object.keys(listFieldConfig).forEach(function(fieldName) { var field = listFieldConfig[fieldName]; %>
                                 <th data-col="<%= fieldName %>" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                     <%= field.label %>
@@ -406,11 +622,49 @@
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
                         <% if (records && records.length > 0) { %>
-                            <% records.forEach(record => { %>
+                            <% 
+                            var serialStart = ((pagination && pagination.currentPage ? pagination.currentPage : 1) - 1) * (pagination && pagination.itemsPerPage ? pagination.itemsPerPage : records.length);
+                            records.forEach(function(record, recordIndex) { 
+                            %>
                                 <tr class="hover:bg-gray-50">
+                                    <td data-col="serialNo" class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 font-medium">
+                                        <%= serialStart + recordIndex + 1 %>
+                                    </td>
                                     <% Object.keys(listFieldConfig).forEach(function(fieldName) { var field = listFieldConfig[fieldName]; %>
                                         <td data-col="<%= fieldName %>" class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                            <% if (field.type === 'select' && record[fieldName]) { %>
+                                            <% if (fieldName === 'status' && field.type === 'select') { %>
+                                                <% 
+                                                  const statusOpts = Array.isArray(field.options) ? field.options : [];
+                                                  const isBinaryStatus = statusOpts.length === 0 || (
+                                                    statusOpts.length === 2 &&
+                                                    statusOpts.some(o => String(o.value) === 'active') &&
+                                                    statusOpts.some(o => String(o.value) === 'inactive')
+                                                  );
+                                                  const statusValue = String(record[fieldName] || 'inactive').toLowerCase();
+                                                  const isActive = statusValue === 'active' || statusValue === 'true' || statusValue === '1';
+                                                  const canToggle = isBinaryStatus && !(typeof softDelete !== 'undefined' && softDelete && typeof showDeleted !== 'undefined' && showDeleted);
+                                                %>
+                                                <% if (canToggle) { %>
+                                                    <label class="status-toggle" title="Toggle status">
+                                                        <input type="checkbox"
+                                                               <%= isActive ? 'checked' : '' %>
+                                                               onchange="toggleRecordStatus('<%= record._id %>', this)">
+                                                        <span class="status-toggle-track"></span>
+                                                        <span class="status-toggle-label"><%= isActive ? 'On' : 'Off' %></span>
+                                                    </label>
+                                                <% } else { %>
+                                                    <% 
+                                                      let statusDisplay = statusValue || '-';
+                                                      if (statusOpts.length) {
+                                                        const matched = statusOpts.find(o => String(o.value) === String(record[fieldName]));
+                                                        if (matched) statusDisplay = matched.label;
+                                                      }
+                                                    %>
+                                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium <%= isActive ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800' %>">
+                                                        <%= statusDisplay %>
+                                                    </span>
+                                                <% } %>
+                                            <% } else if (field.type === 'select' && record[fieldName]) { %>
                                                 <% 
                                                 // Handle select field with options
                                                 let selectedValue = record[fieldName];
@@ -661,7 +915,7 @@
                             <% }); %>
                         <% } else { %>
                             <tr>
-                                <td colspan="<%= Object.keys(fieldConfig).length + 2 %>" class="px-6 py-12 text-center text-gray-500">
+                                <td colspan="<%= Object.keys(listFieldConfig).length + 3 %>" class="px-6 py-12 text-center text-gray-500">
                                     <div class="flex flex-col items-center">
                                         <i class="fas fa-inbox text-4xl mb-4 text-gray-300"></i>
                                         <p class="text-lg font-medium">No <%= singularName.toLowerCase() %>s found</p>
@@ -951,6 +1205,37 @@
             recordToDelete = id;
             document.getElementById('deleteModal').classList.remove('hidden');
         }
+
+        async function toggleRecordStatus(id, checkbox) {
+            const label = checkbox.closest('.status-toggle');
+            const textEl = label ? label.querySelector('.status-toggle-label') : null;
+            const previousChecked = !checkbox.checked;
+            const nextStatus = checkbox.checked ? 'active' : 'inactive';
+
+            if (label) label.classList.add('is-busy');
+
+            try {
+                const response = await fetch(`<%= basePath %>/admin/<%= modelName %>/${id}/toggle-status`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: nextStatus })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.message || 'Failed to update status');
+                }
+                const active = (data.data && data.data.status === 'active') || checkbox.checked;
+                checkbox.checked = active;
+                if (textEl) textEl.textContent = active ? 'On' : 'Off';
+            } catch (error) {
+                checkbox.checked = previousChecked;
+                if (textEl) textEl.textContent = previousChecked ? 'On' : 'Off';
+                console.error('Status toggle error:', error);
+                alert(error.message || 'Error updating status');
+            } finally {
+                if (label) label.classList.remove('is-busy');
+            }
+        }
         
         function closeDeleteModal() {
             document.getElementById('deleteModal').classList.add('hidden');
@@ -1108,11 +1393,11 @@
             const columns = headerCells.map((th) => ({
                 key: th.getAttribute('data-col'),
                 label: (th.textContent || '').trim() || th.getAttribute('data-col'),
-                alwaysVisible: th.getAttribute('data-col') === 'actions',
+                alwaysVisible: th.getAttribute('data-col') === 'actions' || th.getAttribute('data-col') === 'serialNo',
             })).filter((c) => c.key);
 
             function defaultVisible(key) {
-                if (key === 'actions') return true;
+                if (key === 'actions' || key === 'serialNo') return true;
                 // Company list is very wide — hide default GL account columns until enabled.
                 if (modelName === 'company' && /account/i.test(key) && /default_|receivable|payable/i.test(key)) {
                     return false;

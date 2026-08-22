@@ -528,6 +528,15 @@ modelSchema.index(
   },
 );
 
+/** Admin analytics: date-range scan then group by company/day. */
+modelSchema.index(
+  { createdAt: -1, company_id: 1 },
+  {
+    name: "created_company_analytics_1",
+    partialFilterExpression: { deletedAt: null },
+  },
+);
+
 modelSchema.pre("validate", function (next) {
   this.name = trimOrEmpty(this.name);
   this.email = trimOrEmpty(this.email);

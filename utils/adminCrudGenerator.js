@@ -248,16 +248,21 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       const actualLimit = Math.min(parseInt(limit), pagination.maxLimit);
       const total = await Model.countDocuments(query);
 
-      // Execute query
+      // Execute query — always include status when the model exposes it in list fields
+      let selectProjection;
+      if (includedFields.length > 0) {
+        const selectSet = new Set(includedFields);
+        if (fieldConfig.status) selectSet.add("status");
+        selectProjection = Array.from(selectSet).join(" ");
+      } else {
+        selectProjection = `-${excludedFields.join(" -")}`;
+      }
+
       let records = await Model.find(query)
         .sort(sort)
         .skip(skip)
         .limit(actualLimit)
-        .select(
-          includedFields.length > 0 ?
-            includedFields.join(" ")
-          : `-${excludedFields.join(" -")}`,
-        );
+        .select(selectProjection);
 
       // Apply custom middleware
       if (middleware.afterQuery) {
@@ -2607,6 +2612,75 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
   }
 
   /**
+   * TOGGLE STATUS - Flip active/inactive from the list view
+   */
+  async function toggleStatus(req, res) {
+    try {
+      const { id } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid ${singularName} ID format`,
+        });
+      }
+
+      if (!Model.schema.paths.status) {
+        return res.status(400).json({
+          success: false,
+          message: `${titleCase} does not support status toggling`,
+        });
+      }
+
+      let query = { _id: id };
+      if (softDelete) {
+        query.$or = [
+          { deletedAt: { $exists: false } },
+          { deletedAt: null },
+        ];
+      }
+
+      const record = await Model.findOne(query).select("status");
+      if (!record) {
+        return res.status(404).json({
+          success: false,
+          message: `${titleCase} not found`,
+        });
+      }
+
+      const requested = req.body && req.body.status;
+      let nextStatus;
+      if (requested === "active" || requested === "inactive") {
+        nextStatus = requested;
+      } else {
+        nextStatus = record.status === "active" ? "inactive" : "active";
+      }
+
+      const updated = await Model.findOneAndUpdate(
+        query,
+        { $set: { status: nextStatus } },
+        { new: true },
+      );
+
+      if (hooks.afterUpdate && updated) {
+        await hooks.afterUpdate(updated, req);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `${titleCase} status updated to ${nextStatus}`,
+        data: {
+          id: updated._id,
+          status: updated.status,
+        },
+      });
+    } catch (error) {
+      const errorResponse = await handleError(error, "toggleStatus", req);
+      return res.status(errorResponse.statusCode).json(errorResponse);
+    }
+  }
+
+  /**
    * DELETE - Delete record by ID
    */
   async function deleteRecord(req, res) {
@@ -3149,6 +3223,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     });
     router.put("/:id", update); // UPDATE action
     router.post("/:id", update); // UPDATE action (fallback for method override issues)
+    router.patch("/:id/toggle-status", toggleStatus); // STATUS toggle from list
+    router.post("/:id/toggle-status", toggleStatus); // STATUS toggle fallback
     router.delete("/:id", deleteRecord); // DELETE action
 
     // Soft delete routes (only if soft delete is enabled)
@@ -3172,6 +3248,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     insert,
     editForm,
     update,
+    toggleStatus,
     deleteRecord,
     // Soft delete functions (only if enabled)
     ...(softDelete ?

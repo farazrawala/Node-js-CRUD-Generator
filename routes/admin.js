@@ -34,7 +34,7 @@ const {
   validateDefaultVendorFlag,
   syncDefaultVendorFlag,
 } = require("../utils/userDefaultVendor");
-const { getTodayOrdersByCompanyChart } = require("../utils/todayOrdersByCompany");
+const { getOrdersDailyTrendByCompany } = require("../utils/todayOrdersByCompany");
 
 /**
  * Auto-generate Admin CRUD with UI Forms for User model
@@ -323,11 +323,11 @@ const companyAdminCRUD = adminCrudGenerator(
   Company,
   "company",
   [
+    "company_logo",
     "company_name",
     "company_phone",
     "company_email",
     "company_address",
-    "company_logo",
     "company_banner",
     "default_cash_account",
     "default_sales_account",
@@ -342,15 +342,15 @@ const companyAdminCRUD = adminCrudGenerator(
     "allow_upload_product_image_original",
     "warehouse_id",
     "status",
-  ], // Headings.
+  ], // Headings. List order: logo, then company name.
   {
     excludedFields: ["__v"],
     includedFields: [
+      "company_logo",
       "company_name",
       "company_phone",
       "company_email",
       "company_address",
-      "company_logo",
       "company_banner",
       "default_cash_account",
       "default_sales_account",
@@ -364,6 +364,7 @@ const companyAdminCRUD = adminCrudGenerator(
       "default_adjustment_account",
       "allow_upload_product_image_original",
       "warehouse_id",
+      "status",
     ],
     searchableFields: ["company_name", "company_email", "company_phone"],
     filterableFields: ["status"],
@@ -1565,15 +1566,33 @@ const orderAdminCRUD = adminCrudGenerator(
     },
     listExtras: async () => {
       try {
-        const todayOrdersChart = await getTodayOrdersByCompanyChart(
+        const ordersTrendChart = await getOrdersDailyTrendByCompany(
           Order,
           Company,
+          { days: 30 },
         );
-        return { todayOrdersChart };
+        return { ordersTrendChart };
       } catch (err) {
-        console.error("todayOrdersChart error:", err);
-        return { todayOrdersChart: null };
+        console.error("ordersTrendChart error:", err);
+        return { ordersTrendChart: null };
       }
+    },
+    mountExtraRoutes: (orderRouter) => {
+      orderRouter.get("/analytics/daily", async (req, res) => {
+        try {
+          const days = Number(req.query.days) || 30;
+          const data = await getOrdersDailyTrendByCompany(Order, Company, {
+            days,
+          });
+          return res.json({ success: true, data });
+        } catch (err) {
+          console.error("orders analytics/daily error:", err);
+          return res.status(500).json({
+            success: false,
+            message: err.message || "Failed to load order analytics",
+          });
+        }
+      });
     },
     middleware: {
       afterQuery: async (records, req) => {
