@@ -177,6 +177,55 @@
         .status-toggle input:checked ~ .status-toggle-label {
             color: #15803d;
         }
+
+        #adminToastContainer {
+            position: fixed;
+            top: 5rem;
+            right: 1rem;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            max-width: min(22rem, calc(100vw - 2rem));
+            pointer-events: none;
+        }
+        .admin-toast {
+            pointer-events: auto;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            padding: 0.875rem 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15);
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            font-size: 0.875rem;
+            color: #111827;
+            animation: adminToastIn 0.2s ease-out;
+        }
+        .admin-toast.is-leaving {
+            animation: adminToastOut 0.2s ease-in forwards;
+        }
+        .admin-toast.success {
+            border-color: #86efac;
+            background: #f0fdf4;
+            color: #166534;
+        }
+        .admin-toast.error {
+            border-color: #fca5a5;
+            background: #fef2f2;
+            color: #991b1b;
+        }
+        .admin-toast i { margin-top: 0.1rem; }
+        .admin-toast-msg { flex: 1; line-height: 1.35; }
+        @keyframes adminToastIn {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes adminToastOut {
+            from { opacity: 1; transform: translateY(0); }
+            to { opacity: 0; transform: translateY(-6px); }
+        }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -508,6 +557,7 @@
                 <% if (typeof showDeleted !== 'undefined' && showDeleted) { %>
                     <input type="hidden" name="deleted" value="true">
                 <% } %>
+                <input type="hidden" name="limit" id="listFilterLimit" value="<%= pagination.itemsPerPage || 20 %>">
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <!-- Search -->
                     <div>
@@ -932,51 +982,84 @@
             </div>
         </div>
 
-        <!-- Pagination -->
-        <% if (pagination.totalPages > 1) { %>
+        <!-- Pagination / Per page -->
+        <% if (pagination && pagination.totalItems > 0) { %>
+            <%
+              const perPageOptions = (pagination.perPageOptions && pagination.perPageOptions.length)
+                ? pagination.perPageOptions
+                : [10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+              const pageQueryBase = `limit=${pagination.itemsPerPage}&sortBy=${pagination.sortBy || 'createdAt'}&sortOrder=${pagination.sortOrder || 'desc'}&search=${encodeURIComponent(filters.search || '')}${filters.company_id ? `&company_id=${encodeURIComponent(filters.company_id)}` : ''}${typeof showDeleted !== 'undefined' && showDeleted ? '&deleted=true' : ''}`;
+              const fromItem = ((pagination.currentPage - 1) * pagination.itemsPerPage) + 1;
+              const toItem = Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems);
+            %>
             <div class="bg-white rounded-lg shadow-sm border border-gray-200 px-6 py-4 mt-6">
-                <div class="flex items-center justify-between">
-                    <div class="text-sm text-gray-700">
-                        Showing <%= ((pagination.currentPage - 1) * pagination.itemsPerPage) + 1 %> 
-                        to <%= Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems) %> 
-                        of <%= pagination.totalItems %> results
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex flex-wrap items-center gap-3 text-sm text-gray-700">
+                        <span>
+                            Showing <%= fromItem %>
+                            to <%= toItem %>
+                            of <%= pagination.totalItems %> results
+                        </span>
+                        <label class="inline-flex items-center gap-2">
+                            <span class="text-gray-500">Per page</span>
+                            <select id="perPageSelect"
+                                    class="px-2 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                                    onchange="changeListPerPage(this.value)">
+                                <% perPageOptions.forEach(function(n) { %>
+                                    <option value="<%= n %>" <%= Number(pagination.itemsPerPage) === Number(n) ? 'selected' : '' %>><%= n %></option>
+                                <% }); %>
+                                <% if (perPageOptions.indexOf(Number(pagination.itemsPerPage)) === -1) { %>
+                                    <option value="<%= pagination.itemsPerPage %>" selected><%= pagination.itemsPerPage %></option>
+                                <% } %>
+                            </select>
+                        </label>
                     </div>
-                    
-                    <div class="flex space-x-2">
-                        <% 
-                          const pageQueryBase = `limit=${pagination.itemsPerPage}&sortBy=${pagination.sortBy || 'createdAt'}&sortOrder=${pagination.sortOrder || 'desc'}&search=${encodeURIComponent(filters.search || '')}${filters.company_id ? `&company_id=${encodeURIComponent(filters.company_id)}` : ''}${typeof showDeleted !== 'undefined' && showDeleted ? '&deleted=true' : ''}`;
-                        %>
+
+                    <% if (pagination.totalPages > 1) { %>
+                    <div class="flex flex-wrap gap-2">
                         <% if (pagination.hasPrevPage) { %>
-                            <a href="?page=<%= pagination.currentPage - 1 %>&<%= pageQueryBase %>" 
+                            <a href="?page=<%= pagination.currentPage - 1 %>&<%= pageQueryBase %>"
                                class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
                                 Previous
                             </a>
                         <% } %>
-                        
+
                         <% for (let i = 1; i <= pagination.totalPages; i++) { %>
                             <% if (i === pagination.currentPage) { %>
                                 <span class="px-3 py-2 bg-blue-600 text-white rounded-md text-sm font-medium">
                                     <%= i %>
                                 </span>
-                            <% } else { %>
-                                <a href="?page=<%= i %>&<%= pageQueryBase %>" 
+                            <% } else if (
+                                i === 1 ||
+                                i === pagination.totalPages ||
+                                Math.abs(i - pagination.currentPage) <= 2
+                            ) { %>
+                                <a href="?page=<%= i %>&<%= pageQueryBase %>"
                                    class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
                                     <%= i %>
                                 </a>
+                            <% } else if (
+                                i === pagination.currentPage - 3 ||
+                                i === pagination.currentPage + 3
+                            ) { %>
+                                <span class="px-2 py-2 text-sm text-gray-400">…</span>
                             <% } %>
                         <% } %>
-                        
+
                         <% if (pagination.hasNextPage) { %>
-                            <a href="?page=<%= pagination.currentPage + 1 %>&<%= pageQueryBase %>" 
+                            <a href="?page=<%= pagination.currentPage + 1 %>&<%= pageQueryBase %>"
                                class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
                                 Next
                             </a>
                         <% } %>
                     </div>
+                    <% } %>
                 </div>
             </div>
         <% } %>
     </main>
+
+    <div id="adminToastContainer" aria-live="polite" aria-atomic="true"></div>
 
     <!-- Delete Confirmation Modal -->
     <div id="deleteModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
@@ -1206,6 +1289,60 @@
             document.getElementById('deleteModal').classList.remove('hidden');
         }
 
+        function showAdminToast(message, type) {
+            const container = document.getElementById('adminToastContainer');
+            if (!container) {
+                alert(message);
+                return;
+            }
+            const toast = document.createElement('div');
+            toast.className = 'admin-toast ' + (type === 'success' ? 'success' : 'error');
+            toast.innerHTML =
+                '<i class="fas ' + (type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle') + '"></i>' +
+                '<div class="admin-toast-msg"></div>';
+            toast.querySelector('.admin-toast-msg').textContent = message || (type === 'success' ? 'Success' : 'Something went wrong');
+            container.appendChild(toast);
+            setTimeout(function () {
+                toast.classList.add('is-leaving');
+                setTimeout(function () { toast.remove(); }, 200);
+            }, 3200);
+        }
+
+        (function showPendingAdminToast() {
+            try {
+                const raw = sessionStorage.getItem('adminToast');
+                if (!raw) return;
+                sessionStorage.removeItem('adminToast');
+                const pending = JSON.parse(raw);
+                if (pending && pending.message) {
+                    showAdminToast(pending.message, pending.type || 'success');
+                }
+            } catch (e) { /* ignore */ }
+        })();
+
+        function changeListPerPage(limit) {
+            const nextLimit = parseInt(limit, 10);
+            if (!nextLimit || nextLimit < 1) {
+                showAdminToast('Invalid per page value', 'error');
+                return;
+            }
+            try {
+                const params = new URLSearchParams(window.location.search);
+                params.set('limit', String(nextLimit));
+                params.set('page', '1');
+                const hiddenLimit = document.getElementById('listFilterLimit');
+                if (hiddenLimit) hiddenLimit.value = String(nextLimit);
+                sessionStorage.setItem('adminToast', JSON.stringify({
+                    message: 'Showing ' + nextLimit + ' per page',
+                    type: 'success',
+                }));
+                window.location.search = params.toString();
+            } catch (err) {
+                console.error(err);
+                showAdminToast('Failed to change page size', 'error');
+            }
+        }
+
         async function toggleRecordStatus(id, checkbox) {
             const label = checkbox.closest('.status-toggle');
             const textEl = label ? label.querySelector('.status-toggle-label') : null;
@@ -1214,24 +1351,51 @@
 
             if (label) label.classList.add('is-busy');
 
+            const url = `<%= basePath %>/admin/<%= modelName %>/${id}/toggle-status`;
+            const requestOpts = {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify({ status: nextStatus }),
+            };
+
             try {
-                const response = await fetch(`<%= basePath %>/admin/<%= modelName %>/${id}/toggle-status`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ status: nextStatus })
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) {
-                    throw new Error(data.message || 'Failed to update status');
+                let response = await fetch(url, requestOpts);
+                // Fallback for environments that block POST path oddly — try PATCH
+                if (response.status === 404 || response.status === 405) {
+                    response = await fetch(url, { ...requestOpts, method: 'PATCH' });
                 }
-                const active = (data.data && data.data.status === 'active') || checkbox.checked;
+
+                const contentType = response.headers.get('content-type') || '';
+                const data = contentType.includes('application/json')
+                    ? await response.json()
+                    : {};
+
+                if (!response.ok || data.success === false) {
+                    throw new Error(
+                        data.message ||
+                        data.error ||
+                        ('Failed to update status (' + response.status + ')')
+                    );
+                }
+
+                const active = data.data && data.data.status
+                    ? data.data.status === 'active'
+                    : checkbox.checked;
                 checkbox.checked = active;
                 if (textEl) textEl.textContent = active ? 'On' : 'Off';
+                showAdminToast(
+                    data.message || ('Status updated to ' + (active ? 'On' : 'Off')),
+                    'success'
+                );
             } catch (error) {
                 checkbox.checked = previousChecked;
                 if (textEl) textEl.textContent = previousChecked ? 'On' : 'Off';
                 console.error('Status toggle error:', error);
-                alert(error.message || 'Error updating status');
+                showAdminToast(error.message || 'Error updating status', 'error');
             } finally {
                 if (label) label.classList.remove('is-busy');
             }

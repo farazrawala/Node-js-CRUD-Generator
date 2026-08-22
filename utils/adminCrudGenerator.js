@@ -53,7 +53,7 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     // Custom sortable fields
     sortableFields = [],
     // Custom pagination
-    pagination = { defaultLimit: 20, maxLimit: 100 },
+    pagination = { defaultLimit: 20, maxLimit: 5000 },
     // Custom view templates
     viewTemplates = {},
     // Custom CSS classes
@@ -244,8 +244,13 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
 
       // Calculate pagination
-      const skip = (parseInt(page) - 1) * parseInt(limit);
-      const actualLimit = Math.min(parseInt(limit), pagination.maxLimit);
+      const requestedLimit = Math.max(
+        1,
+        parseInt(limit, 10) || pagination.defaultLimit,
+      );
+      const actualLimit = Math.min(requestedLimit, pagination.maxLimit);
+      const currentPage = Math.max(1, parseInt(page, 10) || 1);
+      const skip = (currentPage - 1) * actualLimit;
       const total = await Model.countDocuments(query);
 
       // Execute query — always include status when the model exposes it in list fields
@@ -446,14 +451,18 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
         routes: req.routes || [], // Add routes data for dynamic menu
         baseUrl: req.baseUrl || "http://localhost:8000",
         pagination: {
-          currentPage: parseInt(page),
+          currentPage,
           totalPages,
           totalItems: total,
           itemsPerPage: actualLimit,
-          hasNextPage: page < totalPages,
-          hasPrevPage: page > 1,
+          hasNextPage: currentPage < totalPages,
+          hasPrevPage: currentPage > 1,
           sortBy,
           sortOrder,
+          maxLimit: pagination.maxLimit,
+          perPageOptions: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000].filter(
+            (n) => n <= pagination.maxLimit,
+          ),
         },
         filters: {
           search,
@@ -2659,8 +2668,15 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       const updated = await Model.findOneAndUpdate(
         query,
         { $set: { status: nextStatus } },
-        { new: true },
+        { new: true, runValidators: false },
       );
+
+      if (!updated) {
+        return res.status(404).json({
+          success: false,
+          message: `${titleCase} not found or could not be updated`,
+        });
+      }
 
       if (hooks.afterUpdate && updated) {
         await hooks.afterUpdate(updated, req);
@@ -3214,6 +3230,8 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
       }
       return editForm(req, res, next);
     }); // EDIT form (must come before /:id)
+    router.patch("/:id/toggle-status", toggleStatus); // STATUS toggle from list
+    router.post("/:id/toggle-status", toggleStatus); // STATUS toggle fallback
     router.get("/:id", (req, res, next) => {
       // VIEW/EDIT redirect - only for real ObjectIds (skip slugs like unused-images)
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -3223,8 +3241,6 @@ function adminCrudGenerator(Model, modelName, fields = [], options = {}) {
     });
     router.put("/:id", update); // UPDATE action
     router.post("/:id", update); // UPDATE action (fallback for method override issues)
-    router.patch("/:id/toggle-status", toggleStatus); // STATUS toggle from list
-    router.post("/:id/toggle-status", toggleStatus); // STATUS toggle fallback
     router.delete("/:id", deleteRecord); // DELETE action
 
     // Soft delete routes (only if soft delete is enabled)
