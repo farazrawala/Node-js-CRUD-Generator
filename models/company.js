@@ -137,6 +137,10 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Printer Settings",
     },
+    custom_printer_settings: {
+      type: String,
+      field_name: "Custom Printer Settings",
+    },
 
     unknown_whatsapp_settings: [
       {
