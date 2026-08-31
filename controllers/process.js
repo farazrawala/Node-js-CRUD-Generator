@@ -12,6 +12,7 @@ const {
 const ProcessModel = require("../models/process");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
+const Order = require("../models/order");
 const woocommerceProcess = require("./woocommerceProcess");
 const shopifyProcess = require("./shopifyProcess");
 const {
@@ -101,7 +102,7 @@ async function explainNoActiveProcess(req) {
   }
 
   hints.push(
-    "Use fetch_product / fetch_category / fetch_brand / fetch_order / fetch_latest_order to import from the store; sync_* actions push one POS row to the store.",
+    "Use fetch_product / fetch_category / fetch_brand / fetch_order / fetch_latest_order to import from the store; pull_order updates existing POS orders from the store; push_order sends one POS order to the store; sync_* actions push one POS row to the store.",
   );
 
   return {
@@ -171,6 +172,38 @@ async function hydrateProcessBrand(process, req) {
   return null;
 }
 
+async function hydrateProcessOrder(process, req) {
+  if (process?.order_id && typeof process.order_id === "object") {
+    if (process.order_id.order_no || process.order_id.description) {
+      return process.order_id;
+    }
+    process.order_id = coalesceObjectId(process.order_id._id);
+  }
+
+  const orderId =
+    coalesceObjectId(process?.order_id) ||
+    coalesceObjectId(req.query?.order_id) ||
+    coalesceObjectId(req.body?.order_id);
+
+  if (!orderId) {
+    return null;
+  }
+
+  const order = await Order.findOne({
+    _id: orderId,
+    deletedAt: null,
+  })
+    .populate({ path: "courier_id", select: "name type" })
+    .lean();
+
+  if (order) {
+    process.order_id = order;
+    return order;
+  }
+
+  return null;
+}
+
 async function loadActiveProcess(req, queueRetry = 0) {
   const { filter } = buildActiveProcessFilter(req);
   const hasExplicitProcessId = Boolean(req.params?.id || req.query.process_id);
@@ -200,6 +233,7 @@ async function loadActiveProcess(req, queueRetry = 0) {
       "product_id",
       "category_id",
       "brand_id",
+      "order_id",
     ]);
 
   if (!processDoc) {
@@ -234,6 +268,7 @@ async function loadActiveProcess(req, queueRetry = 0) {
 
   await hydrateProcessCategory(process, req);
   await hydrateProcessBrand(process, req);
+  await hydrateProcessOrder(process, req);
   return process;
 }
 
@@ -250,6 +285,9 @@ const PROCESS_ACTIONS = new Set([
   // "delete_brand",
   "fetch_order",
   "fetch_latest_order",
+  "pull_order",
+  "push_order",
+  "push_order_tracking",
   "queue_bigcommerce_product_reset",
   "apply_bigcommerce_product_reset",
 ]);
@@ -259,6 +297,7 @@ function normalizeBulkProcessRow(row, { companyId, createdBy }) {
     integration_id:
       row.integration_id ? coalesceObjectId(row.integration_id) : undefined,
     product_id: row.product_id ? coalesceObjectId(row.product_id) : undefined,
+    order_id: row.order_id ? coalesceObjectId(row.order_id) : undefined,
     category_id:
       row.category_id ? coalesceObjectId(row.category_id) : undefined,
     brand_id: row.brand_id ? coalesceObjectId(row.brand_id) : undefined,
@@ -281,7 +320,8 @@ function normalizeBulkProcessRow(row, { companyId, createdBy }) {
 
 function validateProcessRow(row) {
   if (!row.action || !PROCESS_ACTIONS.has(row.action)) {
-    return `Invalid or missing action: ${row.action || "(empty)"}`;
+    const allowed = [...PROCESS_ACTIONS].sort().join(", ");
+    return `Invalid or missing action: ${row.action || "(empty)"}. Allowed: ${allowed}`;
   }
   if (!row.company_id) {
     return "company_id is required.";
@@ -295,6 +335,12 @@ function validateProcessRow(row) {
   if (row.action === "sync_product" && !row.product_id) {
     return "product_id is required for sync_product.";
   }
+  if (row.action === "push_order" && !row.order_id) {
+    return "order_id is required for push_order.";
+  }
+  if (row.action === "push_order_tracking" && !row.order_id) {
+    return "order_id is required for push_order_tracking.";
+  }
   if (row.action === "queue_bigcommerce_product_reset" && !row.product_id) {
     return "product_id is required for queue_bigcommerce_product_reset.";
   }
@@ -307,10 +353,19 @@ function validateProcessRow(row) {
       row.action === "fetch_product" ||
       row.action === "fetch_brand" ||
       row.action === "fetch_order" ||
-      row.action === "fetch_latest_order") &&
+      row.action === "fetch_latest_order" ||
+      row.action === "pull_order") &&
     !row.integration_id
   ) {
     return "integration_id is required for fetch actions.";
+  }
+  if (
+    (row.action === "push_order" ||
+      row.action === "push_order_tracking" ||
+      row.action === "pull_order") &&
+    !row.integration_id
+  ) {
+    return "integration_id is required for push_order, push_order_tracking, and pull_order.";
   }
   if (row.action === "sync_category" && !row.integration_id) {
     return "integration_id is required for sync_category.";
@@ -353,7 +408,7 @@ async function createProcessQueueRecords(req, res) {
     return res.status(400).json({
       success: false,
       message:
-        "Provide action plus category_id/product_id/brand_id, category_ids/brand_ids/product_ids, or items.",
+        "Provide action plus category_id/product_id/brand_id/order_id, category_ids/brand_ids/product_ids/order_ids, or items.",
       form_fields: PROCESS_QUEUE_FORM_FIELDS,
     });
   }
@@ -865,6 +920,24 @@ function processQueueFormSchema(req, res) {
         action: "sync_category",
         category_ids: "69150...,69151...,69152...",
       },
+      push_order_single: {
+        integration_id: "6789abcdef012345678901234",
+        action: "push_order",
+        order_id: "69150abcdef012345678901234",
+        priority: 50,
+      },
+      push_order_tracking_single: {
+        integration_id: "6789abcdef012345678901234",
+        action: "push_order_tracking",
+        order_id: "69150abcdef012345678901234",
+        priority: 50,
+      },
+      pull_order_batch: {
+        integration_id: "6789abcdef012345678901234",
+        action: "pull_order",
+        limit: 10,
+        priority: 50,
+      },
     },
   });
 }
@@ -1011,6 +1084,24 @@ async function runProcessAction(req, res, process) {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_latest_order,
         shopify: shopifyProcess.fetch_latest_order,
+      });
+    }
+    case "pull_order": {
+      return dispatchByStoreType(req, res, process, {
+        woocommerce: woocommerceProcess.pull_order,
+        shopify: shopifyProcess.pull_order,
+      });
+    }
+    case "push_order": {
+      return dispatchByStoreType(req, res, process, {
+        woocommerce: woocommerceProcess.push_order,
+        shopify: shopifyProcess.push_order,
+      });
+    }
+    case "push_order_tracking": {
+      return dispatchByStoreType(req, res, process, {
+        woocommerce: woocommerceProcess.push_order_tracking,
+        shopify: shopifyProcess.push_order_tracking,
       });
     }
     case "queue_bigcommerce_product_reset": {

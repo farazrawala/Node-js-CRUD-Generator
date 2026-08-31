@@ -132,7 +132,9 @@ async function attachCourierTrackingToOrders(orders) {
     shipment_status: { $nin: ["Cancelled", "Failed"] },
   })
     .sort({ created_at: -1 })
-    .select("order_id tracking_number courier label_url shipment_status")
+    .select(
+      "order_id tracking_number courier label_url shipment_status api_request",
+    )
     .lean();
 
   const byOrderId = new Map();
@@ -150,15 +152,26 @@ async function attachCourierTrackingToOrders(orders) {
       shipment.label_url ||
       buildPublicCourierTrackingUrl(shipment.courier, tracking_id) ||
       null;
+    const apiRequest =
+      shipment.api_request && typeof shipment.api_request === "object"
+        ? shipment.api_request
+        : null;
+    const courier_company = apiRequest
+      ? String(
+          apiRequest.courierCompany || apiRequest.courier_company || "",
+        ).trim() || null
+      : null;
     return {
       ...order,
       tracking_id,
       tracking_number: tracking_id,
       tracking_url,
       courier_provider: shipment.courier || null,
+      courier_company,
       courier_shipment: {
         tracking_number: tracking_id,
         courier: shipment.courier || null,
+        courier_company,
         label_url: shipment.label_url || null,
         shipment_status: shipment.shipment_status || null,
       },
@@ -3519,12 +3532,56 @@ async function order_update(req, res) {
   );
   await logOrderUpdated(req, beforeUpdateSnapshot, afterUpdateSnapshot);
 
+  let pushOrderQueue = null;
+  let pushOrderTrackingQueue = null;
+  try {
+    const {
+      enqueuePushOrderJob,
+      maybeEnqueuePushOrderTrackingJob,
+    } = require("../utils/orderPushQueue");
+
+    if (coalesceObjectId(orderFresh?.integration_id)) {
+      pushOrderQueue = await enqueuePushOrderJob({
+        order: orderFresh,
+        companyId: coalesceObjectId(req.user?.company_id),
+        createdBy: req.user?._id,
+        remarks: "Auto push_order after order update",
+      });
+    }
+
+    pushOrderTrackingQueue = await maybeEnqueuePushOrderTrackingJob({
+      beforeOrder: beforeUpdateSnapshot?.order_fields,
+      afterOrder: orderFresh,
+      companyId: coalesceObjectId(req.user?.company_id),
+      createdBy: req.user?._id,
+      remarks: "Auto push_order_tracking after order update",
+    });
+  } catch (pushErr) {
+    console.error(
+      "[order_update] website push queue failed:",
+      pushErr?.message || pushErr,
+    );
+    const queueError = {
+      queued: false,
+      reason: "queue_error",
+      error: pushErr?.message || String(pushErr),
+    };
+    if (!pushOrderQueue) {
+      pushOrderQueue = queueError;
+    }
+    if (!pushOrderTrackingQueue) {
+      pushOrderTrackingQueue = queueError;
+    }
+  }
+
   return res.status(200).json({
     success: true,
     status: 200,
     data,
     created: postUpdateTransactions.created,
     failed: postUpdateTransactions.failed,
+    push_order: pushOrderQueue,
+    push_order_tracking: pushOrderTrackingQueue,
     ...(orderLineReplaceSnapshot ?
       { line_replace: orderLineReplaceSnapshot }
     : {}),
@@ -5946,6 +6003,27 @@ async function order_update_status(req, res) {
     });
   }
 
+  let pushOrderQueue = null;
+  try {
+    const { enqueuePushOrderJob } = require("../utils/orderPushQueue");
+    pushOrderQueue = await enqueuePushOrderJob({
+      order: updatedOrder,
+      companyId,
+      createdBy: actorUserId,
+      remarks: `Auto push_order after status ${existingOrder.order_status} → ${nextStatus}`,
+    });
+  } catch (pushErr) {
+    console.error(
+      "[order_update_status] push_order queue failed:",
+      pushErr?.message || pushErr,
+    );
+    pushOrderQueue = {
+      queued: false,
+      reason: "queue_error",
+      error: pushErr?.message || String(pushErr),
+    };
+  }
+
   return res.status(200).json({
     success: true,
     status: 200,
@@ -5957,6 +6035,7 @@ async function order_update_status(req, res) {
       stock_action: stockResult?.action ?? "none",
       stock_updates: stockResult?.stock_updates ?? [],
       status_update: statusUpdateRow,
+      push_order: pushOrderQueue,
     },
   });
 }
@@ -6817,6 +6896,7 @@ module.exports = {
   order_merge,
   order_delete,
   applyOrderStatusStockTransition,
+  applyOrderOutboundLines,
   getOrderByorderItem,
   getOnlineOrders,
   getDeletedOrders,

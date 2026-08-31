@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { decodeHtmlEntities } = require("../utils/decodeHtmlEntities");
 
 /**
  * `isActive` is catalog visibility (boolean). Other models often use string `status` (active/inactive)
@@ -114,14 +115,14 @@ categorySchema.index({ company_id: 1, isActive: 1 });
 
 // Pre-save middleware
 categorySchema.pre("save", function (next) {
-  // Ensure name is properly formatted
+  // Ensure name is properly formatted (decode HTML entities like &amp; → &)
   if (this.name) {
-    this.name = this.name.trim();
+    this.name = decodeHtmlEntities(this.name.trim());
   }
 
   // Ensure description is properly formatted
   if (this.description) {
-    this.description = this.description.trim();
+    this.description = decodeHtmlEntities(this.description.trim());
   }
 
   // Handle empty parent_id - convert empty string to null

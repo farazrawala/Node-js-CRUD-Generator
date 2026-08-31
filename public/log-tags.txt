@@ -36,6 +36,9 @@ failed_bigcommerce
 failed_shopify
 failed_woocommerce
 fetch_order
+pull_order
+push_order
+push_order_tracking
 fetch_product
 generic_create
 generic_update

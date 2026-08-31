@@ -29,6 +29,13 @@ const {
 const courierLogger = require("../utils/courierLogger");
 const { enqueueJob, isQueueEnabled } = require("../../utils/redisQueue");
 
+function pickShipmentCourierCompany(shipment) {
+  const req = shipment?.api_request;
+  if (!req || typeof req !== "object") return null;
+  const value = String(req.courierCompany || req.courier_company || "").trim();
+  return value || null;
+}
+
 const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
 const CourierTracking = require("../models/courier_tracking.model");
@@ -406,6 +413,23 @@ async function createShipment(orderId, options = {}) {
         orderUpdate.courier_id = courierRef;
       }
       await mongoose.model("order").findByIdAndUpdate(order._id, orderUpdate);
+      try {
+        const updatedOrder = await mongoose
+          .model("order")
+          .findById(order._id)
+          .lean();
+        const {
+          maybeEnqueuePushOrderTrackingJob,
+        } = require("../../utils/orderPushQueue");
+        await maybeEnqueuePushOrderTrackingJob({
+          beforeOrder: order,
+          afterOrder: updatedOrder,
+          companyId: order.company_id,
+          remarks: "Auto push_order_tracking after courier booking",
+        });
+      } catch {
+        /* non-fatal */
+      }
     } catch {
       /* non-fatal */
     }
@@ -477,6 +501,38 @@ async function enqueueShipmentCreation(order, options, reason) {
     message: "Shipment creation queued — provider temporarily unavailable",
     order_id: order._id,
   };
+}
+
+/**
+ * Queue push_order_tracking for WooCommerce website orders after courier poll.
+ */
+async function queueWooTrackingPushAfterCourierPoll(shipment, options = {}) {
+  try {
+    const {
+      enqueuePushOrderTrackingForWooCommerceOrder,
+    } = require("../../utils/orderPushQueue");
+    return await enqueuePushOrderTrackingForWooCommerceOrder({
+      orderId: shipment.order_id,
+      companyId: options.companyId || shipment.company_id,
+      createdBy: options.createdBy || null,
+      shipment,
+      remarks:
+        options.trackingPushRemarks ||
+        "Auto push_order_tracking after GET /courier/order/:orderId/tracking",
+      priority: options.trackingPushPriority ?? 50,
+    });
+  } catch (err) {
+    courierLogger.apiError({
+      event: "push_order_tracking_queue_failed",
+      orderId: String(shipment?.order_id || ""),
+      error: err?.message || String(err),
+    });
+    return {
+      queued: false,
+      reason: "queue_error",
+      error: err?.message || String(err),
+    };
+  }
 }
 
 /**
@@ -585,12 +641,18 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     .sort({ event_time: -1, created_at: -1 })
     .lean();
 
+  const push_order_tracking = await queueWooTrackingPushAfterCourierPoll(
+    shipment,
+    options,
+  );
+
   return {
     success: true,
     stale: false,
     order_id: shipment.order_id,
     tracking_number: shipment.tracking_number,
     courier: shipment.courier,
+    courier_company: pickShipmentCourierCompany(shipment),
     status: result.status,
     status_code: result.statusCode,
     tracking_status: lastStatus,
@@ -598,6 +660,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     tracking_details: result.raw ?? null,
     history,
     last_tracking_sync: new Date(),
+    push_order_tracking,
     raw: options.includeRaw ? result.raw : undefined,
   };
 }
@@ -635,12 +698,18 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     shipment.shipment_status ||
     null;
 
+  const push_order_tracking = await queueWooTrackingPushAfterCourierPoll(
+    shipment,
+    options,
+  );
+
   return {
     success: true,
     stale: true,
     order_id: shipment.order_id,
     tracking_number: shipment.tracking_number,
     courier: shipment.courier,
+    courier_company: pickShipmentCourierCompany(shipment),
     status: shipment.shipment_status,
     status_code: shipment.status_code,
     tracking_status: trackingStatus,
@@ -648,6 +717,7 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     tracking_details: trackingDetails,
     history,
     last_tracking_sync: shipment.last_tracking_sync || null,
+    push_order_tracking,
     warning: err?.message || "Courier tracking unavailable; showing last saved records",
     raw: options.includeRaw ? trackingDetails : undefined,
   };

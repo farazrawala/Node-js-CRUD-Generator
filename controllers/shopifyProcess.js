@@ -55,15 +55,24 @@ const {
   mapShopifyOrderStatus,
   resolveOrderWebsiteStatus,
   createFetchOrderStats,
+  createPullOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
   formatFetchLatestOrderRemarks,
+  formatPullOrderBatchRemarks,
   logFetchOrderImported,
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
   resolveSyncStockTotals,
+  applyFetchOrderOutboundInventory,
+  updatePosOrderFromRemote,
+  resolveRemoteOrderIdFromPosOrder,
+  finishPullOrderBatch,
+  failPullOrderBatch,
+  resolvePosOrderTrackingForPush,
+  buildShopifyTrackingNote,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -2325,6 +2334,22 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     stats.lines_inserted += 1;
   }
 
+  if (orderItemsPayload.length > 0) {
+    await applyFetchOrderOutboundInventory({
+      req,
+      process,
+      companyId,
+      order,
+      lines: orderItemsPayload.map((item) => ({
+        product_id: item.product_id,
+        qty: item.qty,
+        price: item.price,
+      })),
+      store: "shopify",
+      stats,
+    });
+  }
+
   stats.inserted += 1;
 
   if (req) {
@@ -2337,6 +2362,411 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       posOrderId: order._id,
       posOrderNo: order.order_no,
       lineCount: orderItemsPayload.length,
+    });
+  }
+}
+
+/**
+ * Pull one Shopify order into POS — update if already imported, else insert.
+ */
+async function pullShopifyOrderToPos(remoteOrder, ctx) {
+  const { companyId, process, stats, req } = ctx;
+  const logCtx = { req, process, companyId };
+  const integrationId = resolveIntegrationId(process);
+  const remoteId = remoteOrder?.id;
+  const externalRef = orderExternalRef("shopify", remoteId);
+  const integrationOrderId = resolveIntegrationOrderId(
+    "shopify",
+    remoteOrder,
+    remoteId,
+  );
+
+  if (!externalRef) {
+    recordOrderSkip(
+      stats,
+      {
+        store: "shopify",
+        remote_id: remoteId,
+        order_number: remoteOrder?.order_number,
+        reason: "missing_remote_id",
+        detail: "Shopify order has no id",
+      },
+      logCtx,
+    );
+    return;
+  }
+
+  const existing = await findExistingImportedOrder(companyId, {
+    externalRef,
+    integrationId,
+    integrationOrderId,
+  });
+
+  if (existing) {
+    await updatePosOrderFromRemote(existing, remoteOrder, "shopify", {
+      companyId,
+      process,
+      integrationId,
+    });
+    stats.updated += 1;
+    return;
+  }
+
+  await importShopifyOrderToPos(remoteOrder, ctx);
+}
+
+/**
+ * Pull orders from Shopify into POS (batch or single). Updates existing POS rows.
+ */
+async function pull_order(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+  const posOrder = process?.order_id;
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const orderFields =
+    "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,shipping_address,customer";
+
+  try {
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const stats = createPullOrderStats();
+      const importCtx = { companyId, process, stats, req };
+
+      if (posOrder) {
+        const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "shopify");
+        if (!remoteId) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "POS order has no Shopify reference (description or integration_order_id).",
+          });
+        }
+
+        const detailResponse = await client.get({
+          path: `orders/${remoteId}`,
+          query: { fields: orderFields },
+        });
+        const remote = detailResponse?.body?.order;
+        if (!remote?.id) {
+          return res.status(404).json({
+            success: false,
+            message: `Shopify order ${remoteId} not found.`,
+          });
+        }
+
+        try {
+          await pullShopifyOrderToPos(remote, importCtx);
+        } catch (err) {
+          recordOrderSkip(
+            stats,
+            {
+              store: "shopify",
+              remote_id: remoteId,
+              order_number: remote?.order_number,
+              reason: "import_error",
+              detail: err?.message || String(err),
+            },
+            importCtx,
+          );
+        }
+
+        const { inserted, updated, skipped, lines_inserted, lines_skipped, skipped_orders } =
+          stats;
+        const remarks = formatPullOrderBatchRemarks({
+          fetched: 1,
+          inserted,
+          updated,
+          skipped,
+          lines_inserted,
+          lines_skipped,
+          skipped_orders,
+          isComplete: true,
+          page: 1,
+        });
+
+        return finishPullOrderBatch(req, res, process, {
+          fetched: 1,
+          inserted,
+          updated,
+          skipped,
+          lines_inserted,
+          lines_skipped,
+          skipped_orders,
+          isComplete: true,
+          remarks,
+        });
+      }
+
+      const { limit, offset, page } = resolveBatchPagination(process);
+      const query = {
+        limit,
+        status: "any",
+        fields: orderFields,
+        order: "id asc",
+      };
+      if (offset > 0) {
+        query.since_id = offset;
+      }
+
+      const listResponse = await client.get({ path: "orders", query });
+      const remoteOrders =
+        Array.isArray(listResponse?.body?.orders) ?
+          listResponse.body.orders
+        : [];
+
+      for (const remote of remoteOrders) {
+        try {
+          await pullShopifyOrderToPos(remote, importCtx);
+        } catch (err) {
+          console.error(
+            `Failed to pull Shopify order ${remote?.id}:`,
+            err?.message || err,
+          );
+          recordOrderSkip(
+            stats,
+            {
+              store: "shopify",
+              remote_id: remote?.id,
+              order_number: remote?.order_number,
+              reason: "import_error",
+              detail: err?.message || String(err),
+            },
+            importCtx,
+          );
+        }
+      }
+
+      const { inserted, updated, skipped, lines_inserted, lines_skipped, skipped_orders } =
+        stats;
+      const fetched = remoteOrders.length;
+      const isComplete = fetched < limit;
+      const lastRemoteId = fetched > 0 ? remoteOrders[fetched - 1]?.id : offset;
+      const remarks = formatPullOrderBatchRemarks({
+        fetched,
+        inserted,
+        updated,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        isComplete,
+        page: page + 1,
+      });
+
+      return finishPullOrderBatch(req, res, process, {
+        fetched,
+        inserted,
+        updated,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        isComplete,
+        nextOffset: lastRemoteId || 0,
+        remarks,
+      });
+    });
+  } catch (error) {
+    console.error(
+      "Shopify order pull failed:",
+      error?.response?.body || error?.response?.data || error?.message || error,
+    );
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to pull orders from Shopify.",
+    );
+    await logFetchOrderBatchFailed(req, {
+      process,
+      companyId,
+      store: "shopify",
+      errorMessage,
+    });
+    return failPullOrderBatch(process, res, errorMessage, errorMessage);
+  }
+}
+
+/**
+ * Push one POS order status to Shopify (cancel or note on order).
+ */
+async function push_order(req, res, process) {
+  const integration = process?.integration_id;
+  const posOrder = process?.order_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!posOrder) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Order is required for push_order. Set order_id on the process (Admin → Process).",
+    });
+  }
+
+  const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "shopify");
+  if (!remoteId) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "POS order has no Shopify reference (description or integration_order_id).",
+    });
+  }
+
+  const posStatus = String(posOrder.order_status || "placed").trim();
+
+  try {
+    return await runWithShopifyClient(integration, process, async (client) => {
+      if (posStatus === "cancelled") {
+        await client.post({
+          path: `orders/${remoteId}/cancel`,
+          data: {},
+        });
+      } else {
+        const note = `[POS] status: ${posStatus} (pushed ${new Date().toISOString()})`;
+        await client.put({
+          path: `orders/${remoteId}`,
+          data: { order: { id: Number(remoteId), note } },
+          type: "application/json",
+        });
+      }
+
+      const label = posOrder.order_no || posOrder._id;
+      await markProcessOutcome(
+        process._id,
+        "completed",
+        `Order ${label} pushed to Shopify (status: ${posStatus}).`,
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: `Order ${label} pushed to Shopify.`,
+        data: {
+          order_id: posOrder._id,
+          remote_id: remoteId,
+          order_status: posStatus,
+        },
+      });
+    });
+  } catch (error) {
+    console.error(
+      "Shopify order push failed:",
+      error?.response?.body || error?.response?.data || error?.message || error,
+    );
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to push order to Shopify.",
+    );
+    await markProcessOutcome(process._id, "failed", errorMessage);
+    return res.status(500).json({
+      success: false,
+      message: errorMessage,
+      error: error?.response?.body || error?.response?.data || error,
+    });
+  }
+}
+
+/**
+ * Push POS courier / tracking fields to Shopify order note.
+ */
+async function push_order_tracking(req, res, process) {
+  const integration = process?.integration_id;
+  const posOrder = process?.order_id;
+
+  if (!validateShopifyIntegration(integration, res)) {
+    return;
+  }
+
+  if (!posOrder) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Order is required for push_order_tracking. Set order_id on the process.",
+    });
+  }
+
+  const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "shopify");
+  if (!remoteId) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "POS order has no Shopify reference (description or integration_order_id).",
+    });
+  }
+
+  const tracking = await resolvePosOrderTrackingForPush(posOrder);
+  if (
+    !tracking.courier_name &&
+    !tracking.tracking_number &&
+    !tracking.tracking_status
+  ) {
+    const msg =
+      "Nothing to push — set courier, tracking number, or tracking status on the POS order.";
+    await markProcessOutcome(process._id, "failed", msg);
+    return res.status(400).json({ success: false, message: msg });
+  }
+
+  const trackingNote = buildShopifyTrackingNote(tracking);
+
+  try {
+    return await runWithShopifyClient(integration, process, async (client) => {
+      const detailResponse = await client.get({
+        path: `orders/${remoteId}`,
+        query: { fields: "id,note" },
+      });
+      const existingNote = String(
+        detailResponse?.body?.order?.note || "",
+      ).trim();
+      const note =
+        existingNote ?
+          `${existingNote}\n\n${trackingNote}`
+        : trackingNote;
+
+      await client.put({
+        path: `orders/${remoteId}`,
+        data: { order: { id: Number(remoteId), note } },
+        type: "application/json",
+      });
+
+      const label = posOrder.order_no || posOrder._id;
+      const remarks = `Order ${label} tracking pushed to Shopify #${remoteId}: courier "${tracking.courier_name || "—"}", tracking "${tracking.tracking_number || "—"}", status "${tracking.tracking_status || "—"}".`;
+      await markProcessOutcome(process._id, "completed", remarks);
+
+      return res.status(200).json({
+        success: true,
+        message: remarks,
+        data: {
+          order_id: posOrder._id,
+          remote_id: remoteId,
+          tracking,
+        },
+      });
+    });
+  } catch (error) {
+    console.error(
+      "Shopify order tracking push failed:",
+      error?.response?.body || error?.response?.data || error?.message || error,
+    );
+    const errorMessage = formatShopifyErrorPayload(
+      error,
+      "Failed to push order tracking to Shopify.",
+    );
+    await markProcessOutcome(process._id, "failed", errorMessage);
+    return res.status(500).json({
+      success: false,
+      message: errorMessage,
+      error: error?.response?.body || error?.response?.data || error,
     });
   }
 }
@@ -2741,6 +3171,9 @@ module.exports = {
   fetch_brand,
   fetch_order,
   fetch_latest_order,
+  pull_order,
+  push_order,
+  push_order_tracking,
   fetch_product,
   sync_product,
   sync_category,

@@ -1,15 +1,22 @@
+const mongoose = require("mongoose");
 const ProcessModel = require("../models/process");
 const Category = require("../models/category");
 const Brand = require("../models/brands");
 const Product = require("../models/product");
 const Order = require("../models/order");
+const Company = require("../models/company");
 const User = require("../models/user");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const { createApplicationLog } = require("./applicationLogs");
+const { applyOrderOutboundLines } = require("../controllers/order");
+const {
+  allowAddToCartWhenStockInsufficient,
+} = require("./companyProductSettings");
 const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
 const SyncProduct = require("../models/sync_product");
 const { coalesceObjectId } = require("./modelHelper");
+const { recordOrderStatusUpdate } = require("./orderStatusHistory");
 const { releaseProcessFromQueue } = require("./processQueue");
 const {
   findIntegrationIfActive,
@@ -802,14 +809,607 @@ function resolveOrderWebsiteStatus(remoteOrder, store) {
   return "pending";
 }
 
+/** Parse `description` like `shopify:order:123` → `{ store, remoteId }`. */
+function parseOrderExternalRef(description) {
+  const raw = String(description ?? "").trim();
+  const match = raw.match(/^(shopify|woocommerce):order:(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    store: match[1].toLowerCase(),
+    remoteId: match[2].trim(),
+  };
+}
+
+function resolveRemoteOrderIdFromPosOrder(order, store) {
+  const parsed = parseOrderExternalRef(order?.description);
+  if (parsed?.remoteId) {
+    return parsed.remoteId;
+  }
+  const integrationOrderId = String(order?.integration_order_id ?? "").trim();
+  if (integrationOrderId) {
+    return integrationOrderId;
+  }
+  return "";
+}
+
+function buildPosOrderHeaderFromRemote(remoteOrder, store, ctx) {
+  const { companyId, process, integrationId } = ctx;
+  const storeKey = String(store || "").toLowerCase();
+  const remoteId =
+    storeKey === "shopify" ? remoteOrder?.id : remoteOrder?.id;
+  const integrationOrderId = resolveIntegrationOrderId(
+    storeKey,
+    remoteOrder,
+    remoteId,
+  );
+
+  let resolvedName = "";
+  let customerEmail = "";
+  let customerPhone = "";
+
+  if (storeKey === "shopify") {
+    const billing = remoteOrder?.billing_address || {};
+    const shipping = remoteOrder?.shipping_address || {};
+    const customer = remoteOrder?.customer || {};
+    const customerName = [billing.first_name, billing.last_name]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    const shippingName = [shipping.first_name, shipping.last_name]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    resolvedName =
+      customerName ||
+      shippingName ||
+      [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim();
+    customerEmail =
+      remoteOrder?.email ||
+      customer.email ||
+      billing.email ||
+      shipping.email ||
+      "";
+    customerPhone =
+      billing.phone || shipping.phone || customer.phone || "";
+  } else {
+    const billing = remoteOrder?.billing || {};
+    const shipping = remoteOrder?.shipping || {};
+    const customerName = [billing.first_name, billing.last_name]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    const shippingName = [shipping.first_name, shipping.last_name]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    resolvedName = customerName || shippingName;
+    customerEmail = billing.email || shipping.email || "";
+    customerPhone = billing.phone || shipping.phone || "";
+  }
+
+  const addressFields = mapRemoteOrderAddressFields(remoteOrder, storeKey);
+  const discount =
+    storeKey === "shopify" ?
+      Number(remoteOrder?.total_discounts) || 0
+    : Number(remoteOrder?.discount_total) || 0;
+  const shipment =
+    storeKey === "shopify" ?
+      Number(remoteOrder?.total_shipping_price_set?.shop_money?.amount) ||
+      Number(remoteOrder?.total_shipping_price_set?.presentment_money?.amount) ||
+      0
+    : Number(remoteOrder?.shipping_total) || 0;
+  const amountReceived =
+    storeKey === "shopify" ?
+      Number(remoteOrder?.total_price) || 0
+    : Number(remoteOrder?.total) || 0;
+
+  let linesSubtotal = 0;
+  const lineItems =
+    Array.isArray(remoteOrder?.line_items) ? remoteOrder.line_items : [];
+  for (const line of lineItems) {
+    const qty = Number(line?.quantity) || 0;
+    const price = Number(line?.price) || 0;
+    if (qty > 0) {
+      linesSubtotal += Math.round(price * qty * 100) / 100;
+    }
+  }
+  if (linesSubtotal === 0) {
+    linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, storeKey);
+  }
+
+  const orderStatus =
+    storeKey === "shopify" ?
+      mapShopifyOrderStatus(
+        remoteOrder?.financial_status,
+        remoteOrder?.fulfillment_status,
+      )
+    : mapWooOrderStatus(remoteOrder?.status);
+
+  return {
+    name:
+      resolvedName ||
+      `${storeKey === "shopify" ? "Shopify" : "WooCommerce"} #${integrationOrderId || remoteId}`,
+    email: customerEmail,
+    phone: customerPhone,
+    address: addressFields.address,
+    city: addressFields.city,
+    state: addressFields.state,
+    zip: addressFields.zip,
+    country: addressFields.country,
+    integration_order_id: integrationOrderId,
+    discount,
+    shipment,
+    lines_subtotal: linesSubtotal,
+    amount_received: amountReceived,
+    order_status: orderStatus,
+    order_website_status: resolveOrderWebsiteStatus(remoteOrder, storeKey),
+    integration_id: coalesceObjectId(integrationId),
+    company_id: coalesceObjectId(companyId),
+    customerResolve: {
+      name: resolvedName,
+      email: customerEmail,
+      phone: customerPhone,
+      companyId,
+      createdBy: process?.created_by?._id || process?.created_by,
+    },
+  };
+}
+
+/**
+ * Apply store order header fields onto an existing POS order (pull_order).
+ * Does not replace line items or re-run inventory.
+ */
+async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
+  const header = buildPosOrderHeaderFromRemote(remoteOrder, store, ctx);
+  const patch = {
+    name: header.name,
+    email: header.email,
+    phone: header.phone,
+    address: header.address,
+    city: header.city,
+    state: header.state,
+    zip: header.zip,
+    country: header.country,
+    integration_order_id: header.integration_order_id,
+    discount: header.discount,
+    shipment: header.shipment,
+    lines_subtotal: header.lines_subtotal,
+    amount_received: header.amount_received,
+    order_website_status: header.order_website_status,
+  };
+
+  const previousStatus = String(existing?.order_status || "").trim();
+  if (header.order_status && header.order_status !== previousStatus) {
+    patch.order_status = header.order_status;
+  }
+
+  if (!existing?.customer_id && header.customerResolve) {
+    const customerId = await findOrCreatePosCustomerFromBilling(
+      header.customerResolve,
+    );
+    if (customerId) {
+      patch.customer_id = customerId;
+    }
+  }
+
+  await Order.updateOne({ _id: existing._id }, { $set: patch });
+
+  if (patch.order_status && patch.order_status !== previousStatus) {
+    await recordOrderStatusUpdate({
+      orderId: existing._id,
+      orderStatus: patch.order_status,
+      companyId: header.company_id,
+      userId: header.customerResolve?.createdBy,
+    });
+  }
+
+  return { updated: true, orderId: existing._id };
+}
+
+/** POS order_status → WooCommerce order status. */
+function mapPosOrderStatusToWoo(posStatus) {
+  const map = {
+    pending: "pending",
+    on_hold: "on-hold",
+    processing: "processing",
+    confirmed: "processing",
+    placed: "processing",
+    active: "processing",
+    packed: "processing",
+    in_transit: "processing",
+    delivered: "completed",
+    completed: "completed",
+    cancelled: "cancelled",
+    failed: "failed",
+    refunded: "refunded",
+    return: "refunded",
+    return_received: "refunded",
+    duplicate: "cancelled",
+    draft: "pending",
+  };
+  return map[String(posStatus || "").trim().toLowerCase()] || "processing";
+}
+
+const POS_ORDER_TRACKING_META_KEYS = Object.freeze({
+  courier_name: "pos_courier_name",
+  tracking_number: "pos_tracking_number",
+  tracking_status: "pos_tracking_status",
+});
+
+const { normalizeProviderKey } = require("../src/couriers/constants");
+
+function formatCourierDisplayName(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return normalizeProviderKey(raw) || raw;
+}
+
+function pickShipmentCourierCompany(shipment) {
+  const req = shipment?.api_request;
+  if (!req || typeof req !== "object") return "";
+  return String(req.courierCompany || req.courier_company || "").trim();
+}
+
+/**
+ * Resolve courier / tracking fields from a POS order for store push.
+ * Prefers the booked carrier (e.g. Leopard via Flagship) over integration name.
+ */
+async function resolvePosOrderTrackingForPush(posOrder) {
+  const orderId = coalesceObjectId(posOrder?._id);
+  let courierName = "";
+
+  if (orderId) {
+    try {
+      const CourierShipment = require("../src/models/courier_shipment.model");
+      const shipment = await CourierShipment.findOne({
+        order_id: orderId,
+        deletedAt: null,
+        tracking_number: { $nin: [null, ""] },
+        shipment_status: { $nin: ["Cancelled", "Failed"] },
+      })
+        .sort({ created_at: -1 })
+        .select("api_request courier")
+        .lean();
+
+      const carrier = pickShipmentCourierCompany(shipment);
+      if (carrier) {
+        courierName = formatCourierDisplayName(carrier);
+      } else if (shipment?.courier) {
+        courierName = formatCourierDisplayName(shipment.courier);
+      }
+    } catch {
+      /* courier shipment model optional in some deployments */
+    }
+  }
+
+  const embeddedCourier = posOrder?.courier_id;
+  if (!courierName && embeddedCourier && typeof embeddedCourier === "object") {
+    courierName = formatCourierDisplayName(
+      embeddedCourier.type || embeddedCourier.name,
+    );
+  }
+
+  if (!courierName) {
+    const courierId = coalesceObjectId(posOrder?.courier_id);
+    if (courierId) {
+      const Courier = require("../models/courier");
+      const courier = await Courier.findOne({
+        _id: courierId,
+        deletedAt: null,
+      })
+        .select("name type")
+        .lean();
+      courierName = formatCourierDisplayName(courier?.type || courier?.name);
+    }
+  }
+
+  return {
+    courier_name: courierName,
+    tracking_number: String(posOrder?.courier_tracking_number || "").trim(),
+    tracking_status: String(posOrder?.tracking_status || "").trim(),
+  };
+}
+
+function buildPosOrderTrackingMetaEntries(tracking) {
+  return [
+    {
+      key: POS_ORDER_TRACKING_META_KEYS.courier_name,
+      value: tracking?.courier_name || "",
+    },
+    {
+      key: POS_ORDER_TRACKING_META_KEYS.tracking_number,
+      value: tracking?.tracking_number || "",
+    },
+    {
+      key: POS_ORDER_TRACKING_META_KEYS.tracking_status,
+      value: tracking?.tracking_status || "",
+    },
+  ];
+}
+
+/** Merge WooCommerce order meta_data by key (updates existing rows by id). */
+function mergeWooOrderMetaData(existingMeta, updates) {
+  const merged = new Map();
+  for (const row of Array.isArray(existingMeta) ? existingMeta : []) {
+    const key = String(row?.key || "").trim();
+    if (!key) {
+      continue;
+    }
+    merged.set(key, { ...row, key });
+  }
+
+  for (const update of updates || []) {
+    const key = String(update?.key || "").trim();
+    if (!key) {
+      continue;
+    }
+    const previous = merged.get(key);
+    const value = String(update?.value ?? "");
+    if (previous?.id) {
+      merged.set(key, { id: previous.id, key, value });
+    } else {
+      merged.set(key, { key, value });
+    }
+  }
+
+  return [...merged.values()];
+}
+
+function buildShopifyTrackingNote(tracking) {
+  const lines = ["[POS Tracking]"];
+  if (tracking?.courier_name) {
+    lines.push(`Courier: ${tracking.courier_name}`);
+  }
+  if (tracking?.tracking_number) {
+    lines.push(`Tracking: ${tracking.tracking_number}`);
+  }
+  if (tracking?.tracking_status) {
+    lines.push(`Status: ${tracking.tracking_status}`);
+  }
+  lines.push(`Updated: ${new Date().toISOString()}`);
+  return lines.join("\n");
+}
+
+function createPullOrderStats() {
+  return {
+    ...createFetchOrderStats(),
+    updated: 0,
+  };
+}
+
+function formatPullOrderBatchRemarks({
+  fetched,
+  inserted,
+  updated,
+  skipped,
+  lines_inserted,
+  lines_skipped,
+  skipped_orders = [],
+  isComplete,
+  page,
+}) {
+  const summary =
+    isComplete ?
+      `Order pull completed: batch fetched ${fetched}, updated ${updated}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}.`
+    : `Pull batch: fetched ${fetched}, updated ${updated}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}. Call execute-process again for page ${page + 1}.`;
+
+  if (!skipped_orders.length) {
+    return summary;
+  }
+
+  const reasons = skipped_orders.map(humanizeOrderSkipReason).join(" | ");
+  return `${summary} Skip reasons: ${reasons}`;
+}
+
+async function finishPullOrderBatch(req, res, process, batchResult) {
+  const { limit, page, hits, count } = resolveBatchPagination(process);
+  const {
+    fetched,
+    inserted,
+    updated = 0,
+    skipped,
+    isComplete,
+    nextOffset,
+    remarks,
+    lines_inserted = 0,
+    lines_skipped = 0,
+    skipped_orders = [],
+  } = batchResult;
+
+  const newHits = hits + 1;
+  const newCount = count + inserted + updated + skipped;
+  const update = {
+    hits: newHits,
+    count: newCount,
+    page: isComplete ? page : page + 1,
+    progress: isComplete ? "completed" : "started",
+    status: isComplete ? "completed" : "active",
+    remarks,
+  };
+
+  if (nextOffset !== undefined) {
+    update.offset = nextOffset;
+  }
+
+  await ProcessModel.findByIdAndUpdate(process._id, update);
+  if (isComplete) {
+    await releaseProcessFromQueue(process);
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: remarks,
+    data: {
+      process_id: process._id,
+      page: update.page,
+      hits: newHits,
+      count: newCount,
+      progress: update.progress,
+      status: update.status,
+      batch: {
+        fetched,
+        inserted,
+        updated,
+        skipped,
+        limit,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+      },
+    },
+  });
+}
+
 function createFetchOrderStats() {
   return {
     inserted: 0,
     skipped: 0,
     lines_inserted: 0,
     lines_skipped: 0,
+    inventory_applied: 0,
+    inventory_stock_awaiting: 0,
     skipped_orders: [],
   };
+}
+
+async function resolveCompanyForFetchOrderInventory(companyId) {
+  const cid = coalesceObjectId(companyId);
+  if (!cid) {
+    return null;
+  }
+
+  return Company.findOne({
+    _id: cid,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("warehouse_id product_settings")
+    .lean();
+}
+
+function buildFetchOrderInventoryReq(req, company, process) {
+  const base = req || {};
+  const user = base.user && typeof base.user === "object" ? { ...base.user } : {};
+  user.company_id = company;
+  if (!user._id && process?.created_by) {
+    user._id = coalesceObjectId(process.created_by?._id || process.created_by);
+  }
+  return { ...base, user };
+}
+
+function isFetchOrderInventoryInsufficientError(err) {
+  const msg = String(err?.message || "");
+  const payload = err?.clientPayload || err?.clientErrorPayload || {};
+  const details = String(payload.details || payload.error || "");
+  const combined = `${msg} ${details}`.toLowerCase();
+  return (
+    combined.includes("insufficient warehouse inventory") ||
+    combined.includes("insufficient stock") ||
+    combined.includes("no warehouse with sufficient stock") ||
+    combined.includes("cannot oversell") ||
+    combined.includes("no warehouse for oversell") ||
+    combined.includes("no warehouse available to absorb")
+  );
+}
+
+/**
+ * Deduct warehouse stock + insert outbound inventory_movements for a fetched website order.
+ * Mirrors `order_save` step 5 via `applyOrderOutboundLines`.
+ */
+async function applyFetchOrderOutboundInventory({
+  req,
+  process,
+  companyId,
+  order,
+  lines,
+  store,
+  stats = null,
+}) {
+  if (!order?._id || !Array.isArray(lines) || lines.length === 0) {
+    return { applied: false, reason: "no_lines" };
+  }
+
+  const company = await resolveCompanyForFetchOrderInventory(companyId);
+  if (!company) {
+    return { applied: false, reason: "no_company" };
+  }
+
+  const inventoryReq = buildFetchOrderInventoryReq(req, company, process);
+  const companyIdOid = coalesceObjectId(companyId);
+  const companyIdForMovementOid =
+    (
+      companyIdOid &&
+      mongoose.Types.ObjectId.isValid(String(companyIdOid))
+    ) ?
+      new mongoose.Types.ObjectId(String(companyIdOid))
+    : null;
+
+  try {
+    const stockUpdates = await applyOrderOutboundLines({
+      lines,
+      orderId: order._id,
+      orderNo: order.order_no,
+      companyId: companyIdOid,
+      companyIdOid: companyIdForMovementOid,
+      req: inventoryReq,
+      mongoSession: null,
+      logUrl: fetchOrderLogUrl(req),
+      allowInsufficientStock: allowAddToCartWhenStockInsufficient(company),
+    });
+
+    if (stats) {
+      stats.inventory_applied = (stats.inventory_applied || 0) + 1;
+    }
+
+    return { applied: true, stock_updates: stockUpdates };
+  } catch (err) {
+    if (!isFetchOrderInventoryInsufficientError(err)) {
+      throw err;
+    }
+
+    await Order.updateOne(
+      { _id: order._id },
+      { $addToSet: { tags: "stock_awaiting" } },
+    );
+
+    if (stats) {
+      stats.inventory_stock_awaiting =
+        (stats.inventory_stock_awaiting || 0) + 1;
+    }
+
+    if (req) {
+      void createApplicationLog(
+        req,
+        {
+          action: `Fetch order inventory skipped :: ${order.order_no || order._id}`,
+          url: fetchOrderLogUrl(req),
+          tags: fetchOrderStoreTags(store, "inventory_skipped"),
+          description: {
+            process_id: process?._id ? String(process._id) : null,
+            store: store ?? null,
+            pos_order_id: String(order._id),
+            pos_order_no: order.order_no ?? null,
+            error: err?.message || String(err),
+            message:
+              `Order imported but stock not deducted (${order.order_no || order._id}): ${err?.message || err}`,
+          },
+          reference_id: order._id,
+          reference_type: "order",
+          company_id: companyId,
+          created_by: process?.created_by?._id || process?.created_by,
+        },
+        { silent: true },
+      );
+    }
+
+    return {
+      applied: false,
+      reason: "insufficient_stock",
+      error: err?.message || String(err),
+    };
+  }
 }
 
 function recordOrderSkip(stats, entry, logCtx = {}) {
@@ -885,11 +1485,18 @@ function formatFetchOrderBatchRemarks({
   skipped_orders = [],
   isComplete,
   page,
+  inventory_applied = 0,
+  inventory_stock_awaiting = 0,
 }) {
+  const inventoryNote =
+    inventory_applied || inventory_stock_awaiting ?
+      ` Inventory deducted ${inventory_applied}, stock awaiting ${inventory_stock_awaiting}.`
+    : "";
+
   const summary =
     isComplete ?
-      `Order import completed: batch fetched ${fetched}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}.`
-    : `Batch complete: fetched ${fetched}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}. Call execute-process again for page ${page + 1}.`;
+      `Order import completed: batch fetched ${fetched}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}.${inventoryNote}`
+    : `Batch complete: fetched ${fetched}, inserted ${inserted}, skipped ${skipped}, lines inserted ${lines_inserted}, lines skipped ${lines_skipped}.${inventoryNote} Call execute-process again for page ${page + 1}.`;
 
   if (!skipped_orders.length) {
     return summary;
@@ -1619,6 +2226,7 @@ async function finishFetchOrderBatch(req, res, process, batchResult) {
 }
 
 const failFetchOrderBatch = failFetchCategoryBatch;
+const failPullOrderBatch = failFetchOrderBatch;
 
 /** Single poll — keep process active for recurring cron / queue runs. */
 async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
@@ -1899,11 +2507,23 @@ module.exports = {
   mapWooOrderStatus,
   mapShopifyOrderStatus,
   resolveOrderWebsiteStatus,
+  parseOrderExternalRef,
+  resolveRemoteOrderIdFromPosOrder,
+  buildPosOrderHeaderFromRemote,
+  updatePosOrderFromRemote,
+  mapPosOrderStatusToWoo,
+  resolvePosOrderTrackingForPush,
+  buildPosOrderTrackingMetaEntries,
+  mergeWooOrderMetaData,
+  buildShopifyTrackingNote,
+  POS_ORDER_TRACKING_META_KEYS,
   fallbackRemoteOrderLinesSubtotal,
   createFetchOrderStats,
+  createPullOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
   formatFetchLatestOrderRemarks,
+  formatPullOrderBatchRemarks,
   logFetchOrderImported,
   logFetchOrderSkipped,
   logFetchOrderFailed,
@@ -1928,10 +2548,12 @@ module.exports = {
   finishFetchProductBatch,
   finishFetchOrderBatch,
   finishFetchLatestOrderBatch,
+  finishPullOrderBatch,
   failFetchCategoryBatch,
   failFetchBrandBatch,
   failFetchProductBatch,
   failFetchOrderBatch,
+  failPullOrderBatch,
   markProcessOutcome,
   formatProcessRemarks,
   extractProcessErrorMessage,
@@ -1941,4 +2563,5 @@ module.exports = {
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
   resolvePosCustomerEmail,
+  applyFetchOrderOutboundInventory,
 };

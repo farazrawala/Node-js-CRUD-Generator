@@ -53,15 +53,26 @@ const {
   mapWooOrderStatus,
   resolveOrderWebsiteStatus,
   createFetchOrderStats,
+  createPullOrderStats,
   recordOrderSkip,
   formatFetchOrderBatchRemarks,
   formatFetchLatestOrderRemarks,
+  formatPullOrderBatchRemarks,
   logFetchOrderImported,
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
   resolveSyncStockTotals,
+  applyFetchOrderOutboundInventory,
+  updatePosOrderFromRemote,
+  resolveRemoteOrderIdFromPosOrder,
+  mapPosOrderStatusToWoo,
+  finishPullOrderBatch,
+  failPullOrderBatch,
+  resolvePosOrderTrackingForPush,
+  buildPosOrderTrackingMetaEntries,
+  mergeWooOrderMetaData,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -2931,6 +2942,22 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     stats.lines_inserted += 1;
   }
 
+  if (orderItemsPayload.length > 0) {
+    await applyFetchOrderOutboundInventory({
+      req,
+      process,
+      companyId,
+      order,
+      lines: orderItemsPayload.map((item) => ({
+        product_id: item.product_id,
+        qty: item.qty,
+        price: item.price,
+      })),
+      store: "woocommerce",
+      stats,
+    });
+  }
+
   stats.inserted += 1;
 
   if (req) {
@@ -2943,6 +2970,681 @@ async function importWooOrderToPos(remoteOrder, ctx) {
       posOrderId: order._id,
       posOrderNo: order.order_no,
       lineCount: orderItemsPayload.length,
+    });
+  }
+}
+
+/**
+ * Pull one WooCommerce order into POS — update if already imported, else insert.
+ */
+async function pullWooOrderToPos(remoteOrder, ctx) {
+  const { companyId, process, stats, req } = ctx;
+  const logCtx = { req, process, companyId };
+  const integrationId = resolveIntegrationId(process);
+  const remoteId = remoteOrder?.id;
+  const externalRef = orderExternalRef("woocommerce", remoteId);
+  const integrationOrderId = resolveIntegrationOrderId(
+    "woocommerce",
+    remoteOrder,
+    remoteId,
+  );
+
+  if (!externalRef) {
+    recordOrderSkip(
+      stats,
+      {
+        store: "woocommerce",
+        remote_id: remoteId,
+        order_number: remoteOrder?.number,
+        reason: "missing_remote_id",
+        detail: "WooCommerce order has no id",
+      },
+      logCtx,
+    );
+    return;
+  }
+
+  const existing = await findExistingImportedOrder(companyId, {
+    externalRef,
+    integrationId,
+    integrationOrderId,
+  });
+
+  if (existing) {
+    await updatePosOrderFromRemote(existing, remoteOrder, "woocommerce", {
+      companyId,
+      process,
+      integrationId,
+    });
+    stats.updated += 1;
+    return;
+  }
+
+  await importWooOrderToPos(remoteOrder, ctx);
+}
+
+/**
+ * Pull orders from WooCommerce into POS (batch or single). Updates existing POS rows.
+ */
+async function pull_order(req, res, process) {
+  const integration = process?.integration_id;
+  const companyId = resolveCompanyId(process);
+  const posOrder = process?.order_id;
+
+  if (!validateWooIntegration(integration, res)) {
+    return;
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const { client, error } = buildWooCommerceClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  try {
+    const stats = createPullOrderStats();
+    const importCtx = { companyId, process, stats, req };
+
+    if (posOrder) {
+      const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "woocommerce");
+      if (!remoteId) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "POS order has no WooCommerce reference (description or integration_order_id).",
+        });
+      }
+
+      const response = await client.get(`orders/${remoteId}`);
+      const remote = response?.data;
+      if (!remote?.id) {
+        return res.status(404).json({
+          success: false,
+          message: `WooCommerce order ${remoteId} not found.`,
+        });
+      }
+
+      try {
+        await pullWooOrderToPos(remote, importCtx);
+      } catch (err) {
+        recordOrderSkip(
+          stats,
+          {
+            store: "woocommerce",
+            remote_id: remoteId,
+            order_number: remote?.number,
+            reason: "import_error",
+            detail: err?.message || String(err),
+          },
+          importCtx,
+        );
+      }
+
+      const { inserted, updated, skipped, lines_inserted, lines_skipped, skipped_orders } =
+        stats;
+      const remarks = formatPullOrderBatchRemarks({
+        fetched: 1,
+        inserted,
+        updated,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        isComplete: true,
+        page: 1,
+      });
+
+      return finishPullOrderBatch(req, res, process, {
+        fetched: 1,
+        inserted,
+        updated,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+        isComplete: true,
+        remarks,
+      });
+    }
+
+    const { limit, page } = resolveBatchPagination(process);
+    const response = await client.get("orders", {
+      page,
+      per_page: limit,
+      orderby: "id",
+      order: "asc",
+    });
+    const remoteOrders = Array.isArray(response?.data) ? response.data : [];
+
+    for (const remote of remoteOrders) {
+      try {
+        await pullWooOrderToPos(remote, importCtx);
+      } catch (err) {
+        console.error(
+          `Failed to pull WooCommerce order ${remote?.id}:`,
+          err?.message || err,
+        );
+        recordOrderSkip(
+          stats,
+          {
+            store: "woocommerce",
+            remote_id: remote?.id,
+            order_number: remote?.number,
+            reason: "import_error",
+            detail: err?.message || String(err),
+          },
+          importCtx,
+        );
+      }
+    }
+
+    const { inserted, updated, skipped, lines_inserted, lines_skipped, skipped_orders } =
+      stats;
+    const fetched = remoteOrders.length;
+    const isComplete = fetched < limit;
+    const remarks = formatPullOrderBatchRemarks({
+      fetched,
+      inserted,
+      updated,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      isComplete,
+      page: page + 1,
+    });
+
+    return finishPullOrderBatch(req, res, process, {
+      fetched,
+      inserted,
+      updated,
+      skipped,
+      lines_inserted,
+      lines_skipped,
+      skipped_orders,
+      isComplete,
+      remarks,
+    });
+  } catch (error) {
+    console.error(
+      "WooCommerce order pull failed:",
+      error?.response?.data || error.message,
+    );
+    const errorMessage =
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to pull orders from WooCommerce.";
+    await logFetchOrderBatchFailed(req, {
+      process,
+      companyId,
+      store: "woocommerce",
+      errorMessage,
+    });
+    return failPullOrderBatch(
+      process,
+      res,
+      errorMessage,
+      error?.response?.data || error,
+    );
+  }
+}
+
+function splitPosCustomerName(name) {
+  const parts = String(name || "")
+    .trim()
+    .split(/\s+/);
+  return {
+    first_name: parts[0] || "",
+    last_name: parts.slice(1).join(" ") || "",
+  };
+}
+
+function normalizeWooCountryCode(country) {
+  const raw = String(country || "").trim();
+  if (!raw) {
+    return "PK";
+  }
+  if (/^[A-Za-z]{2}$/.test(raw)) {
+    return raw.toUpperCase();
+  }
+  const map = {
+    pakistan: "PK",
+    "united states": "US",
+    "united kingdom": "GB",
+  };
+  return map[raw.toLowerCase()] || "PK";
+}
+
+function buildWooAddressFromPosOrder(posOrder) {
+  const { first_name, last_name } = splitPosCustomerName(posOrder?.name);
+  return {
+    first_name,
+    last_name,
+    address_1: String(posOrder?.address || "").trim(),
+    city: String(posOrder?.city || "").trim(),
+    state: String(posOrder?.state || "").trim(),
+    postcode: String(posOrder?.zip || "").trim(),
+    country: normalizeWooCountryCode(posOrder?.country),
+    email: String(posOrder?.email || "").trim(),
+    phone: String(posOrder?.phone || "").trim(),
+  };
+}
+
+function buildWooOrderAddressPayload(posOrder) {
+  const address = buildWooAddressFromPosOrder(posOrder);
+  return {
+    billing: address,
+    shipping: address,
+  };
+}
+
+/**
+ * Woo admin hides billing/shipping when customer_id points to a deleted WP user.
+ * Fall back to guest (0) so order-level address fields display.
+ */
+async function resolveWooCustomerIdForPush(client, remoteOrder) {
+  const remoteCustomerId = Number(remoteOrder?.customer_id) || 0;
+  if (remoteCustomerId <= 0) {
+    return 0;
+  }
+
+  try {
+    await client.get(`customers/${remoteCustomerId}`);
+    return remoteCustomerId;
+  } catch {
+    return 0;
+  }
+}
+
+function formatWooMoney(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) {
+    return "0.00";
+  }
+  return n.toFixed(2);
+}
+
+/**
+ * Map POS order lines → WooCommerce line_items (requires sync_product mapping).
+ */
+async function buildWooLineItemsFromPosOrderItems({
+  orderItems,
+  integrationId,
+  companyId,
+}) {
+  const lineItems = [];
+  const skipped = [];
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+
+  for (const item of orderItems || []) {
+    const productId = coalesceObjectId(item?.product_id);
+    const qty = Number(item?.qty) || 0;
+    const subtotal = Number(item?.subtotal);
+    const price = Number(item?.price);
+
+    if (!productId || qty <= 0) {
+      continue;
+    }
+
+    const mapping = await SyncProduct.findOne({
+      product_id: productId,
+      integration_id,
+      company_id,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (!mapping?.refference_id) {
+      skipped.push({
+        name: item?.name || "Item",
+        product_id: String(productId),
+        reason: "no_sync_product_mapping",
+        detail: "Run sync_product for this product first.",
+      });
+      continue;
+    }
+
+    const { parentId, variationId } = parseWooSyncReference(
+      mapping.refference_id,
+    );
+    const wooProductId = Number(parentId);
+    if (!Number.isFinite(wooProductId) || wooProductId <= 0) {
+      skipped.push({
+        name: item?.name || "Item",
+        product_id: String(productId),
+        reason: "invalid_sync_reference",
+        detail: mapping.refference_id,
+      });
+      continue;
+    }
+
+    const lineTotal =
+      Number.isFinite(subtotal) && subtotal >= 0 ?
+        subtotal
+      : Math.round((Number.isFinite(price) ? price : 0) * qty * 100) / 100;
+
+    const payload = {
+      product_id: wooProductId,
+      quantity: qty,
+      subtotal: formatWooMoney(lineTotal),
+      total: formatWooMoney(lineTotal),
+    };
+
+    if (variationId) {
+      const wooVariationId = Number(variationId);
+      if (Number.isFinite(wooVariationId) && wooVariationId > 0) {
+        payload.variation_id = wooVariationId;
+      }
+    }
+
+    if (item?.name) {
+      payload.name = String(item.name).trim();
+    }
+
+    lineItems.push(payload);
+  }
+
+  return { lineItems, skipped };
+}
+
+/** Replace remote lines on re-push — Woo adds new rows if existing ids are not cleared. */
+function buildWooLineItemsForPush(remoteOrder, posLineItems) {
+  const existing = Array.isArray(remoteOrder?.line_items) ?
+      remoteOrder.line_items
+    : [];
+  const removeExisting = existing
+    .filter((item) => item?.id)
+    .map((item) => ({ id: item.id, quantity: 0 }));
+
+  return {
+    lineItems: [...removeExisting, ...posLineItems],
+    linesRemoved: removeExisting.length,
+  };
+}
+
+const WOO_ORDER_LOCKED_STATUSES = new Set([
+  "completed",
+  "cancelled",
+  "refunded",
+  "failed",
+]);
+
+/**
+ * Push POS order lines + header fields to WooCommerce.
+ */
+async function push_order(req, res, process) {
+  const integration = process?.integration_id;
+  const posOrder = process?.order_id;
+  const companyId = resolveCompanyId(process);
+  const integrationId = resolveIntegrationId(process);
+
+  if (!validateWooIntegration(integration, res)) {
+    return;
+  }
+
+  if (!posOrder) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Order is required for push_order. Set order_id on the process (Admin → Process).",
+    });
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "woocommerce");
+  if (!remoteId) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "POS order has no WooCommerce reference (description or integration_order_id).",
+    });
+  }
+
+  const { client, error } = buildWooCommerceClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  const posStatus = String(posOrder.order_status || "placed").trim();
+  const wooStatus = mapPosOrderStatusToWoo(posStatus);
+
+  try {
+    const orderItems = await OrderItem.find({
+      order_id: coalesceObjectId(posOrder._id),
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    const { lineItems, skipped } = await buildWooLineItemsFromPosOrderItems({
+      orderItems,
+      integrationId,
+      companyId,
+    });
+
+    if (lineItems.length === 0) {
+      const msg =
+        skipped.length > 0 ?
+          "No line items could be pushed — products need sync_product mapping on this integration."
+        : "POS order has no active line items to push.";
+      await markProcessOutcome(process._id, "failed", msg);
+      return res.status(400).json({
+        success: false,
+        message: msg,
+        data: { skipped, pos_line_count: orderItems.length },
+      });
+    }
+
+    const remoteResponse = await client.get(`orders/${remoteId}`);
+    const remoteOrder = remoteResponse?.data;
+    const remoteLineCount = Array.isArray(remoteOrder?.line_items) ?
+        remoteOrder.line_items.length
+      : 0;
+    const remoteStatus = String(remoteOrder?.status || "").toLowerCase();
+
+    const { lineItems: wooLineItems, linesRemoved } = buildWooLineItemsForPush(
+      remoteOrder,
+      lineItems,
+    );
+
+    const addressPayload = buildWooOrderAddressPayload(posOrder);
+    const customerId = await resolveWooCustomerIdForPush(client, remoteOrder);
+    const discount = formatWooMoney(posOrder.discount);
+    const shipping = formatWooMoney(posOrder.shipment);
+    const linesSubtotal = formatWooMoney(
+      posOrder.lines_subtotal ??
+        lineItems.reduce((sum, line) => sum + Number(line.total || 0), 0),
+    );
+    const orderTotal = formatWooMoney(
+      posOrder.amount_received ??
+        Math.max(
+          0,
+          Number(linesSubtotal) - Number(discount) + Number(shipping),
+        ),
+    );
+
+    const wooPayload = {
+      customer_id: customerId,
+      ...addressPayload,
+      line_items: wooLineItems,
+      discount_total: discount,
+      shipping_total: shipping,
+      total: orderTotal,
+    };
+
+    const needsUnlock =
+      WOO_ORDER_LOCKED_STATUSES.has(remoteStatus) &&
+      (remoteLineCount > 0 || lineItems.length > 0);
+
+    if (needsUnlock) {
+      await client.put(`orders/${remoteId}`, {
+        status: "on-hold",
+      });
+    }
+
+    wooPayload.status = wooStatus;
+    const updateResponse = await client.put(`orders/${remoteId}`, wooPayload);
+    const updatedOrder = updateResponse?.data;
+
+    const label = posOrder.order_no || posOrder._id;
+    const replaceNote =
+      linesRemoved > 0 ? `, replaced ${linesRemoved} existing line(s)` : "";
+    const remarks = `Order ${label} pushed to WooCommerce #${remoteId}: ${lineItems.length} line(s), status ${wooStatus}${replaceNote}${skipped.length ? `, ${skipped.length} skipped` : ""}.`;
+    await markProcessOutcome(process._id, "completed", remarks);
+
+    return res.status(200).json({
+      success: true,
+      message: remarks,
+      data: {
+        order_id: posOrder._id,
+        remote_id: remoteId,
+        remote_number: updatedOrder?.number ?? remoteOrder?.number ?? null,
+        order_status: posStatus,
+        woo_status: wooStatus,
+        lines_pushed: lineItems.length,
+        lines_removed: linesRemoved,
+        lines_skipped: skipped,
+        woo_total: updatedOrder?.total ?? orderTotal,
+        woo_line_items:
+          Array.isArray(updatedOrder?.line_items) ?
+            updatedOrder.line_items.filter((row) => Number(row?.quantity) > 0)
+              .length
+          : lineItems.length,
+      },
+    });
+  } catch (err) {
+    console.error(
+      "WooCommerce order push failed:",
+      err?.response?.data || err.message,
+    );
+    const errorMessage =
+      err?.response?.data?.message ||
+      err?.message ||
+      "Failed to push order to WooCommerce.";
+    await markProcessOutcome(process._id, "failed", errorMessage);
+    return res.status(500).json({
+      success: false,
+      message: errorMessage,
+      error: err?.response?.data || err,
+    });
+  }
+}
+
+/**
+ * Push POS courier / tracking fields to WooCommerce order meta_data.
+ */
+async function push_order_tracking(req, res, process) {
+  const integration = process?.integration_id;
+  const posOrder = process?.order_id;
+  const companyId = resolveCompanyId(process);
+
+  if (!validateWooIntegration(integration, res)) {
+    return;
+  }
+
+  if (!posOrder) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Order is required for push_order_tracking. Set order_id on the process.",
+    });
+  }
+
+  if (!companyId) {
+    return res.status(400).json({
+      success: false,
+      message: "company_id is required on the process record.",
+    });
+  }
+
+  const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "woocommerce");
+  if (!remoteId) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "POS order has no WooCommerce reference (description or integration_order_id).",
+    });
+  }
+
+  const tracking = await resolvePosOrderTrackingForPush(posOrder);
+  if (
+    !tracking.courier_name &&
+    !tracking.tracking_number &&
+    !tracking.tracking_status
+  ) {
+    const msg =
+      "Nothing to push — set courier, tracking number, or tracking status on the POS order.";
+    await markProcessOutcome(process._id, "failed", msg);
+    return res.status(400).json({ success: false, message: msg });
+  }
+
+  const { client, error } = buildWooCommerceClient(integration);
+  if (error) {
+    return res.status(400).json({ success: false, message: error });
+  }
+
+  try {
+    const remoteResponse = await client.get(`orders/${remoteId}`);
+    const remoteOrder = remoteResponse?.data;
+    const customerId = await resolveWooCustomerIdForPush(client, remoteOrder);
+    const addressPayload = buildWooOrderAddressPayload(posOrder);
+    const meta_data = mergeWooOrderMetaData(
+      remoteOrder?.meta_data,
+      buildPosOrderTrackingMetaEntries(tracking),
+    );
+
+    const updateResponse = await client.put(`orders/${remoteId}`, {
+      customer_id: customerId,
+      ...addressPayload,
+      meta_data,
+    });
+    const updatedOrder = updateResponse?.data;
+
+    const label = posOrder.order_no || posOrder._id;
+    const remarks = `Order ${label} tracking pushed to WooCommerce #${remoteId}: courier "${tracking.courier_name || "—"}", tracking "${tracking.tracking_number || "—"}", status "${tracking.tracking_status || "—"}", shipping/billing updated.`;
+    await markProcessOutcome(process._id, "completed", remarks);
+
+    return res.status(200).json({
+      success: true,
+      message: remarks,
+      data: {
+        order_id: posOrder._id,
+        remote_id: remoteId,
+        remote_number: updatedOrder?.number ?? remoteOrder?.number ?? null,
+        tracking,
+        customer_id: customerId,
+        billing: addressPayload.billing,
+        shipping: addressPayload.shipping,
+        meta_data: buildPosOrderTrackingMetaEntries(tracking),
+      },
+    });
+  } catch (err) {
+    console.error(
+      "WooCommerce order tracking push failed:",
+      err?.response?.data || err.message,
+    );
+    const errorMessage =
+      err?.response?.data?.message ||
+      err?.message ||
+      "Failed to push order tracking to WooCommerce.";
+    await markProcessOutcome(process._id, "failed", errorMessage);
+    return res.status(500).json({
+      success: false,
+      message: errorMessage,
+      error: err?.response?.data || err,
     });
   }
 }
@@ -3015,6 +3717,8 @@ async function fetch_order(req, res, process) {
       skipped_orders,
       isComplete,
       page: page + 1,
+      inventory_applied: stats.inventory_applied || 0,
+      inventory_stock_awaiting: stats.inventory_stock_awaiting || 0,
     });
 
     return finishFetchOrderBatch(req, res, process, {
@@ -3436,6 +4140,9 @@ module.exports = {
   fetch_brand,
   fetch_order,
   fetch_latest_order,
+  pull_order,
+  push_order,
+  push_order_tracking,
   fetch_product,
   sync_product,
   sync_category,

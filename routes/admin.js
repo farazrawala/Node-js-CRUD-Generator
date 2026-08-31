@@ -2427,6 +2427,7 @@ const processAdminCRUD = adminCrudGenerator(
       product_id: "select",
       category_id: "select",
       brand_id: "select",
+      order_id: "select",
       action: "select",
       company_id: "select",
       created_by: "select",
@@ -2441,6 +2442,7 @@ const processAdminCRUD = adminCrudGenerator(
       product_id: "Product",
       category_id: "Category",
       brand_id: "Brand",
+      order_id: "Order",
     },
     fieldOptions: {
       action: [
@@ -2452,6 +2454,15 @@ const processAdminCRUD = adminCrudGenerator(
         {
           value: "fetch_latest_order",
           label: "Fetch latest orders (new only, store → POS)",
+        },
+        {
+          value: "pull_order",
+          label: "Pull orders (update existing, store → POS)",
+        },
+        { value: "push_order", label: "Push order (POS → store)" },
+        {
+          value: "push_order_tracking",
+          label: "Push order tracking (courier / tracking → store)",
         },
         { value: "sync_product", label: "Sync product" },
         {
@@ -2491,6 +2502,7 @@ const processAdminCRUD = adminCrudGenerator(
           { path: "product_id", select: "product_name sku" },
           { path: "category_id", select: "name slug" },
           { path: "brand_id", select: "name slug" },
+          { path: "order_id", select: "order_no name integration_order_id" },
           { path: "created_by", select: "name email" },
         ]);
 

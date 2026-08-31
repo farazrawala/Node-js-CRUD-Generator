@@ -35,6 +35,9 @@ const PROCESS_QUEUE_FORM_FIELDS = {
       "delete_brand",
       "fetch_order",
       "fetch_latest_order",
+      "pull_order",
+      "push_order",
+      "push_order_tracking",
       "queue_bigcommerce_product_reset",
       "apply_bigcommerce_product_reset",
     ],
@@ -52,12 +55,14 @@ const PROCESS_QUEUE_FORM_FIELDS = {
   category_id: { type: "string", note: "single sync_category job" },
   brand_id: { type: "string", note: "single sync_brand job" },
   product_id: { type: "string", note: "single sync_product job" },
+  order_id: { type: "string", note: "single push_order / push_order_tracking / pull_order job" },
   category_ids: {
     type: "string|string[]",
     note: "comma-separated, JSON array, or repeat field",
   },
   brand_ids: { type: "string|string[]" },
   product_ids: { type: "string|string[]" },
+  order_ids: { type: "string|string[]", note: "bulk push_order / push_order_tracking jobs" },
   items: { type: "json string", note: "advanced bulk rows" },
 };
 
@@ -129,6 +134,9 @@ function normalizeProcessQueueBody(rawBody = {}) {
   body.product_ids = parseIdList(
     pickBodyField(body, "product_ids", "product_ids[]", "productIds"),
   );
+  body.order_ids = parseIdList(
+    pickBodyField(body, "order_ids", "order_ids[]", "orderIds"),
+  );
 
   const scalarFields = [
     "integration_id",
@@ -140,6 +148,7 @@ function normalizeProcessQueueBody(rawBody = {}) {
     "category_id",
     "brand_id",
     "product_id",
+    "order_id",
   ];
 
   for (const field of scalarFields) {
@@ -216,6 +225,15 @@ function buildProcessSourceRows(body) {
     }));
   }
 
+  if (normalized.order_ids.length) {
+    const action = String(normalized.action || "push_order").trim();
+    return normalized.order_ids.map((orderId) => ({
+      ...template,
+      action,
+      order_id: orderId,
+    }));
+  }
+
   if (normalized.action) {
     return [
       {
@@ -224,6 +242,7 @@ function buildProcessSourceRows(body) {
         category_id: normalized.category_id,
         brand_id: normalized.brand_id,
         product_id: normalized.product_id,
+        order_id: normalized.order_id,
       },
     ];
   }

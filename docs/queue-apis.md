@@ -87,11 +87,14 @@ A row is **not** queued when `status !== active`, `progress` is `completed` or `
 | `fetch_brand`                      | Store → POS | Yes               | `integration_id`                |
 | `fetch_order`                      | Store → POS | Yes               | `integration_id`                |
 | `fetch_latest_order`               | Store → POS | Yes               | `integration_id`                |
+| `pull_order`                       | Store → POS | Yes (batch) or single | `integration_id`; optional `order_id` |
+| `push_order`                       | POS → Store | No (one order)    | `integration_id`, `order_id`    |
+| `push_order_tracking`              | POS → Store | No (one order)    | `integration_id`, `order_id`    |
 | `sync_product`                     | POS → Store | No (one product)  | `integration_id`, `product_id`  |
 | `sync_category`                    | POS → Store | No (one category) | `integration_id`, `category_id` |
 | `sync_brand`                       | POS → Store | No (one brand)    | `integration_id`, `brand_id`    |
 
-**Note:** `fetch_product` reuses one active job per integration. `sync_product`, `sync_category`, and `sync_brand` create **one queue entry per ID** when bulk IDs are passed.
+**Note:** `fetch_product` reuses one active job per integration. `fetch_order` only inserts new orders; use `pull_order` to refresh existing POS orders from the store. `sync_product`, `sync_category`, and `sync_brand` create **one queue entry per ID** when bulk IDs are passed. `push_order` creates one queue entry per `order_id`.
 
 ---
 

@@ -22,6 +22,11 @@ const modelSchema = new mongoose.Schema(
       ref: "brands",
       field_name: "Brand",
     },
+    order_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "order",
+      field_name: "Order",
+    },
     action: {
       type: String,
       required: true,
@@ -41,7 +46,9 @@ const modelSchema = new mongoose.Schema(
 
         "fetch_order",
         "fetch_latest_order",
-        "sync_order",
+        "pull_order",
+        "push_order",
+        "push_order_tracking",
         "delete_order",
 
         "queue_bigcommerce_product_reset",

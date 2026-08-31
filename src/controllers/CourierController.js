@@ -142,6 +142,7 @@ async function getTrackingByOrder(req, res) {
     const { orderId } = req.params;
     const result = await CourierService.getTracking(orderId, {
       companyId: companyIdFromReq(req),
+      createdBy: req.user?._id || null,
     });
     return res.status(200).json(result);
   } catch (err) {
