@@ -436,29 +436,6 @@ router.get(
   getSalesReturnByReturnNo,
 );
 
-// Frontend aliases (sales-returns edit page uses sales_order_return/*)
-router.post("/sales_order_return/sales_order_return_create", salesReturnCreate);
-router.patch(
-  "/sales_order_return/sales_order_return_update/:id",
-  sales_return_update,
-);
-router.delete(
-  "/sales_order_return/sales_order_return_delete/:id",
-  sales_return_delete,
-);
-router.get(
-  "/sales_order_return/get-sales-return-by-return-item",
-  getSalesReturnByReturnItem,
-);
-router.get(
-  "/sales_order_return/get-sales-return-by-return-item/:id",
-  getSalesReturnByReturnItem,
-);
-router.get(
-  "/sales_order_return/get-sales-return-by-return-no/:id",
-  getSalesReturnByReturnNo,
-);
-
 // Expense routes
 router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
@@ -1173,6 +1150,38 @@ const categoryController =
 /** Courier Integration Module (provider pattern — TCS, Leopard, …). */
 const courierRoutes = require("../src/routes/courier.routes");
 router.use("/courier", courierRoutes);
+
+// Frontend aliases (sales-returns edit page uses sales_order_return/*).
+// Register after dynamic routes; accept PATCH/PUT/POST (some proxies rewrite PATCH).
+router.post("/sales_order_return/sales_order_return_create", salesReturnCreate);
+router.patch(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.put(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.post(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.delete(
+  "/sales_order_return/sales_order_return_delete/:id",
+  sales_return_delete,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-item",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-item/:id",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-no/:id",
+  getSalesReturnByReturnNo,
+);
 
 /** Unmatched /api/* — JSON 404 + best-effort row in `logs` (never reaches controllers). */
 router.use(async (req, res) => {
