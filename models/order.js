@@ -55,6 +55,7 @@ const ORDER_STATUS_VALUES = [
   "confirmed", // Confirmed for fulfillment
   "duplicate", // Marked duplicate
   "packed", // Packed
+  "products_skipped", // Products skipped
   "delivered", // Delivered
   "draft", // Draft / not finalized
   "pending", // Pending
@@ -108,6 +109,7 @@ const ORDER_STATUS_STOCK = Object.freeze({
     "draft",
     "pending",
     "on_hold",
+    "products_skipped",
     "cancelled",
     "failed",
     "return",
@@ -196,6 +198,7 @@ const ORDER_STATUS_GROUPS = {
     "pending_payment",
     "on_hold",
     "processing",
+    "products_skipped",
   ]),
   /** Physical / digital fulfillment */
   fulfillment: new Set(["packed", "in_transit", "shipped", "delivered"]),
@@ -482,7 +485,7 @@ const modelSchema = new mongoose.Schema(
     status: {
       type: String,
       required: true,
-      enum: ["active", "inactive"],
+      enum: ["active", "inactive", "fetched_from_order"],
       default: "active",
     },
     deletedAt: {

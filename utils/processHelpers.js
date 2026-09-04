@@ -667,27 +667,87 @@ async function resolvePosProductForRemoteLine({
   integrationId,
   companyId,
   remoteProductId,
+  remoteVariantId,
   sku,
   name,
+  store,
 }) {
   const integration_id = coalesceObjectId(integrationId);
   const company_id = coalesceObjectId(companyId);
+  const storeKey = String(store || "").trim().toLowerCase();
+  const productId =
+    remoteProductId != null && remoteProductId !== "" ?
+      String(remoteProductId).trim()
+    : "";
+  const variantId =
+    remoteVariantId != null && remoteVariantId !== "" ?
+      String(remoteVariantId).trim()
+    : "";
 
-  if (integration_id && remoteProductId != null && remoteProductId !== "") {
-    const mapped = await findPosProductBySyncReference(
-      integration_id,
-      company_id,
-      String(remoteProductId),
-    );
-    if (mapped) {
-      return mapped;
+  if (integration_id && (productId || variantId)) {
+    if (productId && variantId) {
+      const byComposite = await findPosProductBySyncReference(
+        integration_id,
+        company_id,
+        `${productId}:${variantId}`,
+      );
+      if (byComposite) {
+        return byComposite;
+      }
+    }
+
+    if (variantId && (storeKey === "shopify" || storeKey === "woocommerce")) {
+      const byVariant = await findPosProductBySyncReference(
+        integration_id,
+        company_id,
+        variantId,
+      );
+      if (byVariant) {
+        return byVariant;
+      }
+    }
+
+    if (productId) {
+      const byProduct = await findPosProductBySyncReference(
+        integration_id,
+        company_id,
+        productId,
+      );
+      if (byProduct) {
+        return byProduct;
+      }
     }
   }
 
   if (sku) {
-    const bySku = await findExistingProductBySku(sku, company_id);
+    const trimmedSku = String(sku).trim();
+    const bySku = await findExistingProductBySku(trimmedSku, company_id);
     if (bySku) {
       return bySku;
+    }
+
+    if (storeKey === "shopify") {
+      const shopifySkuMatch = trimmedSku.match(/^shopify-(\d+)$/i);
+      if (shopifySkuMatch && integration_id) {
+        const extractedId = shopifySkuMatch[1];
+        if (extractedId && extractedId !== productId) {
+          const byExtractedRef = await findPosProductBySyncReference(
+            integration_id,
+            company_id,
+            extractedId,
+          );
+          if (byExtractedRef) {
+            return byExtractedRef;
+          }
+        }
+        const byGeneratedSku = await findExistingProductBySku(
+          trimmedSku,
+          company_id,
+        );
+        if (byGeneratedSku) {
+          return byGeneratedSku;
+        }
+      }
     }
   }
 
@@ -696,6 +756,175 @@ async function resolvePosProductForRemoteLine({
   }
 
   return null;
+}
+
+function resolveRemoteLineVariantId(line, store) {
+  const storeKey = String(store || "").trim().toLowerCase();
+  if (storeKey === "woocommerce") {
+    return line?.variation_id;
+  }
+  return line?.variant_id;
+}
+
+async function buildPosOrderLineItemsFromRemote(remoteOrder, store, ctx) {
+  const { process, stats } = ctx;
+  const companyId = ctx.companyId || resolveCompanyId(process);
+  const integrationId = resolveIntegrationId(process);
+  const storeKey = String(store || "").trim().toLowerCase();
+  const lineItems =
+    Array.isArray(remoteOrder?.line_items) ? remoteOrder.line_items : [];
+  const orderItemsPayload = [];
+  let linesSubtotal = 0;
+  let linesSkipped = 0;
+  let remoteBillableLines = 0;
+
+  for (const line of lineItems) {
+    const qty = Number(line?.quantity) || 0;
+    const price = Number(line?.price) || 0;
+    if (qty <= 0) {
+      continue;
+    }
+    remoteBillableLines += 1;
+
+    const product = await resolvePosProductForRemoteLine({
+      integrationId,
+      companyId,
+      remoteProductId: line?.product_id,
+      remoteVariantId: resolveRemoteLineVariantId(line, storeKey),
+      sku: line?.sku,
+      name: line?.name,
+      store: storeKey,
+    });
+
+    if (!product?._id) {
+      linesSkipped += 1;
+      if (stats) {
+        stats.lines_skipped += 1;
+      }
+      continue;
+    }
+
+    const subtotal = Math.round(price * qty * 100) / 100;
+    linesSubtotal += subtotal;
+    orderItemsPayload.push({
+      product_id: product._id,
+      name: String(
+        line?.name || product.product_name || product.name || "Item",
+      ).trim(),
+      price,
+      qty,
+      subtotal,
+      company_id: companyId,
+      created_by: coalesceObjectId(
+        process?.created_by?._id || process?.created_by,
+      ),
+      status: "active",
+    });
+  }
+
+  if (linesSubtotal === 0) {
+    linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, storeKey);
+  }
+
+  return {
+    orderItemsPayload,
+    linesSubtotal,
+    linesSkipped,
+    remoteBillableLines,
+  };
+}
+
+async function backfillPosOrderLinesIfEmpty(existing, remoteOrder, store, ctx) {
+  const OrderItem = require("../models/order_item");
+  const existingCount = await OrderItem.countDocuments({
+    order_id: existing._id,
+    status: "active",
+    deletedAt: null,
+  });
+  if (existingCount > 0) {
+    return null;
+  }
+
+  const built = await buildPosOrderLineItemsFromRemote(remoteOrder, store, ctx);
+  const { orderItemsPayload, linesSkipped, remoteBillableLines } = built;
+  if (!orderItemsPayload.length) {
+    return {
+      lines_inserted: 0,
+      lines_skipped: linesSkipped,
+      remote_billable_lines: remoteBillableLines,
+      backfilled: false,
+    };
+  }
+
+  const { process, stats, req } = ctx;
+  const companyId = existing.company_id || ctx.companyId || resolveCompanyId(process);
+  const createdBy = coalesceObjectId(
+    process?.created_by?._id || process?.created_by || existing?.created_by,
+  );
+  for (const item of orderItemsPayload) {
+    await OrderItem.create({
+      ...item,
+      order_id: existing._id,
+      company_id: companyId,
+      created_by: item.created_by || createdBy,
+    });
+    if (stats) {
+      stats.lines_inserted += 1;
+    }
+  }
+
+  const nextStatus = resolveFetchOrderImportStatus({
+    linesSkipped,
+    linesInserted: orderItemsPayload.length,
+    remoteBillableLines,
+    remoteOrder,
+    store,
+  });
+  const patch = {
+    lines_subtotal: built.linesSubtotal,
+    order_status: nextStatus,
+  };
+  await Order.updateOne({ _id: existing._id }, { $set: patch });
+
+  if (nextStatus !== String(existing.order_status || "").trim()) {
+    await recordOrderStatusUpdate({
+      orderId: existing._id,
+      orderStatus: nextStatus,
+      companyId,
+      userId: process?.created_by?._id || process?.created_by,
+    });
+  }
+
+  await Order.syncHeaderTotalsFromLineItems(existing._id);
+
+  try {
+    await applyFetchOrderOutboundInventory({
+      req,
+      process,
+      companyId,
+      order: { ...existing, ...patch, _id: existing._id },
+      lines: orderItemsPayload.map((item) => ({
+        product_id: item.product_id,
+        qty: item.qty,
+        price: item.price,
+      })),
+      store,
+      stats,
+    });
+  } catch (err) {
+    console.warn(
+      "[fetch_order] backfill inventory skipped:",
+      err?.message || err,
+    );
+  }
+
+  return {
+    lines_inserted: orderItemsPayload.length,
+    lines_skipped: linesSkipped,
+    remote_billable_lines: remoteBillableLines,
+    backfilled: true,
+    order_status: nextStatus,
+  };
 }
 
 /** WooCommerce `status` → POS `order_status` (see ORDER_STATUS_VALUES in models/order.js). */
@@ -711,6 +940,30 @@ function mapWooOrderStatus(status) {
     trash: "cancelled",
   };
   return map[String(status || "").toLowerCase()] || "placed";
+}
+
+/** POS order_status when importing from store: skipped/missing lines → products_skipped. */
+function resolveFetchOrderImportStatus({
+  linesSkipped = 0,
+  linesInserted = 0,
+  remoteBillableLines = 0,
+  remoteOrder,
+  store,
+} = {}) {
+  if (Number(linesSkipped) > 0) {
+    return "products_skipped";
+  }
+  if (Number(linesInserted) === 0 && Number(remoteBillableLines) > 0) {
+    return "products_skipped";
+  }
+  if (
+    Number(linesInserted) === 0 &&
+    remoteOrder &&
+    fallbackRemoteOrderLinesSubtotal(remoteOrder, store) > 0
+  ) {
+    return "products_skipped";
+  }
+  return "placed";
 }
 
 /** When no POS line items were built, preserve store subtotal on the order header. */
@@ -1008,6 +1261,74 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
   return { updated: true, orderId: existing._id };
 }
 
+/**
+ * POS order_status → Shopify fulfillment sync action for push_order.
+ * Shopify does not mirror OMS statuses on the order resource; use Fulfillment Orders API.
+ */
+function mapPosOrderStatusToShopifyFulfillmentAction(posStatus) {
+  const s = String(posStatus || "").trim().toLowerCase();
+  if (s === "cancelled" || s === "duplicate") {
+    return "cancel";
+  }
+  if (s === "on_hold") {
+    return "hold";
+  }
+  if (s === "delivered" || s === "completed") {
+    return "deliver";
+  }
+  if (["packed", "in_transit", "shipped"].includes(s)) {
+    return "ship_with_tracking";
+  }
+  if (
+    ["processing", "confirmed", "placed", "active"].includes(s)
+  ) {
+    return "release_hold";
+  }
+  return "none";
+}
+
+/**
+ * OMS courier tracking_status → Shopify fulfillment event status
+ * (drives badges like Confirmed, In transit, Out for delivery, Delivered).
+ */
+function mapTrackingStatusToShopifyFulfillmentEvent(trackingStatus, orderStatus) {
+  const raw = String(trackingStatus || "").trim();
+  const s = raw.toLowerCase().replace(/[\s-]+/g, "_");
+
+  const direct = {
+    unbooked: "confirmed",
+    booked: "confirmed",
+    picked: "picked_up",
+    in_transit: "in_transit",
+    dispatched: "in_transit",
+    out_for_delivery: "out_for_delivery",
+    delivered: "delivered",
+    completed: "delivered",
+    returned: "failure",
+    cancelled: "failure",
+    failed: "failure",
+    exception: "failure",
+    arrived: "in_transit",
+  };
+  if (direct[s]) {
+    return direct[s];
+  }
+
+  if (/unbooked|pending/.test(s)) return "confirmed";
+  if (/booked|created|consignment/.test(s)) return "confirmed";
+  if (/pick/.test(s)) return "picked_up";
+  if (/out.*delivery/.test(s)) return "out_for_delivery";
+  if (/deliver/.test(s)) return "delivered";
+  if (/transit|dispatch|depart/.test(s)) return "in_transit";
+
+  const order = String(orderStatus || "").trim().toLowerCase();
+  if (["in_transit", "shipped"].includes(order)) return "in_transit";
+  if (["delivered", "completed"].includes(order)) return "delivered";
+  if (["packed"].includes(order) && raw) return "confirmed";
+
+  return raw ? "confirmed" : null;
+}
+
 /** POS order_status → WooCommerce order status. */
 function mapPosOrderStatusToWoo(posStatus) {
   const map = {
@@ -1044,6 +1365,38 @@ function formatCourierDisplayName(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   return normalizeProviderKey(raw) || raw;
+}
+
+/** Public tracking page URL for known Pakistani couriers (Shopify tracking_info.url). */
+function buildCourierTrackingUrl(courierName, trackingNumber) {
+  const id = String(trackingNumber || "").trim();
+  if (!id) return "";
+  const key = String(courierName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  if (key === "tcs") {
+    return `https://www.tcsexpress.com/track/?consignmentNo=${encodeURIComponent(id)}`;
+  }
+  if (key === "leopard" || key === "leopards" || key === "lcs") {
+    return `https://www.leopardscourier.com/tracking/?cn=${encodeURIComponent(id)}`;
+  }
+  if (key === "blueex") {
+    return `https://www.blue-ex.com/tracking?cn=${encodeURIComponent(id)}`;
+  }
+  if (key === "m&p" || key === "mnp" || key === "mp") {
+    return `https://www.mulphilog.com/tracking/${encodeURIComponent(id)}`;
+  }
+  if (key === "callcourier") {
+    return `https://callcourier.com.pk/tracking/?tc=${encodeURIComponent(id)}`;
+  }
+  if (key === "trax") {
+    return `https://sonic.pk/tracking?tracking_number=${encodeURIComponent(id)}`;
+  }
+  if (key === "postex" || key === "post-ex" || key === "postex.pk") {
+    return `https://postex.pk/tracking?cn=${encodeURIComponent(id)}`;
+  }
+  return "";
 }
 
 function pickShipmentCourierCompany(shipment) {
@@ -1105,10 +1458,14 @@ async function resolvePosOrderTrackingForPush(posOrder) {
     }
   }
 
+  const tracking_number = String(posOrder?.courier_tracking_number || "").trim();
+  const tracking_status = String(posOrder?.tracking_status || "").trim();
+
   return {
     courier_name: courierName,
-    tracking_number: String(posOrder?.courier_tracking_number || "").trim(),
-    tracking_status: String(posOrder?.tracking_status || "").trim(),
+    tracking_number,
+    tracking_status,
+    tracking_url: buildCourierTrackingUrl(courierName, tracking_number),
   };
 }
 
@@ -2504,6 +2861,9 @@ module.exports = {
   findExistingOrderByExternalRef,
   findExistingImportedOrder,
   resolvePosProductForRemoteLine,
+  buildPosOrderLineItemsFromRemote,
+  backfillPosOrderLinesIfEmpty,
+  resolveFetchOrderImportStatus,
   mapWooOrderStatus,
   mapShopifyOrderStatus,
   resolveOrderWebsiteStatus,
@@ -2512,10 +2872,13 @@ module.exports = {
   buildPosOrderHeaderFromRemote,
   updatePosOrderFromRemote,
   mapPosOrderStatusToWoo,
+  mapPosOrderStatusToShopifyFulfillmentAction,
+  mapTrackingStatusToShopifyFulfillmentEvent,
   resolvePosOrderTrackingForPush,
   buildPosOrderTrackingMetaEntries,
   mergeWooOrderMetaData,
   buildShopifyTrackingNote,
+  buildCourierTrackingUrl,
   POS_ORDER_TRACKING_META_KEYS,
   fallbackRemoteOrderLinesSubtotal,
   createFetchOrderStats,

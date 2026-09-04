@@ -251,7 +251,15 @@ const {
   markWhatsappMessageSent,
   markWhatsappMessageNotAvailable,
 } = require("../controllers/whatsapp_message");
-const { chatCreate, fetchRandomChat, markChatSent, markChatNotAvailable, canSendUnknownWhatsapp, resetUnknownWhatsappUsage, resetUnknownWhatsappUsageOnly } = require("../controllers/chat");
+const {
+  chatCreate,
+  fetchRandomChat,
+  markChatSent,
+  markChatNotAvailable,
+  canSendUnknownWhatsapp,
+  resetUnknownWhatsappUsage,
+  resetUnknownWhatsappUsageOnly,
+} = require("../controllers/chat");
 
 const supportTicketCtrl = require("../controllers/support_ticket");
 const taskCtrl = require("../controllers/task_management");
@@ -425,6 +433,29 @@ router.get(
 );
 router.get(
   "/sales_return/get-sales-return-by-return-no/:id",
+  getSalesReturnByReturnNo,
+);
+
+// Frontend aliases (sales-returns edit page uses sales_order_return/*)
+router.post("/sales_order_return/sales_order_return_create", salesReturnCreate);
+router.patch(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.delete(
+  "/sales_order_return/sales_order_return_delete/:id",
+  sales_return_delete,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-item",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-item/:id",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-no/:id",
   getSalesReturnByReturnNo,
 );
 
@@ -657,10 +688,7 @@ router.post(
   "/big-commerce/products/:productId/duplicate",
   duplicatePartnerProduct,
 );
-router.post(
-  "/big-commerce/products/fetch/:productId",
-  duplicatePartnerProduct,
-);
+router.post("/big-commerce/products/fetch/:productId", duplicatePartnerProduct);
 router.get("/big-commerce/categories/:companyId", getPartnerCategories);
 router.get("/big-commerce/brands/:companyId", getPartnerBrands);
 
@@ -830,15 +858,36 @@ router.post("/support-tickets/create", supportTicketCtrl.create);
 router.post("/support-ticket/reply/:id", supportTicketCtrl.reply);
 router.post("/support-tickets/reply/:id", supportTicketCtrl.reply);
 router.put("/support-ticket/change-status/:id", supportTicketCtrl.changeStatus);
-router.put("/support-tickets/change-status/:id", supportTicketCtrl.changeStatus);
-router.put("/support-ticket/change-priority/:id", supportTicketCtrl.changePriority);
-router.put("/support-tickets/change-priority/:id", supportTicketCtrl.changePriority);
+router.put(
+  "/support-tickets/change-status/:id",
+  supportTicketCtrl.changeStatus,
+);
+router.put(
+  "/support-ticket/change-priority/:id",
+  supportTicketCtrl.changePriority,
+);
+router.put(
+  "/support-tickets/change-priority/:id",
+  supportTicketCtrl.changePriority,
+);
 router.put("/support-ticket/assign/:id", supportTicketCtrl.assign);
 router.put("/support-tickets/assign/:id", supportTicketCtrl.assign);
-router.post("/support-ticket/upload-attachment", supportTicketCtrl.uploadAttachment);
-router.post("/support-tickets/upload-attachment", supportTicketCtrl.uploadAttachment);
-router.delete("/support-ticket/delete-attachment/:id", supportTicketCtrl.deleteAttachment);
-router.delete("/support-tickets/delete-attachment/:id", supportTicketCtrl.deleteAttachment);
+router.post(
+  "/support-ticket/upload-attachment",
+  supportTicketCtrl.uploadAttachment,
+);
+router.post(
+  "/support-tickets/upload-attachment",
+  supportTicketCtrl.uploadAttachment,
+);
+router.delete(
+  "/support-ticket/delete-attachment/:id",
+  supportTicketCtrl.deleteAttachment,
+);
+router.delete(
+  "/support-tickets/delete-attachment/:id",
+  supportTicketCtrl.deleteAttachment,
+);
 
 // ─── Task Management routes ───────────────────────────────────────────
 router.get("/task-board/get-all", taskCtrl.listBoards);
@@ -908,8 +957,14 @@ router.delete("/tasks/checklists/:id/:checklistId", taskCtrl.deleteChecklist);
 
 router.post("/task/upload-attachment", taskCtrl.uploadAttachment);
 router.post("/tasks/upload-attachment", taskCtrl.uploadAttachment);
-router.delete("/task/delete-attachment/:id/:attachmentId", taskCtrl.deleteAttachment);
-router.delete("/tasks/delete-attachment/:id/:attachmentId", taskCtrl.deleteAttachment);
+router.delete(
+  "/task/delete-attachment/:id/:attachmentId",
+  taskCtrl.deleteAttachment,
+);
+router.delete(
+  "/tasks/delete-attachment/:id/:attachmentId",
+  taskCtrl.deleteAttachment,
+);
 
 router.get("/task/activity/:id", taskCtrl.getActivity);
 router.get("/tasks/activity/:id", taskCtrl.getActivity);

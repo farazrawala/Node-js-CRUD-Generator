@@ -8,6 +8,7 @@ const {
 const { resolveRemoteOrderIdFromPosOrder } = require("./processHelpers");
 
 const PUSH_ORDER_STORE_TYPES = new Set(["shopify", "woocommerce"]);
+const TRACKING_PUSH_STORE_TYPES = new Set(["shopify", "woocommerce"]);
 const WOO_TRACKING_PUSH_STORE_TYPES = new Set(["woocommerce"]);
 
 const TRACKING_QUEUE_FIELDS = [
@@ -197,9 +198,9 @@ async function maybeEnqueuePushOrderTrackingJob({
 }
 
 /**
- * After courier tracking API: queue push_order_tracking for WooCommerce website orders.
+ * After courier tracking API: queue push_order_tracking for website orders (Shopify + WooCommerce).
  */
-async function enqueuePushOrderTrackingForWooCommerceOrder({
+async function enqueuePushOrderTrackingForWebsiteOrder({
   orderId,
   companyId,
   createdBy = null,
@@ -256,10 +257,10 @@ async function enqueuePushOrderTrackingForWooCommerceOrder({
   }
 
   const storeType = String(integration.store_type || "").trim().toLowerCase();
-  if (!WOO_TRACKING_PUSH_STORE_TYPES.has(storeType)) {
+  if (!TRACKING_PUSH_STORE_TYPES.has(storeType)) {
     return {
       queued: false,
-      reason: "not_woocommerce_integration",
+      reason: "unsupported_store_type",
       store_type: storeType || null,
     };
   }
@@ -279,5 +280,7 @@ module.exports = {
   enqueuePushOrderJob,
   enqueuePushOrderTrackingJob,
   maybeEnqueuePushOrderTrackingJob,
-  enqueuePushOrderTrackingForWooCommerceOrder,
+  enqueuePushOrderTrackingForWebsiteOrder,
+  /** @deprecated use enqueuePushOrderTrackingForWebsiteOrder */
+  enqueuePushOrderTrackingForWooCommerceOrder: enqueuePushOrderTrackingForWebsiteOrder,
 };

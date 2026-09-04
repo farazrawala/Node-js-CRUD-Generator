@@ -50,6 +50,9 @@ const {
   findExistingImportedOrder,
   resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
+  buildPosOrderLineItemsFromRemote,
+  backfillPosOrderLinesIfEmpty,
+  resolveFetchOrderImportStatus,
   mapWooOrderStatus,
   resolveOrderWebsiteStatus,
   createFetchOrderStats,
@@ -2810,6 +2813,16 @@ async function importWooOrderToPos(remoteOrder, ctx) {
         );
       }
     }
+    const backfill = await backfillPosOrderLinesIfEmpty(
+      existing,
+      remoteOrder,
+      "woocommerce",
+      ctx,
+    );
+    if (backfill?.backfilled) {
+      stats.updated = (stats.updated || 0) + 1;
+      return;
+    }
     recordOrderSkip(stats, {
       store: "woocommerce",
       remote_id: remoteId,
@@ -2822,51 +2835,12 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     return;
   }
 
-  const lineItems = Array.isArray(remoteOrder?.line_items) ?
-      remoteOrder.line_items
-    : [];
-  const orderItemsPayload = [];
-  let linesSubtotal = 0;
-
-  for (const line of lineItems) {
-    const qty = Number(line?.quantity) || 0;
-    const price = Number(line?.price) || 0;
-    if (qty <= 0) {
-      continue;
-    }
-
-    const product = await resolvePosProductForRemoteLine({
-      integrationId,
-      companyId,
-      remoteProductId: line?.product_id,
-      sku: line?.sku,
-      name: line?.name,
-    });
-
-    if (!product?._id) {
-      stats.lines_skipped += 1;
-      continue;
-    }
-
-    const subtotal = Math.round(price * qty * 100) / 100;
-    linesSubtotal += subtotal;
-    orderItemsPayload.push({
-      product_id: product._id,
-      name: String(line?.name || product.name || "Item").trim(),
-      price,
-      qty,
-      subtotal,
-      company_id: companyId,
-      created_by: coalesceObjectId(
-        process.created_by?._id || process.created_by,
-      ),
-      status: "active",
-    });
-  }
-
-  if (linesSubtotal === 0) {
-    linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, "woocommerce");
-  }
+  const {
+    orderItemsPayload,
+    linesSubtotal,
+    linesSkipped,
+    remoteBillableLines,
+  } = await buildPosOrderLineItemsFromRemote(remoteOrder, "woocommerce", ctx);
 
   const billing = remoteOrder?.billing || {};
   const shipping = remoteOrder?.shipping || {};
@@ -2909,7 +2883,13 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     shipment: Number(remoteOrder?.shipping_total) || 0,
     lines_subtotal: linesSubtotal,
     amount_received: Number(remoteOrder?.total) || 0,
-    order_status: "placed",
+    order_status: resolveFetchOrderImportStatus({
+      linesSkipped,
+      linesInserted: orderItemsPayload.length,
+      remoteBillableLines,
+      remoteOrder,
+      store: "woocommerce",
+    }),
     order_type: "website",
     order_website_status: resolveOrderWebsiteStatus(remoteOrder, "woocommerce"),
     transaction_number: generateTransactionNumber(),

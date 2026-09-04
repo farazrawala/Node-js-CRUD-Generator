@@ -39,8 +39,51 @@ function shopifyErrorText(error) {
     }
   }
 
+  const status =
+    error?.response?.code ??
+    error?.response?.statusCode ??
+    error?.statusCode ??
+    error?.status ??
+    null;
+  if (status != null) {
+    parts.push(`status=${status}`);
+  }
+
   if (error?.message) parts.push(error.message);
+
+  const cause = error?.cause;
+  if (cause?.code) parts.push(`cause_code=${cause.code}`);
+  if (cause?.message && cause.message !== error?.message) {
+    parts.push(`cause=${cause.message}`);
+  }
+
   return parts.join(" | ");
+}
+
+const SHOPIFY_FULFILLMENT_SCOPES_HINT =
+  "Add Admin API scopes read_merchant_managed_fulfillment_orders and write_merchant_managed_fulfillment_orders on the Shopify custom app, then update the integration access token.";
+
+function formatShopifyFulfillmentScopeError(error, fallback = "Shopify request failed") {
+  const text = shopifyErrorText(error);
+  const status =
+    error?.response?.code ??
+    error?.response?.statusCode ??
+    error?.statusCode ??
+    error?.status ??
+    null;
+
+  if (
+    status === 403 ||
+    /required permission|access denied|insufficient.*scope/i.test(text)
+  ) {
+    return `${text || fallback}. ${SHOPIFY_FULFILLMENT_SCOPES_HINT}`;
+  }
+
+  if (/fetch failed|UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|ENOTFOUND|ECONNREFUSED/i.test(text)) {
+    return `${text || fallback}. Could not reach Shopify — check internet/VPN/firewall to *.myshopify.com.`;
+  }
+
+  return text || fallback;
 }
 
 function isShopifyAuthError(error) {
@@ -391,6 +434,8 @@ module.exports = {
   normalizeShopifyDomain,
   isShopifyAuthError,
   formatShopifyErrorPayload,
+  formatShopifyFulfillmentScopeError,
+  SHOPIFY_FULFILLMENT_SCOPES_HINT,
   isShopifyAccessToken,
   resolveShopifyClientCredentials,
   loadFreshShopifyIntegration,

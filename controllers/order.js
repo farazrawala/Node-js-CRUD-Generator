@@ -5878,13 +5878,21 @@ async function order_update_status(req, res) {
     fromStatusOpt &&
     fromStatusOpt !== String(existingOrder.order_status || "").trim()
   ) {
+    const currentStatus = String(existingOrder.order_status || "").trim();
     return res.status(409).json({
       success: false,
       status: 409,
       error: "from_status mismatch",
+      message:
+        `Order status changed to "${currentStatus}" while this screen was open. Refresh the order list and try again.`,
       details: {
-        expected: existingOrder.order_status,
+        expected: currentStatus,
         received: fromStatusOpt,
+      },
+      data: {
+        order_id: existingOrder._id,
+        order_no: existingOrder.order_no,
+        current_order_status: currentStatus,
       },
       type: "conflict",
     });

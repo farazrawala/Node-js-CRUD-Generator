@@ -52,6 +52,9 @@ const {
   findExistingImportedOrder,
   resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
+  buildPosOrderLineItemsFromRemote,
+  backfillPosOrderLinesIfEmpty,
+  resolveFetchOrderImportStatus,
   mapShopifyOrderStatus,
   resolveOrderWebsiteStatus,
   createFetchOrderStats,
@@ -72,7 +75,8 @@ const {
   finishPullOrderBatch,
   failPullOrderBatch,
   resolvePosOrderTrackingForPush,
-  buildShopifyTrackingNote,
+  mapPosOrderStatusToShopifyFulfillmentAction,
+  mapTrackingStatusToShopifyFulfillmentEvent,
 } = require("../utils/processHelpers");
 const {
   resolvePosProductSku,
@@ -85,6 +89,7 @@ const {
 const {
   isShopifyAuthError,
   formatShopifyErrorPayload,
+  formatShopifyFulfillmentScopeError,
   resolveShopifyClientCredentials,
   refreshShopifyAccessToken,
 } = require("../utils/shopifyTokenRefresh");
@@ -147,6 +152,8 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
       "write_products",
       "read_inventory",
       "write_inventory",
+      "read_merchant_managed_fulfillment_orders",
+      "write_merchant_managed_fulfillment_orders",
     ],
     hostName: shopDomain,
     apiVersion: ApiVersion.October24,
@@ -2186,6 +2193,16 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
         );
       }
     }
+    const backfill = await backfillPosOrderLinesIfEmpty(
+      existing,
+      remoteOrder,
+      "shopify",
+      ctx,
+    );
+    if (backfill?.backfilled) {
+      stats.updated = (stats.updated || 0) + 1;
+      return;
+    }
     recordOrderSkip(stats, {
       store: "shopify",
       remote_id: remoteId,
@@ -2198,51 +2215,12 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     return;
   }
 
-  const lineItems = Array.isArray(remoteOrder?.line_items) ?
-      remoteOrder.line_items
-    : [];
-  const orderItemsPayload = [];
-  let linesSubtotal = 0;
-
-  for (const line of lineItems) {
-    const qty = Number(line?.quantity) || 0;
-    const price = Number(line?.price) || 0;
-    if (qty <= 0) {
-      continue;
-    }
-
-    const product = await resolvePosProductForRemoteLine({
-      integrationId,
-      companyId,
-      remoteProductId: line?.product_id,
-      sku: line?.sku,
-      name: line?.name,
-    });
-
-    if (!product?._id) {
-      stats.lines_skipped += 1;
-      continue;
-    }
-
-    const subtotal = Math.round(price * qty * 100) / 100;
-    linesSubtotal += subtotal;
-    orderItemsPayload.push({
-      product_id: product._id,
-      name: String(line?.name || product.name || "Item").trim(),
-      price,
-      qty,
-      subtotal,
-      company_id: companyId,
-      created_by: coalesceObjectId(
-        process.created_by?._id || process.created_by,
-      ),
-      status: "active",
-    });
-  }
-
-  if (linesSubtotal === 0) {
-    linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, "shopify");
-  }
+  const {
+    orderItemsPayload,
+    linesSubtotal,
+    linesSkipped,
+    remoteBillableLines,
+  } = await buildPosOrderLineItemsFromRemote(remoteOrder, "shopify", ctx);
 
   const billing = remoteOrder?.billing_address || {};
   const shipping = remoteOrder?.shipping_address || {};
@@ -2301,7 +2279,13 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     shipment,
     lines_subtotal: linesSubtotal,
     amount_received: Number(remoteOrder?.total_price) || 0,
-    order_status: "placed",
+    order_status: resolveFetchOrderImportStatus({
+      linesSkipped,
+      linesInserted: orderItemsPayload.length,
+      remoteBillableLines,
+      remoteOrder,
+      store: "shopify",
+    }),
     order_type: "website",
     order_website_status: resolveOrderWebsiteStatus(remoteOrder, "shopify"),
     transaction_number: generateTransactionNumber(),
@@ -2596,8 +2580,335 @@ async function pull_order(req, res, process) {
 }
 
 /**
- * Push one POS order status to Shopify (cancel or note on order).
+ * Push one POS order status to Shopify via Fulfillment Orders API
+ * (hold / release hold / fulfill / cancel).
  */
+async function listShopifyFulfillmentOrders(client, remoteOrderId) {
+  const response = await client.get({
+    path: `orders/${remoteOrderId}/fulfillment_orders`,
+  });
+  return Array.isArray(response?.body?.fulfillment_orders) ?
+      response.body.fulfillment_orders
+    : [];
+}
+
+function shopifyFulfillmentOrderSupports(fulfillmentOrder, action) {
+  const actions = Array.isArray(fulfillmentOrder?.supported_actions) ?
+      fulfillmentOrder.supported_actions
+    : [];
+  return actions.includes(action);
+}
+
+async function holdShopifyFulfillmentOrders(
+  client,
+  fulfillmentOrders,
+  reasonNotes = "OMS on hold",
+) {
+  const held = [];
+  for (const fo of fulfillmentOrders) {
+    const status = String(fo?.status || "").toLowerCase();
+    if (status === "closed") {
+      continue;
+    }
+    if (status === "on_hold") {
+      held.push(fo.id);
+      continue;
+    }
+    if (!shopifyFulfillmentOrderSupports(fo, "hold")) {
+      continue;
+    }
+    await client.post({
+      path: `fulfillment_orders/${fo.id}/hold`,
+      data: {
+        fulfillment_hold: {
+          reason: "other",
+          reason_notes: reasonNotes,
+        },
+      },
+      type: "application/json",
+    });
+    held.push(fo.id);
+  }
+  return held;
+}
+
+async function releaseShopifyFulfillmentHolds(client, fulfillmentOrders) {
+  const released = [];
+  for (const fo of fulfillmentOrders) {
+    const status = String(fo?.status || "").toLowerCase();
+    if (status !== "on_hold") {
+      continue;
+    }
+    if (!shopifyFulfillmentOrderSupports(fo, "release_hold")) {
+      continue;
+    }
+    await client.post({
+      path: `fulfillment_orders/${fo.id}/release_hold`,
+      data: {},
+      type: "application/json",
+    });
+    released.push(fo.id);
+  }
+  return released;
+}
+
+async function listShopifyOrderFulfillments(client, remoteOrderId) {
+  const response = await client.get({
+    path: `orders/${remoteOrderId}/fulfillments`,
+  });
+  return Array.isArray(response?.body?.fulfillments) ?
+      response.body.fulfillments
+    : [];
+}
+
+function buildShopifyFulfillmentTrackingInfo(tracking) {
+  const number = String(tracking?.tracking_number || "").trim();
+  if (!number) {
+    return null;
+  }
+  const company = String(tracking?.courier_name || "").trim() || undefined;
+  const url = String(tracking?.tracking_url || "").trim() || undefined;
+  return { number, company, url };
+}
+
+async function updateShopifyFulfillmentTracking(client, fulfillmentId, trackingInfo) {
+  await client.post({
+    path: `fulfillments/${fulfillmentId}/update_tracking`,
+    data: {
+      fulfillment: {
+        notify_customer: false,
+        tracking_info: trackingInfo,
+      },
+    },
+    type: "application/json",
+  });
+}
+
+async function markShopifyFulfillmentsDelivered(client, remoteOrderId) {
+  const fulfillments = await listShopifyOrderFulfillments(client, remoteOrderId);
+  const marked = [];
+  for (const fulfillment of fulfillments) {
+    const shipmentStatus = String(fulfillment?.shipment_status || "").toLowerCase();
+    if (shipmentStatus === "delivered") {
+      continue;
+    }
+    try {
+      await client.post({
+        path: `orders/${remoteOrderId}/fulfillments/${fulfillment.id}/events`,
+        data: { event: { status: "delivered" } },
+        type: "application/json",
+      });
+      marked.push(fulfillment.id);
+    } catch (error) {
+      console.warn(
+        `[shopify push_order] mark delivered failed for fulfillment ${fulfillment.id}:`,
+        describeShopifyError(error),
+      );
+    }
+  }
+  return marked;
+}
+
+async function postShopifyFulfillmentShipmentEvent(
+  client,
+  remoteOrderId,
+  fulfillmentId,
+  tracking,
+  orderStatus,
+) {
+  const eventStatus = mapTrackingStatusToShopifyFulfillmentEvent(
+    tracking?.tracking_status,
+    orderStatus,
+  );
+  if (!eventStatus) {
+    return null;
+  }
+
+  const message = String(tracking?.tracking_status || "").trim() || undefined;
+  await client.post({
+    path: `orders/${remoteOrderId}/fulfillments/${fulfillmentId}/events`,
+    data: {
+      event: {
+        status: eventStatus,
+        ...(message ? { message } : {}),
+      },
+    },
+    type: "application/json",
+  });
+
+  return {
+    fulfillment_id: fulfillmentId,
+    event_status: eventStatus,
+    message: message || null,
+  };
+}
+
+async function syncShopifyFulfillmentShipmentEvents(
+  client,
+  remoteOrderId,
+  tracking,
+  orderStatus,
+) {
+  const fulfillments = await listShopifyOrderFulfillments(client, remoteOrderId);
+  const events = [];
+
+  for (const fulfillment of fulfillments) {
+    const status = String(fulfillment?.status || "").toLowerCase();
+    if (status !== "success") {
+      continue;
+    }
+    try {
+      const event = await postShopifyFulfillmentShipmentEvent(
+        client,
+        remoteOrderId,
+        fulfillment.id,
+        tracking,
+        orderStatus,
+      );
+      if (event) {
+        events.push(event);
+      }
+    } catch (error) {
+      console.warn(
+        `[shopify push_order] shipment event failed for fulfillment ${fulfillment.id}:`,
+        describeShopifyError(error),
+      );
+    }
+  }
+
+  return events;
+}
+
+/**
+ * Create fulfillment with tracking (shows "In transit" in Shopify admin) or
+ * update tracking on an existing open fulfillment.
+ */
+async function syncShopifyOrderShipmentTracking(
+  client,
+  remoteOrderId,
+  fulfillmentOrders,
+  tracking,
+  orderStatus = "",
+) {
+  const trackingInfo = buildShopifyFulfillmentTrackingInfo(tracking);
+  const result = {
+    tracking: trackingInfo,
+    fulfilled: [],
+    tracking_updated: [],
+  };
+
+  await releaseShopifyFulfillmentHolds(client, fulfillmentOrders);
+  const refreshedOrders = await listShopifyFulfillmentOrders(client, remoteOrderId);
+
+  const fulfillable = refreshedOrders.filter((fo) => {
+    const status = String(fo?.status || "").toLowerCase();
+    return (
+      status !== "closed" &&
+      shopifyFulfillmentOrderSupports(fo, "create_fulfillment")
+    );
+  });
+
+  if (fulfillable.length > 0) {
+    result.fulfilled = await fulfillShopifyFulfillmentOrders(
+      client,
+      fulfillable,
+      tracking,
+    );
+    result.action = "fulfilled";
+    result.shipment_events = await syncShopifyFulfillmentShipmentEvents(
+      client,
+      remoteOrderId,
+      tracking,
+      orderStatus,
+    );
+    if (result.shipment_events.length > 0) {
+      result.shipment_event_status = result.shipment_events[0]?.event_status || null;
+    }
+    return result;
+  }
+
+  if (!trackingInfo) {
+    result.action = "none";
+    result.reason = "no_tracking_number";
+    return result;
+  }
+
+  const existingFulfillments = await listShopifyOrderFulfillments(
+    client,
+    remoteOrderId,
+  );
+  const updatable = existingFulfillments.filter((row) => {
+    const status = String(row?.status || "").toLowerCase();
+    const shipmentStatus = String(row?.shipment_status || "").toLowerCase();
+    return status === "success" && shipmentStatus !== "delivered";
+  });
+
+  for (const fulfillment of updatable) {
+    await updateShopifyFulfillmentTracking(client, fulfillment.id, trackingInfo);
+    result.tracking_updated.push(fulfillment.id);
+  }
+
+  result.action =
+    result.tracking_updated.length > 0 ? "tracking_updated" : "none";
+  if (result.action === "none") {
+    result.reason = "no_open_fulfillment_to_update";
+  }
+
+  result.shipment_events = await syncShopifyFulfillmentShipmentEvents(
+    client,
+    remoteOrderId,
+    tracking,
+    orderStatus,
+  );
+  if (result.shipment_events.length > 0) {
+    result.shipment_event_status = result.shipment_events[0]?.event_status || null;
+  }
+
+  return result;
+}
+
+async function fulfillShopifyFulfillmentOrders(client, fulfillmentOrders, tracking = {}) {
+  const openOrders = fulfillmentOrders.filter((fo) => {
+    const status = String(fo?.status || "").toLowerCase();
+    return (
+      status !== "closed" &&
+      shopifyFulfillmentOrderSupports(fo, "create_fulfillment")
+    );
+  });
+
+  if (openOrders.length === 0) {
+    return [];
+  }
+
+  const fulfillmentPayload = {
+    fulfillment: {
+      notify_customer: false,
+      line_items_by_fulfillment_order: openOrders.map((fo) => ({
+        fulfillment_order_id: fo.id,
+      })),
+    },
+  };
+
+  const trackingNumber = String(tracking?.tracking_number || "").trim();
+  const trackingInfo = buildShopifyFulfillmentTrackingInfo(tracking);
+  if (trackingInfo) {
+    fulfillmentPayload.fulfillment.tracking_info = trackingInfo;
+  } else if (trackingNumber) {
+    fulfillmentPayload.fulfillment.tracking_info = {
+      number: trackingNumber,
+      company: String(tracking?.courier_name || "").trim() || undefined,
+    };
+  }
+
+  await client.post({
+    path: "fulfillments",
+    data: fulfillmentPayload,
+    type: "application/json",
+  });
+
+  return openOrders.map((fo) => fo.id);
+}
+
 async function push_order(req, res, process) {
   const integration = process?.integration_id;
   const posOrder = process?.order_id;
@@ -2625,37 +2936,123 @@ async function push_order(req, res, process) {
   }
 
   const posStatus = String(posOrder.order_status || "placed").trim();
+  const fulfillmentAction =
+    mapPosOrderStatusToShopifyFulfillmentAction(posStatus);
 
   try {
     return await runWithShopifyClient(integration, process, async (client) => {
-      if (posStatus === "cancelled") {
+      const syncResult = {
+        action: fulfillmentAction,
+        remote_id: remoteId,
+        fulfillment_orders: [],
+      };
+
+      if (fulfillmentAction === "cancel") {
         await client.post({
           path: `orders/${remoteId}/cancel`,
           data: {},
         });
+      } else if (fulfillmentAction === "none") {
+        syncResult.skipped = true;
+        syncResult.reason = "no_shopify_fulfillment_mapping";
       } else {
-        const note = `[POS] status: ${posStatus} (pushed ${new Date().toISOString()})`;
-        await client.put({
-          path: `orders/${remoteId}`,
-          data: { order: { id: Number(remoteId), note } },
-          type: "application/json",
-        });
+        const fulfillmentOrders = await listShopifyFulfillmentOrders(
+          client,
+          remoteId,
+        );
+        syncResult.fulfillment_orders = fulfillmentOrders.map((fo) => ({
+          id: fo.id,
+          status: fo.status,
+          supported_actions: fo.supported_actions || [],
+        }));
+
+        if (fulfillmentOrders.length === 0) {
+          const msg =
+            "No Shopify fulfillment orders found for this order. " +
+            "Ensure the custom app has read_merchant_managed_fulfillment_orders scope.";
+          await markProcessOutcome(process._id, "failed", msg);
+          return res.status(400).json({
+            success: false,
+            message: msg,
+            data: syncResult,
+          });
+        }
+
+        if (fulfillmentAction === "hold") {
+          syncResult.held = await holdShopifyFulfillmentOrders(
+            client,
+            fulfillmentOrders,
+            `OMS status: ${posStatus}`,
+          );
+        } else if (fulfillmentAction === "release_hold") {
+          syncResult.released = await releaseShopifyFulfillmentHolds(
+            client,
+            fulfillmentOrders,
+          );
+        } else if (fulfillmentAction === "ship_with_tracking") {
+          const tracking = await resolvePosOrderTrackingForPush(posOrder);
+          syncResult.shipment = await syncShopifyOrderShipmentTracking(
+            client,
+            remoteId,
+            fulfillmentOrders,
+            tracking,
+            posStatus,
+          );
+        } else if (fulfillmentAction === "deliver") {
+          const tracking = await resolvePosOrderTrackingForPush(posOrder);
+          await releaseShopifyFulfillmentHolds(client, fulfillmentOrders);
+          const refreshedOrders = await listShopifyFulfillmentOrders(
+            client,
+            remoteId,
+          );
+          syncResult.fulfilled = await fulfillShopifyFulfillmentOrders(
+            client,
+            refreshedOrders,
+            tracking,
+          );
+          syncResult.delivered = await markShopifyFulfillmentsDelivered(
+            client,
+            remoteId,
+          );
+        }
       }
 
       const label = posOrder.order_no || posOrder._id;
-      await markProcessOutcome(
-        process._id,
-        "completed",
-        `Order ${label} pushed to Shopify (status: ${posStatus}).`,
-      );
+      const actionSummary =
+        fulfillmentAction === "cancel" ? "cancelled"
+        : fulfillmentAction === "hold" ?
+          `held ${(syncResult.held || []).length} fulfillment order(s)`
+        : fulfillmentAction === "release_hold" ?
+          `released ${(syncResult.released || []).length} hold(s)`
+        : fulfillmentAction === "ship_with_tracking" ?
+          syncResult.shipment?.action === "fulfilled" ?
+            `fulfilled with tracking (${syncResult.shipment?.tracking?.number || "—"})` +
+              (syncResult.shipment?.shipment_event_status ?
+                `, Shopify: ${syncResult.shipment.shipment_event_status.replace(/_/g, " ")}`
+              : "")
+          : syncResult.shipment?.action === "tracking_updated" ?
+            `updated tracking on ${(syncResult.shipment?.tracking_updated || []).length} fulfillment(s)` +
+              (syncResult.shipment?.shipment_event_status ?
+                `, Shopify: ${syncResult.shipment.shipment_event_status.replace(/_/g, " ")}`
+              : "")
+          : syncResult.shipment?.shipment_events?.length ?
+            `shipment status → ${syncResult.shipment.shipment_event_status?.replace(/_/g, " ") || "updated"}`
+          : "no shipment tracking update"
+        : fulfillmentAction === "deliver" ?
+          `delivered (${(syncResult.delivered || []).length} fulfillment event(s))`
+        : "no fulfillment action";
+      const remarks = `Order ${label} pushed to Shopify #${remoteId} (OMS status: ${posStatus}, ${actionSummary}).`;
+      await markProcessOutcome(process._id, "completed", remarks);
 
       return res.status(200).json({
         success: true,
-        message: `Order ${label} pushed to Shopify.`,
+        message: remarks,
         data: {
           order_id: posOrder._id,
           remote_id: remoteId,
           order_status: posStatus,
+          shopify_fulfillment_action: fulfillmentAction,
+          ...syncResult,
         },
       });
     });
@@ -2664,7 +3061,7 @@ async function push_order(req, res, process) {
       "Shopify order push failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorMessage = formatShopifyErrorPayload(
+    const errorMessage = formatShopifyFulfillmentScopeError(
       error,
       "Failed to push order to Shopify.",
     );
@@ -2678,7 +3075,7 @@ async function push_order(req, res, process) {
 }
 
 /**
- * Push POS courier / tracking fields to Shopify order note.
+ * Push POS courier / tracking to Shopify fulfillment (In transit + tracking link).
  */
 async function push_order_tracking(req, res, process) {
   const integration = process?.integration_id;
@@ -2717,30 +3114,64 @@ async function push_order_tracking(req, res, process) {
     return res.status(400).json({ success: false, message: msg });
   }
 
-  const trackingNote = buildShopifyTrackingNote(tracking);
-
   try {
     return await runWithShopifyClient(integration, process, async (client) => {
-      const detailResponse = await client.get({
-        path: `orders/${remoteId}`,
-        query: { fields: "id,note" },
-      });
-      const existingNote = String(
-        detailResponse?.body?.order?.note || "",
-      ).trim();
-      const note =
-        existingNote ?
-          `${existingNote}\n\n${trackingNote}`
-        : trackingNote;
+      const fulfillmentOrders = await listShopifyFulfillmentOrders(
+        client,
+        remoteId,
+      );
+      if (fulfillmentOrders.length === 0) {
+        const msg =
+          "No Shopify fulfillment orders found for this order. " +
+          "Ensure the custom app has read_merchant_managed_fulfillment_orders scope.";
+        await markProcessOutcome(process._id, "failed", msg);
+        return res.status(400).json({ success: false, message: msg });
+      }
 
-      await client.put({
-        path: `orders/${remoteId}`,
-        data: { order: { id: Number(remoteId), note } },
-        type: "application/json",
-      });
+      const shipment = await syncShopifyOrderShipmentTracking(
+        client,
+        remoteId,
+        fulfillmentOrders,
+        tracking,
+        posOrder.order_status,
+      );
+
+      if (
+        shipment.action === "none" &&
+        !(Array.isArray(shipment.shipment_events) && shipment.shipment_events.length > 0)
+      ) {
+        const msg =
+          tracking.tracking_number ?
+            `Could not update Shopify shipping — ${shipment.reason || "no fulfillment to fulfill or update"}. ` +
+              "Check fulfillment scopes and that the order is not already fully fulfilled without tracking."
+          : "Nothing to push — add a courier tracking number on the POS order.";
+        await markProcessOutcome(process._id, "failed", msg);
+        return res.status(400).json({
+          success: false,
+          message: msg,
+          data: { shipment, tracking },
+        });
+      }
 
       const label = posOrder.order_no || posOrder._id;
-      const remarks = `Order ${label} tracking pushed to Shopify #${remoteId}: courier "${tracking.courier_name || "—"}", tracking "${tracking.tracking_number || "—"}", status "${tracking.tracking_status || "—"}".`;
+      const trackingLabel = tracking.tracking_number || "—";
+      const courierLabel = tracking.courier_name || "—";
+      const shopifyStatus = shipment.shipment_event_status ?
+          shipment.shipment_event_status.replace(/_/g, " ")
+        : "";
+      const omsStatus = tracking.tracking_status || "";
+      const remarks =
+        shipment.action === "fulfilled" ?
+          `Order ${label} fulfilled on Shopify #${remoteId} with ${courierLabel} tracking ${trackingLabel}` +
+            (shopifyStatus ? ` (${shopifyStatus})` : "") +
+            (omsStatus ? `. OMS: ${omsStatus}` : ".")
+        : shipment.action === "tracking_updated" ?
+          `Order ${label} tracking updated on Shopify #${remoteId}: ${courierLabel} ${trackingLabel}` +
+            (shopifyStatus ? ` (${shopifyStatus})` : "") +
+            (omsStatus ? `. OMS: ${omsStatus}` : ".")
+        : `Order ${label} shipment status updated on Shopify #${remoteId}` +
+            (shopifyStatus ? `: ${shopifyStatus}` : "") +
+            (omsStatus ? ` (OMS: ${omsStatus})` : ".");
       await markProcessOutcome(process._id, "completed", remarks);
 
       return res.status(200).json({
@@ -2750,6 +3181,7 @@ async function push_order_tracking(req, res, process) {
           order_id: posOrder._id,
           remote_id: remoteId,
           tracking,
+          shipment,
         },
       });
     });
@@ -2758,7 +3190,7 @@ async function push_order_tracking(req, res, process) {
       "Shopify order tracking push failed:",
       error?.response?.body || error?.response?.data || error?.message || error,
     );
-    const errorMessage = formatShopifyErrorPayload(
+    const errorMessage = formatShopifyFulfillmentScopeError(
       error,
       "Failed to push order tracking to Shopify.",
     );
