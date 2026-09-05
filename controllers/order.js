@@ -153,11 +153,12 @@ async function attachCourierTrackingToOrders(orders) {
       buildPublicCourierTrackingUrl(shipment.courier, tracking_id) ||
       null;
     const apiRequest =
-      shipment.api_request && typeof shipment.api_request === "object"
-        ? shipment.api_request
-        : null;
-    const courier_company = apiRequest
-      ? String(
+      shipment.api_request && typeof shipment.api_request === "object" ?
+        shipment.api_request
+      : null;
+    const courier_company =
+      apiRequest ?
+        String(
           apiRequest.courierCompany || apiRequest.courier_company || "",
         ).trim() || null
       : null;
@@ -735,6 +736,24 @@ async function rebuildOrderGlTransactions({
       )
     : Number(record?.lines_subtotal ?? orderReq.body?.lines_subtotal ?? 0);
 
+  const receivedAmount = Math.max(
+    0,
+    Math.round((Number(record?.amount_received) || 0) * 100) / 100,
+  );
+  const totalAmountDue =
+    Number.isFinite(Number(record?.total_amount)) ?
+      Number(record.total_amount)
+    : Math.round(
+        ((Number(orderTotal) || 0) -
+          (Number(record?.discount) || 0) +
+          (Number(record?.shipment) || 0)) *
+          100,
+      ) / 100;
+  const remainingAmountDue = Math.max(
+    0,
+    Math.round((totalAmountDue - receivedAmount) * 100) / 100,
+  );
+
   const { created, failed } = await transactionBulkCreate(
     orderReq,
     [
@@ -787,7 +806,10 @@ async function rebuildOrderGlTransactions({
         amount: record?.amount_received,
         reference_user_id: record?.customer_id,
         transaction_number,
-        description: orderGlDescription("Mode of Payment", record?.order_no),
+        description: orderGlDescription(
+          "Mode of Payment" + "-" + remainingAmountDue,
+          record?.order_no,
+        ),
         reference_id: {
           module: "order",
           ref_id: record._id,
@@ -2494,7 +2516,7 @@ async function order_save(req, res) {
               reference_user_id: record?.customer_id,
               transaction_number,
               description: orderGlDescription(
-                "Mode of Payment",
+                "Mode of Payment" + "-" + remainingAmountDue,
                 record?.order_no,
               ),
               reference_id: {
@@ -3224,11 +3246,11 @@ async function order_update(req, res) {
               updatedOrder?.payment_method_accounts_id ??
               companyDefaultAccountReceivable(req.user),
             type: "debit",
-            amount: lines_subtotal + shipment - discount,
+            amount: lines_subtotal + shipment - discount - remainingAmountDue,
             reference_user_id: updatedOrder?.customer_id,
             transaction_number,
             description: orderGlDescription(
-              "Mode of Payment",
+              "Mode of Payment" + "-" + remainingAmountDue,
               updatedOrder?.order_no,
             ),
             reference_id: {
@@ -5883,8 +5905,7 @@ async function order_update_status(req, res) {
       success: false,
       status: 409,
       error: "from_status mismatch",
-      message:
-        `Order status changed to "${currentStatus}" while this screen was open. Refresh the order list and try again.`,
+      message: `Order status changed to "${currentStatus}" while this screen was open. Refresh the order list and try again.`,
       details: {
         expected: currentStatus,
         received: fromStatusOpt,
@@ -6134,10 +6155,7 @@ async function order_merge(req, res) {
     String(orderById.get(id)?.customer_id || "").trim(),
   );
   const customerId = customerKeys[0];
-  if (
-    !customerId ||
-    !customerKeys.every((k) => k && k === customerId)
-  ) {
+  if (!customerId || !customerKeys.every((k) => k && k === customerId)) {
     return res.status(400).json({
       success: false,
       status: 400,
@@ -6247,10 +6265,7 @@ async function order_merge(req, res) {
       }
     }
 
-    const targetRefName = orderGlDescription(
-      "Order",
-      targetOrder.order_no,
-    );
+    const targetRefName = orderGlDescription("Order", targetOrder.order_no);
     const sourceOids = sourceIds.map((id) => new mongoose.Types.ObjectId(id));
     await InventoryMovements.updateMany(
       {
@@ -6449,13 +6464,7 @@ async function order_update_tags(req, res) {
   const normalizeList = (raw) => {
     if (raw == null) return [];
     const arr = Array.isArray(raw) ? raw : [raw];
-    return [
-      ...new Set(
-        arr
-          .map((t) => String(t ?? "").trim())
-          .filter(Boolean),
-      ),
-    ];
+    return [...new Set(arr.map((t) => String(t ?? "").trim()).filter(Boolean))];
   };
 
   let nextTags = null;
@@ -6476,9 +6485,9 @@ async function order_update_tags(req, res) {
   }
 
   const candidateTags =
-    nextTags != null ?
-      nextTags
-    : [...normalizeList(addRaw), ...normalizeList(removeRaw)];
+    nextTags != null ? nextTags : (
+      [...normalizeList(addRaw), ...normalizeList(removeRaw)]
+    );
   const invalid = candidateTags.filter((t) => !allowed.has(t));
   if (invalid.length) {
     return res.status(400).json({
@@ -6619,23 +6628,26 @@ async function order_validate_address(req, res) {
     input = {
       address: bodyAddress || order.address,
       city:
-        req.body?.city != null && String(req.body.city).trim() !== ""
-          ? req.body.city
-          : order.city,
+        req.body?.city != null && String(req.body.city).trim() !== "" ?
+          req.body.city
+        : order.city,
       state:
-        req.body?.state != null && String(req.body.state).trim() !== ""
-          ? req.body.state
-          : order.state,
+        req.body?.state != null && String(req.body.state).trim() !== "" ?
+          req.body.state
+        : order.state,
       zip:
-        req.body?.zip != null && String(req.body.zip).trim() !== ""
-          ? req.body.zip
-          : req.body?.postal_code != null && String(req.body.postal_code).trim() !== ""
-            ? req.body.postal_code
-            : order.zip,
+        req.body?.zip != null && String(req.body.zip).trim() !== "" ?
+          req.body.zip
+        : (
+          req.body?.postal_code != null &&
+          String(req.body.postal_code).trim() !== ""
+        ) ?
+          req.body.postal_code
+        : order.zip,
       country:
-        req.body?.country != null && String(req.body.country).trim() !== ""
-          ? req.body.country
-          : order.country,
+        req.body?.country != null && String(req.body.country).trim() !== "" ?
+          req.body.country
+        : order.country,
     };
     const validation = validateOrderAddressFields(input, {
       config: req.body?.config || null,
@@ -6653,7 +6665,11 @@ async function order_validate_address(req, res) {
     });
   }
 
-  if (typeof req.body?.address === "string" && !req.body?.city && !req.body?.street) {
+  if (
+    typeof req.body?.address === "string" &&
+    !req.body?.city &&
+    !req.body?.street
+  ) {
     // Prefer full string when only `address` is sent
     input = req.body.address;
   } else if (
