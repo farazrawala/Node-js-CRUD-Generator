@@ -416,6 +416,7 @@ app.use("/api/debug", debugLogsRoute);
 app.use("/url", restrictTo(["NORMAL"]), urlRouter);
 app.use("/user", userRoute);
 app.use("/api", checkHeaderAuthentication, apiRoute);
+app.use("/pos_admin/api", checkHeaderAuthentication, apiRoute);
 app.use("/admin", adminRoute);
 app.use("/", staticRoute);
 

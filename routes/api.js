@@ -436,6 +436,40 @@ router.get(
   getSalesReturnByReturnNo,
 );
 
+// POS frontend (sales-returns edit) calls sales_order_return/* instead of sales_return/*.
+router.post("/sales_order_return/sales_order_return_create", salesReturnCreate);
+router.patch(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.put(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.post(
+  "/sales_order_return/sales_order_return_update/:id",
+  sales_return_update,
+);
+router.patch("/sales_order_return/update/:id", sales_return_update);
+router.put("/sales_order_return/update/:id", sales_return_update);
+router.post("/sales_order_return/update/:id", sales_return_update);
+router.delete(
+  "/sales_order_return/sales_order_return_delete/:id",
+  sales_return_delete,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-item",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-item/:id",
+  getSalesReturnByReturnItem,
+);
+router.get(
+  "/sales_order_return/get-sales-return-by-return-no/:id",
+  getSalesReturnByReturnNo,
+);
+
 // Expense routes
 router.post("/expense/save", expenseCreate);
 router.patch("/expense/update/:id", expenseUpdate);
@@ -1045,6 +1079,34 @@ registerAllModelRoutes(router, {
     sales_return: {
       enabled: true,
       excludedRoutes: [],
+      routeAliases: ["sales_order_return"],
+      customRoutes: [
+        {
+          method: "POST",
+          path: "/sales_order_return/sales_order_return_create",
+          handler: salesReturnCreate,
+        },
+        {
+          method: "PATCH",
+          path: "/sales_order_return/sales_order_return_update/:id",
+          handler: sales_return_update,
+        },
+        {
+          method: "PUT",
+          path: "/sales_order_return/sales_order_return_update/:id",
+          handler: sales_return_update,
+        },
+        {
+          method: "POST",
+          path: "/sales_order_return/sales_order_return_update/:id",
+          handler: sales_return_update,
+        },
+        {
+          method: "DELETE",
+          path: "/sales_order_return/sales_order_return_delete/:id",
+          handler: sales_return_delete,
+        },
+      ],
     },
     sales_return_item: {
       enabled: true,
