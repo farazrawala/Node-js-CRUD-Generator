@@ -201,6 +201,44 @@ const {
   findProfitBySalesReturnItem,
   findSalesReturnSales,
 } = require("../controllers/sales_return");
+
+/** POS sales-returns edit uses /sales_order_return/*; backend model is sales_return. */
+function salesOrderReturnPath(req) {
+  return String(req.originalUrl || req.url || req.path || "").split("?")[0];
+}
+
+function dispatchSalesOrderReturnAlias(req, res, next) {
+  const pathOnly = salesOrderReturnPath(req);
+  const method = String(req.method || "").toUpperCase();
+
+  const updateMatch = pathOnly.match(
+    /\/sales_order_return\/sales_order_return_update\/([^/]+)\/?$/,
+  );
+  if (updateMatch && (method === "PATCH" || method === "PUT" || method === "POST")) {
+    req.params = { ...req.params, id: updateMatch[1] };
+    return sales_return_update(req, res);
+  }
+
+  const deleteMatch = pathOnly.match(
+    /\/sales_order_return\/sales_order_return_delete\/([^/]+)\/?$/,
+  );
+  if (deleteMatch && method === "DELETE") {
+    req.params = { ...req.params, id: deleteMatch[1] };
+    return sales_return_delete(req, res);
+  }
+
+  if (
+    method === "POST" &&
+    /\/sales_order_return\/sales_order_return_create\/?$/.test(pathOnly)
+  ) {
+    return salesReturnCreate(req, res);
+  }
+
+  return next();
+}
+
+router.use(dispatchSalesOrderReturnAlias);
+
 const {
   companyCreate,
   checkCompanySlugAvailable,

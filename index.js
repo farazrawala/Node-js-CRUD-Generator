@@ -76,6 +76,11 @@ const apiRoute = require("./routes/api");
 const adminRoute = require("./routes/admin");
 const staticRoute = require("./routes/staticRouter");
 const debugLogsRoute = require("./routes/debugLogs");
+const {
+  salesReturnCreate,
+  sales_return_update,
+  sales_return_delete,
+} = require("./controllers/sales_return");
 const fileUpload = require("express-fileupload");
 const methodOverride = require("method-override");
 
@@ -415,6 +420,45 @@ app.use("/admin/debug", debugLogsRoute);
 app.use("/api/debug", debugLogsRoute);
 app.use("/url", restrictTo(["NORMAL"]), urlRouter);
 app.use("/user", userRoute);
+
+const salesOrderReturnUpdatePaths = [
+  "/api/sales_order_return/sales_order_return_update/:id",
+  "/pos_admin/api/sales_order_return/sales_order_return_update/:id",
+];
+const salesOrderReturnCreatePaths = [
+  "/api/sales_order_return/sales_order_return_create",
+  "/pos_admin/api/sales_order_return/sales_order_return_create",
+];
+const salesOrderReturnDeletePaths = [
+  "/api/sales_order_return/sales_order_return_delete/:id",
+  "/pos_admin/api/sales_order_return/sales_order_return_delete/:id",
+];
+app.patch(
+  salesOrderReturnUpdatePaths,
+  checkHeaderAuthentication,
+  sales_return_update,
+);
+app.put(
+  salesOrderReturnUpdatePaths,
+  checkHeaderAuthentication,
+  sales_return_update,
+);
+app.post(
+  salesOrderReturnUpdatePaths,
+  checkHeaderAuthentication,
+  sales_return_update,
+);
+app.post(
+  salesOrderReturnCreatePaths,
+  checkHeaderAuthentication,
+  salesReturnCreate,
+);
+app.delete(
+  salesOrderReturnDeletePaths,
+  checkHeaderAuthentication,
+  sales_return_delete,
+);
+
 app.use("/api", checkHeaderAuthentication, apiRoute);
 app.use("/pos_admin/api", checkHeaderAuthentication, apiRoute);
 app.use("/admin", adminRoute);

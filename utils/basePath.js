@@ -41,6 +41,9 @@ function createStripBasePathMiddleware() {
         url.startsWith(`${prefix}?`)
       ) {
         req.url = url.slice(prefix.length) || "/";
+        // Express caches parseurl(req); stale pathname would miss /api mounts.
+        req._parsedUrl = undefined;
+        req._parsedOriginalUrl = undefined;
       }
       res.locals.basePath = prefix;
     } else if (res.locals.basePath === undefined) {
