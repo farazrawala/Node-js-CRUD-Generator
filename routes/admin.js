@@ -49,6 +49,7 @@ const userAdminCRUD = adminCrudGenerator(
     "phone",
     "password",
     "role",
+    "show_graphs_on_dashboard",
     "mark_as_default_vendor",
     "permissions",
     "profile_image",
@@ -105,13 +106,14 @@ const userAdminCRUD = adminCrudGenerator(
     // Custom field types
     fieldTypes: {
       role: "multiselect",
+      show_graphs_on_dashboard: "multiselect",
       mark_as_default_vendor: "checkbox",
       profile_image: "file",
       company_id: "select",
       password: "password",
       permissions: "custom",
     },
-    listHiddenFields: ["permissions"],
+    listHiddenFields: ["permissions", "show_graphs_on_dashboard"],
     // Custom field options
     fieldOptions: {
       role: [
@@ -120,6 +122,7 @@ const userAdminCRUD = adminCrudGenerator(
         { value: "VENDOR", label: "Vendor" },
         { value: "CUSTOMER", label: "Customer" },
       ],
+      show_graphs_on_dashboard: User.DASHBOARD_GRAPH_OPTIONS,
       company_id: [], // Will be populated dynamically
       // Configure the permission matrix once—modules become rows, actions become columns.
       permissions: {
@@ -174,6 +177,7 @@ const userAdminCRUD = adminCrudGenerator(
       password: "Password",
       company_id: "Company",
       permissions: "Permissions",
+      show_graphs_on_dashboard: "Show Graphs on Dashboard",
       mark_as_default_vendor: "Make default vendor",
     },
 

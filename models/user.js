@@ -59,6 +59,66 @@ const PERMISSION_MODULE_KEYS = [
 /** Keys allowed on each permission row (matches permissionSetSchema). */
 const PERMISSION_ACTION_KEYS = ["view", "edit", "delete", "add"];
 
+/**
+ * Dashboard chart keys stored on `show_graphs_on_dashboard`.
+ * Keep in sync with `ai-pos/src/constants/dashboardGraphs.js` and
+ * `routes/admin.js` → userAdminCRUD fieldOptions.show_graphs_on_dashboard.
+ */
+const DASHBOARD_GRAPH_OPTIONS = [
+  { value: "sales_overview", label: "Sales Overview" },
+  { value: "purchases_vs_sales", label: "Purchases vs Sales" },
+  { value: "sales_by_month", label: "Sales by Month" },
+  { value: "gross_profit_margin_trend", label: "Gross profit / margin trend" },
+  { value: "cogs_vs_sales", label: "COGS vs sales" },
+  { value: "inventory_value", label: "Inventory Value (by location)" },
+  { value: "discount_total", label: "Discount (total)" },
+  { value: "ledger_debit_credit", label: "Ledger Debit / Credit" },
+  { value: "top_selling_products", label: "Top Selling Products" },
+  { value: "peak_sales_hours", label: "Peak Sales Hours" },
+  { value: "top_vendors", label: "Top Vendors" },
+  { value: "daily_orders", label: "Daily Orders" },
+  { value: "avg_order_value", label: "Average Order Value" },
+  { value: "expense_summary", label: "Expense Summary" },
+  { value: "accounts_receivable_summary", label: "Accounts Receivable" },
+  { value: "receivables_by_customer", label: "Receivables by Customer" },
+  { value: "receivables_aging", label: "Receivables Aging" },
+  { value: "sales_by_category", label: "Sales by Category" },
+  { value: "expenses_by_account", label: "Expenses by Account" },
+  { value: "expense_vs_revenue", label: "Expense vs Revenue" },
+  { value: "low_stock_alerts", label: "Low Stock Alerts" },
+];
+
+const DASHBOARD_GRAPH_KEYS = DASHBOARD_GRAPH_OPTIONS.map((item) => item.value);
+
+function showGraphsInputToArray(input) {
+  if (input == null || input === false) return [];
+  if (Array.isArray(input)) return input;
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // fall through — comma-separated or single key
+    }
+    return trimmed.split(",").map((part) => part.trim());
+  }
+  return [];
+}
+
+/** Drop unknown graph keys so clients cannot inject extra dashboard widgets. */
+function sanitizeShowGraphsOnDashboard(input) {
+  const allowed = new Set(DASHBOARD_GRAPH_KEYS);
+  const out = [];
+  for (const item of showGraphsInputToArray(input)) {
+    const key = String(item || "").trim();
+    if (!allowed.has(key) || out.includes(key)) continue;
+    out.push(key);
+  }
+  return out;
+}
+
 function permissionsInputToPlain(input) {
   if (input == null) return {};
   if (input instanceof Map) return Object.fromEntries(input);
@@ -176,6 +236,12 @@ const userSchema = new mongoose.Schema(
     //   ref: "company",
     //   field_name: "Assign Branch",
     // },
+    show_graphs_on_dashboard: {
+      type: [String],
+      default: () => [],
+      field_type: "multiselect",
+      field_name: "Show Graphs on Dashboard",
+    },
     permissions: {
       type: Map,
       of: permissionSetSchema,
@@ -250,6 +316,9 @@ userSchema.pre("validate", function (next) {
   const permPlain = permissionsInputToPlain(this.permissions);
   const sanitized = sanitizeUserPermissions(permPlain);
   this.permissions = new Map(Object.entries(sanitized));
+  this.show_graphs_on_dashboard = sanitizeShowGraphsOnDashboard(
+    this.show_graphs_on_dashboard,
+  );
 
   next();
 });
@@ -265,12 +334,38 @@ userSchema.pre(["findOneAndUpdate", "findByIdAndUpdate"], function (next) {
     obj.permissions = sanitizeUserPermissions(plain);
   };
 
+  const patchShowGraphs = (obj) => {
+    if (!obj || typeof obj !== "object") return;
+    const next =
+      obj.show_graphs_on_dashboard !== undefined
+        ? obj.show_graphs_on_dashboard
+        : obj.show_graphs !== undefined
+          ? obj.show_graphs
+          : obj.show_grahs_on_dashboard;
+    if (next === undefined) return;
+    obj.show_graphs_on_dashboard = sanitizeShowGraphsOnDashboard(next);
+    if (obj.show_grahs_on_dashboard !== undefined) {
+      delete obj.show_grahs_on_dashboard;
+    }
+    if (obj.show_graphs !== undefined) {
+      delete obj.show_graphs;
+    }
+  };
+
   if (raw.$set && typeof raw.$set === "object") {
     patchPermissions(raw.$set);
+    patchShowGraphs(raw.$set);
   }
   const topKeys = Object.keys(raw).filter((k) => !k.startsWith("$"));
   if (topKeys.includes("permissions")) {
     patchPermissions(raw);
+  }
+  if (
+    topKeys.includes("show_graphs_on_dashboard") ||
+    topKeys.includes("show_graphs") ||
+    topKeys.includes("show_grahs_on_dashboard")
+  ) {
+    patchShowGraphs(raw);
   }
   next();
 });
@@ -316,5 +411,8 @@ USER.companyIdRequiredForRoles = companyIdRequiredForRoles;
 USER.PERMISSION_MODULE_KEYS = PERMISSION_MODULE_KEYS;
 USER.PERMISSION_ACTION_KEYS = PERMISSION_ACTION_KEYS;
 USER.sanitizeUserPermissions = sanitizeUserPermissions;
+USER.DASHBOARD_GRAPH_KEYS = DASHBOARD_GRAPH_KEYS;
+USER.DASHBOARD_GRAPH_OPTIONS = DASHBOARD_GRAPH_OPTIONS;
+USER.sanitizeShowGraphsOnDashboard = sanitizeShowGraphsOnDashboard;
 
 module.exports = USER;
