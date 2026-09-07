@@ -65,6 +65,10 @@ const PERMISSION_ACTION_KEYS = ["view", "edit", "delete", "add"];
  * `routes/admin.js` → userAdminCRUD fieldOptions.show_graphs_on_dashboard.
  */
 const DASHBOARD_GRAPH_OPTIONS = [
+  { value: "todays_money", label: "Today's Money" },
+  { value: "todays_users", label: "Today's Users" },
+  { value: "total_customers", label: "Total Customers" },
+  { value: "sales", label: "Sales" },
   { value: "sales_overview", label: "Sales Overview" },
   { value: "purchases_vs_sales", label: "Purchases vs Sales" },
   { value: "sales_by_month", label: "Sales by Month" },

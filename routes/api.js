@@ -62,6 +62,7 @@ const {
   productById,
   getAllProducts,
   getAllActiveProducts,
+  getDeletedProducts,
   // updateWarehouseQuantity,
   // getProductWarehouseInventory,
   // checkWarehouseStock,
@@ -544,6 +545,8 @@ router.patch("/product/update-cost/:id", productCostUpdate);
 router.get("/product/get/:id", productById);
 router.get("/product/get-all", getAllProducts);
 router.get("/product/get-all-active", getAllActiveProducts);
+router.get("/product/get-deleted", getDeletedProducts);
+router.get("/products/get-deleted", getDeletedProducts);
 router.get(
   "/inventory_movements/cost-of-goods-available",
   cost_of_goods_available,

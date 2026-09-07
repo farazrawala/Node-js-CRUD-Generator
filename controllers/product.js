@@ -121,7 +121,23 @@ function applyPosProductStatusFilter(filter, query = {}) {
   return filter;
 }
 
-function buildParentProductListFilter(req, { status } = {}) {
+function mergeProductListPopulate(req) {
+  const fromQuery = buildPopulateFromQuery(req.query || {}, "product");
+  if (!fromQuery || fromQuery.length === 0) {
+    return PRODUCT_LIST_POPULATE;
+  }
+  const seen = new Set();
+  const merged = [];
+  for (const entry of [...fromQuery, ...PRODUCT_LIST_POPULATE]) {
+    const key = typeof entry === "string" ? entry : entry?.path;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+function buildParentProductListFilter(req, { status, deletedOnly } = {}) {
   const tenantCo = coalesceObjectId(req.user?.company_id);
   const query = req.query || {};
   const explicitIds = parseObjectIdListFromQuery(
@@ -129,7 +145,9 @@ function buildParentProductListFilter(req, { status } = {}) {
   );
 
   const filter = {
-    deletedAt: null,
+    ...(deletedOnly ?
+      { deletedAt: { $exists: true, $ne: null } }
+    : { deletedAt: null }),
     ...(tenantCo ? { company_id: tenantCo } : {}),
   };
 
@@ -150,11 +168,11 @@ function buildParentProductListFilter(req, { status } = {}) {
   return applyIncludeExcludeIdQueryFilter(filter, query);
 }
 
-function fetchParentProductList(req, filter) {
+function fetchParentProductList(req, filter, extra = {}) {
   return handleGenericGetAll(req, "product", {
     excludeFields: [],
-    populate: PRODUCT_LIST_POPULATE,
-    sort: { createdAt: -1 },
+    populate: extra.populate || mergeProductListPopulate(req),
+    sort: extra.sort || { createdAt: -1 },
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
     filter,
@@ -2009,6 +2027,26 @@ async function getAllActiveProducts(req, res) {
 }
 
 /**
+ * GET /api/product/get-deleted
+ * Alias: GET /api/products/get-deleted
+ *
+ * Parent products with `deletedAt` set (same list shape as get-all).
+ * Query: skip, limit, search, searchFields, populate, deleted=1 (ignored; endpoint is deleted-only).
+ */
+async function getDeletedProducts(req, res) {
+  return runCachedListHandler(req, res, {
+    module: PRODUCT_LIST_CACHE_MODULE,
+    action: "get-deleted",
+    fetch: () =>
+      fetchParentProductList(
+        req,
+        buildParentProductListFilter(req, { deletedOnly: true }),
+        { sort: { deletedAt: -1, createdAt: -1 } },
+      ),
+  });
+}
+
+/**
  * GET /api/warehouse/:warehouseId/products — products with stock in this warehouse
  * (reads `warehouse_inventory` collection, not embedded product arrays).
  */
@@ -3171,6 +3209,7 @@ module.exports = {
   productById,
   getAllProducts,
   getAllActiveProducts,
+  getDeletedProducts,
   getProductsByWarehouse,
   productCreateVariation,
   productUpdateVariation,

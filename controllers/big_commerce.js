@@ -1633,7 +1633,6 @@ const FETCH_PRODUCT_COPY_FIELDS = [
   "barcode",
   "product_type",
   "product_slug",
-  "wholesale_price",
   "product_price",
   "product_description",
   "product_image",
@@ -1672,6 +1671,9 @@ function buildFetchedProductPayload(source, {
       payload[field] = source[field];
     }
   }
+
+  // Partner cost is company-specific; duplicated copies start at 0.
+  payload.wholesale_price = 0;
 
   // Fetching a variant alone becomes a standalone product under the new company.
   if (!parentProductId && source.parent_product_id) {
