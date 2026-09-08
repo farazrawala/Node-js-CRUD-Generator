@@ -2084,7 +2084,124 @@ async function getFetchedProducts(req, res) {
 /**
  * Shared Me-too reset core (HTTP + process queue).
  * Company 2 resets its copy from the origin product (Company 1).
- *
+ */
+const RESET_SKIP_LOG_BASE_TAGS = [
+  "bigcommerce",
+  "bigCommerce product sync",
+  "skipped",
+  "product",
+  "skipped_bigcommerce",
+];
+
+/**
+ * Write skip logs on both catalogs:
+ * - destination company → tag `destination_product`
+ * - origin company → tag `origin_product`
+ */
+async function logFetchedProductResetSkipped({
+  req,
+  actorId,
+  message,
+  reason,
+  local,
+  origin = null,
+  extra = {},
+}) {
+  const localName =
+    String(local?.product_name || "").trim() || String(local?._id || "");
+  const localCompanyId = coalesceObjectId(local?.company_id);
+  let originDoc = origin;
+  if (!originDoc) {
+    const originId = coalesceObjectId(local?.fetch_from_product_id);
+    if (originId) {
+      originDoc = await Product.findById(originId)
+        .select("_id product_name company_id status show_on_bigcommerce")
+        .lean();
+    }
+  }
+  const originId = coalesceObjectId(
+    originDoc?._id || local?.fetch_from_product_id,
+  );
+  const originCompanyId = coalesceObjectId(
+    originDoc?.company_id || local?.fetch_from_company_id,
+  );
+  const originName = originDoc
+    ? String(originDoc.product_name || "").trim() || String(originDoc._id)
+    : originId
+      ? String(originId)
+      : null;
+  const url =
+    req?.originalUrl ||
+    `/api/big-commerce/fetched-products/${local?._id}/reset`;
+  const description = {
+    message,
+    reason,
+    destination_product_id: local?._id ? String(local._id) : null,
+    destination_product_name: localName || null,
+    destination_company_id: localCompanyId ? String(localCompanyId) : null,
+    destination_status: local?.status ?? null,
+    origin_product_id: originId ? String(originId) : null,
+    origin_product_name: originName,
+    origin_company_id: originCompanyId ? String(originCompanyId) : null,
+    origin_status: originDoc?.status ?? null,
+    fetch_from_product_id: originId ? String(originId) : null,
+    ...extra,
+  };
+
+  const jobs = [];
+  if (localCompanyId && local?._id) {
+    jobs.push(
+      createApplicationLog(
+        req,
+        {
+          action: `Skipped BigCommerce product sync :: ${localName}`,
+          url,
+          tags: [...RESET_SKIP_LOG_BASE_TAGS, "destination_product"],
+          description,
+          company_id: localCompanyId,
+          created_by: actorId,
+          reference_type: "product",
+          reference_id: local._id,
+        },
+        { silent: true },
+      ),
+    );
+  }
+  if (originCompanyId && originId) {
+    jobs.push(
+      createApplicationLog(
+        req,
+        {
+          action: `Skipped BigCommerce product sync :: ${originName || localName}`,
+          url,
+          tags: [...RESET_SKIP_LOG_BASE_TAGS, "origin_product"],
+          description,
+          company_id: originCompanyId,
+          created_by: actorId,
+          reference_type: "product",
+          reference_id: originId,
+        },
+        { silent: true },
+      ),
+    );
+  }
+  if (jobs.length) {
+    await Promise.all(jobs);
+  }
+}
+
+function skippedFetchedProductReset(local, message, meta = {}) {
+  return {
+    ok: true,
+    status: 200,
+    skipped: true,
+    message,
+    data: local.toObject ? local.toObject() : local,
+    meta,
+  };
+}
+
+/**
  * @param {{
  *   localProductId: import("mongoose").Types.ObjectId|string,
  *   companyId: import("mongoose").Types.ObjectId|string,
@@ -2132,65 +2249,51 @@ async function applyFetchedProductReset({
       };
     }
 
-    const localName =
-      String(local.product_name || "").trim() || String(local._id);
+    if (local.status && local.status !== "active") {
+      const message = `Skipped reset: destination product status is ${local.status}`;
+      await logFetchedProductResetSkipped({
+        req,
+        actorId,
+        message,
+        reason: "destination_status_not_active",
+        local,
+        extra: { destination_status: local.status },
+      });
+      return skippedFetchedProductReset(local, message, {
+        product_id: local._id,
+        status: local.status,
+      });
+    }
 
     // Company 2 me-too must opt in (BC SYNC toggle).
     if (local.bigcommerce_sync_status !== true) {
       const message =
         "Skipped reset: local product bigcommerce_sync_status is off";
-      await createApplicationLog(
+      await logFetchedProductResetSkipped({
         req,
-        {
-          action: `Skipped BigCommerce product sync :: ${localName}`,
-          url:
-            req?.originalUrl ||
-            `/api/big-commerce/fetched-products/${local._id}/reset`,
-          tags: [
-            "bigcommerce",
-            "bigCommerce product sync",
-            "skipped",
-            "product",
-            "skipped_bigcommerce",
-          ],
-          description: {
-            message,
-            reason: "local_bigcommerce_sync_status_off",
-            product_id: String(local._id),
-            product_name: localName,
-            company_id: String(myCompanyId),
-            fetch_from_product_id: local.fetch_from_product_id
-              ? String(local.fetch_from_product_id)
-              : null,
-            bigcommerce_sync_status: false,
-          },
-          company_id: myCompanyId,
-          created_by: actorId,
-          reference_type: "product",
-          reference_id: local._id,
-        },
-        { silent: true },
-      );
-      return {
-        ok: true,
-        status: 200,
-        skipped: true,
+        actorId,
         message,
-        data: local.toObject ? local.toObject() : local,
-        meta: {
-          product_id: local._id,
-          bigcommerce_sync_status: false,
-        },
-      };
+        reason: "local_bigcommerce_sync_status_off",
+        local,
+        extra: { bigcommerce_sync_status: false },
+      });
+      return skippedFetchedProductReset(local, message, {
+        product_id: local._id,
+        bigcommerce_sync_status: false,
+      });
     }
 
     const originId = coalesceObjectId(local.fetch_from_product_id);
     if (!originId) {
-      return {
-        ok: false,
-        status: 400,
-        message: "Fetched product has no origin link",
-      };
+      const message = "Skipped reset: fetched product has no origin link";
+      await logFetchedProductResetSkipped({
+        req,
+        actorId,
+        message,
+        reason: "missing_origin_link",
+        local,
+      });
+      return skippedFetchedProductReset(local, message);
     }
 
     const origin = await Product.findOne({
@@ -2199,65 +2302,66 @@ async function applyFetchedProductReset({
     }).lean();
 
     if (!origin) {
-      return {
-        ok: false,
-        status: 404,
-        message: "Origin product not found or was deleted",
-      };
+      const message = "Skipped reset: origin product not found or was deleted";
+      await logFetchedProductResetSkipped({
+        req,
+        actorId,
+        message,
+        reason: "origin_not_found",
+        local,
+        extra: { fetch_from_product_id: String(originId) },
+      });
+      return skippedFetchedProductReset(local, message, {
+        fetch_from_product_id: originId,
+      });
     }
 
-    // Company 1 origin must also opt in.
-    if (origin.bigcommerce_sync_status !== true) {
+    if (origin.status && origin.status !== "active") {
+      const originName =
+        String(origin.product_name || "").trim() || String(origin._id);
+      const message = `Skipped reset: origin product status is ${origin.status}`;
+      await logFetchedProductResetSkipped({
+        req,
+        actorId,
+        message,
+        reason: "origin_status_not_active",
+        local,
+        origin,
+        extra: {
+          origin_product_name: originName,
+          origin_status: origin.status,
+        },
+      });
+      return skippedFetchedProductReset(local, message, {
+        fetch_from_product_id: origin._id,
+        fetch_from_company_id: origin.company_id,
+        origin_status: origin.status,
+      });
+    }
+
+    // Company 1 origin must be listed on Big Commerce (`show_on_bigcommerce`).
+    if (origin.show_on_bigcommerce !== true) {
       const originName =
         String(origin.product_name || "").trim() || String(origin._id);
       const message =
-        "Skipped reset: origin product bigcommerce_sync_status is off";
-      await createApplicationLog(
+        "Skipped reset: origin product show_on_bigcommerce is off";
+      await logFetchedProductResetSkipped({
         req,
-        {
-          action: `Skipped BigCommerce origin sync :: ${originName}`,
-          url:
-            req?.originalUrl ||
-            `/api/big-commerce/fetched-products/${local._id}/reset`,
-          tags: [
-            "bigcommerce",
-            "BigCommerce origin sync",
-            "skipped",
-            "product",
-            "skipped_bigcommerce",
-          ],
-          description: {
-            message,
-            reason: "origin_bigcommerce_sync_status_off",
-            product_id: String(local._id),
-            product_name: localName,
-            company_id: String(myCompanyId),
-            fetch_from_product_id: String(origin._id),
-            origin_product_name: originName,
-            origin_company_id: origin.company_id
-              ? String(origin.company_id)
-              : null,
-            bigcommerce_sync_status: false,
-          },
-          company_id: myCompanyId,
-          created_by: actorId,
-          reference_type: "product",
-          reference_id: local._id,
-        },
-        { silent: true },
-      );
-      return {
-        ok: true,
-        status: 200,
-        skipped: true,
+        actorId,
         message,
-        data: local.toObject ? local.toObject() : local,
-        meta: {
-          fetch_from_product_id: origin._id,
-          fetch_from_company_id: origin.company_id,
-          bigcommerce_sync_status: false,
+        reason: "origin_show_on_bigcommerce_off",
+        local,
+        origin,
+        extra: {
+          origin_product_name: originName,
+          show_on_bigcommerce: false,
         },
-      };
+      });
+      return skippedFetchedProductReset(local, message, {
+        fetch_from_product_id: origin._id,
+        fetch_from_company_id: origin.company_id,
+        show_on_bigcommerce: false,
+      });
     }
 
     const connection = await findApprovedConnectionForReset(

@@ -372,7 +372,7 @@ async function apply_bigcommerce_product_reset(req, res, process) {
     });
   }
 
-  // Skipped (e.g. origin bigcommerce_sync_status off) — no POS change, no store sync.
+  // Skipped (e.g. local BC SYNC off, or origin not listed on Big Commerce).
   if (result.skipped) {
     const skipMsg =
       result.message ||
