@@ -69,6 +69,8 @@ const {
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
   resolveSyncStockTotals,
+  syncStockQuantity,
+  formatSyncStockFieldRemark,
   applyFetchOrderOutboundInventory,
   updatePosOrderFromRemote,
   resolveRemoteOrderIdFromPosOrder,
@@ -82,7 +84,10 @@ const {
   resolvePosProductSku,
   resolveSyncProductPrice,
   buildShopifyProductSyncPayload,
+  buildShopifyImageResources,
   buildShopifyVariantSyncPayload,
+  buildShopifyVariableOptionPlan,
+  formatShopifyVariantOptionValue,
   hasSyncPayloadFields,
   isIntegrationSyncEnabled,
 } = require("../utils/integrationProductSync");
@@ -152,6 +157,7 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
       "write_products",
       "read_inventory",
       "write_inventory",
+      "read_locations",
       "read_merchant_managed_fulfillment_orders",
       "write_merchant_managed_fulfillment_orders",
     ],
@@ -165,6 +171,7 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
 
   return {
     client: accessToken ? new shopify.clients.Rest({ session }) : null,
+    graphql: accessToken ? new shopify.clients.Graphql({ session }) : null,
     shopDomain,
     accessToken: accessToken || null,
   };
@@ -172,14 +179,15 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
 
 async function obtainAndPersistShopifyToken(integration, process) {
   const integrationId =
-    resolveIntegrationId(process) || integration?._id || integration?.id || null;
+    resolveIntegrationId(process) ||
+    integration?._id ||
+    integration?.id ||
+    null;
   const refreshed = await refreshShopifyAccessToken(integration, integrationId);
-  const next =
-    refreshed.integration ||
-    {
-      ...toPlainIntegration(integration),
-      token: refreshed.access_token,
-    };
+  const next = refreshed.integration || {
+    ...toPlainIntegration(integration),
+    token: refreshed.access_token,
+  };
 
   if (process?.integration_id && typeof process.integration_id === "object") {
     process.integration_id.token = refreshed.access_token;
@@ -233,13 +241,13 @@ async function runWithShopifyClient(integration, process, handler) {
       );
     }
 
-    const { client, error } = buildShopifyClient(activeIntegration);
+    const { client, graphql, error } = buildShopifyClient(activeIntegration);
     if (error || !client) {
       throw new Error(error || "Failed to build Shopify client.");
     }
 
     try {
-      return await handler(client, activeIntegration);
+      return await handler(client, activeIntegration, graphql);
     } catch (apiError) {
       if (attempt === 0 && isShopifyAuthError(apiError)) {
         try {
@@ -275,13 +283,9 @@ async function runWithShopifyClient(integration, process, handler) {
  */
 function describeShopifyError(error) {
   const status =
-    error?.response?.code ??
-    error?.response?.statusCode ??
-    error?.code ??
-    null;
+    error?.response?.code ?? error?.response?.statusCode ?? error?.code ?? null;
 
-  const body =
-    error?.response?.body ?? error?.response?.data ?? null;
+  const body = error?.response?.body ?? error?.response?.data ?? null;
 
   let bodyText = "";
   if (body != null) {
@@ -303,6 +307,64 @@ function describeShopifyError(error) {
   if (message) parts.push(`message=${message}`);
 
   return parts.join(" | ") || String(error);
+}
+
+/**
+ * Replace Shopify product images with the POS featured + gallery files.
+ * Shopify PUT product.images appends and leaves the old featured image in
+ * place — delete then upload (local file as attachment when present).
+ */
+async function replaceShopifyProductImages(
+  client,
+  shopifyProductId,
+  product,
+  integration,
+) {
+  if (!client || !shopifyProductId) return;
+  if (!isIntegrationSyncEnabled(integration, "sync_product_image")) return;
+
+  const images = buildShopifyImageResources(product);
+  if (!images.length) return;
+
+  let existing = [];
+  try {
+    const resp = await client.get({
+      path: `products/${shopifyProductId}`,
+    });
+    existing =
+      Array.isArray(resp?.body?.product?.images) ?
+        resp.body.product.images
+      : [];
+  } catch (err) {
+    if (isShopifyAuthError(err)) throw err;
+    console.warn(
+      `Failed to list Shopify images for product ${shopifyProductId}:`,
+      describeShopifyError(err),
+    );
+  }
+
+  for (const image of existing) {
+    if (!image?.id) continue;
+    try {
+      await client.delete({
+        path: `products/${shopifyProductId}/images/${image.id}`,
+      });
+    } catch (err) {
+      if (isShopifyAuthError(err)) throw err;
+      console.warn(
+        `Failed to delete Shopify image ${image.id}:`,
+        describeShopifyError(err),
+      );
+    }
+  }
+
+  for (const image of images) {
+    await client.post({
+      path: `products/${shopifyProductId}/images`,
+      data: { image },
+      type: "application/json",
+    });
+  }
 }
 
 function validateShopifyIntegration(integration, res) {
@@ -351,9 +413,7 @@ function isShopifyVariableProduct(remoteProduct) {
 function formatShopifyVariantLabel(variant) {
   const parts = [variant?.option1, variant?.option2, variant?.option3]
     .map((value) => String(value || "").trim())
-    .filter(
-      (value) => value && value.toLowerCase() !== "default title",
-    );
+    .filter((value) => value && value.toLowerCase() !== "default title");
   return parts.join(" / ");
 }
 
@@ -490,7 +550,9 @@ let shopifyInventoryLevelsUnavailable = false;
 
 function isShopifyInventoryScopeError(error) {
   const body = error?.response?.body;
-  const text = JSON.stringify(body || error?.message || error || "").toLowerCase();
+  const text = JSON.stringify(
+    body || error?.message || error || "",
+  ).toLowerCase();
   return text.includes("read_inventory") || text.includes("inventory scope");
 }
 
@@ -542,16 +604,41 @@ async function resolveShopifyVariantStockQuantity(variant, client) {
   return mapShopifyVariantInventoryQuantity(variant);
 }
 
-/** When the token lacks write_inventory, skip pushing stock for the rest of the run. */
+/** Per-run flags so a 403 on one job does not disable stock for every later sync. */
 let shopifyInventoryWriteUnavailable = false;
 
-/** Sum POS on-hand qty for sync push; uses origin_qty when fetch_from_product_id is set. */
+function resetShopifyInventorySyncFlags() {
+  shopifyInventoryLevelsUnavailable = false;
+  shopifyInventoryWriteUnavailable = false;
+}
+
+/** POS qty for sync push: max(origin_qty, warehouse_inventory.quantity) plus source field. */
 async function resolveShopifyStockTotals(productIds, companyId) {
   return resolveSyncStockTotals(productIds, companyId);
 }
 
-/** Resolve the Shopify location to write inventory against (prefer active). */
-async function resolveShopifyPrimaryLocationId(client) {
+function shopifyGidNumericId(gid) {
+  const raw = String(gid || "").trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return raw;
+  const last = raw.split("/").pop();
+  return last && /^\d+$/.test(last) ? last : null;
+}
+
+function shopifyGraphqlData(result) {
+  return result?.data || result?.body?.data || null;
+}
+
+function shopifyInventoryItemGid(inventoryItemId) {
+  const raw = String(inventoryItemId || "").trim();
+  if (!raw) return null;
+  if (raw.startsWith("gid://")) return raw;
+  const numeric = shopifyGidNumericId(raw);
+  return numeric ? `gid://shopify/InventoryItem/${numeric}` : null;
+}
+
+async function resolveShopifyLocationFromRest(client) {
+  if (!client) return null;
   try {
     const resp = await client.get({ path: "locations" });
     const locations =
@@ -560,11 +647,317 @@ async function resolveShopifyPrimaryLocationId(client) {
     return active?.id != null ? String(active.id) : null;
   } catch (error) {
     console.warn(
-      "Shopify locations lookup failed; cannot push stock:",
+      "Shopify REST locations lookup failed:",
       describeShopifyError(error),
     );
     return null;
   }
+}
+
+async function resolveShopifyLocationFromGraphql(graphql) {
+  if (!graphql) return null;
+  const queries = [
+    `query { locations(first: 20) { nodes { id isActive } } }`,
+    `query { shop { primaryLocation { id } } }`,
+  ];
+  for (const query of queries) {
+    try {
+      const result = await graphql.request(query);
+      const nodes = result?.data?.locations?.nodes;
+      if (Array.isArray(nodes) && nodes.length) {
+        const active = nodes.find((row) => row?.isActive) || nodes[0];
+        const id = shopifyGidNumericId(active?.id);
+        if (id) return id;
+      }
+      const primaryId = shopifyGidNumericId(
+        result?.data?.shop?.primaryLocation?.id,
+      );
+      if (primaryId) return primaryId;
+    } catch (error) {
+      console.warn(
+        "Shopify GraphQL location lookup failed:",
+        describeShopifyError(error),
+      );
+    }
+  }
+  return null;
+}
+
+async function resolveShopifyLocationFromInventoryItem(
+  client,
+  inventoryItemId,
+) {
+  if (!client || !inventoryItemId) return null;
+  try {
+    const response = await client.get({
+      path: "inventory_levels",
+      query: { inventory_item_ids: String(inventoryItemId), limit: 50 },
+    });
+    const levels =
+      Array.isArray(response?.body?.inventory_levels) ?
+        response.body.inventory_levels
+      : [];
+    const row = levels.find((level) => level?.location_id != null) || levels[0];
+    return row?.location_id != null ? String(row.location_id) : null;
+  } catch (error) {
+    console.warn(
+      "Shopify inventory_levels location lookup failed:",
+      describeShopifyError(error),
+    );
+    return null;
+  }
+}
+
+async function resolveShopifyLocationFromVariantGraphql(graphql, variant) {
+  const itemGid = shopifyInventoryItemGid(variant?.inventory_item_id);
+  if (!graphql || !itemGid) return null;
+  try {
+    const result = await graphql.request(
+      `query InventoryItemLocation($id: ID!) {
+        inventoryItem(id: $id) {
+          inventoryLevels(first: 10) {
+            nodes { location { id } }
+          }
+        }
+      }`,
+      { variables: { id: itemGid } },
+    );
+    const nodes =
+      shopifyGraphqlData(result)?.inventoryItem?.inventoryLevels?.nodes || [];
+    const locationGid = nodes.find((row) => row?.location?.id)?.location?.id;
+    return shopifyGidNumericId(locationGid);
+  } catch (error) {
+    console.warn(
+      "Shopify inventoryItem location query failed:",
+      describeShopifyError(error),
+    );
+    return null;
+  }
+}
+
+async function resolveShopifyVariantLocation(client, graphql, variant) {
+  const fromItemGraphql = await resolveShopifyLocationFromVariantGraphql(
+    graphql,
+    variant,
+  );
+  if (fromItemGraphql) return fromItemGraphql;
+
+  const fromItemRest = await resolveShopifyLocationFromInventoryItem(
+    client,
+    variant?.inventory_item_id,
+  );
+  if (fromItemRest) return fromItemRest;
+
+  return resolveShopifyPrimaryLocationId(client, graphql, [
+    variant?.inventory_item_id,
+  ]);
+}
+
+/**
+ * Prefer a location already attached to inventory items (read_inventory).
+ * GET /locations needs read_locations, which this app version does not have.
+ */
+async function resolveShopifyPrimaryLocationId(
+  client,
+  graphql = null,
+  inventoryItemIds = [],
+) {
+  const fromRest = await resolveShopifyLocationFromRest(client);
+  if (fromRest) return fromRest;
+
+  const itemIds = (
+    Array.isArray(inventoryItemIds) ? inventoryItemIds : [inventoryItemIds])
+    .map((id) => (id != null ? String(id) : ""))
+    .filter(Boolean);
+  for (const itemId of itemIds) {
+    const fromItem = await resolveShopifyLocationFromInventoryItem(
+      client,
+      itemId,
+    );
+    if (fromItem) return fromItem;
+  }
+
+  return resolveShopifyLocationFromGraphql(graphql);
+}
+
+async function setShopifyVariantInventoryGraphql(
+  graphql,
+  variant,
+  quantity,
+  locationId,
+) {
+  const inventoryItemId = variant?.inventory_item_id;
+  if (!graphql || !inventoryItemId || !locationId) return false;
+  const available = Math.max(0, Math.round(Number(quantity) || 0));
+  try {
+    const result = await graphql.request(
+      `mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+        inventorySetQuantities(input: $input) {
+          userErrors { field message }
+        }
+      }`,
+      {
+        variables: {
+          input: {
+            name: "available",
+            reason: "correction",
+            ignoreCompareQuantity: true,
+            quantities: [
+              {
+                inventoryItemId: shopifyInventoryItemGid(inventoryItemId),
+                locationId: `gid://shopify/Location/${shopifyGidNumericId(locationId)}`,
+                quantity: available,
+              },
+            ],
+          },
+        },
+      },
+    );
+    const payload = shopifyGraphqlData(result)?.inventorySetQuantities;
+    const errors = payload?.userErrors || [];
+    if (errors.length) {
+      console.warn(
+        "Shopify inventorySetQuantities:",
+        errors.map((row) => row.message).join("; "),
+      );
+      return false;
+    }
+    if (result?.errors?.length) {
+      console.warn(
+        "Shopify inventorySetQuantities:",
+        result.errors.map((row) => row.message || String(row)).join("; "),
+      );
+      return false;
+    }
+    return Boolean(payload);
+  } catch (error) {
+    console.warn(
+      `Shopify GraphQL inventory set failed for item ${inventoryItemId}:`,
+      describeShopifyError(error),
+    );
+    return false;
+  }
+}
+
+async function enableShopifyInventoryItemTracked({
+  client,
+  graphql,
+  variant,
+  locationId = null,
+}) {
+  const inventoryItemId = variant?.inventory_item_id;
+  if (!inventoryItemId) return false;
+  const itemGid = shopifyInventoryItemGid(inventoryItemId);
+  const itemNumeric = Number(
+    shopifyGidNumericId(inventoryItemId) || inventoryItemId,
+  );
+  const locationGid =
+    locationId ?
+      `gid://shopify/Location/${shopifyGidNumericId(locationId)}`
+    : null;
+
+  if (client && itemNumeric) {
+    try {
+      await client.put({
+        path: `inventory_items/${itemNumeric}`,
+        data: { inventory_item: { id: itemNumeric, tracked: true } },
+        type: "application/json",
+      });
+    } catch (error) {
+      console.warn(
+        `Failed to mark Shopify inventory item ${inventoryItemId} tracked:`,
+        describeShopifyError(error),
+      );
+    }
+  }
+
+  if (graphql && itemGid) {
+    try {
+      const result = await graphql.request(
+        `mutation InventoryItemTracked($id: ID!) {
+          inventoryItemUpdate(id: $id, input: { tracked: true }) {
+            inventoryItem { id tracked }
+            userErrors { field message }
+          }
+        }`,
+        { variables: { id: itemGid } },
+      );
+      const errors =
+        shopifyGraphqlData(result)?.inventoryItemUpdate?.userErrors || [];
+      if (errors.length) {
+        console.warn(
+          "Shopify inventoryItemUpdate:",
+          errors.map((row) => row.message).join("; "),
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `Shopify GraphQL inventoryItemUpdate failed for item ${inventoryItemId}:`,
+        describeShopifyError(error),
+      );
+    }
+  }
+
+  if (graphql && itemGid && locationGid) {
+    try {
+      const result = await graphql.request(
+        `mutation InventoryActivate($inventoryItemId: ID!, $updates: [InventoryBulkToggleActivationInput!]!) {
+          inventoryBulkToggleActivation(
+            inventoryItemId: $inventoryItemId
+            inventoryItemUpdates: $updates
+          ) {
+            userErrors { field message }
+          }
+        }`,
+        {
+          variables: {
+            inventoryItemId: itemGid,
+            updates: [{ locationId: locationGid, activate: true }],
+          },
+        },
+      );
+      const errors =
+        shopifyGraphqlData(result)?.inventoryBulkToggleActivation?.userErrors ||
+        [];
+      if (errors.length) {
+        console.warn(
+          "Shopify inventoryBulkToggleActivation:",
+          errors.map((row) => row.message).join("; "),
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `Shopify inventory activate failed for item ${inventoryItemId}:`,
+        describeShopifyError(error),
+      );
+    }
+  }
+
+  if (client && itemNumeric && locationId) {
+    try {
+      await client.post({
+        path: "inventory_levels/connect",
+        data: {
+          location_id: Number(shopifyGidNumericId(locationId)),
+          inventory_item_id: itemNumeric,
+        },
+        type: "application/json",
+      });
+    } catch (error) {
+      const text = JSON.stringify(
+        error?.response?.body || error?.message || "",
+      ).toLowerCase();
+      if (!text.includes("already") && !text.includes("stocked")) {
+        console.warn(
+          `Shopify inventory_levels/connect failed for item ${inventoryItemId}:`,
+          describeShopifyError(error),
+        );
+      }
+    }
+  }
+
+  variant.inventory_management = "shopify";
+  return true;
 }
 
 /**
@@ -574,6 +967,7 @@ async function resolveShopifyPrimaryLocationId(client) {
  */
 async function setShopifyVariantInventory({
   client,
+  graphql,
   variant,
   quantity,
   locationId,
@@ -586,36 +980,104 @@ async function setShopifyVariantInventory({
     return false;
   }
   const available = Math.max(0, Math.round(Number(quantity) || 0));
+  const locationNumeric = Number(shopifyGidNumericId(locationId) || locationId);
+  const itemNumeric = Number(
+    shopifyGidNumericId(inventoryItemId) || inventoryItemId,
+  );
+
+  await enableShopifyInventoryItemTracked({
+    client,
+    graphql,
+    variant,
+    locationId,
+  });
+
+  const graphqlSet = await setShopifyVariantInventoryGraphql(
+    graphql,
+    variant,
+    quantity,
+    locationId,
+  );
+  if (graphqlSet) return true;
 
   try {
-    if (variant.inventory_management !== "shopify") {
-      await client.put({
-        path: `variants/${variant.id}`,
+    try {
+      await client.post({
+        path: "inventory_levels/set",
         data: {
-          variant: { id: variant.id, inventory_management: "shopify" },
+          location_id: locationNumeric,
+          inventory_item_id: itemNumeric,
+          available,
         },
         type: "application/json",
       });
+      return true;
+    } catch (setError) {
+      const setText = JSON.stringify(
+        setError?.response?.body || setError?.message || "",
+      ).toLowerCase();
+      if (
+        setText.includes("not stocked") ||
+        setText.includes("not found") ||
+        setText.includes("tracking enabled")
+      ) {
+        await enableShopifyInventoryItemTracked({
+          client,
+          graphql,
+          variant,
+          locationId,
+        });
+        const retryGraphql = await setShopifyVariantInventoryGraphql(
+          graphql,
+          variant,
+          quantity,
+          locationId,
+        );
+        if (retryGraphql) return true;
+        try {
+          await client.post({
+            path: "inventory_levels/connect",
+            data: {
+              location_id: locationNumeric,
+              inventory_item_id: itemNumeric,
+            },
+            type: "application/json",
+          });
+        } catch (connectError) {
+          const connectText = JSON.stringify(
+            connectError?.response?.body || connectError?.message || "",
+          ).toLowerCase();
+          if (
+            !connectText.includes("already") &&
+            !connectText.includes("stocked")
+          ) {
+            throw connectError;
+          }
+        }
+        await client.post({
+          path: "inventory_levels/set",
+          data: {
+            location_id: locationNumeric,
+            inventory_item_id: itemNumeric,
+            available,
+          },
+          type: "application/json",
+        });
+        return true;
+      }
+      throw setError;
     }
-
-    await client.post({
-      path: "inventory_levels/set",
-      data: {
-        location_id: Number(locationId),
-        inventory_item_id: Number(inventoryItemId),
-        available,
-      },
-      type: "application/json",
-    });
-    return true;
   } catch (error) {
     const text = JSON.stringify(
       error?.response?.body || error?.message || error || "",
     ).toLowerCase();
-    if (isShopifyInventoryScopeError(error) || text.includes("write_inventory")) {
+    if (
+      isShopifyInventoryScopeError(error) ||
+      text.includes("write_inventory")
+    ) {
       shopifyInventoryWriteUnavailable = true;
       console.warn(
-        "[shopify sync] write_inventory scope missing — skipping stock sync.",
+        "[shopify sync] write_inventory scope missing — skipping REST stock sync.",
       );
     } else {
       console.warn(
@@ -623,8 +1085,9 @@ async function setShopifyVariantInventory({
         describeShopifyError(error),
       );
     }
-    return false;
   }
+
+  return false;
 }
 
 async function resolveCompanyDefaultWarehouseId(companyId) {
@@ -677,7 +1140,9 @@ async function syncShopifyProductWarehouseStock({
     return { synced: false, reason: "invalid_ids" };
   }
 
-  const row = await WarehouseInventory.findOne(filter).select("quantity").lean();
+  const row = await WarehouseInventory.findOne(filter)
+    .select("quantity")
+    .lean();
   const current = row ? Number(row.quantity) || 0 : 0;
   const delta = roundImportQty(target - current);
   if (delta === 0) {
@@ -713,7 +1178,8 @@ function buildPosFieldsFromShopify(
     product_name: String(remoteProduct?.title || "").trim(),
     product_price: productPrice,
     product_description: remoteProduct?.body_html || "",
-    product_type: productTypeOverride || mapShopifyProductType(remoteProduct?.product_type),
+    product_type:
+      productTypeOverride || mapShopifyProductType(remoteProduct?.product_type),
   };
 
   if (variant?.weight != null && variant.weight !== "") {
@@ -832,10 +1298,9 @@ async function resolvePosCategoryIdsFromShopifyProduct(
           const collectionResponse = await client.get({
             path: `custom_collections/${collectionId}`,
           });
-          collectionTitle =
-            String(
-              collectionResponse?.body?.custom_collection?.title || "",
-            ).trim();
+          collectionTitle = String(
+            collectionResponse?.body?.custom_collection?.title || "",
+          ).trim();
         } catch (error) {
           console.warn(
             `Shopify collection ${collectionId} lookup failed:`,
@@ -894,7 +1359,9 @@ async function upsertShopifyProductRow({
     return null;
   }
 
-  const categoryField = categoryIds.map((id) => coalesceObjectId(id)).filter(Boolean);
+  const categoryField = categoryIds
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
   const existing = await findPosProductForShopifyImport({
     process,
     companyId,
@@ -904,7 +1371,12 @@ async function upsertShopifyProductRow({
   });
 
   const payload = {
-    ...buildPosFieldsFromShopify(remoteProduct, variant, productPrice, productType),
+    ...buildPosFieldsFromShopify(
+      remoteProduct,
+      variant,
+      productPrice,
+      productType,
+    ),
     product_name: trimmedName,
     sku,
     product_code: sku,
@@ -942,7 +1414,9 @@ async function upsertShopifyProductRow({
       unit: "Piece",
       company_id: companyId,
       status: "active",
-      created_by: coalesceObjectId(process.created_by?._id || process.created_by),
+      created_by: coalesceObjectId(
+        process.created_by?._id || process.created_by,
+      ),
     });
     posId = coalesceObjectId(created._id);
     if (isVariation) {
@@ -1015,9 +1489,7 @@ async function importShopifyVariableProductToPos(
     .map((row) => mapShopifyVariantPrice(row))
     .filter((price) => price > 0);
   const parentDisplayPrice =
-    variantPrices.length > 0 ?
-      Math.min(...variantPrices)
-    : productPrice;
+    variantPrices.length > 0 ? Math.min(...variantPrices) : productPrice;
 
   const parentPosId = await upsertShopifyProductRow({
     remoteProduct,
@@ -1113,9 +1585,7 @@ async function importShopifyProductToPos(
     String(variant?.sku || "").trim() ||
     (shopifyId ? `shopify-${shopifyId}` : "");
   const price =
-    productPrice !== undefined ?
-      productPrice
-    : mapShopifyVariantPrice(variant);
+    productPrice !== undefined ? productPrice : mapShopifyVariantPrice(variant);
 
   return upsertShopifyProductRow({
     remoteProduct,
@@ -1324,17 +1794,125 @@ function parseShopifySyncReference(referenceId) {
   return { productId: raw, variantId: null };
 }
 
+function shopifyVariantOptionKey(variant) {
+  return [variant?.option1, variant?.option2, variant?.option3]
+    .map((value) =>
+      String(value || "")
+        .trim()
+        .toLowerCase(),
+    )
+    .join("|");
+}
+
+function shopifyVariantCombinedLabel(variant) {
+  return formatShopifyVariantOptionValue(
+    [variant?.option1, variant?.option2, variant?.option3]
+      .map((value) => String(value || "").trim())
+      .filter((value) => value && value.toLowerCase() !== "default title")
+      .join("-"),
+  );
+}
+
+async function deleteShopifyExtraProductOptions(
+  graphql,
+  shopifyProductId,
+  keepCount = 1,
+) {
+  if (!graphql || !shopifyProductId) return;
+  const productGid = `gid://shopify/Product/${shopifyProductId}`;
+  let options = [];
+  try {
+    const listed = await graphql.request(
+      `query ProductOptions($id: ID!) {
+        product(id: $id) { options { id name } }
+      }`,
+      { variables: { id: productGid } },
+    );
+    options = listed?.data?.product?.options || [];
+  } catch (err) {
+    console.warn(
+      `Failed to list Shopify product options for ${shopifyProductId}:`,
+      describeShopifyError(err),
+    );
+    return;
+  }
+
+  const extras = options.slice(Math.max(1, keepCount)).filter((row) => row?.id);
+  if (!extras.length) return;
+
+  try {
+    const result = await graphql.request(
+      `mutation ProductOptionsDelete($productId: ID!, $options: [ID!]!) {
+        productOptionsDelete(productId: $productId, options: $options, strategy: FORCE) {
+          deletedOptionsIds
+          userErrors { field message }
+        }
+      }`,
+      {
+        variables: {
+          productId: productGid,
+          options: extras.map((row) => row.id),
+        },
+      },
+    );
+    const errors = result?.data?.productOptionsDelete?.userErrors || [];
+    if (errors.length) {
+      console.warn(
+        "Shopify productOptionsDelete:",
+        errors.map((row) => row.message).join("; "),
+      );
+    }
+  } catch (err) {
+    if (isShopifyAuthError(err)) throw err;
+    console.warn(
+      `Failed to delete extra Shopify options for product ${shopifyProductId}:`,
+      describeShopifyError(err),
+    );
+  }
+}
+
+function isDefaultShopifyVariant(variant) {
+  const option1 = String(variant?.option1 || "")
+    .trim()
+    .toLowerCase();
+  return !option1 || option1 === "default title";
+}
+
+function buildShopifyVariantWritePayload(
+  child,
+  integration,
+  optionFields,
+  { mode, syncRow, quantity } = {},
+) {
+  const payload = {
+    ...(buildShopifyVariantSyncPayload(child, integration, {
+      mode,
+      syncRow,
+    }) || {}),
+    ...(optionFields || {}),
+  };
+  const sku = resolvePosProductSku(child);
+  if (sku) payload.sku = sku;
+  payload.inventory_management = "shopify";
+  if (
+    mode === "create" &&
+    quantity != null &&
+    Number.isFinite(Number(quantity))
+  ) {
+    payload.inventory_quantity = Math.max(0, Math.round(Number(quantity)));
+  }
+  return payload;
+}
+
 /**
- * Push a variable POS product to Shopify: update the parent product fields and
- * each Shopify variant's price/weight from the matching POS variation child.
- * Children are matched to remote variants by their stored sync reference
- * (`productId:variantId`) first, then by SKU.
+ * Push a variable POS product to Shopify: create the parent if needed, then
+ * create/update a Shopify variant for every POS child.
  */
 async function syncShopifyVariableProductToStore(
   req,
   res,
   process,
-  { client, integration, parentProduct, companyId, integrationId },
+  { client, graphql, integration, parentProduct, companyId, integrationId },
 ) {
   const parentId = coalesceObjectId(parentProduct._id);
   const parentSku = resolvePosProductSku(parentProduct);
@@ -1348,10 +1926,7 @@ async function syncShopifyVariableProductToStore(
     integration,
     "sync_product_stock",
   );
-  const childStockTotals =
-    stockSyncEnabled ?
-      await resolveShopifyStockTotals(childIds, companyId)
-    : new Map();
+  const childStockTotals = await resolveShopifyStockTotals(childIds, companyId);
 
   const syncRows = await SyncProduct.find({
     integration_id: integrationId,
@@ -1370,8 +1945,12 @@ async function syncShopifyVariableProductToStore(
       .map((row) => [String(row.product_id), row]),
   );
 
+  const { options: shopifyOptions, variantOptionsByChildId } =
+    buildShopifyVariableOptionPlan(children, parentSku);
+
   const stats = {
     variations_updated: 0,
+    variations_created: 0,
     variations_skipped: 0,
     variations_unmatched: 0,
     inventory_updated: 0,
@@ -1435,29 +2014,85 @@ async function syncShopifyVariableProductToStore(
   }
 
   if (!remoteParent || !shopifyProductId) {
-    await markProcessOutcome(
-      process._id,
-      "failed",
-      `Failed to sync Product Name : ${parentProduct.product_name} to Shopify — parent product not found on Shopify.`,
-    );
-    return res.status(404).json({
-      success: false,
-      message: `Parent product "${parentProduct.product_name}" was not found on Shopify. Create it there first.`,
-    });
-  }
+    if (!children.length) {
+      await markProcessOutcome(
+        process._id,
+        "failed",
+        `Failed to sync Product Name : ${parentProduct.product_name} to Shopify — no variation children found.`,
+      );
+      return res.status(400).json({
+        success: false,
+        message: `Variable product "${parentProduct.product_name}" has no child products to sync.`,
+      });
+    }
 
-  const parentUpdatePayload = buildShopifyProductSyncPayload(
-    parentProduct,
-    integration,
-    { mode: "update", syncRow: parentSyncRow },
-  );
-  if (hasSyncPayloadFields(parentUpdatePayload)) {
-    await client.put({
-      path: `products/${shopifyProductId}`,
-      data: { product: { ...parentUpdatePayload, id: shopifyProductId } },
+    const createPayload = buildShopifyProductSyncPayload(
+      parentProduct,
+      integration,
+      { mode: "create", syncRow: parentSyncRow },
+    );
+    if (!createPayload.title) {
+      createPayload.title =
+        parentProduct.product_name || parentSku || "Product";
+    }
+
+    const createdVariants = children.map((child) =>
+      buildShopifyVariantWritePayload(
+        child,
+        integration,
+        variantOptionsByChildId.get(String(child._id)) || {},
+        {
+          mode: "create",
+          syncRow: childSyncByProductId.get(String(child._id)),
+          quantity: syncStockQuantity(childStockTotals, child._id),
+        },
+      ),
+    );
+
+    const createdResponse = await client.post({
+      path: "products",
+      data: {
+        product: {
+          ...createPayload,
+          status: createPayload.status || "active",
+          options: shopifyOptions,
+          variants: createdVariants,
+        },
+      },
       type: "application/json",
     });
+    remoteParent = createdResponse?.body?.product || null;
+    shopifyProductId =
+      remoteParent?.id != null ? String(remoteParent.id) : null;
+    if (!shopifyProductId) {
+      throw new Error(
+        "Shopify did not return a product id for the variable parent.",
+      );
+    }
+  } else {
+    const parentUpdatePayload = buildShopifyProductSyncPayload(
+      parentProduct,
+      integration,
+      { mode: "update", syncRow: parentSyncRow },
+    );
+    if (hasSyncPayloadFields(parentUpdatePayload)) {
+      const updatedResponse = await client.put({
+        path: `products/${shopifyProductId}`,
+        data: {
+          product: { ...parentUpdatePayload, id: shopifyProductId },
+        },
+        type: "application/json",
+      });
+      remoteParent = updatedResponse?.body?.product || remoteParent;
+    }
   }
+
+  await replaceShopifyProductImages(
+    client,
+    shopifyProductId,
+    parentProduct,
+    integration,
+  );
   await recordShopifyProductSyncMapping(
     process,
     companyId,
@@ -1466,67 +2101,137 @@ async function syncShopifyVariableProductToStore(
   );
 
   const remoteVariants =
-    Array.isArray(remoteParent?.variants) ? remoteParent.variants : [];
-  const variantById = new Map(
-    remoteVariants.map((v) => [String(v.id), v]),
-  );
-  const variantBySku = new Map(
-    remoteVariants
-      .filter((v) => v?.sku)
-      .map((v) => [String(v.sku).trim().toLowerCase(), v]),
-  );
+    Array.isArray(remoteParent?.variants) ? [...remoteParent.variants] : [];
+  const usedVariantIds = new Set();
+  let locationId = null;
+  let stockSkipReason = "";
+  if (stockSyncEnabled) {
+    locationId = await resolveShopifyPrimaryLocationId(
+      client,
+      graphql,
+      remoteVariants.map((row) => row?.inventory_item_id).filter(Boolean),
+    );
+    if (!locationId) {
+      stockSkipReason = "no Shopify location";
+    }
+  }
 
-  const locationId =
-    stockSyncEnabled ? await resolveShopifyPrimaryLocationId(client) : null;
+  const takeMatchingVariant = (child, childSyncRow, optionFields) => {
+    const childSku = resolvePosProductSku(child);
+    const optionKey = shopifyVariantOptionKey(optionFields);
+    const refVariantId = parseShopifySyncReference(
+      childSyncRow?.refference_id,
+    ).variantId;
+
+    const unused = () =>
+      remoteVariants.filter((row) => !usedVariantIds.has(String(row.id)));
+
+    if (refVariantId) {
+      const byRef = unused().find(
+        (row) => String(row.id) === String(refVariantId),
+      );
+      if (byRef) return byRef;
+    }
+    if (childSku) {
+      const skuKey = String(childSku).trim().toLowerCase();
+      const bySku = unused().find(
+        (row) =>
+          String(row.sku || "")
+            .trim()
+            .toLowerCase() === skuKey,
+      );
+      if (bySku) return bySku;
+    }
+    if (optionKey) {
+      const byOptions = unused().find(
+        (row) => shopifyVariantOptionKey(row) === optionKey,
+      );
+      if (byOptions) return byOptions;
+    }
+    const wanted = formatShopifyVariantOptionValue(optionFields?.option1);
+    if (wanted) {
+      const byCombined = unused().find(
+        (row) => shopifyVariantCombinedLabel(row) === wanted,
+      );
+      if (byCombined) return byCombined;
+    }
+    return (
+      unused().find((row) => isDefaultShopifyVariant(row)) ||
+      (unused().length === 1 ? unused()[0] : null)
+    );
+  };
 
   for (const child of children) {
     try {
       const childId = coalesceObjectId(child._id);
       const childSyncRow = childSyncByProductId.get(String(child._id)) || null;
-      const childSku = resolvePosProductSku(child);
+      const optionFields = variantOptionsByChildId.get(String(child._id)) || {};
+      let variant = takeMatchingVariant(child, childSyncRow, optionFields);
+      const childQty = syncStockQuantity(childStockTotals, child._id);
+      const variantPayload = buildShopifyVariantWritePayload(
+        child,
+        integration,
+        optionFields,
+        {
+          mode: variant?.id ? "update" : "create",
+          syncRow: childSyncRow,
+          quantity: childQty,
+        },
+      );
 
-      let variant = null;
-      const refVariantId = parseShopifySyncReference(
-        childSyncRow?.refference_id,
-      ).variantId;
-      if (refVariantId && variantById.has(String(refVariantId))) {
-        variant = variantById.get(String(refVariantId));
-      }
-      if (!variant && childSku) {
-        variant =
-          variantBySku.get(String(childSku).trim().toLowerCase()) || null;
-      }
-
-      if (!variant?.id) {
-        stats.variations_unmatched += 1;
-        continue;
-      }
-
-      const variantPayload = buildShopifyVariantSyncPayload(child, integration, {
-        mode: "update",
-        syncRow: childSyncRow,
-      });
-      if (variantPayload) {
-        await client.put({
+      if (variant?.id) {
+        const updated = await client.put({
           path: `variants/${variant.id}`,
           data: { variant: { ...variantPayload, id: variant.id } },
           type: "application/json",
         });
+        variant = updated?.body?.variant || variant;
+        usedVariantIds.add(String(variant.id));
         stats.variations_updated += 1;
       } else {
-        stats.variations_skipped += 1;
+        const created = await client.post({
+          path: `products/${shopifyProductId}/variants`,
+          data: { variant: variantPayload },
+          type: "application/json",
+        });
+        variant = created?.body?.variant || null;
+        if (!variant?.id) {
+          stats.variations_unmatched += 1;
+          continue;
+        }
+        remoteVariants.push(variant);
+        usedVariantIds.add(String(variant.id));
+        stats.variations_created += 1;
       }
 
-      if (stockSyncEnabled && locationId) {
-        const quantity = childStockTotals.get(String(child._id)) ?? 0;
-        const inventorySet = await setShopifyVariantInventory({
-          client,
-          variant,
-          quantity,
-          locationId,
-        });
-        if (inventorySet) {
-          stats.inventory_updated += 1;
+      await enableShopifyInventoryItemTracked({
+        client,
+        graphql,
+        variant,
+        locationId,
+      });
+
+      if (stockSyncEnabled) {
+        const variantLocationId =
+          locationId ||
+          (await resolveShopifyVariantLocation(client, graphql, variant));
+        if (variantLocationId) {
+          locationId = variantLocationId;
+          stockSkipReason = "";
+          const inventorySet = await setShopifyVariantInventory({
+            client,
+            graphql,
+            variant,
+            quantity: childQty,
+            locationId: variantLocationId,
+          });
+          if (inventorySet) {
+            stats.inventory_updated += 1;
+          } else if (!stockSkipReason) {
+            stockSkipReason = "inventory write failed";
+          }
+        } else if (!stockSkipReason) {
+          stockSkipReason = "no Shopify location";
         }
       }
 
@@ -1545,11 +2250,67 @@ async function syncShopifyVariableProductToStore(
     }
   }
 
+  await deleteShopifyExtraProductOptions(
+    graphql,
+    shopifyProductId,
+    shopifyOptions.length || 1,
+  );
+
+  if (shopifyOptions[0]) {
+    try {
+      const refreshed = await client.get({
+        path: `products/${shopifyProductId}`,
+      });
+      const current = refreshed?.body?.product || {};
+      const currentOptions =
+        Array.isArray(current.options) ? current.options : [];
+      const currentVariants =
+        Array.isArray(current.variants) ? current.variants : [];
+      const keepOption = currentOptions[0];
+      if (keepOption?.id && currentVariants.length) {
+        await client.put({
+          path: `products/${shopifyProductId}`,
+          data: {
+            product: {
+              id: shopifyProductId,
+              options: [
+                {
+                  id: keepOption.id,
+                  name: shopifyOptions[0].name,
+                  values: shopifyOptions[0].values,
+                },
+              ],
+              variants: currentVariants.map((row) => ({
+                id: row.id,
+                option1: row.option1,
+              })),
+            },
+          },
+          type: "application/json",
+        });
+      }
+    } catch (err) {
+      if (isShopifyAuthError(err)) throw err;
+      console.warn(
+        `Failed to rename Shopify options for product ${shopifyProductId}:`,
+        describeShopifyError(err),
+      );
+    }
+  }
+
+  const qtyFieldRemark = formatSyncStockFieldRemark(childStockTotals, childIds);
+  const variantsTouched =
+    Number(stats.variations_created || 0) +
+    Number(stats.variations_updated || 0);
+  const stockRemark =
+    stats.inventory_updated > 0 || !stockSkipReason ?
+      `stock updated ${stats.inventory_updated}`
+    : `stock updated ${stats.inventory_updated} (${stockSkipReason})`;
   const remarks =
     `Product Name : ${parentProduct.product_name} synced to Shopify ` +
-    `(product ${shopifyProductId}, variants updated ${stats.variations_updated}, ` +
-    `stock updated ${stats.inventory_updated}, ` +
-    `skipped ${stats.variations_skipped}, unmatched ${stats.variations_unmatched}).`;
+    `(product ${shopifyProductId}, variants updated ${variantsTouched}, ` +
+    `${stockRemark}, skipped ${stats.variations_skipped}, ` +
+    `unmatched ${stats.variations_unmatched}, ${qtyFieldRemark}).`;
 
   await markProcessOutcome(process._id, "completed", remarks);
 
@@ -1592,282 +2353,371 @@ async function sync_product(req, res, process) {
   const productId = coalesceObjectId(product._id);
 
   try {
-    return await runWithShopifyClient(integration, process, async (client) => {
-      const { rootProduct } = await resolveShopifySyncRootProduct(
-        product,
-        companyId,
-      );
+    resetShopifyInventorySyncFlags();
+    return await runWithShopifyClient(
+      integration,
+      process,
+      async (client, _active, graphql) => {
+        const { rootProduct } = await resolveShopifySyncRootProduct(
+          product,
+          companyId,
+        );
 
-      if (
-        typeof rootProduct?.product_type === "string" &&
-        rootProduct.product_type.toLowerCase() === "variable"
-      ) {
+        if (
+          typeof rootProduct?.product_type === "string" &&
+          rootProduct.product_type.toLowerCase() === "variable"
+        ) {
+          try {
+            return await syncShopifyVariableProductToStore(req, res, process, {
+              client,
+              graphql,
+              integration,
+              parentProduct: rootProduct,
+              companyId,
+              integrationId,
+            });
+          } catch (error) {
+            if (isShopifyAuthError(error)) throw error;
+            const detail = describeShopifyError(error);
+            console.error(
+              `Shopify variable product sync failed for "${rootProduct.product_name}":`,
+              detail,
+            );
+            await markProcessOutcome(
+              process._id,
+              "failed",
+              `Failed to sync Product Name : ${rootProduct.product_name} to Shopify — ${detail}`,
+            );
+            return res.status(500).json({
+              success: false,
+              message: detail,
+              detail,
+            });
+          }
+        }
+
+        const syncRow = await SyncProduct.findOne({
+          product_id: productId,
+          integration_id: integrationId,
+          company_id: companyId,
+          status: "active",
+          deletedAt: null,
+        }).lean();
+
+        let step = "init";
         try {
-          return await syncShopifyVariableProductToStore(req, res, process, {
-            client,
+          let remoteProduct = null;
+          let remoteId =
+            (
+              syncRow?.refference_id != null &&
+              String(syncRow.refference_id).trim() !== ""
+            ) ?
+              String(syncRow.refference_id).trim()
+            : null;
+
+          if (remoteId) {
+            try {
+              step = `GET products/${remoteId}`;
+              const productResponse = await client.get({
+                path: `products/${remoteId}`,
+              });
+              remoteProduct = productResponse?.body?.product || null;
+            } catch (fetchErr) {
+              if (isShopifyAuthError(fetchErr)) throw fetchErr;
+              console.warn(
+                `Shopify product ${remoteId} not found; will try SKU lookup:`,
+                describeShopifyError(fetchErr),
+              );
+              remoteId = null;
+            }
+          }
+
+          if (!remoteProduct) {
+            step = `GET variants?sku=${sku}`;
+            const variantResponse = await client.get({
+              path: "variants",
+              query: { sku },
+            });
+            const existingVariants =
+              Array.isArray(variantResponse?.body?.variants) ?
+                variantResponse.body.variants
+              : [];
+            if (
+              existingVariants.length > 0 &&
+              existingVariants[0]?.product_id
+            ) {
+              remoteId = String(existingVariants[0].product_id);
+              try {
+                step = `GET products/${remoteId} (via variant SKU)`;
+                const productResponse = await client.get({
+                  path: `products/${remoteId}`,
+                });
+                remoteProduct = productResponse?.body?.product || null;
+              } catch (fetchErr) {
+                if (isShopifyAuthError(fetchErr)) throw fetchErr;
+                console.warn(
+                  "Failed to load Shopify product by variant SKU:",
+                  describeShopifyError(fetchErr),
+                );
+              }
+            }
+          }
+
+          if (remoteProduct && remoteId) {
+            const updatePayload = buildShopifyProductSyncPayload(
+              product,
+              integration,
+              { mode: "update", syncRow },
+            );
+            const variantPayload = buildShopifyVariantSyncPayload(
+              product,
+              integration,
+              { mode: "update", syncRow },
+            );
+            const stockSyncEnabled = isIntegrationSyncEnabled(
+              integration,
+              "sync_product_stock",
+            );
+
+            if (
+              !hasSyncPayloadFields(updatePayload) &&
+              !variantPayload &&
+              !stockSyncEnabled
+            ) {
+              const keepVariant = remoteProduct?.variants?.[0] || null;
+              if (keepVariant?.id) {
+                await enableShopifyInventoryItemTracked({
+                  client,
+                  graphql,
+                  variant: keepVariant,
+                });
+              }
+              await recordShopifyProductSyncMapping(
+                process,
+                companyId,
+                productId,
+                remoteId,
+              );
+              await markProcessOutcome(
+                process._id,
+                "completed",
+                `Product Name : ${product.product_name} — no Shopify fields enabled for update.`,
+              );
+              return res.status(200).json({
+                success: true,
+                data: remoteProduct,
+                message: `Product Name : ${product.product_name} — sync mapping kept; no fields enabled.`,
+              });
+            }
+
+            let updatedProduct = remoteProduct;
+            if (hasSyncPayloadFields(updatePayload)) {
+              step = `PUT products/${remoteId}`;
+              const updatedResponse = await client.put({
+                path: `products/${remoteId}`,
+                data: { product: updatePayload },
+                type: "application/json",
+              });
+              updatedProduct = updatedResponse?.body?.product || updatedProduct;
+            }
+
+            const singleVariant =
+              updatedProduct?.variants?.[0] ||
+              remoteProduct?.variants?.[0] ||
+              null;
+
+            if (variantPayload && singleVariant?.id) {
+              step = `PUT variants/${singleVariant.id}`;
+              const updatedVariant = await client.put({
+                path: `variants/${singleVariant.id}`,
+                data: {
+                  variant: {
+                    ...variantPayload,
+                    sku,
+                    id: singleVariant.id,
+                    inventory_management: "shopify",
+                  },
+                },
+                type: "application/json",
+              });
+              if (updatedVariant?.body?.variant) {
+                Object.assign(singleVariant, updatedVariant.body.variant);
+              }
+            }
+
+            if (singleVariant?.id) {
+              const locationId = await resolveShopifyPrimaryLocationId(
+                client,
+                graphql,
+                [singleVariant.inventory_item_id],
+              );
+              await enableShopifyInventoryItemTracked({
+                client,
+                graphql,
+                variant: singleVariant,
+                locationId,
+              });
+            }
+
+            let stockTotals = new Map();
+            if (stockSyncEnabled && singleVariant?.id) {
+              stockTotals = await resolveShopifyStockTotals(
+                [productId],
+                companyId,
+              );
+              const locationId = await resolveShopifyVariantLocation(
+                client,
+                graphql,
+                singleVariant,
+              );
+              if (locationId) {
+                step = `SET inventory for variant ${singleVariant.id}`;
+                await setShopifyVariantInventory({
+                  client,
+                  graphql,
+                  variant: singleVariant,
+                  quantity: syncStockQuantity(stockTotals, productId),
+                  locationId,
+                });
+              }
+            }
+
+            await recordShopifyProductSyncMapping(
+              process,
+              companyId,
+              productId,
+              remoteId,
+            );
+
+            step = `REPLACE images for product ${remoteId}`;
+            await replaceShopifyProductImages(
+              client,
+              remoteId,
+              product,
+              integration,
+            );
+
+            const updateRemarks =
+              `Product Name : ${product.product_name} updated on Shopify` +
+              (stockTotals.size ?
+                ` (${formatSyncStockFieldRemark(stockTotals, productId)}).`
+              : ".");
+
+            await markProcessOutcome(process._id, "completed", updateRemarks);
+
+            return res.status(200).json({
+              success: true,
+              data: updatedProduct,
+              message: updateRemarks,
+            });
+          }
+
+          const variantPayload = buildShopifyVariantSyncPayload(
+            product,
             integration,
-            parentProduct: rootProduct,
+            {
+              mode: "create",
+              syncRow,
+            },
+          ) || {
+            price: resolveSyncProductPrice(product, syncRow),
+            sku,
+          };
+          if (!variantPayload.sku) variantPayload.sku = sku;
+          variantPayload.inventory_management = "shopify";
+
+          const createPayload = buildShopifyProductSyncPayload(
+            product,
+            integration,
+            {
+              mode: "create",
+              syncRow,
+            },
+          );
+          if (!createPayload.title) {
+            createPayload.title = product.product_name || sku;
+          }
+
+          step = "POST products";
+          const createdProductResponse = await client.post({
+            path: "products",
+            data: {
+              product: {
+                ...createPayload,
+                status: createPayload.status || "active",
+                variants: [variantPayload],
+              },
+            },
+            type: "application/json",
+          });
+
+          const createdProduct = createdProductResponse?.body?.product;
+          const createdId = createdProduct?.id;
+          const createdVariant = createdProduct?.variants?.[0] || null;
+          if (createdVariant?.id) {
+            await enableShopifyInventoryItemTracked({
+              client,
+              graphql,
+              variant: createdVariant,
+            });
+          }
+          await recordShopifyProductSyncMapping(
+            process,
             companyId,
-            integrationId,
+            productId,
+            createdId,
+          );
+
+          if (createdId) {
+            step = `REPLACE images for product ${createdId}`;
+            await replaceShopifyProductImages(
+              client,
+              createdId,
+              product,
+              integration,
+            );
+          }
+
+          await markProcessOutcome(
+            process._id,
+            "completed",
+            `Product Name : ${product.product_name} created on Shopify.`,
+          );
+
+          return res.status(201).json({
+            success: true,
+            data: createdProduct,
+            message: `Product Name : ${product.product_name} synced to Shopify successfully.`,
           });
         } catch (error) {
           if (isShopifyAuthError(error)) throw error;
           const detail = describeShopifyError(error);
           console.error(
-            `Shopify variable product sync failed for "${rootProduct.product_name}":`,
+            `Shopify product sync failed [step: ${step}] for "${product.product_name}" (sku=${sku}):`,
             detail,
           );
+
           await markProcessOutcome(
             process._id,
             "failed",
-            `Failed to sync Product Name : ${rootProduct.product_name} to Shopify — ${detail}`,
+            `Failed to sync Product Name : ${product.product_name} to Shopify [step: ${step}] — ${detail}`,
           );
+
+          const errorMessage = formatShopifyErrorPayload(
+            error,
+            `Failed to sync Product Name : ${product.product_name} to Shopify.`,
+          );
+
           return res.status(500).json({
             success: false,
-            message: detail,
+            step,
+            message: errorMessage,
             detail,
+            error: errorMessage,
           });
         }
-      }
-
-      const syncRow = await SyncProduct.findOne({
-        product_id: productId,
-        integration_id: integrationId,
-        company_id: companyId,
-        status: "active",
-        deletedAt: null,
-      }).lean();
-
-      let step = "init";
-      try {
-    let remoteProduct = null;
-    let remoteId =
-      syncRow?.refference_id != null && String(syncRow.refference_id).trim() !== "" ?
-        String(syncRow.refference_id).trim()
-      : null;
-
-      if (remoteId) {
-      try {
-        step = `GET products/${remoteId}`;
-        const productResponse = await client.get({
-          path: `products/${remoteId}`,
-        });
-        remoteProduct = productResponse?.body?.product || null;
-      } catch (fetchErr) {
-        if (isShopifyAuthError(fetchErr)) throw fetchErr;
-        console.warn(
-          `Shopify product ${remoteId} not found; will try SKU lookup:`,
-          describeShopifyError(fetchErr),
-        );
-        remoteId = null;
-      }
-    }
-
-    if (!remoteProduct) {
-      step = `GET variants?sku=${sku}`;
-      const variantResponse = await client.get({
-        path: "variants",
-        query: { sku },
-      });
-      const existingVariants =
-        Array.isArray(variantResponse?.body?.variants) ?
-          variantResponse.body.variants
-        : [];
-      if (existingVariants.length > 0 && existingVariants[0]?.product_id) {
-        remoteId = String(existingVariants[0].product_id);
-        try {
-          step = `GET products/${remoteId} (via variant SKU)`;
-          const productResponse = await client.get({
-            path: `products/${remoteId}`,
-          });
-          remoteProduct = productResponse?.body?.product || null;
-        } catch (fetchErr) {
-          if (isShopifyAuthError(fetchErr)) throw fetchErr;
-          console.warn(
-            "Failed to load Shopify product by variant SKU:",
-            describeShopifyError(fetchErr),
-          );
-        }
-      }
-    }
-
-    if (remoteProduct && remoteId) {
-      const updatePayload = buildShopifyProductSyncPayload(
-        product,
-        integration,
-        { mode: "update", syncRow },
-      );
-      const variantPayload = buildShopifyVariantSyncPayload(
-        product,
-        integration,
-        { mode: "update", syncRow },
-      );
-      const stockSyncEnabled = isIntegrationSyncEnabled(
-        integration,
-        "sync_product_stock",
-      );
-
-      if (
-        !hasSyncPayloadFields(updatePayload) &&
-        !variantPayload &&
-        !stockSyncEnabled
-      ) {
-        await recordShopifyProductSyncMapping(
-          process,
-          companyId,
-          productId,
-          remoteId,
-        );
-        await markProcessOutcome(
-          process._id,
-          "completed",
-          `Product Name : ${product.product_name} — no Shopify fields enabled for update.`,
-        );
-        return res.status(200).json({
-          success: true,
-          data: remoteProduct,
-          message: `Product Name : ${product.product_name} — sync mapping kept; no fields enabled.`,
-        });
-      }
-
-      let updatedProduct = remoteProduct;
-      if (hasSyncPayloadFields(updatePayload)) {
-        step = `PUT products/${remoteId}`;
-        const updatedResponse = await client.put({
-          path: `products/${remoteId}`,
-          data: { product: updatePayload },
-          type: "application/json",
-        });
-        updatedProduct = updatedResponse?.body?.product || updatedProduct;
-      }
-
-      const singleVariant =
-        updatedProduct?.variants?.[0] || remoteProduct?.variants?.[0] || null;
-
-      if (variantPayload && singleVariant?.id) {
-        step = `PUT variants/${singleVariant.id}`;
-        await client.put({
-          path: `variants/${singleVariant.id}`,
-          data: { variant: { ...variantPayload, sku } },
-          type: "application/json",
-        });
-      }
-
-      if (stockSyncEnabled && singleVariant?.id) {
-        const locationId = await resolveShopifyPrimaryLocationId(client);
-        if (locationId) {
-          const stockTotals = await resolveShopifyStockTotals(
-            [productId],
-            companyId,
-          );
-          step = `SET inventory for variant ${singleVariant.id}`;
-          await setShopifyVariantInventory({
-            client,
-            variant: singleVariant,
-            quantity: stockTotals.get(String(productId)) ?? 0,
-            locationId,
-          });
-        }
-      }
-
-      await recordShopifyProductSyncMapping(
-        process,
-        companyId,
-        productId,
-        remoteId,
-      );
-
-      await markProcessOutcome(
-        process._id,
-        "completed",
-        `Product Name : ${product.product_name} updated on Shopify.`,
-      );
-
-      return res.status(200).json({
-        success: true,
-        data: updatedProduct,
-        message: `Product Name : ${product.product_name} updated on Shopify.`,
-      });
-    }
-
-    const variantPayload = buildShopifyVariantSyncPayload(product, integration, {
-      mode: "create",
-      syncRow,
-    }) || {
-      price: resolveSyncProductPrice(product, syncRow),
-      sku,
-    };
-    if (!variantPayload.sku) variantPayload.sku = sku;
-
-    const createPayload = buildShopifyProductSyncPayload(product, integration, {
-      mode: "create",
-      syncRow,
-    });
-    if (!createPayload.title) {
-      createPayload.title = product.product_name || sku;
-    }
-
-    step = "POST products";
-    const createdProductResponse = await client.post({
-      path: "products",
-      data: {
-        product: {
-          ...createPayload,
-          status: createPayload.status || "active",
-          variants: [variantPayload],
-        },
       },
-      type: "application/json",
-    });
-
-    const createdProduct = createdProductResponse?.body?.product;
-    const createdId = createdProduct?.id;
-    await recordShopifyProductSyncMapping(
-      process,
-      companyId,
-      productId,
-      createdId,
     );
-
-    await markProcessOutcome(
-      process._id,
-      "completed",
-      `Product Name : ${product.product_name} created on Shopify.`,
-    );
-
-    return res.status(201).json({
-      success: true,
-      data: createdProduct,
-      message: `Product Name : ${product.product_name} synced to Shopify successfully.`,
-    });
-  } catch (error) {
-    if (isShopifyAuthError(error)) throw error;
-    const detail = describeShopifyError(error);
-    console.error(
-      `Shopify product sync failed [step: ${step}] for "${product.product_name}" (sku=${sku}):`,
-      detail,
-    );
-
-    await markProcessOutcome(
-      process._id,
-      "failed",
-      `Failed to sync Product Name : ${product.product_name} to Shopify [step: ${step}] — ${detail}`,
-    );
-
-    const errorMessage = formatShopifyErrorPayload(
-      error,
-      `Failed to sync Product Name : ${product.product_name} to Shopify.`,
-    );
-
-    return res.status(500).json({
-      success: false,
-      step,
-      message: errorMessage,
-      detail,
-      error: errorMessage,
-    });
-      }
-    });
   } catch (error) {
     const errorMessage = formatShopifyErrorPayload(
       error,
@@ -2134,13 +2984,17 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
   );
 
   if (!externalRef) {
-    recordOrderSkip(stats, {
-      store: "shopify",
-      remote_id: remoteId,
-      order_number: remoteOrder?.order_number,
-      reason: "missing_remote_id",
-      detail: "Shopify order has no id",
-    }, logCtx);
+    recordOrderSkip(
+      stats,
+      {
+        store: "shopify",
+        remote_id: remoteId,
+        order_number: remoteOrder?.order_number,
+        reason: "missing_remote_id",
+        detail: "Shopify order has no id",
+      },
+      logCtx,
+    );
     return;
   }
 
@@ -2165,7 +3019,10 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       const resolvedName =
         customerName ||
         shippingName ||
-        [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim() ||
+        [customer.first_name, customer.last_name]
+          .filter(Boolean)
+          .join(" ")
+          .trim() ||
         existing.name ||
         "";
       const backfillCustomerId = await findOrCreatePosCustomerFromBilling({
@@ -2203,15 +3060,20 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       stats.updated = (stats.updated || 0) + 1;
       return;
     }
-    recordOrderSkip(stats, {
-      store: "shopify",
-      remote_id: remoteId,
-      order_number: remoteOrder?.order_number,
-      reason: "already_imported",
-      detail: existing.order_no ?
-          `POS ${existing.order_no}`
-        : `POS order ${existing._id}`,
-    }, logCtx);
+    recordOrderSkip(
+      stats,
+      {
+        store: "shopify",
+        remote_id: remoteId,
+        order_number: remoteOrder?.order_number,
+        reason: "already_imported",
+        detail:
+          existing.order_no ?
+            `POS ${existing.order_no}`
+          : `POS order ${existing._id}`,
+      },
+      logCtx,
+    );
     return;
   }
 
@@ -2243,8 +3105,7 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     billing.email ||
     shipping.email ||
     "";
-  const customerPhone =
-    billing.phone || shipping.phone || customer.phone || "";
+  const customerPhone = billing.phone || shipping.phone || customer.phone || "";
 
   const discount = Number(remoteOrder?.total_discounts) || 0;
   const shipment =
@@ -2263,9 +3124,7 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
   const addressFields = mapRemoteOrderAddressFields(remoteOrder, "shopify");
 
   const orderPayload = {
-    name:
-      resolvedName ||
-      `Shopify #${remoteOrder?.order_number || remoteId}`,
+    name: resolvedName || `Shopify #${remoteOrder?.order_number || remoteId}`,
     email: customerEmail,
     phone: customerPhone,
     address: addressFields.address,
@@ -2291,9 +3150,7 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     transaction_number: generateTransactionNumber(),
     integration_id: integrationId,
     company_id: companyId,
-    created_by: coalesceObjectId(
-      process.created_by?._id || process.created_by,
-    ),
+    created_by: coalesceObjectId(process.created_by?._id || process.created_by),
     status: "active",
   };
   const arAccountId = await resolveCompanyDefaultArAccountId(companyId);
@@ -2464,8 +3321,14 @@ async function pull_order(req, res, process) {
           );
         }
 
-        const { inserted, updated, skipped, lines_inserted, lines_skipped, skipped_orders } =
-          stats;
+        const {
+          inserted,
+          updated,
+          skipped,
+          lines_inserted,
+          lines_skipped,
+          skipped_orders,
+        } = stats;
         const remarks = formatPullOrderBatchRemarks({
           fetched: 1,
           inserted,
@@ -2530,8 +3393,14 @@ async function pull_order(req, res, process) {
         }
       }
 
-      const { inserted, updated, skipped, lines_inserted, lines_skipped, skipped_orders } =
-        stats;
+      const {
+        inserted,
+        updated,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+      } = stats;
       const fetched = remoteOrders.length;
       const isComplete = fetched < limit;
       const lastRemoteId = fetched > 0 ? remoteOrders[fetched - 1]?.id : offset;
@@ -2593,7 +3462,8 @@ async function listShopifyFulfillmentOrders(client, remoteOrderId) {
 }
 
 function shopifyFulfillmentOrderSupports(fulfillmentOrder, action) {
-  const actions = Array.isArray(fulfillmentOrder?.supported_actions) ?
+  const actions =
+    Array.isArray(fulfillmentOrder?.supported_actions) ?
       fulfillmentOrder.supported_actions
     : [];
   return actions.includes(action);
@@ -2671,7 +3541,11 @@ function buildShopifyFulfillmentTrackingInfo(tracking) {
   return { number, company, url };
 }
 
-async function updateShopifyFulfillmentTracking(client, fulfillmentId, trackingInfo) {
+async function updateShopifyFulfillmentTracking(
+  client,
+  fulfillmentId,
+  trackingInfo,
+) {
   await client.post({
     path: `fulfillments/${fulfillmentId}/update_tracking`,
     data: {
@@ -2685,10 +3559,15 @@ async function updateShopifyFulfillmentTracking(client, fulfillmentId, trackingI
 }
 
 async function markShopifyFulfillmentsDelivered(client, remoteOrderId) {
-  const fulfillments = await listShopifyOrderFulfillments(client, remoteOrderId);
+  const fulfillments = await listShopifyOrderFulfillments(
+    client,
+    remoteOrderId,
+  );
   const marked = [];
   for (const fulfillment of fulfillments) {
-    const shipmentStatus = String(fulfillment?.shipment_status || "").toLowerCase();
+    const shipmentStatus = String(
+      fulfillment?.shipment_status || "",
+    ).toLowerCase();
     if (shipmentStatus === "delivered") {
       continue;
     }
@@ -2749,7 +3628,10 @@ async function syncShopifyFulfillmentShipmentEvents(
   tracking,
   orderStatus,
 ) {
-  const fulfillments = await listShopifyOrderFulfillments(client, remoteOrderId);
+  const fulfillments = await listShopifyOrderFulfillments(
+    client,
+    remoteOrderId,
+  );
   const events = [];
 
   for (const fulfillment of fulfillments) {
@@ -2798,7 +3680,10 @@ async function syncShopifyOrderShipmentTracking(
   };
 
   await releaseShopifyFulfillmentHolds(client, fulfillmentOrders);
-  const refreshedOrders = await listShopifyFulfillmentOrders(client, remoteOrderId);
+  const refreshedOrders = await listShopifyFulfillmentOrders(
+    client,
+    remoteOrderId,
+  );
 
   const fulfillable = refreshedOrders.filter((fo) => {
     const status = String(fo?.status || "").toLowerCase();
@@ -2822,7 +3707,8 @@ async function syncShopifyOrderShipmentTracking(
       orderStatus,
     );
     if (result.shipment_events.length > 0) {
-      result.shipment_event_status = result.shipment_events[0]?.event_status || null;
+      result.shipment_event_status =
+        result.shipment_events[0]?.event_status || null;
     }
     return result;
   }
@@ -2844,7 +3730,11 @@ async function syncShopifyOrderShipmentTracking(
   });
 
   for (const fulfillment of updatable) {
-    await updateShopifyFulfillmentTracking(client, fulfillment.id, trackingInfo);
+    await updateShopifyFulfillmentTracking(
+      client,
+      fulfillment.id,
+      trackingInfo,
+    );
     result.tracking_updated.push(fulfillment.id);
   }
 
@@ -2861,13 +3751,18 @@ async function syncShopifyOrderShipmentTracking(
     orderStatus,
   );
   if (result.shipment_events.length > 0) {
-    result.shipment_event_status = result.shipment_events[0]?.event_status || null;
+    result.shipment_event_status =
+      result.shipment_events[0]?.event_status || null;
   }
 
   return result;
 }
 
-async function fulfillShopifyFulfillmentOrders(client, fulfillmentOrders, tracking = {}) {
+async function fulfillShopifyFulfillmentOrders(
+  client,
+  fulfillmentOrders,
+  tracking = {},
+) {
   const openOrders = fulfillmentOrders.filter((fo) => {
     const status = String(fo?.status || "").toLowerCase();
     return (
@@ -3027,14 +3922,14 @@ async function push_order(req, res, process) {
         : fulfillmentAction === "ship_with_tracking" ?
           syncResult.shipment?.action === "fulfilled" ?
             `fulfilled with tracking (${syncResult.shipment?.tracking?.number || "—"})` +
-              (syncResult.shipment?.shipment_event_status ?
-                `, Shopify: ${syncResult.shipment.shipment_event_status.replace(/_/g, " ")}`
-              : "")
+            (syncResult.shipment?.shipment_event_status ?
+              `, Shopify: ${syncResult.shipment.shipment_event_status.replace(/_/g, " ")}`
+            : "")
           : syncResult.shipment?.action === "tracking_updated" ?
             `updated tracking on ${(syncResult.shipment?.tracking_updated || []).length} fulfillment(s)` +
-              (syncResult.shipment?.shipment_event_status ?
-                `, Shopify: ${syncResult.shipment.shipment_event_status.replace(/_/g, " ")}`
-              : "")
+            (syncResult.shipment?.shipment_event_status ?
+              `, Shopify: ${syncResult.shipment.shipment_event_status.replace(/_/g, " ")}`
+            : "")
           : syncResult.shipment?.shipment_events?.length ?
             `shipment status → ${syncResult.shipment.shipment_event_status?.replace(/_/g, " ") || "updated"}`
           : "no shipment tracking update"
@@ -3138,12 +4033,15 @@ async function push_order_tracking(req, res, process) {
 
       if (
         shipment.action === "none" &&
-        !(Array.isArray(shipment.shipment_events) && shipment.shipment_events.length > 0)
+        !(
+          Array.isArray(shipment.shipment_events) &&
+          shipment.shipment_events.length > 0
+        )
       ) {
         const msg =
           tracking.tracking_number ?
             `Could not update Shopify shipping — ${shipment.reason || "no fulfillment to fulfill or update"}. ` +
-              "Check fulfillment scopes and that the order is not already fully fulfilled without tracking."
+            "Check fulfillment scopes and that the order is not already fully fulfilled without tracking."
           : "Nothing to push — add a courier tracking number on the POS order.";
         await markProcessOutcome(process._id, "failed", msg);
         return res.status(400).json({
@@ -3156,22 +4054,23 @@ async function push_order_tracking(req, res, process) {
       const label = posOrder.order_no || posOrder._id;
       const trackingLabel = tracking.tracking_number || "—";
       const courierLabel = tracking.courier_name || "—";
-      const shopifyStatus = shipment.shipment_event_status ?
+      const shopifyStatus =
+        shipment.shipment_event_status ?
           shipment.shipment_event_status.replace(/_/g, " ")
         : "";
       const omsStatus = tracking.tracking_status || "";
       const remarks =
         shipment.action === "fulfilled" ?
           `Order ${label} fulfilled on Shopify #${remoteId} with ${courierLabel} tracking ${trackingLabel}` +
-            (shopifyStatus ? ` (${shopifyStatus})` : "") +
-            (omsStatus ? `. OMS: ${omsStatus}` : ".")
+          (shopifyStatus ? ` (${shopifyStatus})` : "") +
+          (omsStatus ? `. OMS: ${omsStatus}` : ".")
         : shipment.action === "tracking_updated" ?
           `Order ${label} tracking updated on Shopify #${remoteId}: ${courierLabel} ${trackingLabel}` +
-            (shopifyStatus ? ` (${shopifyStatus})` : "") +
-            (omsStatus ? `. OMS: ${omsStatus}` : ".")
+          (shopifyStatus ? ` (${shopifyStatus})` : "") +
+          (omsStatus ? `. OMS: ${omsStatus}` : ".")
         : `Order ${label} shipment status updated on Shopify #${remoteId}` +
-            (shopifyStatus ? `: ${shopifyStatus}` : "") +
-            (omsStatus ? ` (OMS: ${omsStatus})` : ".");
+          (shopifyStatus ? `: ${shopifyStatus}` : "") +
+          (omsStatus ? ` (OMS: ${omsStatus})` : ".");
       await markProcessOutcome(process._id, "completed", remarks);
 
       return res.status(200).json({
@@ -3253,18 +4152,27 @@ async function fetch_order(req, res, process) {
             `Failed to import Shopify order ${remote?.id}:`,
             err?.message || err,
           );
-          recordOrderSkip(stats, {
-            store: "shopify",
-            remote_id: remote?.id,
-            order_number: remote?.order_number,
-            reason: "import_error",
-            detail: err?.message || String(err),
-          }, importCtx);
+          recordOrderSkip(
+            stats,
+            {
+              store: "shopify",
+              remote_id: remote?.id,
+              order_number: remote?.order_number,
+              reason: "import_error",
+              detail: err?.message || String(err),
+            },
+            importCtx,
+          );
         }
       }
 
-      const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
-        stats;
+      const {
+        inserted,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+      } = stats;
       const fetched = remoteOrders.length;
       const isComplete = fetched < limit;
       const lastRemoteId = fetched > 0 ? remoteOrders[fetched - 1]?.id : offset;
@@ -3359,18 +4267,27 @@ async function fetch_latest_order(req, res, process) {
             `Failed to import Shopify order ${remote?.id}:`,
             err?.message || err,
           );
-          recordOrderSkip(stats, {
-            store: "shopify",
-            remote_id: remote?.id,
-            order_number: remote?.order_number,
-            reason: "import_error",
-            detail: err?.message || String(err),
-          }, importCtx);
+          recordOrderSkip(
+            stats,
+            {
+              store: "shopify",
+              remote_id: remote?.id,
+              order_number: remote?.order_number,
+              reason: "import_error",
+              detail: err?.message || String(err),
+            },
+            importCtx,
+          );
         }
       }
 
-      const { inserted, skipped, lines_inserted, lines_skipped, skipped_orders } =
-        stats;
+      const {
+        inserted,
+        skipped,
+        lines_inserted,
+        lines_skipped,
+        skipped_orders,
+      } = stats;
       const fetched = remoteOrders.length;
       const remarks = formatFetchLatestOrderRemarks({
         fetched,
@@ -3469,7 +4386,8 @@ async function fetch_product(req, res, process) {
         }
 
         try {
-          const variant = Array.isArray(remote?.variants) ? remote.variants[0] : null;
+          const variant =
+            Array.isArray(remote?.variants) ? remote.variants[0] : null;
           const productPrice = mapShopifyVariantPrice(variant);
           const categoryIds = await resolvePosCategoryIdsFromShopifyProduct(
             remote,
@@ -3507,7 +4425,8 @@ async function fetch_product(req, res, process) {
       } = stats;
       const fetched = remoteProducts.length;
       const isComplete = fetched < limit;
-      const lastRemoteId = fetched > 0 ? remoteProducts[fetched - 1]?.id : offset;
+      const lastRemoteId =
+        fetched > 0 ? remoteProducts[fetched - 1]?.id : offset;
       const variationSummary =
         variations_fetched > 0 ?
           `, variations fetched ${variations_fetched}, inserted ${variations_inserted}, updated ${variations_updated}`

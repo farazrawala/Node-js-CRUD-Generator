@@ -1,4 +1,7 @@
+const fs = require("fs");
+const path = require("path");
 const { categorySlugFromName } = require("./processHelpers");
+const { toPublicUploadUrl } = require("./basePath");
 
 const SYNC_TOGGLE_KEYS = [
   "sync_product_name",
@@ -32,16 +35,77 @@ function resolvePosProductSku(product) {
   );
 }
 
-function resolvePublicAssetUrl(assetPath) {
-  if (assetPath == null) return "";
-  const trimmed = String(assetPath).trim();
-  if (!trimmed) return "";
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  const base = String(process.env.BASE_URL || "http://localhost:8000").replace(
-    /\/$/,
-    "",
-  );
-  return `${base}/${trimmed.replace(/^\/+/, "")}`;
+function resolvePublicAssetUrl(assetPath, req = null) {
+  return toPublicUploadUrl(assetPath, req);
+}
+
+function collectPosProductImagePaths(product) {
+  const paths = [];
+  const seen = new Set();
+  const add = (value) => {
+    const trimmed = String(value || "").trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    paths.push(trimmed);
+  };
+  add(product?.product_image);
+  if (Array.isArray(product?.multi_images)) {
+    product.multi_images.forEach(add);
+  }
+  return paths;
+}
+
+function resolveUploadFileOnDisk(assetPath) {
+  const raw = String(assetPath || "")
+    .trim()
+    .replace(/\\/g, "/");
+  if (!raw) return null;
+
+  let relative = raw;
+  if (/^https?:\/\//i.test(raw)) {
+    const marker = raw.toLowerCase().indexOf("/uploads/");
+    if (marker < 0) return null;
+    relative = raw.slice(marker + 1);
+  } else {
+    relative = raw.replace(/^\/+/, "");
+  }
+
+  if (!relative.startsWith("uploads/") || relative.includes("..")) {
+    return null;
+  }
+
+  const abs = path.join(__dirname, "..", ...relative.split("/"));
+  try {
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return abs;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Shopify fetches `src` from its servers (localhost /api/uploads URLs fail)
+ * and PUT product.images appends instead of replacing the featured image.
+ * Prefer the local POS file as a base64 attachment so the store gets the
+ * same image the POS shows.
+ */
+function buildShopifyImageResource(assetPath) {
+  const abs = resolveUploadFileOnDisk(assetPath);
+  if (abs) {
+    const filename = path.basename(abs) || "product.jpg";
+    return {
+      attachment: fs.readFileSync(abs).toString("base64"),
+      filename,
+    };
+  }
+  const src = resolvePublicAssetUrl(assetPath);
+  return src ? { src } : null;
+}
+
+function buildShopifyImageResources(product) {
+  return collectPosProductImagePaths(product)
+    .map(buildShopifyImageResource)
+    .filter(Boolean);
 }
 
 function mapPosStatusToWoo(status) {
@@ -162,11 +226,6 @@ function buildShopifyProductSyncPayload(product, integration, options = {}) {
   const allowStatus =
     mode === "create" ||
     isIntegrationSyncEnabled(integration, "sync_product_status");
-  // Image sync must honor the toggle on create and update (remote URL fetch).
-  const allowImage = isIntegrationSyncEnabled(
-    integration,
-    "sync_product_image",
-  );
 
   if (allowName && product?.product_name) {
     payload.title = product.product_name;
@@ -183,10 +242,8 @@ function buildShopifyProductSyncPayload(product, integration, options = {}) {
   if (allowStatus) {
     payload.status = mapPosStatusToShopify(product?.status);
   }
-  if (allowImage && product?.product_image) {
-    const src = resolvePublicAssetUrl(product.product_image);
-    if (src) payload.images = [{ src }];
-  }
+  // Images are uploaded separately (attachment + replace). Shopify PUT
+  // `product.images` appends and keeps the old featured image.
 
   if (product?.product_type) {
     payload.product_type = product.product_type;
@@ -200,14 +257,17 @@ function buildShopifyVariantSyncPayload(product, integration, options = {}) {
   const allowPrice =
     mode === "create" ||
     isIntegrationSyncEnabled(integration, "sync_product_price");
-  if (!allowPrice) return null;
 
   const variantPayload = {
-    price: resolveSyncProductPrice(
+    inventory_management: "shopify",
+  };
+
+  if (allowPrice) {
+    variantPayload.price = resolveSyncProductPrice(
       product,
       options.syncRow ?? options.syncPrice,
-    ),
-  };
+    );
+  }
 
   if (product?.weight !== undefined && product?.weight !== null) {
     const numericWeight = Number(product.weight);
@@ -358,6 +418,154 @@ function buildWooVariableAttributePlan(
   return { parentAttributes, childAttributesById };
 }
 
+/**
+ * POS stores labels like "LARGE - BLUE"; Shopify variant names should be
+ * `large-blue` / `large-red` (one option value, not size + color).
+ */
+function formatShopifyVariantOptionValue(label, fallback = "") {
+  const raw = String(label || fallback || "").trim();
+  if (!raw) return "";
+  return raw
+    .toLowerCase()
+    .replace(/\s*-\s*/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]+/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/**
+ * Shopify REST options + per-child option1 from the full POS variation label.
+ * Unlabeled children fall back to SKU / name so every child still becomes a variant.
+ */
+function buildShopifyVariableOptionPlan(
+  children,
+  parentSku,
+  _positionNames = [],
+) {
+  const list = Array.isArray(children) ? children : [];
+  const rows = list.map((child, index) => {
+    const label = parsePosVariationLabel(child, parentSku);
+    const fallback =
+      resolvePosProductSku(child) ||
+      String(child?.product_name || "").trim() ||
+      `Variant ${index + 1}`;
+    const value =
+      formatShopifyVariantOptionValue(label, fallback) ||
+      formatShopifyVariantOptionValue(fallback) ||
+      `variant-${index + 1}`;
+    return { child, values: [value] };
+  });
+
+  const usedCombo = new Set();
+  for (const row of rows) {
+    let combo = row.values[0];
+    if (usedCombo.has(combo)) {
+      const sku =
+        resolvePosProductSku(row.child) || String(row.child?._id || "");
+      const suffix = formatShopifyVariantOptionValue(sku) || String(row.child?._id || "");
+      row.values[0] = `${combo}-${suffix}`.replace(/-+/g, "-");
+      combo = row.values[0];
+    }
+    usedCombo.add(combo);
+  }
+
+  const values = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const value = row.values[0];
+    if (!seen.has(value)) {
+      seen.add(value);
+      values.push(value);
+    }
+  }
+
+  const options = [{ name: "Title", values }];
+  const variantOptionsByChildId = new Map();
+  for (const row of rows) {
+    variantOptionsByChildId.set(String(row.child?._id), {
+      option1: row.values[0],
+    });
+  }
+
+  return { options, variantOptionsByChildId };
+}
+
+async function resolveVariationAttributePositionNames(
+  children,
+  parentSku,
+  companyId,
+) {
+  const valueRows = (Array.isArray(children) ? children : []).map((child) =>
+    parsePosVariationValues(child, parentSku),
+  );
+  const positionCount = valueRows.reduce(
+    (max, values) => Math.max(max, values.length),
+    0,
+  );
+  if (!positionCount) {
+    return [];
+  }
+
+  const valueSetsByPosition = [];
+  for (let i = 0; i < positionCount; i += 1) {
+    const set = new Set();
+    for (const values of valueRows) {
+      if (values[i]) {
+        set.add(values[i].toLowerCase());
+      }
+    }
+    valueSetsByPosition.push(set);
+  }
+
+  let attributeDefs = [];
+  try {
+    const Attribute = require("../models/attribute");
+    const attributes = await Attribute.find({
+      company_id: companyId,
+      deletedAt: null,
+    }).lean();
+    attributeDefs = attributes.map((attr) => ({
+      name: attr?.name,
+      values: new Set(
+        (attr?.attribute_values || [])
+          .map((value) => String(value?.name || "").trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    }));
+  } catch (error) {
+    console.warn(
+      "Failed to load attribute definitions for variation sync:",
+      error?.message,
+    );
+    attributeDefs = [];
+  }
+
+  return valueSetsByPosition.map((valueSet) => {
+    const values = [...valueSet];
+    if (!values.length) {
+      return null;
+    }
+    let bestName = null;
+    let bestScore = -1;
+    for (const def of attributeDefs) {
+      if (!def.name || !def.values.size) {
+        continue;
+      }
+      const covered = values.filter((value) => def.values.has(value)).length;
+      if (covered !== values.length) {
+        continue;
+      }
+      const score = 1000 - (def.values.size - covered);
+      if (score > bestScore) {
+        bestScore = score;
+        bestName = def.name;
+      }
+    }
+    return bestName;
+  });
+}
+
 function mapLabelToWooVariationAttributes(label, remoteParentAttributes) {
   const parts = String(label || "")
     .split("-")
@@ -477,11 +685,15 @@ module.exports = {
   buildWooCommerceProductSyncPayload,
   buildWooCommerceVariationSyncPayload,
   buildShopifyProductSyncPayload,
+  buildShopifyImageResources,
   buildShopifyVariantSyncPayload,
   hasSyncPayloadFields,
   buildWooStockPayloadFields,
   parsePosVariationLabel,
   parsePosVariationValues,
+  formatShopifyVariantOptionValue,
   buildWooVariableAttributePlan,
+  buildShopifyVariableOptionPlan,
+  resolveVariationAttributePositionNames,
   mapLabelToWooVariationAttributes,
 };

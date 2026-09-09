@@ -17,6 +17,7 @@
 
 const ProcessModel = require("../models/process");
 const Product = require("../models/product");
+const Company = require("../models/company");
 const BigcommerceProductReset = require("../models/bigcommerce_product_reset");
 const { coalesceObjectId } = require("./modelHelper");
 const { enqueueProcess } = require("./processQueue");
@@ -25,6 +26,54 @@ const { markProcessOutcome } = require("./processHelpers");
 const ACTION = "queue_bigcommerce_product_reset";
 const APPLY_ACTION = "apply_bigcommerce_product_reset";
 const INSERT_CHUNK = 500;
+
+function remarksWithCompanyName(remarks, companyName) {
+  const base = String(remarks || "").trim();
+  const name = String(companyName || "").trim();
+  if (!name) return base;
+  if (base && base.includes(name)) return base;
+  return base ? `${base} · ${name}` : name;
+}
+
+function formatCompanyNames(names) {
+  return [
+    ...new Set(
+      (names || []).map((name) => String(name || "").trim()).filter(Boolean),
+    ),
+  ].join(", ");
+}
+
+async function companyNameByIds(companyIds) {
+  const unique = [
+    ...new Set(
+      (companyIds || []).map((id) => coalesceObjectId(id)).filter(Boolean).map(String),
+    ),
+  ];
+  if (!unique.length) return new Map();
+  const rows = await Company.find({
+    _id: { $in: unique.map((id) => coalesceObjectId(id)).filter(Boolean) },
+  })
+    .select("company_name")
+    .lean();
+  return new Map(rows.map((row) => [String(row._id), row.company_name || ""]));
+}
+
+async function companyNameFromProcess(process) {
+  const populated =
+    process?.company_id &&
+    typeof process.company_id === "object" &&
+    process.company_id.company_name
+      ? String(process.company_id.company_name).trim()
+      : "";
+  if (populated) return populated;
+
+  const companyId = coalesceObjectId(
+    process?.company_id?._id || process?.company_id,
+  );
+  if (!companyId) return "";
+  const names = await companyNameByIds([companyId]);
+  return String(names.get(String(companyId)) || "").trim();
+}
 
 /**
  * Enqueue one lightweight process job per origin product.
@@ -70,6 +119,10 @@ async function enqueueBigcommerceProductResetJobs({
     .select("_id company_id")
     .lean();
 
+  const nameByCompanyId = await companyNameByIds(
+    products.map((row) => row.company_id),
+  );
+
   const actor = coalesceObjectId(createdBy);
   const created = [];
   const failed = [];
@@ -84,6 +137,7 @@ async function enqueueBigcommerceProductResetJobs({
     }
 
     try {
+      const companyName = nameByCompanyId.get(String(companyId)) || "";
       const doc = await ProcessModel.create({
         product_id: productId,
         company_id: companyId,
@@ -97,7 +151,7 @@ async function enqueueBigcommerceProductResetJobs({
         offset: 0,
         count: 0,
         hits: 0,
-        remarks,
+        remarks: remarksWithCompanyName(remarks, companyName),
       });
       await enqueueProcess(doc);
       created.push({
@@ -147,6 +201,10 @@ async function enqueueApplyJobsForLinkedProducts(
   const failed = [];
   let skipped = 0;
 
+  const nameByCompanyId = await companyNameByIds(
+    (linkedProducts || []).map((row) => row.company_id),
+  );
+
   for (const row of linkedProducts || []) {
     const productId = coalesceObjectId(row._id);
     const companyId = coalesceObjectId(row.company_id);
@@ -159,6 +217,7 @@ async function enqueueApplyJobsForLinkedProducts(
     const createdBy = coalesceObjectId(actorId) || ownerId || null;
 
     try {
+      const companyName = nameByCompanyId.get(String(companyId)) || "";
       const doc = await ProcessModel.create({
         product_id: productId,
         company_id: companyId,
@@ -172,7 +231,7 @@ async function enqueueApplyJobsForLinkedProducts(
         offset: 0,
         count: 0,
         hits: 0,
-        remarks,
+        remarks: remarksWithCompanyName(remarks, companyName),
       });
       await enqueueProcess(doc);
       created.push({
@@ -237,7 +296,10 @@ async function queue_bigcommerce_product_reset(req, res, process) {
     .lean();
 
   if (!linkedProducts.length) {
-    const msg = `No me-too products fetch from origin ${originId}`;
+    const originCompanyName = await companyNameFromProcess(process);
+    const msg = originCompanyName
+      ? `No me-too products fetch from ${originCompanyName}`
+      : `No me-too products fetch from origin ${originId}`;
     await markProcessOutcome(process._id, "completed", msg);
     return res.status(200).json({
       success: true,
@@ -277,13 +339,24 @@ async function queue_bigcommerce_product_reset(req, res, process) {
     inserted += result.length;
   }
 
+  const destNameByCompanyId = await companyNameByIds(
+    linkedProducts.map((row) => row.company_id),
+  );
+  const destCompanyLabel = formatCompanyNames([
+    ...destNameByCompanyId.values(),
+  ]);
+  const originCompanyName = await companyNameFromProcess(process);
+  const companyLabel = destCompanyLabel || originCompanyName;
+
   const applyQueue = await enqueueApplyJobsForLinkedProducts(linkedProducts, {
     actorId,
-    remarks: `Auto-queued BC me-too reset apply for origin ${originId}`,
+    remarks: "Auto-queued BC me-too reset apply from origin product activity",
     priority: Number(process.priority) || 55,
   });
 
-  const msg = `Queued ${inserted} bigcommerce_product_reset row(s) and ${applyQueue.count} apply job(s) for origin ${originId}`;
+  const msg = companyLabel
+    ? `Queued ${inserted} bigcommerce_product_reset row(s) and ${applyQueue.count} apply job(s) for ${companyLabel}`
+    : `Queued ${inserted} bigcommerce_product_reset row(s) and ${applyQueue.count} apply job(s)`;
   await markProcessOutcome(process._id, "completed", msg);
 
   return res.status(200).json({
@@ -372,7 +445,7 @@ async function apply_bigcommerce_product_reset(req, res, process) {
     });
   }
 
-  // Skipped (e.g. local BC SYNC off, or origin not listed on Big Commerce).
+  // Skipped (e.g. destination BC SYNC off).
   if (result.skipped) {
     const skipMsg =
       result.message ||

@@ -2521,8 +2521,12 @@ const processAdminCRUD = adminCrudGenerator(
           }
 
           if (record.company_id && typeof record.company_id === "object") {
+            recordObj.company_name =
+              record.company_id.company_name || "No Company";
             recordObj.company_id =
               record.company_id.company_name || "No Company";
+          } else if (!recordObj.company_name) {
+            recordObj.company_name = "No Company";
           }
 
           if (

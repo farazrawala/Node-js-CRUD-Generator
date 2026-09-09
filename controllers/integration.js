@@ -2413,6 +2413,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
         isShopifyAccessToken,
         resolveShopifyClientCredentials,
         normalizeShopifyDomain,
+        buildShopifyTokenExpiry,
       } = require("../utils/shopifyTokenRefresh");
       const Integration = require("../models/integration");
       const { coalesceObjectId } = require("../utils/modelHelper");
@@ -2507,7 +2508,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
       // move it to `token` so sync_product can use it.
       if (secretLooksLikeAccessToken && !isShopifyAccessToken(overrideSecret) && !overrideSecret) {
         const accessToken = resolved.accessToken || String(integration.secret).trim();
-        const token_expiry = new Date(Date.now() + 12 * 60 * 60 * 1000);
+        const token_expiry = buildShopifyTokenExpiry();
         await Integration.findByIdAndUpdate(integrationId, {
           $set: { token: accessToken, token_expiry },
         });
@@ -2597,6 +2598,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
         isShopifyAccessToken,
         resolveShopifyClientCredentials,
         normalizeShopifyDomain,
+        buildShopifyTokenExpiry,
       } = require("../utils/shopifyTokenRefresh");
       const Integration = require("../models/integration");
       const { coalesceObjectId } = require("../utils/modelHelper");
@@ -2652,7 +2654,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
           ) {
             const accessToken =
               resolved.accessToken || String(integration.secret).trim();
-            const token_expiry = new Date(Date.now() + 12 * 60 * 60 * 1000);
+            const token_expiry = buildShopifyTokenExpiry();
             await Integration.findByIdAndUpdate(integrationId, {
               $set: { token: accessToken, token_expiry },
             });

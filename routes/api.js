@@ -141,6 +141,7 @@ const {
   generateShopifyIntegrationToken,
   generateShopifyIntegrationTokensCron,
 } = require("../controllers/integration");
+const { unlinkSyncProduct } = require("../controllers/sync_product");
 
 const {
   execute_process,
@@ -588,6 +589,12 @@ router.get(
   "/integration/store-product-variations/:id/:remoteProductId",
   listStoreProductVariations,
 );
+router.post("/sync_product/unlink", unlinkSyncProduct);
+router.post("/sync_products/unlink", unlinkSyncProduct);
+router.delete("/sync_product/unlink/:id", unlinkSyncProduct);
+router.delete("/sync_products/unlink/:id", unlinkSyncProduct);
+router.delete("/sync_product/unlink", unlinkSyncProduct);
+router.delete("/sync_products/unlink", unlinkSyncProduct);
 
 // WhatsApp message worker routes
 router.get("/whatsapp_message/fetch-random", fetchRandomWhatsappMessage);

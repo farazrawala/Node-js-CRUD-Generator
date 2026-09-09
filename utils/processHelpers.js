@@ -25,13 +25,18 @@ const {
 
 /**
  * Stock qty to push during sync_product.
- * Default: sum of active warehouse_inventory on-hand.
- * If a product has fetch_from_product_id set (partner-fetched / me-too),
- * use origin_qty instead of local warehouse stock.
+ * Uses the greater of:
+ *   - sum of active warehouse_inventory.quantity
+ *   - product.origin_qty
  *
  * @param {Array<string|import("mongoose").Types.ObjectId>} productIds
  * @param {string|import("mongoose").Types.ObjectId|null} companyId
- * @returns {Promise<Map<string, number>>} productId (string) -> quantity
+ * @returns {Promise<Map<string, {
+ *   quantity: number,
+ *   source: "origin_qty" | "warehouse_inventory.quantity",
+ *   origin_qty: number,
+ *   warehouse_qty: number,
+ * }>>}
  */
 async function resolveSyncStockTotals(productIds, companyId) {
   const ids = (Array.isArray(productIds) ? productIds : [])
@@ -51,15 +56,15 @@ async function resolveSyncStockTotals(productIds, companyId) {
     matchFilter.company_id = scopedCompanyId;
   }
 
-  let stockMap = new Map();
+  const warehouseByProduct = new Map();
   try {
     const grouped = await WarehouseInventory.aggregate([
       { $match: matchFilter },
       { $group: { _id: "$product_id", total: { $sum: "$quantity" } } },
     ]);
-    stockMap = new Map(
-      grouped.map((row) => [String(row._id), Number(row.total) || 0]),
-    );
+    for (const row of grouped) {
+      warehouseByProduct.set(String(row._id), Number(row.total) || 0);
+    }
   } catch (error) {
     console.warn(
       "Failed to aggregate warehouse inventory for product sync:",
@@ -67,27 +72,99 @@ async function resolveSyncStockTotals(productIds, companyId) {
     );
   }
 
+  const stockMap = new Map();
   try {
-    const originProducts = await Product.find({
+    const products = await Product.find({
       _id: { $in: ids },
-      fetch_from_product_id: { $exists: true, $ne: null },
       deletedAt: null,
     })
-      .select("_id origin_qty fetch_from_product_id")
+      .select("_id origin_qty")
       .lean();
 
-    for (const row of originProducts) {
-      if (!row?.fetch_from_product_id) continue;
-      stockMap.set(String(row._id), Number(row.origin_qty) || 0);
+    const seen = new Set();
+    for (const row of products) {
+      const id = String(row._id);
+      seen.add(id);
+      const warehouseQty = Number(warehouseByProduct.get(id)) || 0;
+      const originQty = Number(row.origin_qty) || 0;
+      const useOrigin = originQty >= warehouseQty && originQty > 0;
+      stockMap.set(id, {
+        quantity: useOrigin ? originQty : warehouseQty,
+        source: useOrigin ? "origin_qty" : "warehouse_inventory.quantity",
+        origin_qty: originQty,
+        warehouse_qty: warehouseQty,
+      });
+    }
+
+    for (const id of ids) {
+      const key = String(id);
+      if (seen.has(key)) continue;
+      const warehouseQty = Number(warehouseByProduct.get(key)) || 0;
+      stockMap.set(key, {
+        quantity: warehouseQty,
+        source: "warehouse_inventory.quantity",
+        origin_qty: 0,
+        warehouse_qty: warehouseQty,
+      });
     }
   } catch (error) {
     console.warn(
-      "Failed to apply origin_qty stock overrides for product sync:",
+      "Failed to apply origin_qty vs warehouse stock for product sync:",
       error?.message,
     );
+    for (const id of ids) {
+      const key = String(id);
+      if (stockMap.has(key)) continue;
+      const warehouseQty = Number(warehouseByProduct.get(key)) || 0;
+      stockMap.set(key, {
+        quantity: warehouseQty,
+        source: "warehouse_inventory.quantity",
+        origin_qty: 0,
+        warehouse_qty: warehouseQty,
+      });
+    }
   }
 
   return stockMap;
+}
+
+function syncStockQuantity(stockMap, productId) {
+  const row = stockMap?.get(String(productId));
+  if (row == null) return 0;
+  if (typeof row === "number") return Number(row) || 0;
+  return Number(row.quantity) || 0;
+}
+
+const SYNC_QTY_FIELD_LABELS = {
+  origin_qty: "Origin Quantity",
+  "warehouse_inventory.quantity": "Warehouse Quantity",
+};
+
+function syncQtyFieldLabel(source) {
+  return SYNC_QTY_FIELD_LABELS[source] || source || "none";
+}
+
+/**
+ * Compact remark: `qty field: Origin Quantity (1487, 1992)`.
+ */
+function formatSyncStockFieldRemark(stockMap, productIds) {
+  const ids = (Array.isArray(productIds) ? productIds : [productIds])
+    .map((id) => String(id || ""))
+    .filter(Boolean);
+  const rows = ids
+    .map((id) => stockMap?.get(id) || stockMap?.get(String(id)))
+    .filter((row) => row && typeof row === "object");
+  if (!rows.length) {
+    return "qty field: none";
+  }
+  const sources = [...new Set(rows.map((row) => row.source))];
+  if (sources.length === 1) {
+    const qtys = rows.map((row) => row.quantity).join(", ");
+    return `qty field: ${syncQtyFieldLabel(sources[0])} (${qtys})`;
+  }
+  return `qty field: ${rows
+    .map((row) => `${syncQtyFieldLabel(row.source)}=${row.quantity}`)
+    .join("; ")}`;
 }
 
 /** Same default as POS add-customer UI. */
@@ -554,6 +631,94 @@ async function upsertSyncProductMapping({
     status: "active",
     created_by: actor,
   });
+}
+
+/**
+ * Soft-unlink a POS product from a store integration (does not delete the
+ * remote Shopify/WooCommerce product). Cancels queued sync_product jobs so
+ * they cannot recreate the mapping.
+ */
+async function unlinkSyncProductMapping({
+  mappingId,
+  productId,
+  integrationId,
+  companyId,
+  updatedBy,
+} = {}) {
+  const mapping_id = coalesceObjectId(mappingId);
+  const product_id = coalesceObjectId(productId);
+  const integration_id = coalesceObjectId(integrationId);
+  const company_id = coalesceObjectId(companyId);
+  const actor = coalesceObjectId(updatedBy);
+
+  if (!mapping_id && (!product_id || !integration_id)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "product_id and integration_id are required (or pass mapping _id)",
+    };
+  }
+
+  const filter = { deletedAt: null };
+  if (mapping_id) filter._id = mapping_id;
+  if (product_id) filter.product_id = product_id;
+  if (integration_id) filter.integration_id = integration_id;
+  if (company_id) filter.company_id = company_id;
+
+  const existing = await SyncProduct.findOne(filter);
+  if (!existing) {
+    return {
+      ok: false,
+      status: 404,
+      error: "Store mapping not found",
+    };
+  }
+
+  const now = new Date();
+  const update = {
+    deletedAt: now,
+    status: "inactive",
+  };
+  if (actor) update.updated_by = actor;
+
+  const mapping = await SyncProduct.findByIdAndUpdate(existing._id, update, {
+    new: true,
+  }).lean();
+
+  const pendingFilter = {
+    product_id: existing.product_id,
+    integration_id: existing.integration_id,
+    action: "sync_product",
+    progress: "not_started",
+    deletedAt: null,
+  };
+  if (existing.company_id) {
+    pendingFilter.company_id = existing.company_id;
+  }
+
+  const pending = await ProcessModel.find(pendingFilter)
+    .select("_id company_id")
+    .lean();
+  let cancelled_processes = 0;
+  if (pending.length) {
+    await ProcessModel.updateMany(
+      { _id: { $in: pending.map((row) => row._id) } },
+      {
+        $set: {
+          status: "inactive",
+          progress: "added_new",
+          remarks: "Cancelled: product unlinked from store",
+          ...(actor ? { updated_by: actor } : {}),
+        },
+      },
+    );
+    await Promise.all(
+      pending.map((row) => releaseProcessFromQueue(row).catch(() => false)),
+    );
+    cancelled_processes = pending.length;
+  }
+
+  return { ok: true, mapping, cancelled_processes };
 }
 
 async function findPosProductBySyncReference(
@@ -2852,9 +3017,12 @@ module.exports = {
   resolveCompanyId,
   resolveIntegrationId,
   resolveSyncStockTotals,
+  syncStockQuantity,
+  formatSyncStockFieldRemark,
   upsertSyncCategoryMapping,
   upsertSyncBrandMapping,
   upsertSyncProductMapping,
+  unlinkSyncProductMapping,
   findPosProductBySyncReference,
   orderExternalRef,
   resolveIntegrationOrderId,

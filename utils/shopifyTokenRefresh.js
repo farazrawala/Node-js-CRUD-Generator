@@ -212,14 +212,14 @@ async function loadFreshShopifyIntegration(integration, integrationId = null) {
   };
 }
 
+/** Shopify client-credentials tokens are treated as valid for 20 hours from issue/repair. */
+function buildShopifyTokenExpiry(fromDate = new Date()) {
+  return new Date(fromDate.getTime() + 20 * 60 * 60 * 1000);
+}
+
 /**
  * If access token was stored under `secret`, copy it into `token` once.
  */
-/** Shopify client-credentials tokens are treated as valid for 12 hours from issue/repair. */
-function buildShopifyTokenExpiry(fromDate = new Date()) {
-  return new Date(fromDate.getTime() + 12 * 60 * 60 * 1000);
-}
-
 async function repairMisfiledShopifyAccessToken(integrationId, accessToken) {
   if (!integrationId || !accessToken) return false;
   const token_expiry = buildShopifyTokenExpiry();

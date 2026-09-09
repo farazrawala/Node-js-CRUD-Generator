@@ -2339,31 +2339,6 @@ async function applyFetchedProductReset({
       });
     }
 
-    // Company 1 origin must be listed on Big Commerce (`show_on_bigcommerce`).
-    if (origin.show_on_bigcommerce !== true) {
-      const originName =
-        String(origin.product_name || "").trim() || String(origin._id);
-      const message =
-        "Skipped reset: origin product show_on_bigcommerce is off";
-      await logFetchedProductResetSkipped({
-        req,
-        actorId,
-        message,
-        reason: "origin_show_on_bigcommerce_off",
-        local,
-        origin,
-        extra: {
-          origin_product_name: originName,
-          show_on_bigcommerce: false,
-        },
-      });
-      return skippedFetchedProductReset(local, message, {
-        fetch_from_product_id: origin._id,
-        fetch_from_company_id: origin.company_id,
-        show_on_bigcommerce: false,
-      });
-    }
-
     const connection = await findApprovedConnectionForReset(
       myCompanyId,
       coalesceObjectId(origin.company_id),

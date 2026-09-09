@@ -67,6 +67,8 @@ const {
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
   resolveSyncStockTotals,
+  syncStockQuantity,
+  formatSyncStockFieldRemark,
   applyFetchOrderOutboundInventory,
   updatePosOrderFromRemote,
   resolveRemoteOrderIdFromPosOrder,
@@ -86,7 +88,7 @@ const {
   hasSyncPayloadFields,
 } = require("../utils/integrationProductSync");
 
-/** @returns {Promise<Map<string, number>>} productId -> qty (origin_qty when fetch_from_product_id is set). */
+/** POS qty for sync push: max(origin_qty, warehouse_inventory.quantity) plus source field. */
 async function resolveProductStockTotals(productIds, companyId) {
   return resolveSyncStockTotals(productIds, companyId);
 }
@@ -1810,7 +1812,11 @@ async function syncWooSimpleProductToStore(
     [productId],
     companyId,
   );
-  const stockQuantity = productStockTotals.get(String(productId)) ?? 0;
+  const stockQuantity = syncStockQuantity(productStockTotals, productId);
+  const qtyFieldRemark = formatSyncStockFieldRemark(
+    productStockTotals,
+    productId,
+  );
 
   if (remoteProduct && remoteId) {
     const updatePayload = buildWooCommerceProductSyncPayload(
@@ -1842,16 +1848,16 @@ async function syncWooSimpleProductToStore(
     );
     await recordProductSyncMapping(process, companyId, productId, remoteId);
 
-    await markProcessOutcome(
-      process._id,
-      "completed",
-      `Product Name : ${product.product_name} updated on WooCommerce.`,
-    );
+    const updateRemarks =
+      `Product Name : ${product.product_name} updated on WooCommerce ` +
+      `(${qtyFieldRemark}).`;
+
+    await markProcessOutcome(process._id, "completed", updateRemarks);
 
     return res.status(200).json({
       success: true,
       data: updatedResponse?.data,
-      message: `Product Name : ${product.product_name} updated on WooCommerce.`,
+      message: updateRemarks,
     });
   }
 
@@ -1875,16 +1881,16 @@ async function syncWooSimpleProductToStore(
   const createdId = createdProductResponse?.data?.id;
   await recordProductSyncMapping(process, companyId, productId, createdId);
 
-  await markProcessOutcome(
-    process._id,
-    "completed",
-    `Product Name : ${product.product_name} created on WooCommerce.`,
-  );
+  const createRemarks =
+    `Product Name : ${product.product_name} created on WooCommerce ` +
+    `(${qtyFieldRemark}).`;
+
+  await markProcessOutcome(process._id, "completed", createRemarks);
 
   return res.status(201).json({
     success: true,
     data: createdProductResponse?.data,
-    message: `Product Name : ${product.product_name} synced to WooCommerce successfully.`,
+    message: createRemarks,
   });
 }
 
@@ -2344,7 +2350,7 @@ async function syncWooVariableProductToStore(
         childProduct: child,
         childSyncRow: childSyncByProductId.get(String(child._id)) || null,
         variationAttributes: childAttributesById.get(String(child._id)) || [],
-        stockQuantity: childStockTotals.get(String(child._id)) ?? 0,
+        stockQuantity: syncStockQuantity(childStockTotals, child._id),
         stats,
       });
     } catch (error) {
@@ -2364,7 +2370,8 @@ async function syncWooVariableProductToStore(
   const remarks =
     `Product Name : ${parentProduct.product_name} synced to WooCommerce ` +
     `(parent ${wooParentId}, variations updated ${variations_updated}, ` +
-    `created ${variations_created}, skipped ${variations_skipped}).`;
+    `created ${variations_created}, skipped ${variations_skipped}, ` +
+    `${formatSyncStockFieldRemark(childStockTotals, childIds)}).`;
 
   await markProcessOutcome(process._id, "completed", remarks);
 

@@ -3,6 +3,7 @@
     "index.js",
     "connection.js",
     "controllers/",
+    "utils/",
     "models/",
     "routes/",
     "middlewares/",

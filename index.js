@@ -548,6 +548,7 @@ process.on("uncaughtException", (err) => {
 });
 
 const server = app.listen(port, () => {
+  // nodemon: reload after shopify inventory tracking changes
   const version = getDeployVersionPayload();
   fileLogger.logStartup({
     port,
