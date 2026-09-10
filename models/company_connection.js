@@ -94,6 +94,13 @@ const modelSchema = new mongoose.Schema(
       field_name: "Sync product status",
       field_type: "select",
     },
+    sync_order_to_vendor: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync order to vendor",
+      field_type: "select",
+    },
   },
   { timestamps: true, shardKey: { company_id: 1, _id: 1 } },
 );

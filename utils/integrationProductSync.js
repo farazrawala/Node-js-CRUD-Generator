@@ -26,6 +26,40 @@ function isIntegrationSyncEnabled(integration, fieldKey) {
   );
 }
 
+function isQuantitySyncEnabled(integration) {
+  if (
+    integration?.sync_product_quantity != null &&
+    String(integration.sync_product_quantity).trim() !== ""
+  ) {
+    return isIntegrationSyncEnabled(integration, "sync_product_quantity");
+  }
+  return isIntegrationSyncEnabled(integration, "sync_product_stock");
+}
+
+/**
+ * Compact process remark for Product settings toggles:
+ * `name skipped, slug updated, image updated, quantity updated, description updated, status updated`.
+ */
+function formatProductSyncFieldRemarks(integration) {
+  const fields = [
+    ["sync_product_name", "name"],
+    ["sync_product_slug", "slug"],
+    ["sync_product_image", "image"],
+    ["quantity", "quantity"],
+    ["sync_product_description", "description"],
+    ["sync_product_status", "status"],
+  ];
+  return fields
+    .map(([key, label]) => {
+      const enabled =
+        key === "quantity" ?
+          isQuantitySyncEnabled(integration)
+        : isIntegrationSyncEnabled(integration, key);
+      return enabled ? `${label} updated` : `${label} skipped`;
+    })
+    .join(", ");
+}
+
 function resolvePosProductSku(product) {
   return (
     (typeof product?.sku === "string" && product.sku.trim()) ||
@@ -118,6 +152,18 @@ function mapPosStatusToShopify(status) {
   return String(status || "active").toLowerCase() === "active" ?
       "active"
     : "draft";
+}
+
+/** Shopify Admin description is HTML (`body_html` / `descriptionHtml`). */
+function toShopifyDescriptionHtml(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (/<[a-z][\s\S]*>/i.test(raw)) return raw;
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\r\n|\r|\n/g, "<br>");
 }
 
 /**
@@ -237,7 +283,9 @@ function buildShopifyProductSyncPayload(product, integration, options = {}) {
     if (handle) payload.handle = handle;
   }
   if (allowDescription) {
-    payload.body_html = product?.product_description || "";
+    payload.body_html = toShopifyDescriptionHtml(
+      product?.product_description,
+    );
   }
   if (allowStatus) {
     payload.status = mapPosStatusToShopify(product?.status);
@@ -679,6 +727,8 @@ function buildWooCommerceVariationSyncPayload(
 module.exports = {
   SYNC_TOGGLE_KEYS,
   isIntegrationSyncEnabled,
+  formatProductSyncFieldRemarks,
+  toShopifyDescriptionHtml,
   resolvePosProductSku,
   resolvePublicAssetUrl,
   resolveSyncProductPrice,

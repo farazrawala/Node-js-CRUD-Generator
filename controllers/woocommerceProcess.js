@@ -86,6 +86,7 @@ const {
   buildWooVariableAttributePlan,
   parsePosVariationValues,
   hasSyncPayloadFields,
+  formatProductSyncFieldRemarks,
 } = require("../utils/integrationProductSync");
 
 /** POS qty for sync push: max(origin_qty, warehouse_inventory.quantity) plus source field. */
@@ -1850,7 +1851,8 @@ async function syncWooSimpleProductToStore(
 
     const updateRemarks =
       `Product Name : ${product.product_name} updated on WooCommerce ` +
-      `(${qtyFieldRemark}).`;
+      `(${qtyFieldRemark}). ` +
+      formatProductSyncFieldRemarks(integration);
 
     await markProcessOutcome(process._id, "completed", updateRemarks);
 
@@ -1883,7 +1885,8 @@ async function syncWooSimpleProductToStore(
 
   const createRemarks =
     `Product Name : ${product.product_name} created on WooCommerce ` +
-    `(${qtyFieldRemark}).`;
+    `(${qtyFieldRemark}). ` +
+    formatProductSyncFieldRemarks(integration);
 
   await markProcessOutcome(process._id, "completed", createRemarks);
 
@@ -2371,7 +2374,8 @@ async function syncWooVariableProductToStore(
     `Product Name : ${parentProduct.product_name} synced to WooCommerce ` +
     `(parent ${wooParentId}, variations updated ${variations_updated}, ` +
     `created ${variations_created}, skipped ${variations_skipped}, ` +
-    `${formatSyncStockFieldRemark(childStockTotals, childIds)}).`;
+    `${formatSyncStockFieldRemark(childStockTotals, childIds)}). ` +
+    formatProductSyncFieldRemarks(integration);
 
   await markProcessOutcome(process._id, "completed", remarks);
 

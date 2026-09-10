@@ -30,6 +30,7 @@ const CONNECTION_SYNC_FIELDS = [
   "sync_product_quantity",
   "sync_product_description",
   "sync_product_status",
+  "sync_order_to_vendor",
 ];
 
 function toYesNo(value, fallback = "yes") {

@@ -90,6 +90,7 @@ const {
   formatShopifyVariantOptionValue,
   hasSyncPayloadFields,
   isIntegrationSyncEnabled,
+  formatProductSyncFieldRemarks,
 } = require("../utils/integrationProductSync");
 const {
   isShopifyAuthError,
@@ -627,6 +628,64 @@ function shopifyGidNumericId(gid) {
 
 function shopifyGraphqlData(result) {
   return result?.data || result?.body?.data || null;
+}
+
+function shopifyProductGid(productId) {
+  const numeric = shopifyGidNumericId(productId);
+  return numeric ? `gid://shopify/Product/${numeric}` : null;
+}
+
+/**
+ * REST PUT products (API 2024-10) often keeps title/handle but ignores
+ * `body_html`. GraphQL `productUpdate.descriptionHtml` is the write that
+ * actually updates the Admin description editor.
+ */
+async function pushShopifyProductDescriptionHtml(
+  graphql,
+  shopifyProductId,
+  bodyHtml,
+) {
+  if (!graphql || bodyHtml == null) return false;
+  const productGid = shopifyProductGid(shopifyProductId);
+  if (!productGid) return false;
+
+  const result = await graphql.request(
+    `mutation ProductUpdateDescription($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product { id descriptionHtml }
+        userErrors { field message }
+      }
+    }`,
+    {
+      variables: {
+        product: {
+          id: productGid,
+          descriptionHtml: String(bodyHtml),
+        },
+      },
+    },
+  );
+
+  const data = shopifyGraphqlData(result);
+  const gqlErrors = result?.errors || result?.body?.errors || [];
+  const errors = [
+    ...(Array.isArray(gqlErrors) ? gqlErrors : []),
+    ...(data?.productUpdate?.userErrors || []),
+  ];
+  if (errors.length) {
+    throw new Error(
+      `Shopify description update failed: ${errors
+        .map((row) => row?.message)
+        .filter(Boolean)
+        .join("; ")}`,
+    );
+  }
+  if (!data?.productUpdate?.product) {
+    throw new Error(
+      "Shopify description update failed: empty productUpdate response.",
+    );
+  }
+  return true;
 }
 
 function shopifyInventoryItemGid(inventoryItemId) {
@@ -2013,6 +2072,7 @@ async function syncShopifyVariableProductToStore(
     }
   }
 
+  let productFieldsPayload = null;
   if (!remoteParent || !shopifyProductId) {
     if (!children.length) {
       await markProcessOutcome(
@@ -2031,6 +2091,7 @@ async function syncShopifyVariableProductToStore(
       integration,
       { mode: "create", syncRow: parentSyncRow },
     );
+    productFieldsPayload = createPayload;
     if (!createPayload.title) {
       createPayload.title =
         parentProduct.product_name || parentSku || "Product";
@@ -2075,6 +2136,7 @@ async function syncShopifyVariableProductToStore(
       integration,
       { mode: "update", syncRow: parentSyncRow },
     );
+    productFieldsPayload = parentUpdatePayload;
     if (hasSyncPayloadFields(parentUpdatePayload)) {
       const updatedResponse = await client.put({
         path: `products/${shopifyProductId}`,
@@ -2298,6 +2360,17 @@ async function syncShopifyVariableProductToStore(
     }
   }
 
+  if (
+    productFieldsPayload &&
+    Object.prototype.hasOwnProperty.call(productFieldsPayload, "body_html")
+  ) {
+    await pushShopifyProductDescriptionHtml(
+      graphql,
+      shopifyProductId,
+      productFieldsPayload.body_html,
+    );
+  }
+
   const qtyFieldRemark = formatSyncStockFieldRemark(childStockTotals, childIds);
   const variantsTouched =
     Number(stats.variations_created || 0) +
@@ -2310,7 +2383,8 @@ async function syncShopifyVariableProductToStore(
     `Product Name : ${parentProduct.product_name} synced to Shopify ` +
     `(product ${shopifyProductId}, variants updated ${variantsTouched}, ` +
     `${stockRemark}, skipped ${stats.variations_skipped}, ` +
-    `unmatched ${stats.variations_unmatched}, ${qtyFieldRemark}).`;
+    `unmatched ${stats.variations_unmatched}, ${qtyFieldRemark}). ` +
+    formatProductSyncFieldRemarks(integration);
 
   await markProcessOutcome(process._id, "completed", remarks);
 
@@ -2519,6 +2593,15 @@ async function sync_product(req, res, process) {
                 type: "application/json",
               });
               updatedProduct = updatedResponse?.body?.product || updatedProduct;
+              if (
+                Object.prototype.hasOwnProperty.call(updatePayload, "body_html")
+              ) {
+                await pushShopifyProductDescriptionHtml(
+                  graphql,
+                  remoteId,
+                  updatePayload.body_html,
+                );
+              }
             }
 
             const singleVariant =
@@ -2600,8 +2683,9 @@ async function sync_product(req, res, process) {
             const updateRemarks =
               `Product Name : ${product.product_name} updated on Shopify` +
               (stockTotals.size ?
-                ` (${formatSyncStockFieldRemark(stockTotals, productId)}).`
-              : ".");
+                ` (${formatSyncStockFieldRemark(stockTotals, productId)}). `
+              : ". ") +
+              formatProductSyncFieldRemarks(integration);
 
             await markProcessOutcome(process._id, "completed", updateRemarks);
 
@@ -2653,6 +2737,16 @@ async function sync_product(req, res, process) {
 
           const createdProduct = createdProductResponse?.body?.product;
           const createdId = createdProduct?.id;
+          if (
+            createdId &&
+            Object.prototype.hasOwnProperty.call(createPayload, "body_html")
+          ) {
+            await pushShopifyProductDescriptionHtml(
+              graphql,
+              createdId,
+              createPayload.body_html,
+            );
+          }
           const createdVariant = createdProduct?.variants?.[0] || null;
           if (createdVariant?.id) {
             await enableShopifyInventoryItemTracked({
@@ -2678,16 +2772,20 @@ async function sync_product(req, res, process) {
             );
           }
 
+          const createRemarks =
+            `Product Name : ${product.product_name} created on Shopify. ` +
+            formatProductSyncFieldRemarks(integration);
+
           await markProcessOutcome(
             process._id,
             "completed",
-            `Product Name : ${product.product_name} created on Shopify.`,
+            createRemarks,
           );
 
           return res.status(201).json({
             success: true,
             data: createdProduct,
-            message: `Product Name : ${product.product_name} synced to Shopify successfully.`,
+            message: createRemarks,
           });
         } catch (error) {
           if (isShopifyAuthError(error)) throw error;
