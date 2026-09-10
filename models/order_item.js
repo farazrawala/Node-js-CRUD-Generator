@@ -7,6 +7,12 @@ const modelSchema = new mongoose.Schema(
       ref: "product",
       required: true,
     },
+
+    origin_company_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "company",
+      required: true,
+    },
     name: {
       type: String,
       required: true,
@@ -82,11 +88,114 @@ function computeLineSubtotal(price, qty) {
   return Math.round(p * q * 100) / 100;
 }
 
+function toCompanyObjectId(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof mongoose.Types.ObjectId) return value;
+  if (typeof value === "object" && value._id != null) {
+    return toCompanyObjectId(value._id);
+  }
+  const str = String(value).trim();
+  if (mongoose.Types.ObjectId.isValid(str) && str.length === 24) {
+    return new mongoose.Types.ObjectId(str);
+  }
+  return null;
+}
+
+/**
+ * Me-too lines: `product.fetch_from_company_id` (or the parent product's).
+ * Own-catalog lines fall back to the selling `company_id`.
+ * `insertMany` does not run document `pre("validate")` until after docs are
+ * hydrated — set the field on the raw payload here so it is not omitted.
+ */
+async function assignOriginCompanyIds(docs, session) {
+  const rows = Array.isArray(docs) ? docs : [];
+  if (rows.length === 0) return;
+
+  const Product = mongoose.model("product");
+  const productIds = [
+    ...new Set(
+      rows
+        .map((d) => String(d.product_id ?? "").trim())
+        .filter((id) => mongoose.Types.ObjectId.isValid(id) && id.length === 24),
+    ),
+  ];
+  const products =
+    productIds.length === 0 ?
+      []
+    : await (session ?
+        Product.find({ _id: { $in: productIds } })
+          .select("fetch_from_company_id parent_product_id")
+          .session(session)
+          .lean()
+      : Product.find({ _id: { $in: productIds } })
+          .select("fetch_from_company_id parent_product_id")
+          .lean());
+  const productById = new Map(products.map((p) => [String(p._id), p]));
+
+  const parentIds = [
+    ...new Set(
+      products
+        .map((p) => String(p.parent_product_id ?? "").trim())
+        .filter(
+          (id) =>
+            mongoose.Types.ObjectId.isValid(id) &&
+            id.length === 24 &&
+            !productById.has(id),
+        ),
+    ),
+  ];
+  if (parentIds.length) {
+    const parents = await (session ?
+      Product.find({ _id: { $in: parentIds } })
+        .select("fetch_from_company_id")
+        .session(session)
+        .lean()
+    : Product.find({ _id: { $in: parentIds } })
+        .select("fetch_from_company_id")
+        .lean());
+    for (const parent of parents) {
+      productById.set(String(parent._id), parent);
+    }
+  }
+
+  for (const doc of rows) {
+    const product = productById.get(String(doc.product_id ?? "").trim());
+    const parent =
+      product?.parent_product_id ?
+        productById.get(String(product.parent_product_id))
+      : null;
+    const origin =
+      toCompanyObjectId(product?.fetch_from_company_id) ||
+      toCompanyObjectId(parent?.fetch_from_company_id) ||
+      toCompanyObjectId(doc.origin_company_id) ||
+      toCompanyObjectId(doc.company_id);
+    if (origin) {
+      doc.origin_company_id = origin;
+    }
+  }
+}
+
+modelSchema.pre("insertMany", async function (next, docs, options) {
+  try {
+    await assignOriginCompanyIds(docs, options?.session || null);
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 modelSchema.pre("validate", async function (next) {
   try {
     const computed = computeLineSubtotal(this.price, this.qty);
     if (computed !== null) {
       this.subtotal = computed;
+    }
+
+    if (this.origin_company_id == null && this.product_id) {
+      await assignOriginCompanyIds([this], this.$session?.() || null);
+    }
+    if (this.origin_company_id == null && this.company_id != null) {
+      this.origin_company_id = this.company_id;
     }
 
     if (this.order_id) {
@@ -196,6 +305,7 @@ modelSchema.pre(
 );
 
 modelSchema.index({ company_id: 1, order_id: 1 });
+modelSchema.index({ origin_company_id: 1, createdAt: -1 });
 
 const MODEL = mongoose.model("order_item", modelSchema);
 

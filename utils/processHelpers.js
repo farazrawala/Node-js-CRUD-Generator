@@ -980,6 +980,8 @@ async function buildPosOrderLineItemsFromRemote(remoteOrder, store, ctx) {
       qty,
       subtotal,
       company_id: companyId,
+      origin_company_id:
+        coalesceObjectId(product.fetch_from_company_id) || companyId,
       created_by: coalesceObjectId(
         process?.created_by?._id || process?.created_by,
       ),

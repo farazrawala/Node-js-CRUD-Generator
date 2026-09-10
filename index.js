@@ -81,6 +81,11 @@ const {
   sales_return_update,
   sales_return_delete,
 } = require("./controllers/sales_return");
+const {
+  listVendorOrders,
+  getVendorOrderById,
+  createVendorOrder,
+} = require("./controllers/big_commerce");
 const fileUpload = require("express-fileupload");
 const methodOverride = require("method-override");
 
@@ -459,8 +464,28 @@ app.delete(
   sales_return_delete,
 );
 
+app.get(
+  ["/api/big-commerce/vendor-orders", "/pos_admin/api/big-commerce/vendor-orders"],
+  checkHeaderAuthentication,
+  listVendorOrders,
+);
+app.post(
+  ["/api/big-commerce/vendor-orders", "/pos_admin/api/big-commerce/vendor-orders"],
+  checkHeaderAuthentication,
+  createVendorOrder,
+);
+app.get(
+  [
+    "/api/big-commerce/vendor-orders/:id",
+    "/pos_admin/api/big-commerce/vendor-orders/:id",
+  ],
+  checkHeaderAuthentication,
+  getVendorOrderById,
+);
+
 app.use("/api", checkHeaderAuthentication, apiRoute);
 app.use("/pos_admin/api", checkHeaderAuthentication, apiRoute);
+// /api/big-commerce/vendor-orders is registered on apiRoute
 app.use("/admin", adminRoute);
 app.use("/", staticRoute);
 

@@ -210,6 +210,11 @@ function clientPayloadFromGenericCreateFailure(response, fallbackError) {
   if (response.received != null) out.received = response.received;
   if (response.qty_needed != null) out.qty_needed = response.qty_needed;
   if (response.product_id != null) out.product_id = response.product_id;
+  if (response.product_name != null) out.product_name = response.product_name;
+  if (response.sku != null) out.sku = response.sku;
+  if (response.product_code != null) out.product_code = response.product_code;
+  if (response.line_number != null) out.line_number = response.line_number;
+  if (Array.isArray(response.products)) out.products = response.products;
   if (response.company_id != null) out.company_id = response.company_id;
   if (response.preferred_warehouse_id != null) {
     out.preferred_warehouse_id = response.preferred_warehouse_id;
@@ -253,6 +258,38 @@ function throwOrderCreateFromGenericFailure(response, fallbackError) {
     response,
     fallbackError,
   );
+  throw err;
+}
+
+function firstCartLineNumberByProductId(lines) {
+  const map = new Map();
+  (lines || []).forEach((line, i) => {
+    const id = String(line?.product_id ?? "").trim();
+    if (id && !map.has(id)) map.set(id, i + 1);
+  });
+  return map;
+}
+
+function throwStockAlertFailure(alertResult, extra = {}) {
+  const msg =
+    alertResult?.message ||
+    alertResult?.error ||
+    "Product stock alert check failed";
+  const err = new Error(msg);
+  const status = Number(alertResult?.status) || 404;
+  err.clientErrorPayload = {
+    success: false,
+    status,
+    error: alertResult?.error || "Product not found",
+    message: msg,
+    details: alertResult?.details || msg,
+    type: alertResult?.type || "not_found",
+    product_id: alertResult?.product_id || extra.product_id || null,
+    product_name: alertResult?.product_name || extra.product_name || null,
+    sku: alertResult?.sku || extra.sku || null,
+    product_code: alertResult?.product_code || extra.product_code || null,
+    ...extra,
+  };
   throw err;
 }
 
@@ -1272,11 +1309,7 @@ async function applyOrderLineReplaceInventory({
       logUrl,
     });
     if (!alertResult.success) {
-      throw new Error(
-        alertResult.message ||
-          alertResult.error ||
-          "Product stock alert check failed",
-      );
+      throwStockAlertFailure(alertResult);
     }
   }
 
@@ -1357,7 +1390,9 @@ async function applyOrderOutboundLines({
   const createdBy = coalesceObjectId(req.user?._id);
   const referenceName = orderGlDescription("Order", orderNo);
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    const lineNumber = lineIndex + 1;
     const unitCost = Number(line.price);
     const lineQtyNum = Number(line.qty);
     if (
@@ -1367,16 +1402,19 @@ async function applyOrderOutboundLines({
       lineQtyNum <= 0
     ) {
       throw new Error(
-        "Each order line needs a finite unit price (price) and positive quantity for inventory movement",
+        `Cart line ${lineNumber}: each order line needs a finite unit price (price) and positive quantity for inventory movement`,
       );
     }
 
     const productIdStr = String(line.product_id).trim();
     if (!productIdStr || !mongoose.Types.ObjectId.isValid(productIdStr)) {
-      throw new Error("Each order line needs a valid product_id");
+      throw new Error(
+        `Cart line ${lineNumber}: each order line needs a valid product_id`,
+      );
     }
 
     const preferredWarehouseId = resolveOrderLineWarehouseId(line, req);
+    const productLabel = `cart line ${lineNumber}, product id ${productIdStr}`;
 
     let allocations;
     let stockChanges;
@@ -1402,12 +1440,41 @@ async function applyOrderOutboundLines({
         }));
     } catch (warehouseResolveErr) {
       if (warehouseResolveErr.clientPayload) {
+        const payload = {
+          ...warehouseResolveErr.clientPayload,
+          product_id:
+            warehouseResolveErr.clientPayload.product_id || productIdStr,
+          line_number: lineNumber,
+        };
+        const existingMsg = String(payload.message || payload.error || "");
+        if (existingMsg && !existingMsg.includes(productIdStr)) {
+          payload.message = `${existingMsg} (${productLabel})`;
+          payload.details = payload.details
+            ? `${payload.details} (${productLabel})`
+            : payload.message;
+        }
         throwOrderCreateFromGenericFailure(
-          warehouseResolveErr.clientPayload,
+          payload,
           "No warehouse with sufficient stock for order line",
         );
       }
-      throw warehouseResolveErr;
+      const whMsg = String(
+        warehouseResolveErr.message || "Warehouse inventory update failed",
+      );
+      const labeled =
+        whMsg.includes(productIdStr) ? whMsg : `${whMsg} (${productLabel})`;
+      const mapped = new Error(labeled);
+      mapped.clientErrorPayload = {
+        success: false,
+        status: 400,
+        error: "Warehouse inventory update failed",
+        message: labeled,
+        details: labeled,
+        type: "validation",
+        product_id: productIdStr,
+        line_number: lineNumber,
+      };
+      throw mapped;
     }
 
     for (const whChange of stockChanges) {
@@ -1471,14 +1538,59 @@ async function applyOrderOutboundLines({
       });
     }),
   );
+  const lineNumberByProductId = firstCartLineNumberByProductId(lines);
+  const failedAlerts = [];
   for (const alertResult of alertResults) {
-    if (!alertResult.success) {
-      throw new Error(
-        alertResult.message ||
-          alertResult.error ||
-          "Product stock alert check failed",
-      );
-    }
+    if (alertResult.success) continue;
+    const lineNumber = lineNumberByProductId.get(
+      String(alertResult.product_id || ""),
+    );
+    const linePrefix = lineNumber ? `Cart line ${lineNumber}: ` : "";
+    const baseMsg =
+      alertResult.message ||
+      alertResult.error ||
+      "Product stock alert check failed";
+    failedAlerts.push({
+      ...alertResult,
+      message: `${linePrefix}${baseMsg}`,
+      details: `${linePrefix}${alertResult.details || baseMsg}`,
+      line_number: lineNumber || null,
+    });
+  }
+  if (failedAlerts.length === 1) {
+    throwStockAlertFailure(failedAlerts[0], {
+      line_number: failedAlerts[0].line_number,
+    });
+  }
+  if (failedAlerts.length > 1) {
+    const msg = `${failedAlerts.length} products were not found for this company. ${failedAlerts
+      .map((f) => f.message)
+      .join("; ")}`;
+    const err = new Error(msg);
+    err.clientErrorPayload = {
+      success: false,
+      status: 404,
+      error: `Product not found: ${failedAlerts
+        .map((f) => f.product_name || f.product_id)
+        .join(", ")}`,
+      message: msg,
+      details: msg,
+      type: "not_found",
+      product_id: failedAlerts[0].product_id,
+      product_name: failedAlerts[0].product_name,
+      sku: failedAlerts[0].sku,
+      product_code: failedAlerts[0].product_code,
+      line_number: failedAlerts[0].line_number,
+      products: failedAlerts.map((f) => ({
+        product_id: f.product_id,
+        product_name: f.product_name,
+        sku: f.sku,
+        product_code: f.product_code,
+        line_number: f.line_number,
+        message: f.message,
+      })),
+    };
+    throw err;
   }
 
   return productStockUpdates;
@@ -1633,11 +1745,7 @@ async function applyOrderDeleteInventoryRestore({
       logUrl,
     });
     if (!alertResult.success) {
-      throw new Error(
-        alertResult.message ||
-          alertResult.error ||
-          "Product stock alert check failed",
-      );
+      throwStockAlertFailure(alertResult);
     }
   }
 
@@ -1712,6 +1820,22 @@ function costPriceAtSaleFromProduct(product) {
   return 0;
 }
 
+/**
+ * Me-too / partner catalog: persist the source company on the line.
+ * Own-catalog products fall back to the selling `company_id` (`origin_company_id` is required).
+ */
+function originCompanyIdFromProduct(product, fallbackCompanyId, productById) {
+  const fromSelf = coalesceObjectId(product?.fetch_from_company_id);
+  if (fromSelf) return fromSelf;
+  const parentId = product?.parent_product_id;
+  const parent =
+    parentId && productById ? productById.get(String(parentId)) : null;
+  return (
+    coalesceObjectId(parent?.fetch_from_company_id) ||
+    coalesceObjectId(fallbackCompanyId)
+  );
+}
+
 async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
   const orderObjectId =
     orderId instanceof mongoose.Types.ObjectId ?
@@ -1754,9 +1878,29 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
     productIds.length === 0 ?
       []
     : await Product.find({ _id: { $in: productIds } })
-        .select("product_name wholesale_price")
+        .select(
+          "product_name wholesale_price fetch_from_company_id parent_product_id",
+        )
         .lean();
   const productById = new Map(products.map((p) => [String(p._id), p]));
+  const parentIds = [
+    ...new Set(
+      products
+        .map((p) => String(p.parent_product_id ?? "").trim())
+        .filter(
+          (id) =>
+            mongoose.Types.ObjectId.isValid(id) && !productById.has(id),
+        ),
+    ),
+  ];
+  if (parentIds.length) {
+    const parents = await Product.find({ _id: { $in: parentIds } })
+      .select("fetch_from_company_id")
+      .lean();
+    for (const parent of parents) {
+      productById.set(String(parent._id), parent);
+    }
+  }
 
   const docs = [];
   for (const line of lines) {
@@ -1768,6 +1912,11 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
         String(product.product_name).trim()
       : "Item";
     const cost_price_at_sale = costPriceAtSaleFromProduct(product);
+    const origin_company_id = originCompanyIdFromProduct(
+      product,
+      companyId,
+      productById,
+    );
 
     docs.push({
       order_id: orderObjectId,
@@ -1779,6 +1928,7 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
       cost_price_at_sale,
       profit: Number(line.subtotal) - Number(cost_price_at_sale * line.qty),
       company_id: companyId,
+      origin_company_id,
       branch_id: coalesceObjectId(orderSnapshot.branch_id) || undefined,
       created_by: createdBy,
       status: "active",
@@ -2832,11 +2982,32 @@ async function order_save(req, res) {
   // Queue WhatsApp without blocking the Payment 201 response.
   void maybeQueueWhatsappOnOrderSave(req, orderFresh || response.data);
 
+  let vendorOrder = null;
+  try {
+    const { syncBuyerOrderToVendor } = require("../utils/vendorOrderSync");
+    vendorOrder = await syncBuyerOrderToVendor({
+      buyerCompanyId:
+        coalesceObjectId(orderFresh?.company_id) ||
+        coalesceObjectId(req.user?.company_id),
+      userId: req.user?._id,
+      orderId,
+      order: orderFresh || response.data,
+      items: insertedItemsPlain,
+      alreadyDeducted: true,
+    });
+  } catch (vendorErr) {
+    console.warn(
+      "[order_save] sync order to vendor failed:",
+      vendorErr?.message || vendorErr,
+    );
+  }
+
   return res.status(201).json({
     success: true,
     status: 201,
     data,
     product_stock_updates: productStockUpdates,
+    vendor_order: vendorOrder,
   });
   // step 9 end — 201 response
 }
@@ -3348,11 +3519,7 @@ async function order_update(req, res) {
           logUrl: req.originalUrl || req.path || "/api/order/order_update",
         });
         if (!alertResult.success) {
-          throw new Error(
-            alertResult.message ||
-              alertResult.error ||
-              "Product stock alert check failed",
-          );
+          throwStockAlertFailure(alertResult);
         }
       }
       // step 11 end

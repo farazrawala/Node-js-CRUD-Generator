@@ -492,6 +492,141 @@ async function costOfGoodsSoldByOrderItem(req, res) {
   }
 }
 
+/**
+ * GET order lines whose origin catalog is the authenticated company (A).
+ * `company_id` on the line is the selling (buyer) company; `origin_company_id` is A.
+ *
+ * Query: skip, limit, product_id, buyer_company_id, search, from, to,
+ * include_own=1 (also return A's own POS lines; default is partner sales only).
+ */
+async function getOrderItemsByOriginCompany(req, res) {
+  try {
+    const cid = resolveOrderItemReportCompanyId(req, res);
+    if (!cid) return;
+
+    const includeOwn =
+      req.query.include_own === "1" ||
+      req.query.include_own === "true" ||
+      req.query.includeOwn === "1";
+
+    const filter = {
+      origin_company_id: cid,
+      status: "active",
+      deletedAt: null,
+    };
+    if (!includeOwn) {
+      filter.company_id = { $ne: cid };
+    }
+
+    const buyerCompanyId = coalesceObjectId(req.query.buyer_company_id);
+    if (buyerCompanyId) {
+      filter.company_id = buyerCompanyId;
+    }
+
+    const rawProductId = req.query.product_id;
+    if (rawProductId != null && String(rawProductId).trim() !== "") {
+      const productIdStr = String(rawProductId).trim();
+      if (!mongoose.Types.ObjectId.isValid(productIdStr)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid product_id",
+        });
+      }
+      filter.product_id = new mongoose.Types.ObjectId(productIdStr);
+    }
+
+    const rawFrom =
+      req.query.from ?? req.query.startDate ?? req.query.start_date;
+    const rawTo = req.query.to ?? req.query.endDate ?? req.query.end_date;
+    const hasFrom = rawFrom != null && String(rawFrom).trim() !== "";
+    const hasTo = rawTo != null && String(rawTo).trim() !== "";
+    if (hasFrom || hasTo) {
+      filter.createdAt = {};
+      if (hasFrom) {
+        const fromDate = new Date(String(rawFrom).trim());
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid from date",
+          });
+        }
+        filter.createdAt.$gte = fromDate;
+      }
+      if (hasTo) {
+        const toDate = new Date(String(rawTo).trim());
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            status: 400,
+            error: "Invalid to date",
+          });
+        }
+        filter.createdAt.$lte = toDate;
+      }
+    }
+
+    const search = String(req.query.search || "").trim();
+    if (search) {
+      filter.name = {
+        $regex: search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        $options: "i",
+      };
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+
+    let rows = [];
+    let total = 0;
+    try {
+      [rows, total] = await Promise.all([
+        OrderItem.find(filter)
+          .populate("product_id", "product_name sku product_code")
+          .populate("company_id", "company_name company_logo")
+          .populate("origin_company_id", "company_name company_logo")
+          .populate("order_id", "order_no order_status total_amount")
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        OrderItem.countDocuments(filter),
+      ]);
+    } catch (queryErr) {
+      console.warn(
+        "[order_item] by-origin-company populate failed, retrying without populate:",
+        queryErr?.message || queryErr,
+      );
+      [rows, total] = await Promise.all([
+        OrderItem.find(filter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        OrderItem.countDocuments(filter),
+      ]);
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      data: rows,
+      total,
+      skip,
+      limit,
+      origin_company_id: String(cid),
+    });
+  } catch (error) {
+    console.error("❌ getOrderItemsByOriginCompany:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to list origin order items",
+    });
+  }
+}
+
 module.exports = {
   order_itemCreate,
   order_itemUpdate,
@@ -499,4 +634,5 @@ module.exports = {
   getAllorder_item,
   costOfGoodsSoldByOrderItem,
   profitByOrderItem,
+  getOrderItemsByOriginCompany,
 };

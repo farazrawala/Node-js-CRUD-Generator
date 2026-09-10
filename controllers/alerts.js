@@ -24,6 +24,47 @@ function queryWithSession(query, session) {
   return session ? query.session(session) : query;
 }
 
+function productIdentityLabel(product, productIdStr) {
+  const name = String(product?.product_name || "").trim();
+  const sku = String(product?.sku || "").trim();
+  const code = String(product?.product_code || "").trim();
+  const parts = [];
+  if (name) parts.push(`"${name}"`);
+  if (sku) parts.push(`SKU ${sku}`);
+  if (code && code !== sku) parts.push(`code ${code}`);
+  parts.push(`id ${productIdStr}`);
+  return parts.join(", ");
+}
+
+function productNotFoundReason(product) {
+  if (!product) return "no product exists with this id";
+  if (product.deletedAt) return "it is deleted";
+  const status = String(product.status || "").trim();
+  if (status && status !== "active") {
+    return `its status is "${status}"`;
+  }
+  return "it does not belong to this company";
+}
+
+function productNotFoundForCompanyResult(productIdStr, anyProduct = null) {
+  const identity = productIdentityLabel(anyProduct, productIdStr);
+  const reason = productNotFoundReason(anyProduct);
+  const message = `Product not found for this company: ${identity} (${reason})`;
+  return {
+    success: false,
+    status: 404,
+    error: `Product not found: ${identity}`,
+    message,
+    details: message,
+    type: "not_found",
+    product_id: productIdStr,
+    product_name: String(anyProduct?.product_name || "").trim() || null,
+    sku: String(anyProduct?.sku || "").trim() || null,
+    product_code: String(anyProduct?.product_code || "").trim() || null,
+    product_status: anyProduct?.status ?? null,
+  };
+}
+
 /**
 
  * Low-stock when on-hand <= threshold.
@@ -145,17 +186,14 @@ async function evaluateProductStockAlert({
   ).lean();
 
   if (!product) {
-    return {
-      success: false,
+    const anyProduct = await queryWithSession(
+      Product.findById(productIdStr).select(
+        "product_name product_code sku status deletedAt",
+      ),
+      session,
+    ).lean();
 
-      status: 404,
-
-      error: "Product not found",
-
-      message: "Product not found for this company",
-
-      product_id: productIdStr,
-    };
+    return productNotFoundForCompanyResult(productIdStr, anyProduct);
   }
 
   const productAlertQty = Number(product.alert_qty) || 0;

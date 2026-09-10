@@ -12,6 +12,13 @@ const {
   activeNotDeletedCriteria,
   parseSearchFieldsFromQuery,
 } = require("../utils/modelHelper");
+const VendorOrder = require("../models/vendor_order");
+const {
+  syncBuyerOrderToVendor,
+  backfillVendorOrdersForVendor,
+  shapeVendorOrder,
+  flattenVendorOrderItems,
+} = require("../utils/vendorOrderSync");
 
 const ACTIVE_STATUSES = ["pending", "approved"];
 const CONNECTION_POPULATE = [
@@ -2610,6 +2617,208 @@ async function softDeleteFetchedProduct(req, res) {
   }
 }
 
+/**
+ * POST /big-commerce/vendor-orders
+ * Destination company (B) lists me-too order lines + qty on origin (A)
+ * when `sync_order_to_vendor` is enabled and B does not have local stock.
+ *
+ * Body: { order_id? } or { items: [{ product_id, qty, price? }] }
+ */
+async function createVendorOrder(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Company context is required");
+    }
+
+    const orderId = coalesceObjectId(req.body?.order_id);
+    const items = Array.isArray(req.body?.items) ? req.body.items : null;
+    if (!orderId && (!items || !items.length)) {
+      return jsonError(
+        res,
+        400,
+        "Provide order_id or items[{ product_id, qty }]",
+      );
+    }
+
+    const result = await syncBuyerOrderToVendor({
+      buyerCompanyId: myCompanyId,
+      userId: userId(req),
+      orderId,
+      items,
+      alreadyDeducted: Boolean(orderId),
+    });
+
+    if (!result.created.length) {
+      return jsonSuccess(
+        res,
+        200,
+        result,
+        "No vendor order lines to list on origin",
+      );
+    }
+
+    return jsonSuccess(
+      res,
+      201,
+      result,
+      "Vendor order listed on origin company",
+    );
+  } catch (error) {
+    console.error("[big_commerce] createVendorOrder:", error);
+    return jsonError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to sync order to vendor",
+    );
+  }
+}
+
+/**
+ * GET /big-commerce/vendor-orders
+ * Origin (A) sees incoming item/qty rows; destination (B) sees what it sent.
+ * Query: skip, limit, buyer_company_id, role=vendor|buyer, flat=1 (item list)
+ */
+async function listVendorOrders(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Company context is required");
+    }
+
+    const filter = {
+      deletedAt: null,
+      status: "active",
+      $or: [{ company_id: myCompanyId }, { buyer_company_id: myCompanyId }],
+    };
+
+    const buyerCompanyId = coalesceObjectId(req.query.buyer_company_id);
+    if (buyerCompanyId) {
+      filter.buyer_company_id = buyerCompanyId;
+    }
+
+    const role = String(req.query.role || "").trim().toLowerCase();
+    if (role === "vendor") {
+      filter.company_id = myCompanyId;
+      delete filter.$or;
+      try {
+        await backfillVendorOrdersForVendor(myCompanyId, userId(req));
+      } catch (backfillErr) {
+        console.warn(
+          "[big_commerce] vendor-orders backfill:",
+          backfillErr?.message || backfillErr,
+        );
+      }
+    } else if (role === "buyer") {
+      filter.buyer_company_id = myCompanyId;
+      delete filter.$or;
+    }
+
+    const search = String(req.query.search || "").trim();
+    if (search) {
+      const regex = { $regex: escapeRegex(search), $options: "i" };
+      filter.$and = [
+        ...(filter.$and || []),
+        {
+          $or: [
+            { source_order_no: regex },
+            { "items.origin_product_name": regex },
+            { "items.buyer_product_name": regex },
+          ],
+        },
+      ];
+    }
+
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+    const flat =
+      req.query.flat === "1" ||
+      req.query.flat === "true" ||
+      req.query.items_only === "1";
+
+    let rows = [];
+    let total = 0;
+    try {
+      [rows, total] = await Promise.all([
+        VendorOrder.find(filter)
+          .populate("company_id", "company_name company_logo")
+          .populate("buyer_company_id", "company_name company_logo")
+          .populate("connection_id", "sync_order_to_vendor status")
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        VendorOrder.countDocuments(filter),
+      ]);
+    } catch (queryErr) {
+      console.warn(
+        "[big_commerce] vendor-orders populate failed, retrying without populate:",
+        queryErr?.message || queryErr,
+      );
+      [rows, total] = await Promise.all([
+        VendorOrder.find(filter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        VendorOrder.countDocuments(filter),
+      ]);
+    }
+
+    const data =
+      flat ?
+        flattenVendorOrderItems(rows, myCompanyId)
+      : rows.map((row) => shapeVendorOrder(row, myCompanyId));
+
+    return jsonSuccess(res, 200, data, "Vendor orders", {
+      total,
+      skip,
+      limit,
+      meta: { total, skip, limit, flat },
+    });
+  } catch (error) {
+    console.error("[big_commerce] listVendorOrders:", error);
+    return jsonError(res, 500, error.message || "Failed to list vendor orders");
+  }
+}
+
+async function getVendorOrderById(req, res) {
+  try {
+    const myCompanyId = tenantCompanyId(req);
+    if (!myCompanyId) {
+      return jsonError(res, 403, "Company context is required");
+    }
+    const id = coalesceObjectId(req.params.id);
+    if (!id) {
+      return jsonError(res, 400, "Vendor order id is required");
+    }
+
+    const row = await VendorOrder.findOne({
+      _id: id,
+      deletedAt: null,
+      $or: [{ company_id: myCompanyId }, { buyer_company_id: myCompanyId }],
+    })
+      .populate("company_id", "company_name company_logo")
+      .populate("buyer_company_id", "company_name company_logo")
+      .populate("items.origin_product_id", "product_name sku product_code")
+      .lean();
+
+    if (!row) {
+      return jsonError(res, 404, "Vendor order not found");
+    }
+
+    return jsonSuccess(
+      res,
+      200,
+      shapeVendorOrder(row, myCompanyId),
+      "Vendor order",
+    );
+  } catch (error) {
+    console.error("[big_commerce] getVendorOrderById:", error);
+    return jsonError(res, 500, error.message || "Failed to load vendor order");
+  }
+}
+
 module.exports = {
   sendConnectionRequest,
   listSentConnections,
@@ -2634,4 +2843,7 @@ module.exports = {
   applyFetchedProductReset,
   resetFetchedProductFromOrigin,
   softDeleteFetchedProduct,
+  createVendorOrder,
+  listVendorOrders,
+  getVendorOrderById,
 };

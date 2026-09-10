@@ -129,6 +129,7 @@ const {
 const {
   costOfGoodsSoldByOrderItem,
   profitByOrderItem,
+  getOrderItemsByOriginCompany,
 } = require("../controllers/order_item");
 const {
   checkIntegrationActive,
@@ -347,6 +348,9 @@ const {
   getFetchedProducts,
   resetFetchedProductFromOrigin,
   softDeleteFetchedProduct,
+  createVendorOrder,
+  listVendorOrders,
+  getVendorOrderById,
 } = require("../controllers/big_commerce");
 
 const {
@@ -750,6 +754,10 @@ router.post(
 router.post("/big-commerce/products/fetch/:productId", duplicatePartnerProduct);
 router.get("/big-commerce/categories/:companyId", getPartnerCategories);
 router.get("/big-commerce/brands/:companyId", getPartnerBrands);
+// Vendor / origin company A lists me-too sales from destination B
+router.post("/big-commerce/vendor-orders", createVendorOrder);
+router.get("/big-commerce/vendor-orders", listVendorOrders);
+router.get("/big-commerce/vendor-orders/:id", getVendorOrderById);
 
 // Public guest storefront (no auth — allowlisted in middlewares/auth.js)
 router.get("/shop/:companySlug", getShopStore);
@@ -844,6 +852,8 @@ router.get(
   "/order_item/cost-of-goods-sold-by-order-item",
   costOfGoodsSoldByOrderItem,
 );
+router.get("/order_item/by-origin-company", getOrderItemsByOriginCompany);
+router.get("/order_items/by-origin-company", getOrderItemsByOriginCompany);
 router.get("/order/sales", findSales);
 router.get("/order/sales-day-wise", findSalesDayWise);
 router.get("/order/sales-month-wise", findSalesMonthWise);
@@ -1041,6 +1051,7 @@ registerAllModelRoutes(router, {
     // Big Commerce uses custom connection + product-share APIs
     "company_connection",
     "company_connection_log",
+    "vendor_order",
     // 'purchase_order' removed - we want BOTH dynamic routes AND custom routes
     // Support ticket module uses custom controller routes
     "support_ticket",
