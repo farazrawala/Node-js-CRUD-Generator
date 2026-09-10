@@ -255,12 +255,41 @@ function logMessageFromGenericFailure(response, fallbackError) {
 }
 
 /** Preserve full handleGenericCreate failure shape on the error for txn catch blocks (`clientErrorPayload`). */
+function extractClientErrorPayload(err) {
+  let e = err;
+  for (let i = 0; e && i < 12; i++) {
+    if (e.clientErrorPayload && typeof e.clientErrorPayload === "object") {
+      return e.clientErrorPayload;
+    }
+    const msg = String(e.message || "");
+    const start = msg.indexOf("{");
+    const end = msg.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        const parsed = JSON.parse(msg.slice(start, end + 1));
+        if (parsed && typeof parsed === "object" && parsed.status) return parsed;
+      } catch (_) {
+        /* not JSON */
+      }
+    }
+    const next = e.cause || e.reason || e.originalError;
+    if (!next || next === e) break;
+    e = next;
+  }
+  return null;
+}
+
 function throwWithGenericFailure(response, fallbackError) {
-  const err = new Error(logMessageFromGenericFailure(response, fallbackError));
-  err.clientErrorPayload = clientErrorFromGenericResponse(
-    response,
-    fallbackError,
-  );
+  const payload = clientErrorFromGenericResponse(response, fallbackError);
+  const human = logMessageFromGenericFailure(response, fallbackError);
+  let encoded = "";
+  try {
+    encoded = JSON.stringify(payload);
+  } catch {
+    encoded = "";
+  }
+  const err = new Error(encoded ? `${human}\n${encoded}` : human);
+  err.clientErrorPayload = payload;
   throw err;
 }
 
@@ -756,6 +785,9 @@ function buildPurchaseOrderItemDocuments(poId, poSnapshot, lines, req) {
       line.warehouse_id != null ? String(line.warehouse_id).trim() : "";
     if (wid && mongoose.Types.ObjectId.isValid(wid)) {
       doc.warehouse_id = wid;
+    } else {
+      const defaultWid = resolveDefaultWarehouseId(req);
+      if (defaultWid) doc.warehouse_id = String(defaultWid);
     }
     if (userId) {
       doc.created_by = userId;
@@ -2466,9 +2498,10 @@ async function purchaseOrderCreate(req, res) {
         fallbackUrl: "/api/purchase_order/purchase_order_create",
       });
       // step 20 end
-      if (createPipelineError.clientErrorPayload) {
-        return res.status(createPipelineError.clientErrorPayload.status).json({
-          ...createPipelineError.clientErrorPayload,
+      const clientPayload = extractClientErrorPayload(createPipelineError);
+      if (clientPayload) {
+        return res.status(clientPayload.status || 400).json({
+          ...clientPayload,
           step_timings_ms: stepTimingsOnError,
         });
       }
@@ -2560,6 +2593,13 @@ async function purchaseOrderCreate(req, res) {
       fallbackUrl: "/api/purchase_order/purchase_order_create",
     });
     // step 20 end
+    const clientPayload = extractClientErrorPayload(unexpectedError);
+    if (clientPayload) {
+      return res.status(clientPayload.status || 400).json({
+        ...clientPayload,
+        ...(poStepTimer ? { step_timings_ms: poStepTimer.report() } : {}),
+      });
+    }
     return res.status(500).json({
       success: false,
       message: "Failed to create purchase order",
@@ -2947,12 +2987,12 @@ async function purchase_order_update(req, res) {
       tags: ["api", "purchase_order", "rollback", "update"],
       fallbackUrl: "/api/purchase_order/update",
     });
-    if (txnError.clientErrorPayload) {
-      const p = txnError.clientErrorPayload;
-      return res.status(p.status || 400).json({
+    const clientPayload = extractClientErrorPayload(txnError);
+    if (clientPayload) {
+      return res.status(clientPayload.status || 400).json({
         success: false,
         message: "Purchase order update rolled back",
-        ...p,
+        ...clientPayload,
       });
     }
     const msg = String(txnError.message || "");
@@ -3342,12 +3382,12 @@ async function purchase_order_delete(req, res) {
         },
       });
       // step 8 end
-      if (txnError.clientErrorPayload) {
-        const p = txnError.clientErrorPayload;
-        return res.status(p.status || 400).json({
+      const clientPayload = extractClientErrorPayload(txnError);
+      if (clientPayload) {
+        return res.status(clientPayload.status || 400).json({
           success: false,
           message: "Purchase order delete rolled back",
-          ...p,
+          ...clientPayload,
           step_timings_ms: stepTimingsOnError,
           txn_mode: txnMode,
         });

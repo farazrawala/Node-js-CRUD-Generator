@@ -28,11 +28,13 @@ function productIdentityLabel(product, productIdStr) {
   const name = String(product?.product_name || "").trim();
   const sku = String(product?.sku || "").trim();
   const code = String(product?.product_code || "").trim();
+  const id = String(productIdStr || "").trim();
   const parts = [];
   if (name) parts.push(`"${name}"`);
   if (sku) parts.push(`SKU ${sku}`);
   if (code && code !== sku) parts.push(`code ${code}`);
-  parts.push(`id ${productIdStr}`);
+  if (id && id !== name) parts.push(`id ${id}`);
+  if (!parts.length) parts.push("unknown product");
   return parts.join(", ");
 }
 
@@ -46,9 +48,20 @@ function productNotFoundReason(product) {
   return "it does not belong to this company";
 }
 
-function productNotFoundForCompanyResult(productIdStr, anyProduct = null) {
-  const identity = productIdentityLabel(anyProduct, productIdStr);
-  const reason = productNotFoundReason(anyProduct);
+function productNotFoundForCompanyResult(
+  productIdStr,
+  anyProduct = null,
+  extras = {},
+) {
+  const fallbackName = String(extras.fallbackName || "").trim();
+  const identity = productIdentityLabel(
+    anyProduct || (fallbackName ? { product_name: fallbackName } : null),
+    productIdStr,
+  );
+  const reason =
+    anyProduct ? productNotFoundReason(anyProduct)
+    : fallbackName ? "no matching product for this name/id"
+    : "no product exists with this id";
   const message = `Product not found for this company: ${identity} (${reason})`;
   return {
     success: false,
@@ -57,8 +70,9 @@ function productNotFoundForCompanyResult(productIdStr, anyProduct = null) {
     message,
     details: message,
     type: "not_found",
-    product_id: productIdStr,
-    product_name: String(anyProduct?.product_name || "").trim() || null,
+    product_id: productIdStr || null,
+    product_name:
+      String(anyProduct?.product_name || fallbackName || "").trim() || null,
     sku: String(anyProduct?.sku || "").trim() || null,
     product_code: String(anyProduct?.product_code || "").trim() || null,
     product_status: anyProduct?.status ?? null,

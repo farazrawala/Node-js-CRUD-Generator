@@ -301,13 +301,16 @@ function throwWithClientErrorPayload(payload) {
         error: "Request failed",
         message: String(payload || "Request failed"),
       };
-  let encoded;
+  const human = String(body.message || body.error || "Request failed");
+  let encoded = "";
   try {
     encoded = JSON.stringify(body);
   } catch {
-    encoded = String(body.message || body.error || "Request failed");
+    encoded = "";
   }
-  const err = new Error(encoded);
+  // Human text survives Mongo transaction wrapping; JSON lets the HTTP catch
+  // rebuild the structured body when `clientErrorPayload` is stripped.
+  const err = new Error(encoded ? `${human}\n${encoded}` : human);
   err.clientErrorPayload = body;
   throw err;
 }
@@ -331,6 +334,11 @@ function throwOrderCreateFromGenericFailure(response, fallbackError) {
   throwWithClientErrorPayload(payload);
 }
 
+function isStrictObjectId(value) {
+  const s = value != null ? String(value).trim() : "";
+  return /^[a-fA-F0-9]{24}$/.test(s);
+}
+
 function firstCartLineNumberByProductId(lines) {
   const map = new Map();
   (lines || []).forEach((line, i) => {
@@ -338,6 +346,55 @@ function firstCartLineNumberByProductId(lines) {
     if (id && !map.has(id)) map.set(id, i + 1);
   });
   return map;
+}
+
+function lineProductLabel(line, fallbackId = "") {
+  const raw = line?.product_id;
+  if (raw && typeof raw === "object") {
+    const nested = String(raw.product_name || raw.name || "").trim();
+    if (nested) return nested;
+  }
+  const fromLine = String(line?.product_name || line?.name || "").trim();
+  if (fromLine) return fromLine;
+  const id = String(fallbackId || raw || "").trim();
+  if (id && !isStrictObjectId(id)) return id;
+  return id || "unknown product";
+}
+
+function normalizeLineProductRef(line) {
+  const raw = line?.product_id;
+  let id = "";
+  let name = String(line?.product_name || line?.name || "").trim();
+  const sku = String(line?.sku || line?.product_code || "").trim();
+  if (raw && typeof raw === "object") {
+    id = String(raw._id || raw.id || "").trim();
+    if (!name) name = String(raw.product_name || raw.name || "").trim();
+  } else if (raw != null) {
+    id = String(raw).trim();
+  }
+  if (!isStrictObjectId(id) && id && !name) name = id;
+  return { id, name, sku };
+}
+
+function productIsUsableForCompany(product, companyStr) {
+  if (!product) return false;
+  if (product.deletedAt) return false;
+  if (String(product.status || "").trim() !== "active") return false;
+  return companyIdString(product.company_id) === companyStr;
+}
+
+function pickProductMatch(candidates, companyStr) {
+  const inCompany = (candidates || []).filter(
+    (p) => companyIdString(p.company_id) === companyStr,
+  );
+  const usable = inCompany.filter((p) =>
+    productIsUsableForCompany(p, companyStr),
+  );
+  if (usable.length === 1) return { product: usable[0], ambiguous: false };
+  if (usable.length > 1) return { product: usable[0], ambiguous: true };
+  if (inCompany.length) return { product: inCompany[0], ambiguous: false };
+  if (candidates?.length) return { product: candidates[0], ambiguous: false };
+  return { product: null, ambiguous: false };
 }
 
 function productFailureClientRow(f) {
@@ -413,13 +470,18 @@ function companyIdString(value) {
  * Fail fast with name/SKU/line for any cart product that is missing, deleted,
  * inactive, or on another company — before warehouse/GL work.
  */
+/**
+ * Fail fast with name/SKU/line for any cart product that is missing, deleted,
+ * inactive, or on another company. POS often sends product_name as product_id;
+ * resolve those to real `_id`s before warehouse/GL work.
+ */
 async function assertCartProductsBelongToCompany({
   lines,
   companyId,
   session = null,
 } = {}) {
   const companyStr = companyIdString(companyId);
-  if (!companyStr || !mongoose.Types.ObjectId.isValid(companyStr)) {
+  if (!companyStr || !isStrictObjectId(companyStr)) {
     throwWithClientErrorPayload({
       success: false,
       status: 400,
@@ -430,40 +492,109 @@ async function assertCartProductsBelongToCompany({
     });
   }
 
-  const lineNumberByProductId = firstCartLineNumberByProductId(lines);
-  const productIds = [...lineNumberByProductId.keys()].filter((id) =>
-    mongoose.Types.ObjectId.isValid(id),
-  );
-  if (!productIds.length) return;
+  const refs = (lines || []).map((line, i) => ({
+    line,
+    lineNumber: i + 1,
+    ...normalizeLineProductRef(line),
+  }));
 
-  let query = Product.find({ _id: { $in: productIds } }).select(
-    "product_name product_code sku status deletedAt company_id",
-  );
-  if (session) query = query.session(session);
-  const anyProducts = await query.lean();
-  const anyById = new Map(anyProducts.map((p) => [String(p._id), p]));
+  const objectIds = [
+    ...new Set(refs.map((r) => r.id).filter((id) => isStrictObjectId(id))),
+  ];
+  const nameKeys = [
+    ...new Set(
+      refs
+        .filter((r) => !isStrictObjectId(r.id))
+        .flatMap((r) => [r.name, r.sku, r.id].filter(Boolean)),
+    ),
+  ];
+
+  const productSelect =
+    "product_name product_code sku status deletedAt company_id";
+  let byIdQuery =
+    objectIds.length ?
+      Product.find({ _id: { $in: objectIds } }).select(productSelect)
+    : null;
+  let byNameQuery =
+    nameKeys.length ?
+      Product.find({
+        $or: [
+          { product_name: { $in: nameKeys } },
+          { sku: { $in: nameKeys } },
+          { product_code: { $in: nameKeys } },
+        ],
+      }).select(productSelect)
+    : null;
+  if (session) {
+    if (byIdQuery) byIdQuery = byIdQuery.session(session);
+    if (byNameQuery) byNameQuery = byNameQuery.session(session);
+  }
+  const [byIdRows, byNameRows] = await Promise.all([
+    byIdQuery ? byIdQuery.lean() : Promise.resolve([]),
+    byNameQuery ? byNameQuery.lean() : Promise.resolve([]),
+  ]);
+
+  const anyById = new Map(byIdRows.map((p) => [String(p._id), p]));
+  const byName = new Map();
+  const addNameMatch = (key, product) => {
+    const k = String(key || "").trim();
+    if (!k) return;
+    if (!byName.has(k)) byName.set(k, []);
+    byName.get(k).push(product);
+  };
+  for (const product of byNameRows) {
+    addNameMatch(product.product_name, product);
+    addNameMatch(product.sku, product);
+    addNameMatch(product.product_code, product);
+  }
 
   const failedAlerts = [];
-  for (const productIdStr of productIds) {
-    const anyProduct = anyById.get(productIdStr) || null;
-    const productCompanyStr = companyIdString(anyProduct?.company_id);
-    const status = String(anyProduct?.status || "").trim();
-    const ok =
-      !!anyProduct &&
-      !anyProduct.deletedAt &&
-      status === "active" &&
-      productCompanyStr === companyStr;
-    if (ok) continue;
+  for (const ref of refs) {
+    const label = lineProductLabel(ref.line, ref.id || ref.name);
+    let anyProduct = isStrictObjectId(ref.id) ? anyById.get(ref.id) || null : null;
+    let ambiguous = false;
+    if (!anyProduct) {
+      const key = ref.name || ref.sku || ref.id;
+      const picked = pickProductMatch(byName.get(key) || [], companyStr);
+      anyProduct = picked.product;
+      ambiguous = picked.ambiguous;
+    }
 
-    const result = productNotFoundForCompanyResult(productIdStr, anyProduct);
-    const lineNumber = lineNumberByProductId.get(productIdStr);
-    const linePrefix = lineNumber ? `Cart line ${lineNumber}: ` : "";
-    failedAlerts.push({
-      ...result,
-      message: `${linePrefix}${result.message}`,
-      details: `${linePrefix}${result.details || result.message}`,
-      line_number: lineNumber || null,
-    });
+    if (ambiguous) {
+      failedAlerts.push({
+        success: false,
+        status: 400,
+        error: `Multiple products named "${label}"`,
+        message: `Cart line ${ref.lineNumber} (${label}): multiple products match this name for this company`,
+        details: `Cart line ${ref.lineNumber} (${label}): multiple products match this name for this company`,
+        type: "validation",
+        product_id: anyProduct ? String(anyProduct._id) : ref.id || null,
+        product_name: label,
+        line_number: ref.lineNumber,
+      });
+      continue;
+    }
+
+    if (!productIsUsableForCompany(anyProduct, companyStr)) {
+      const result = productNotFoundForCompanyResult(
+        isStrictObjectId(ref.id) ? ref.id : String(anyProduct?._id || ""),
+        anyProduct,
+        { fallbackName: label },
+      );
+      failedAlerts.push({
+        ...result,
+        message: `Cart line ${ref.lineNumber} (${label}): ${result.message}`,
+        details: `Cart line ${ref.lineNumber} (${label}): ${result.details || result.message}`,
+        line_number: ref.lineNumber,
+        product_name: result.product_name || label,
+      });
+      continue;
+    }
+
+    ref.line.product_id = String(anyProduct._id);
+    if (!ref.line.product_name) {
+      ref.line.product_name = String(anyProduct.product_name || label).trim();
+    }
   }
   throwFailedProductLookups(failedAlerts);
 }
@@ -498,6 +629,20 @@ function parseOrderLineItemsFromFlatKeys(body) {
       const i = parseInt(m[1], 10);
       if (!byIndex.has(i)) byIndex.set(i, {});
       byIndex.get(i).product_id = body[key];
+      continue;
+    }
+    m = key.match(/^product_name\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).product_name = body[key];
+      continue;
+    }
+    m = key.match(/^name\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).name = body[key];
       continue;
     }
     m = key.match(/^qty\[(\d+)\]$/);
@@ -535,6 +680,7 @@ function parseOrderLineItemsFromFlatKeys(body) {
       : NaN;
     lines.push({
       product_id: row.product_id,
+      product_name: row.product_name || row.name,
       warehouse_id: row.warehouse_id,
       qtyRaw,
       qty: qtyNum,
@@ -546,7 +692,6 @@ function parseOrderLineItemsFromFlatKeys(body) {
     (l) =>
       l.product_id &&
       String(l.product_id).trim() !== "" &&
-      mongoose.Types.ObjectId.isValid(String(l.product_id).trim()) &&
       Number.isFinite(l.subtotal),
   );
 }
@@ -561,11 +706,13 @@ function parseOrderLineItemsFromIndexedContainers(body) {
   const q = body.qty;
   const pr = body.price;
   const w = body.warehouse_id;
+  const pn = body.product_name || body.name;
   const len = Math.max(
     indexedContainerLength(p),
     indexedContainerLength(q),
     indexedContainerLength(pr),
     indexedContainerLength(w),
+    indexedContainerLength(pn),
   );
   if (len === 0) return [];
 
@@ -575,6 +722,7 @@ function parseOrderLineItemsFromIndexedContainers(body) {
     const qtyRaw = indexedContainerGet(q, i);
     const priceRaw = indexedContainerGet(pr, i);
     const warehouse_id = indexedContainerGet(w, i);
+    const product_name = indexedContainerGet(pn, i);
     const qtyNum = parseFloat(String(qtyRaw ?? "").trim());
     const priceNum = parseFloat(String(priceRaw ?? "").trim());
     const subtotal =
@@ -583,6 +731,7 @@ function parseOrderLineItemsFromIndexedContainers(body) {
       : NaN;
     lines.push({
       product_id,
+      product_name,
       warehouse_id,
       qtyRaw,
       qty: qtyNum,
@@ -594,7 +743,6 @@ function parseOrderLineItemsFromIndexedContainers(body) {
     (l) =>
       l.product_id &&
       String(l.product_id).trim() !== "" &&
-      mongoose.Types.ObjectId.isValid(String(l.product_id).trim()) &&
       Number.isFinite(l.subtotal),
   );
 }
@@ -3090,6 +3238,10 @@ async function order_save(req, res) {
         company_id:
           coalesceObjectId(req.user?.company_id) ?? req.user?.company_id,
         first_line_product_id: firstLine.product_id,
+        first_line_product_name: lineProductLabel(
+          firstLine,
+          firstLine.product_id,
+        ),
         first_line_qty: firstLine.qty,
         partial_order_id:
           response?.data?._id ? String(response.data._id) : null,
@@ -3832,6 +3984,10 @@ async function order_update(req, res) {
         company_id:
           coalesceObjectId(req.user?.company_id) ?? req.user?.company_id,
         first_line_product_id: firstLine.product_id,
+        first_line_product_name: lineProductLabel(
+          firstLine,
+          firstLine.product_id,
+        ),
         first_line_qty: firstLine.qty,
         partial_order_id:
           response?.data?._id ? String(response.data._id) : recordId || null,
