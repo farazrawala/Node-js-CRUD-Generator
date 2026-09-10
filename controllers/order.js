@@ -33,7 +33,10 @@ const {
   insertInventoryMovementRecord,
   insertInventoryMovementRecordsBulk,
 } = require("./inventory_movements");
-const { evaluateProductStockAlert } = require("./alerts");
+const {
+  evaluateProductStockAlert,
+  productNotFoundForCompanyResult,
+} = require("./alerts");
 const {
   normalizePopulatedCompanyForClient,
 } = require("../utils/userCompanyPopulate");
@@ -250,15 +253,82 @@ function logMessageFromGenericCreateFailure(response, fallbackError) {
     : detailStr || headline;
 }
 
+function tryParseJsonClientPayload(value) {
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(s.slice(start, end + 1));
+    if (parsed && typeof parsed === "object" && parsed.status) return parsed;
+  } catch (_) {
+    /* not JSON */
+  }
+  return null;
+}
+
+/**
+ * Mongo `withTransaction` wraps thrown errors and drops custom fields like
+ * `clientErrorPayload`. Recover the API body from the cause chain or JSON
+ * `Error.message` so the client still gets product name / line number.
+ */
+function extractClientErrorPayload(err) {
+  let e = err;
+  for (let i = 0; e && i < 12; i++) {
+    if (e.clientErrorPayload && typeof e.clientErrorPayload === "object") {
+      return e.clientErrorPayload;
+    }
+    if (e.clientPayload && typeof e.clientPayload === "object") {
+      return e.clientPayload;
+    }
+    const fromMsg = tryParseJsonClientPayload(e.message);
+    if (fromMsg) return fromMsg;
+    const next = e.cause || e.reason || e.originalError;
+    if (!next || next === e) break;
+    e = next;
+  }
+  return null;
+}
+
+function throwWithClientErrorPayload(payload) {
+  const body =
+    payload && typeof payload === "object" ?
+      payload
+    : {
+        success: false,
+        status: 500,
+        error: "Request failed",
+        message: String(payload || "Request failed"),
+      };
+  let encoded;
+  try {
+    encoded = JSON.stringify(body);
+  } catch {
+    encoded = String(body.message || body.error || "Request failed");
+  }
+  const err = new Error(encoded);
+  err.clientErrorPayload = body;
+  throw err;
+}
+
 function throwOrderCreateFromGenericFailure(response, fallbackError) {
-  const err = new Error(
-    logMessageFromGenericCreateFailure(response, fallbackError),
-  );
-  err.clientErrorPayload = clientPayloadFromGenericCreateFailure(
+  const payload = clientPayloadFromGenericCreateFailure(
     response,
     fallbackError,
-  );
-  throw err;
+  ) || {
+    success: false,
+    status: 500,
+    error: fallbackError || "Request failed",
+    message: logMessageFromGenericCreateFailure(response, fallbackError),
+  };
+  if (payload.message == null) {
+    payload.message = logMessageFromGenericCreateFailure(
+      response,
+      fallbackError,
+    );
+  }
+  throwWithClientErrorPayload(payload);
 }
 
 function firstCartLineNumberByProductId(lines) {
@@ -270,14 +340,24 @@ function firstCartLineNumberByProductId(lines) {
   return map;
 }
 
+function productFailureClientRow(f) {
+  return {
+    product_id: f.product_id || null,
+    product_name: f.product_name || null,
+    sku: f.sku || null,
+    product_code: f.product_code || null,
+    line_number: f.line_number || null,
+    message: f.message || null,
+  };
+}
+
 function throwStockAlertFailure(alertResult, extra = {}) {
   const msg =
     alertResult?.message ||
     alertResult?.error ||
     "Product stock alert check failed";
-  const err = new Error(msg);
   const status = Number(alertResult?.status) || 404;
-  err.clientErrorPayload = {
+  const payload = {
     success: false,
     status,
     error: alertResult?.error || "Product not found",
@@ -290,7 +370,102 @@ function throwStockAlertFailure(alertResult, extra = {}) {
     product_code: alertResult?.product_code || extra.product_code || null,
     ...extra,
   };
-  throw err;
+  if (!Array.isArray(payload.products)) {
+    payload.products = [productFailureClientRow(payload)];
+  }
+  throwWithClientErrorPayload(payload);
+}
+
+function throwFailedProductLookups(failedAlerts) {
+  if (!failedAlerts?.length) return;
+  if (failedAlerts.length === 1) {
+    throwStockAlertFailure(failedAlerts[0], {
+      line_number: failedAlerts[0].line_number,
+    });
+  }
+  const msg = `${failedAlerts.length} products were not found for this company. ${failedAlerts
+    .map((f) => f.message)
+    .join("; ")}`;
+  throwWithClientErrorPayload({
+    success: false,
+    status: 404,
+    error: `Product not found: ${failedAlerts
+      .map((f) => f.product_name || f.product_id)
+      .join(", ")}`,
+    message: msg,
+    details: msg,
+    type: "not_found",
+    product_id: failedAlerts[0].product_id,
+    product_name: failedAlerts[0].product_name,
+    sku: failedAlerts[0].sku,
+    product_code: failedAlerts[0].product_code,
+    line_number: failedAlerts[0].line_number,
+    products: failedAlerts.map(productFailureClientRow),
+  });
+}
+
+function companyIdString(value) {
+  const oid = coalesceObjectId(value);
+  return oid != null ? String(oid) : "";
+}
+
+/**
+ * Fail fast with name/SKU/line for any cart product that is missing, deleted,
+ * inactive, or on another company — before warehouse/GL work.
+ */
+async function assertCartProductsBelongToCompany({
+  lines,
+  companyId,
+  session = null,
+} = {}) {
+  const companyStr = companyIdString(companyId);
+  if (!companyStr || !mongoose.Types.ObjectId.isValid(companyStr)) {
+    throwWithClientErrorPayload({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+      message: "Company context is required to validate order products",
+      details: "Company context is required to validate order products",
+      type: "validation",
+    });
+  }
+
+  const lineNumberByProductId = firstCartLineNumberByProductId(lines);
+  const productIds = [...lineNumberByProductId.keys()].filter((id) =>
+    mongoose.Types.ObjectId.isValid(id),
+  );
+  if (!productIds.length) return;
+
+  let query = Product.find({ _id: { $in: productIds } }).select(
+    "product_name product_code sku status deletedAt company_id",
+  );
+  if (session) query = query.session(session);
+  const anyProducts = await query.lean();
+  const anyById = new Map(anyProducts.map((p) => [String(p._id), p]));
+
+  const failedAlerts = [];
+  for (const productIdStr of productIds) {
+    const anyProduct = anyById.get(productIdStr) || null;
+    const productCompanyStr = companyIdString(anyProduct?.company_id);
+    const status = String(anyProduct?.status || "").trim();
+    const ok =
+      !!anyProduct &&
+      !anyProduct.deletedAt &&
+      status === "active" &&
+      productCompanyStr === companyStr;
+    if (ok) continue;
+
+    const result = productNotFoundForCompanyResult(productIdStr, anyProduct);
+    const lineNumber = lineNumberByProductId.get(productIdStr);
+    const linePrefix = lineNumber ? `Cart line ${lineNumber}: ` : "";
+    failedAlerts.push({
+      ...result,
+      message: `${linePrefix}${result.message}`,
+      details: `${linePrefix}${result.details || result.message}`,
+      line_number: lineNumber || null,
+    });
+  }
+  throwFailedProductLookups(failedAlerts);
 }
 
 function indexedContainerLength(v) {
@@ -1105,6 +1280,11 @@ async function applyOrderLineReplaceInventory({
     orderId,
     orderNo,
   );
+  await assertCartProductsBelongToCompany({
+    lines: newLines,
+    companyId: companyIdOid || companyId,
+    session: mongoSession,
+  });
   const movementWarehouseMap =
     buildOutboundQtyMapFromMovements(oldOutMovements);
   const oldMap = buildOrderLineRestoreQtyMap({
@@ -1249,8 +1429,7 @@ async function applyOrderLineReplaceInventory({
       const whMsg = String(
         whErr?.message || "Warehouse inventory update failed",
       );
-      const mapped = new Error(whMsg);
-      mapped.clientErrorPayload = {
+      throwWithClientErrorPayload({
         success: false,
         status: 400,
         error: "Insufficient warehouse inventory",
@@ -1262,8 +1441,7 @@ async function applyOrderLineReplaceInventory({
         old_outbound_qty: oldQty,
         new_outbound_qty: newQty,
         qty_delta: delta,
-      };
-      throw mapped;
+      });
     }
 
     const unitCost = Number(priceByProduct.get(productIdStr));
@@ -1390,6 +1568,12 @@ async function applyOrderOutboundLines({
   const createdBy = coalesceObjectId(req.user?._id);
   const referenceName = orderGlDescription("Order", orderNo);
 
+  await assertCartProductsBelongToCompany({
+    lines,
+    companyId: companyIdForDocs,
+    session: mongoSession,
+  });
+
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     const line = lines[lineIndex];
     const lineNumber = lineIndex + 1;
@@ -1463,8 +1647,7 @@ async function applyOrderOutboundLines({
       );
       const labeled =
         whMsg.includes(productIdStr) ? whMsg : `${whMsg} (${productLabel})`;
-      const mapped = new Error(labeled);
-      mapped.clientErrorPayload = {
+      throwWithClientErrorPayload({
         success: false,
         status: 400,
         error: "Warehouse inventory update failed",
@@ -1473,8 +1656,7 @@ async function applyOrderOutboundLines({
         type: "validation",
         product_id: productIdStr,
         line_number: lineNumber,
-      };
-      throw mapped;
+      });
     }
 
     for (const whChange of stockChanges) {
@@ -1518,15 +1700,17 @@ async function applyOrderOutboundLines({
     }
   }
 
-  // One alert check per distinct SKU (not per cart line); parallelize independent reads.
-  const alertResults = await Promise.all(
-    [...productsTouched].map(async (productIdStr) => {
-      const onHandAfterOutbound = await sumWarehouseInventoryQtyForProduct(
-        productIdStr,
-        companyIdForDocs,
-        mongoSession,
-      );
-      return evaluateProductStockAlert({
+  // One alert check per distinct SKU (not per cart line). Same Mongo session
+  // must not be used concurrently, so keep these sequential inside a txn.
+  const alertResults = [];
+  for (const productIdStr of productsTouched) {
+    const onHandAfterOutbound = await sumWarehouseInventoryQtyForProduct(
+      productIdStr,
+      companyIdForDocs,
+      mongoSession,
+    );
+    alertResults.push(
+      await evaluateProductStockAlert({
         req,
         productId: productIdStr,
         companyId: companyIdForDocs,
@@ -1535,9 +1719,9 @@ async function applyOrderOutboundLines({
         session: mongoSession,
         logUrl,
         skipLog: true,
-      });
-    }),
-  );
+      }),
+    );
+  }
   const lineNumberByProductId = firstCartLineNumberByProductId(lines);
   const failedAlerts = [];
   for (const alertResult of alertResults) {
@@ -1557,41 +1741,7 @@ async function applyOrderOutboundLines({
       line_number: lineNumber || null,
     });
   }
-  if (failedAlerts.length === 1) {
-    throwStockAlertFailure(failedAlerts[0], {
-      line_number: failedAlerts[0].line_number,
-    });
-  }
-  if (failedAlerts.length > 1) {
-    const msg = `${failedAlerts.length} products were not found for this company. ${failedAlerts
-      .map((f) => f.message)
-      .join("; ")}`;
-    const err = new Error(msg);
-    err.clientErrorPayload = {
-      success: false,
-      status: 404,
-      error: `Product not found: ${failedAlerts
-        .map((f) => f.product_name || f.product_id)
-        .join(", ")}`,
-      message: msg,
-      details: msg,
-      type: "not_found",
-      product_id: failedAlerts[0].product_id,
-      product_name: failedAlerts[0].product_name,
-      sku: failedAlerts[0].sku,
-      product_code: failedAlerts[0].product_code,
-      line_number: failedAlerts[0].line_number,
-      products: failedAlerts.map((f) => ({
-        product_id: f.product_id,
-        product_name: f.product_name,
-        sku: f.sku,
-        product_code: f.product_code,
-        line_number: f.line_number,
-        message: f.message,
-      })),
-    };
-    throw err;
-  }
+  throwFailedProductLookups(failedAlerts);
 
   return productStockUpdates;
 }
@@ -1699,8 +1849,7 @@ async function applyOrderDeleteInventoryRestore({
       const whMsg = String(
         whErr?.message || "Warehouse inventory restore failed",
       );
-      const mapped = new Error(whMsg);
-      mapped.clientErrorPayload = {
+      throwWithClientErrorPayload({
         success: false,
         status: 400,
         error: "Warehouse inventory restore failed",
@@ -1710,8 +1859,7 @@ async function applyOrderDeleteInventoryRestore({
         product_id: productIdStr,
         warehouse_id: warehouseIdStr,
         qty_restore: lineQtyNum,
-      };
-      throw mapped;
+      });
     }
 
     await insertOrderReferencedInventoryMovement({
@@ -2526,6 +2674,26 @@ async function order_save(req, res) {
     });
   }
 
+  try {
+    await assertCartProductsBelongToCompany({
+      lines,
+      companyId: req.user?.company_id,
+    });
+  } catch (preErr) {
+    const p = extractClientErrorPayload(preErr);
+    if (p) {
+      return res.status(Number(p.status) || 404).json(p);
+    }
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Order lines invalid",
+      message: preErr.message,
+      details: preErr.message,
+      type: "validation",
+    });
+  }
+
   const originalBody = req.body;
   req.body = normalizeOrderNumericFields(stripLineItemKeys(originalBody));
   delete req.body._id;
@@ -2925,27 +3093,17 @@ async function order_save(req, res) {
         first_line_qty: firstLine.qty,
         partial_order_id:
           response?.data?._id ? String(response.data._id) : null,
-        api_client_error: txnError.clientErrorPayload ?? null,
+        api_client_error:
+          extractClientErrorPayload(txnError) ??
+          txnError.clientErrorPayload ??
+          null,
         gl_or_bulk_details: txnError.details ?? null,
         error_message: String(txnError.message || ""),
       },
     });
-    if (
-      txnError.clientErrorPayload &&
-      typeof txnError.clientErrorPayload === "object"
-    ) {
-      const p = txnError.clientErrorPayload;
-      return res.status(Number(p.status) || 400).json(p);
-    }
-    let parsed = null;
-    try {
-      parsed = JSON.parse(txnError.message);
-    } catch (_) {
-      /* not JSON */
-    }
-    // Inner throws may use `throw new Error(JSON.stringify({ status, ... }))` to pass through a full API payload.
-    if (parsed && typeof parsed === "object" && parsed.status) {
-      return res.status(parsed.status).json(parsed);
+    const clientPayload = extractClientErrorPayload(txnError);
+    if (clientPayload) {
+      return res.status(Number(clientPayload.status) || 400).json(clientPayload);
     }
     const msg = String(txnError.message || "");
     // GL bulk path prefixes the message with `Post-order transaction bulk insert failed`.
@@ -3159,6 +3317,27 @@ async function logOrderUpdated(req, before, after) {
 async function order_update(req, res) {
   // step 1 start — parse lines + normalize header for `handleGenericUpdate`
   const lines = parseOrderLineItems(req.body);
+  if (lines.length > 0) {
+    try {
+      await assertCartProductsBelongToCompany({
+        lines,
+        companyId: req.user?.company_id,
+      });
+    } catch (preErr) {
+      const p = extractClientErrorPayload(preErr);
+      if (p) {
+        return res.status(Number(p.status) || 404).json(p);
+      }
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Order lines invalid",
+        message: preErr.message,
+        details: preErr.message,
+        type: "validation",
+      });
+    }
+  }
   const originalBody = req.body;
   const clientTouchedFinancial =
     orderUpdateTouchesFinancialFields(originalBody);
@@ -3656,26 +3835,17 @@ async function order_update(req, res) {
         first_line_qty: firstLine.qty,
         partial_order_id:
           response?.data?._id ? String(response.data._id) : recordId || null,
-        api_client_error: txnError.clientErrorPayload ?? null,
+        api_client_error:
+          extractClientErrorPayload(txnError) ??
+          txnError.clientErrorPayload ??
+          null,
         gl_or_bulk_details: txnError.details ?? null,
         error_message: String(txnError.message || ""),
       },
     });
-    if (
-      txnError.clientErrorPayload &&
-      typeof txnError.clientErrorPayload === "object"
-    ) {
-      const p = txnError.clientErrorPayload;
-      return res.status(Number(p.status) || 400).json(p);
-    }
-    let parsed = null;
-    try {
-      parsed = JSON.parse(txnError.message);
-    } catch (_) {
-      /* not JSON */
-    }
-    if (parsed && typeof parsed === "object" && parsed.status) {
-      return res.status(parsed.status).json(parsed);
+    const clientPayload = extractClientErrorPayload(txnError);
+    if (clientPayload) {
+      return res.status(Number(clientPayload.status) || 400).json(clientPayload);
     }
     const msg = String(txnError.message || "");
     const isGl = msg.includes("Post-order");
@@ -5800,19 +5970,19 @@ async function order_delete(req, res) {
         transaction_number: transactionNumber,
         line_count: existingOrderItems.length,
         delete_snapshot: deleteSnapshot,
-        api_client_error: txnError.clientErrorPayload ?? null,
+        api_client_error:
+          extractClientErrorPayload(txnError) ??
+          txnError.clientErrorPayload ??
+          null,
         error_message: String(txnError.message || ""),
       },
     });
-    if (
-      txnError.clientErrorPayload &&
-      typeof txnError.clientErrorPayload === "object"
-    ) {
-      const p = txnError.clientErrorPayload;
-      return res.status(Number(p.status) || 400).json({
+    const clientPayload = extractClientErrorPayload(txnError);
+    if (clientPayload) {
+      return res.status(Number(clientPayload.status) || 400).json({
         success: false,
         message: "Order delete rolled back",
-        ...p,
+        ...clientPayload,
         execution_mode: orderDeleteExecutionMode,
       });
     }

@@ -16,6 +16,7 @@ const { invalidateModuleListCachesForReq } = require("../utils/redisCache");
 const {
   computeWeightedAverageCost,
 } = require("../utils/weightedAverageCost");
+const { productNotFoundForCompanyResult } = require("./alerts");
 
 const INVENTORY_MOVEMENTS_LIST_CACHE_MODULE = "inventory_movements";
 
@@ -967,13 +968,12 @@ async function syncProductStockFromMovementLedger(
   ]);
 
   if (!product) {
-    return {
-      success: false,
-      status: 404,
-      error: "Product not found",
-      message: "Product not found for this company",
-      product_id: productIdStr,
-    };
+    let anyQuery = Product.findById(productObjectId).select(
+      "product_name product_code sku status deletedAt company_id",
+    );
+    if (mongoSession) anyQuery = anyQuery.session(mongoSession);
+    const anyProduct = await anyQuery.lean();
+    return productNotFoundForCompanyResult(productIdStr, anyProduct);
   }
 
   const warehouseNameById = await loadWarehouseNamesById(
@@ -1237,11 +1237,12 @@ async function stockTransfer(req, res) {
       .lean();
 
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        status: 404,
-        message: "Product not found for this company",
-      });
+      const anyProduct = await Product.findById(productId)
+        .select("product_name product_code sku status deletedAt company_id")
+        .lean();
+      return res
+        .status(404)
+        .json(productNotFoundForCompanyResult(productIdStr, anyProduct));
     }
 
     // --- Both warehouses must exist, be active, and belong to this company ---

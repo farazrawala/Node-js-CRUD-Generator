@@ -627,4 +627,6 @@ module.exports = {
   checkProductAlert,
   getLowStockAlerts,
   evaluateProductStockAlert,
+  productNotFoundForCompanyResult,
+  productIdentityLabel,
 };
