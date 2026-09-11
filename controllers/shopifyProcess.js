@@ -907,6 +907,78 @@ async function resolveShopifyVariantLocation(client, graphql, variant) {
 }
 
 /**
+ * Location IDs already stocked for this inventory item. Used so stock sync
+ * updates the existing level instead of connecting a second location (which
+ * doubles Available across "All locations").
+ */
+async function listShopifyInventoryLevelLocationIds(
+  client,
+  graphql,
+  inventoryItemId,
+) {
+  const ids = [];
+  const seen = new Set();
+  const add = (value) => {
+    const numeric = shopifyGidNumericId(value);
+    if (!numeric || seen.has(numeric)) return;
+    seen.add(numeric);
+    ids.push(numeric);
+  };
+
+  const itemGid = shopifyInventoryItemGid(inventoryItemId);
+  if (graphql && itemGid) {
+    try {
+      const result = await graphql.request(
+        `query InventoryItemLevels($id: ID!) {
+          inventoryItem(id: $id) {
+            inventoryLevels(first: 50) {
+              nodes { location { id } }
+            }
+          }
+        }`,
+        { variables: { id: itemGid } },
+      );
+      const nodes =
+        shopifyGraphqlData(result)?.inventoryItem?.inventoryLevels?.nodes || [];
+      for (const row of nodes) {
+        add(row?.location?.id);
+      }
+    } catch (error) {
+      if (isShopifyAuthError(error)) throw error;
+      console.warn(
+        `Shopify inventoryItem levels query failed for item ${inventoryItemId}:`,
+        describeShopifyError(error),
+      );
+    }
+  }
+
+  const itemNumeric = shopifyGidNumericId(inventoryItemId);
+  if (client && itemNumeric) {
+    try {
+      const response = await client.get({
+        path: "inventory_levels",
+        query: { inventory_item_ids: itemNumeric, limit: 50 },
+      });
+      const levels =
+        Array.isArray(response?.body?.inventory_levels) ?
+          response.body.inventory_levels
+        : [];
+      for (const row of levels) {
+        add(row?.location_id);
+      }
+    } catch (error) {
+      if (isShopifyAuthError(error)) throw error;
+      console.warn(
+        "Shopify inventory_levels list failed:",
+        describeShopifyError(error),
+      );
+    }
+  }
+
+  return ids;
+}
+
+/**
  * Prefer a location already attached to inventory items (read_inventory).
  * GET /locations needs read_locations, which this app version does not have.
  */
@@ -915,11 +987,9 @@ async function resolveShopifyPrimaryLocationId(
   graphql = null,
   inventoryItemIds = [],
 ) {
-  const fromRest = await resolveShopifyLocationFromRest(client);
-  if (fromRest) return fromRest;
-
   const itemIds = (
-    Array.isArray(inventoryItemIds) ? inventoryItemIds : [inventoryItemIds])
+    Array.isArray(inventoryItemIds) ? inventoryItemIds : [inventoryItemIds]
+  )
     .map((id) => (id != null ? String(id) : ""))
     .filter(Boolean);
   for (const itemId of itemIds) {
@@ -928,20 +998,39 @@ async function resolveShopifyPrimaryLocationId(
       itemId,
     );
     if (fromItem) return fromItem;
+    const fromItemGraphql = await resolveShopifyLocationFromVariantGraphql(
+      graphql,
+      { inventory_item_id: itemId },
+    );
+    if (fromItemGraphql) return fromItemGraphql;
   }
 
-  return resolveShopifyLocationFromGraphql(graphql);
+  const fromGraphql = await resolveShopifyLocationFromGraphql(graphql);
+  if (fromGraphql) return fromGraphql;
+
+  return resolveShopifyLocationFromRest(client);
 }
 
 async function setShopifyVariantInventoryGraphql(
   graphql,
   variant,
-  quantity,
-  locationId,
+  locationQuantities,
 ) {
   const inventoryItemId = variant?.inventory_item_id;
-  if (!graphql || !inventoryItemId || !locationId) return false;
-  const available = Math.max(0, Math.round(Number(quantity) || 0));
+  const itemGid = shopifyInventoryItemGid(inventoryItemId);
+  const quantities = [];
+  if (locationQuantities instanceof Map) {
+    for (const [locationId, quantity] of locationQuantities.entries()) {
+      const locGid = shopifyGidNumericId(locationId);
+      if (!locGid) continue;
+      quantities.push({
+        inventoryItemId: itemGid,
+        locationId: `gid://shopify/Location/${locGid}`,
+        quantity: Math.max(0, Math.round(Number(quantity) || 0)),
+      });
+    }
+  }
+  if (!graphql || !itemGid || !quantities.length) return false;
   try {
     const result = await graphql.request(
       `mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
@@ -955,13 +1044,7 @@ async function setShopifyVariantInventoryGraphql(
             name: "available",
             reason: "correction",
             ignoreCompareQuantity: true,
-            quantities: [
-              {
-                inventoryItemId: shopifyInventoryItemGid(inventoryItemId),
-                locationId: `gid://shopify/Location/${shopifyGidNumericId(locationId)}`,
-                quantity: available,
-              },
-            ],
+            quantities,
           },
         },
       },
@@ -990,6 +1073,35 @@ async function setShopifyVariantInventoryGraphql(
     );
     return false;
   }
+}
+
+async function setShopifyInventoryLevelsRest(
+  client,
+  inventoryItemId,
+  locationQuantities,
+) {
+  const itemNumeric = Number(
+    shopifyGidNumericId(inventoryItemId) || inventoryItemId,
+  );
+  if (!client || !itemNumeric || !(locationQuantities instanceof Map)) {
+    return false;
+  }
+  let wrote = false;
+  for (const [locationId, quantity] of locationQuantities.entries()) {
+    const locationNumeric = Number(shopifyGidNumericId(locationId) || locationId);
+    if (!locationNumeric) continue;
+    await client.post({
+      path: "inventory_levels/set",
+      data: {
+        location_id: locationNumeric,
+        inventory_item_id: itemNumeric,
+        available: Math.max(0, Math.round(Number(quantity) || 0)),
+      },
+      type: "application/json",
+    });
+    wrote = true;
+  }
+  return wrote;
 }
 
 async function enableShopifyInventoryItemTracked({
@@ -1114,9 +1226,9 @@ async function enableShopifyInventoryItemTracked({
 }
 
 /**
- * Set a Shopify variant's available inventory at the given location. Enables
- * Shopify inventory tracking on the variant first if needed. Returns true when
- * the level was set. Disables further stock pushes if write_inventory is missing.
+ * Set a Shopify variant's available inventory to the POS quantity.
+ * Writes the qty to one location and zeros every other stocked location so
+ * Admin "All locations" does not double (80 + 80 = 160).
  */
 async function setShopifyVariantInventory({
   client,
@@ -1125,7 +1237,7 @@ async function setShopifyVariantInventory({
   quantity,
   locationId,
 }) {
-  if (shopifyInventoryWriteUnavailable || !locationId || !variant?.id) {
+  if (shopifyInventoryWriteUnavailable || !variant?.id) {
     return false;
   }
   const inventoryItemId = variant?.inventory_item_id;
@@ -1133,38 +1245,47 @@ async function setShopifyVariantInventory({
     return false;
   }
   const available = Math.max(0, Math.round(Number(quantity) || 0));
-  const locationNumeric = Number(shopifyGidNumericId(locationId) || locationId);
-  const itemNumeric = Number(
-    shopifyGidNumericId(inventoryItemId) || inventoryItemId,
+  const existingLocationIds = await listShopifyInventoryLevelLocationIds(
+    client,
+    graphql,
+    inventoryItemId,
   );
+  const requestedId = shopifyGidNumericId(locationId);
+  const targetLocationId =
+    (requestedId && existingLocationIds.includes(requestedId) ?
+      requestedId
+    : existingLocationIds[0]) || requestedId;
+  if (!targetLocationId) {
+    return false;
+  }
 
   await enableShopifyInventoryItemTracked({
     client,
     graphql,
     variant,
-    locationId,
+    locationId: targetLocationId,
   });
+
+  const locationQuantities = new Map();
+  for (const loc of existingLocationIds) {
+    locationQuantities.set(String(loc), 0);
+  }
+  locationQuantities.set(String(targetLocationId), available);
 
   const graphqlSet = await setShopifyVariantInventoryGraphql(
     graphql,
     variant,
-    quantity,
-    locationId,
+    locationQuantities,
   );
   if (graphqlSet) return true;
 
   try {
     try {
-      await client.post({
-        path: "inventory_levels/set",
-        data: {
-          location_id: locationNumeric,
-          inventory_item_id: itemNumeric,
-          available,
-        },
-        type: "application/json",
-      });
-      return true;
+      return await setShopifyInventoryLevelsRest(
+        client,
+        inventoryItemId,
+        locationQuantities,
+      );
     } catch (setError) {
       const setText = JSON.stringify(
         setError?.response?.body || setError?.message || "",
@@ -1178,45 +1299,19 @@ async function setShopifyVariantInventory({
           client,
           graphql,
           variant,
-          locationId,
+          locationId: targetLocationId,
         });
         const retryGraphql = await setShopifyVariantInventoryGraphql(
           graphql,
           variant,
-          quantity,
-          locationId,
+          locationQuantities,
         );
         if (retryGraphql) return true;
-        try {
-          await client.post({
-            path: "inventory_levels/connect",
-            data: {
-              location_id: locationNumeric,
-              inventory_item_id: itemNumeric,
-            },
-            type: "application/json",
-          });
-        } catch (connectError) {
-          const connectText = JSON.stringify(
-            connectError?.response?.body || connectError?.message || "",
-          ).toLowerCase();
-          if (
-            !connectText.includes("already") &&
-            !connectText.includes("stocked")
-          ) {
-            throw connectError;
-          }
-        }
-        await client.post({
-          path: "inventory_levels/set",
-          data: {
-            location_id: locationNumeric,
-            inventory_item_id: itemNumeric,
-            available,
-          },
-          type: "application/json",
-        });
-        return true;
+        return await setShopifyInventoryLevelsRest(
+          client,
+          inventoryItemId,
+          locationQuantities,
+        );
       }
       throw setError;
     }
@@ -2514,7 +2609,6 @@ async function syncShopifyVariableProductToStore(
         client,
         graphql,
         variant,
-        locationId,
       });
 
       if (stockSyncEnabled) {
@@ -2882,16 +2976,10 @@ async function sync_product(req, res, process) {
             }
 
             if (singleVariant?.id) {
-              const locationId = await resolveShopifyPrimaryLocationId(
-                client,
-                graphql,
-                [singleVariant.inventory_item_id],
-              );
               await enableShopifyInventoryItemTracked({
                 client,
                 graphql,
                 variant: singleVariant,
-                locationId,
               });
             }
 
