@@ -197,7 +197,7 @@ const modelSchema = new mongoose.Schema(
     bigcommerce_sync_status: {
       type: Boolean,
       field_name: "BigCommerce Sync Status",
-      default: false,
+      default: true,
     },
     // Second company BigCommerce Settings //
 

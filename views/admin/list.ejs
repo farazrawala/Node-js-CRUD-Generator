@@ -404,6 +404,9 @@
                     plugins: {
                         legend: { display: false },
                         tooltip: {
+                            filter: function (item) {
+                                return Number(item.parsed && item.parsed.y) > 0;
+                            },
                             callbacks: {
                                 title: function (items) {
                                     if (!items.length) return '';

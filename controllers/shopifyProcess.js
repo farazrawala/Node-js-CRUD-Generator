@@ -1632,8 +1632,15 @@ async function importShopifyVariableProductToPos(
     return null;
   }
 
-  const variants =
+  let variants =
     Array.isArray(remoteProduct?.variants) ? remoteProduct.variants : [];
+  if (client && shopifyProductId) {
+    variants = await loadShopifyProductVariants(
+      client,
+      shopifyProductId,
+      variants,
+    );
+  }
   stats.variations_fetched = (stats.variations_fetched || 0) + variants.length;
 
   const parentSku = `shopify-${shopifyProductId}`;
@@ -1957,6 +1964,138 @@ function shopifyVariantOptionKey(variant) {
     .join("|");
 }
 
+/**
+ * REST product payloads can omit variants; list them from
+ * /products/{id}/variants so matching/deletes see the full set.
+ */
+async function listShopifyProductVariants(client, shopifyProductId) {
+  if (!client || !shopifyProductId) return [];
+  const variants = [];
+  let request = {
+    path: `products/${shopifyProductId}/variants`,
+    query: { limit: 250 },
+  };
+  for (let page = 0; page < 20; page += 1) {
+    const resp = await client.get(request);
+    const batch = Array.isArray(resp?.body?.variants) ? resp.body.variants : [];
+    variants.push(...batch);
+    const nextPage = resp?.pageInfo?.nextPage;
+    if (!nextPage || !batch.length) break;
+    request = {
+      path: nextPage.path || request.path,
+      query: nextPage.query || { limit: 250 },
+    };
+  }
+  return variants;
+}
+
+async function loadShopifyProductVariants(
+  client,
+  shopifyProductId,
+  fallbackVariants = [],
+) {
+  if (client && shopifyProductId) {
+    try {
+      const listed = await listShopifyProductVariants(client, shopifyProductId);
+      if (listed.length) return listed;
+    } catch (err) {
+      if (isShopifyAuthError(err)) throw err;
+      console.warn(
+        `Failed to list Shopify variants for product ${shopifyProductId}:`,
+        describeShopifyError(err),
+      );
+    }
+  }
+  return Array.isArray(fallbackVariants) ? [...fallbackVariants] : [];
+}
+
+function shopifyVariantGid(variantId) {
+  const numeric = shopifyGidNumericId(variantId);
+  return numeric ? `gid://shopify/ProductVariant/${numeric}` : null;
+}
+
+/**
+ * Drop Shopify variants that are not mapped to a POS child. Sync previously
+ * updated/created matching variants and left the rest in place (e.g. 5 POS
+ * children on a product that already had 38 store variants).
+ */
+async function deleteShopifyUnusedProductVariants({
+  client,
+  graphql,
+  shopifyProductId,
+  keepVariantIds,
+}) {
+  const keep = new Set(
+    [...(keepVariantIds || [])].map((id) => String(id || "").trim()).filter(Boolean),
+  );
+  if (!client || !shopifyProductId || keep.size === 0) return 0;
+
+  const variants = await loadShopifyProductVariants(client, shopifyProductId);
+  const extras = variants.filter(
+    (row) => row?.id && !keep.has(String(row.id)),
+  );
+  if (!extras.length) return 0;
+
+  // Shopify requires at least one variant on a product.
+  if (variants.length - extras.length < 1) {
+    extras.pop();
+  }
+  if (!extras.length) return 0;
+
+  const extraGids = extras
+    .map((row) => shopifyVariantGid(row.id))
+    .filter(Boolean);
+
+  if (graphql && extraGids.length) {
+    try {
+      const productGid = shopifyProductGid(shopifyProductId);
+      const result = await graphql.request(
+        `mutation ProductVariantsBulkDelete($productId: ID!, $variantsIds: [ID!]!) {
+          productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) {
+            userErrors { field message }
+          }
+        }`,
+        {
+          variables: {
+            productId: productGid,
+            variantsIds: extraGids,
+          },
+        },
+      );
+      const errors =
+        shopifyGraphqlData(result)?.productVariantsBulkDelete?.userErrors || [];
+      if (!errors.length) {
+        return extras.length;
+      }
+      console.warn(
+        "Shopify productVariantsBulkDelete:",
+        errors.map((row) => row.message).join("; "),
+      );
+    } catch (err) {
+      if (isShopifyAuthError(err)) throw err;
+      console.warn(
+        `Shopify productVariantsBulkDelete failed for ${shopifyProductId}:`,
+        describeShopifyError(err),
+      );
+    }
+  }
+
+  let deleted = 0;
+  for (const row of extras) {
+    try {
+      await client.delete({ path: `variants/${row.id}` });
+      deleted += 1;
+    } catch (err) {
+      if (isShopifyAuthError(err)) throw err;
+      console.warn(
+        `Failed to delete extra Shopify variant ${row.id}:`,
+        describeShopifyError(err),
+      );
+    }
+  }
+  return deleted;
+}
+
 function shopifyVariantCombinedLabel(variant) {
   return formatShopifyVariantOptionValue(
     [variant?.option1, variant?.option2, variant?.option3]
@@ -2106,6 +2245,7 @@ async function syncShopifyVariableProductToStore(
     variations_created: 0,
     variations_skipped: 0,
     variations_unmatched: 0,
+    variations_deleted: 0,
     inventory_updated: 0,
   };
 
@@ -2263,8 +2403,11 @@ async function syncShopifyVariableProductToStore(
     shopifyProductId,
   );
 
-  const remoteVariants =
-    Array.isArray(remoteParent?.variants) ? [...remoteParent.variants] : [];
+  const remoteVariants = await loadShopifyProductVariants(
+    client,
+    shopifyProductId,
+    remoteParent?.variants,
+  );
   const usedVariantIds = new Set();
   let locationId = null;
   let stockSkipReason = "";
@@ -2413,6 +2556,13 @@ async function syncShopifyVariableProductToStore(
     }
   }
 
+  stats.variations_deleted = await deleteShopifyUnusedProductVariants({
+    client,
+    graphql,
+    shopifyProductId,
+    keepVariantIds: usedVariantIds,
+  });
+
   await deleteShopifyExtraProductOptions(
     graphql,
     shopifyProductId,
@@ -2427,8 +2577,11 @@ async function syncShopifyVariableProductToStore(
       const current = refreshed?.body?.product || {};
       const currentOptions =
         Array.isArray(current.options) ? current.options : [];
-      const currentVariants =
-        Array.isArray(current.variants) ? current.variants : [];
+      const currentVariants = await loadShopifyProductVariants(
+        client,
+        shopifyProductId,
+        current.variants,
+      );
       const keepOption = currentOptions[0];
       if (keepOption?.id && currentVariants.length) {
         await client.put({
@@ -2483,7 +2636,7 @@ async function syncShopifyVariableProductToStore(
   const remarks =
     `Product Name : ${parentProduct.product_name} synced to Shopify ` +
     `(product ${shopifyProductId}, variants updated ${variantsTouched}, ` +
-    `${stockRemark}, skipped ${stats.variations_skipped}, ` +
+    `deleted ${stats.variations_deleted}, ${stockRemark}, skipped ${stats.variations_skipped}, ` +
     `unmatched ${stats.variations_unmatched}, ${qtyFieldRemark}). ` +
     formatProductSyncFieldRemarks(integration);
 

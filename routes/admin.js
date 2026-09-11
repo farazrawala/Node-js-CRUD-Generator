@@ -3556,18 +3556,22 @@ router.get("/dashboard", async (req, res) => {
     };
 
     // Get recent activity
-    const recentUsers = await User.find()
+    const recentUsers = await User.find({ deletedAt: null })
       .sort({ createdAt: -1 })
       .limit(5)
-      .select("name email createdAt");
-    const recentProducts = await Product.find()
+      .select("name email company_id createdAt")
+      .populate("company_id", "company_name");
+    const recentProducts = await Product.find({ deletedAt: null })
       .sort({ createdAt: -1 })
       .limit(5)
-      .select("name price createdAt");
-    const recentOrders = await Order.find()
+      .select("product_name product_price company_id createdAt")
+      .populate("company_id", "company_name");
+    const recentOrders = await Order.find({ deletedAt: null })
       .sort({ createdAt: -1 })
       .limit(5)
-      .select("order_no total_amount status createdAt");
+      .select("order_no name email customer_id total_amount company_id createdAt")
+      .populate("company_id", "company_name")
+      .populate("customer_id", "name");
 
     // Get dynamic routes for sidebar  //posPayAmount
     const enabledRoutes = routeRegistry.getEnabledRoutes();
