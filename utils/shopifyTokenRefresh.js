@@ -1,22 +1,33 @@
 const Integration = require("../models/integration");
 
 function normalizeShopifyDomain(rawUrl) {
-  let shopDomain = String(rawUrl || "")
-    .trim()
+  const raw = String(rawUrl || "").trim();
+  if (!raw) return null;
+
+  const adminMatch = raw.match(
+    /(?:https?:\/\/)?admin\.shopify\.com\/store\/([a-z0-9][a-z0-9-]*)/i,
+  );
+  if (adminMatch) {
+    return `${adminMatch[1].toLowerCase()}.myshopify.com`;
+  }
+
+  let shopDomain = raw
     .replace(/^https?:\/\//i, "")
-    .replace(/\/$/, "");
+    .split("/")[0]
+    .replace(/:\d+$/, "")
+    .trim();
 
   if (!shopDomain) return null;
 
-  if (!/\.myshopify\.com$/i.test(shopDomain)) {
-    if (/^[a-z0-9][a-z0-9-]*$/i.test(shopDomain)) {
-      shopDomain = `${shopDomain}.myshopify.com`;
-    } else {
-      return null;
-    }
+  if (/\.myshopify\.com$/i.test(shopDomain)) {
+    return shopDomain.toLowerCase();
   }
 
-  return shopDomain.toLowerCase();
+  if (/^[a-z0-9][a-z0-9-]*$/i.test(shopDomain)) {
+    return `${shopDomain.toLowerCase()}.myshopify.com`;
+  }
+
+  return null;
 }
 
 function shopifyErrorText(error) {

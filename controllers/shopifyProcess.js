@@ -635,6 +635,100 @@ function shopifyProductGid(productId) {
   return numeric ? `gid://shopify/Product/${numeric}` : null;
 }
 
+function shopifySkuSearchQuery(sku) {
+  const trimmed = String(sku || "").trim();
+  if (!trimmed) return null;
+  const escaped = trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `sku:"${escaped}"`;
+}
+
+/**
+ * Shopify REST `GET /variants.json?sku=` ignores `sku` and returns the first
+ * page of store variants. Lookup must use GraphQL and then exact-match SKU.
+ */
+async function findShopifyProductIdByExactSku(graphql, sku) {
+  const query = shopifySkuSearchQuery(sku);
+  if (!graphql || !query) return null;
+  const wanted = String(sku).trim().toLowerCase();
+  try {
+    const result = await graphql.request(
+      `query ProductVariantsBySku($query: String!) {
+        productVariants(first: 10, query: $query) {
+          nodes {
+            sku
+            product { id legacyResourceId }
+          }
+        }
+      }`,
+      { variables: { query } },
+    );
+    const nodes = shopifyGraphqlData(result)?.productVariants?.nodes || [];
+    const match = nodes.find(
+      (row) =>
+        String(row?.sku || "")
+          .trim()
+          .toLowerCase() === wanted,
+    );
+    return (
+      shopifyGidNumericId(match?.product?.legacyResourceId) ||
+      shopifyGidNumericId(match?.product?.id) ||
+      null
+    );
+  } catch (err) {
+    if (isShopifyAuthError(err)) throw err;
+    console.warn(
+      `Shopify GraphQL SKU lookup failed for "${sku}":`,
+      describeShopifyError(err),
+    );
+    return null;
+  }
+}
+
+async function findShopifyProductIdByExactSkus(graphql, skus = []) {
+  const seen = new Set();
+  for (const sku of skus) {
+    const trimmed = String(sku || "").trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const productId = await findShopifyProductIdByExactSku(graphql, trimmed);
+    if (productId) return productId;
+  }
+  return null;
+}
+
+async function isShopifyProductMappedToOtherPosProduct({
+  shopifyProductId,
+  integrationId,
+  companyId,
+  allowedPosProductIds = [],
+}) {
+  const remoteId = String(shopifyProductId || "").trim();
+  if (!remoteId || !integrationId || !companyId) return false;
+  const allowed = new Set(
+    (allowedPosProductIds || [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  );
+  const rows = await SyncProduct.find({
+    integration_id: integrationId,
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+    $or: [
+      { refference_id: remoteId },
+      { refference_id: { $regex: `^${remoteId}:` } },
+    ],
+  })
+    .select("product_id")
+    .lean();
+  return rows.some((row) => {
+    const posId = String(row?.product_id || "").trim();
+    return Boolean(posId) && !allowed.has(posId);
+  });
+}
+
 /**
  * REST PUT products (API 2024-10) often keeps title/handle but ignores
  * `body_html`. GraphQL `productUpdate.descriptionHtml` is the write that
@@ -2050,23 +2144,30 @@ async function syncShopifyVariableProductToStore(
       parentSku,
       ...children.map((c) => resolvePosProductSku(c)),
     ].filter(Boolean);
-    for (const candidate of skuCandidates) {
-      const variantResp = await client.get({
-        path: "variants",
-        query: { sku: candidate },
+    const foundId = await findShopifyProductIdByExactSkus(
+      graphql,
+      skuCandidates,
+    );
+    if (foundId) {
+      const ownedByOther = await isShopifyProductMappedToOtherPosProduct({
+        shopifyProductId: foundId,
+        integrationId,
+        companyId,
+        allowedPosProductIds: [parentId, ...childIds],
       });
-      const vs =
-        Array.isArray(variantResp?.body?.variants) ?
-          variantResp.body.variants
-        : [];
-      if (vs.length && vs[0]?.product_id) {
-        shopifyProductId = String(vs[0].product_id);
-        const resp = await client.get({
-          path: `products/${shopifyProductId}`,
-        });
-        remoteParent = resp?.body?.product || null;
-        if (remoteParent) {
-          break;
+      if (!ownedByOther) {
+        try {
+          const resp = await client.get({ path: `products/${foundId}` });
+          remoteParent = resp?.body?.product || null;
+          if (remoteParent) shopifyProductId = foundId;
+        } catch (err) {
+          if (isShopifyAuthError(err)) throw err;
+          console.warn(
+            `Shopify parent ${foundId} from SKU lookup not found:`,
+            describeShopifyError(err),
+          );
+          shopifyProductId = null;
+          remoteParent = null;
         }
       }
     }
@@ -2507,32 +2608,31 @@ async function sync_product(req, res, process) {
           }
 
           if (!remoteProduct) {
-            step = `GET variants?sku=${sku}`;
-            const variantResponse = await client.get({
-              path: "variants",
-              query: { sku },
-            });
-            const existingVariants =
-              Array.isArray(variantResponse?.body?.variants) ?
-                variantResponse.body.variants
-              : [];
-            if (
-              existingVariants.length > 0 &&
-              existingVariants[0]?.product_id
-            ) {
-              remoteId = String(existingVariants[0].product_id);
-              try {
-                step = `GET products/${remoteId} (via variant SKU)`;
-                const productResponse = await client.get({
-                  path: `products/${remoteId}`,
+            step = `GraphQL productVariants sku=${sku}`;
+            const foundId = await findShopifyProductIdByExactSku(graphql, sku);
+            if (foundId) {
+              const ownedByOther =
+                await isShopifyProductMappedToOtherPosProduct({
+                  shopifyProductId: foundId,
+                  integrationId,
+                  companyId,
+                  allowedPosProductIds: [productId],
                 });
-                remoteProduct = productResponse?.body?.product || null;
-              } catch (fetchErr) {
-                if (isShopifyAuthError(fetchErr)) throw fetchErr;
-                console.warn(
-                  "Failed to load Shopify product by variant SKU:",
-                  describeShopifyError(fetchErr),
-                );
+              if (!ownedByOther) {
+                try {
+                  step = `GET products/${foundId} (via variant SKU)`;
+                  const productResponse = await client.get({
+                    path: `products/${foundId}`,
+                  });
+                  remoteProduct = productResponse?.body?.product || null;
+                  if (remoteProduct) remoteId = foundId;
+                } catch (fetchErr) {
+                  if (isShopifyAuthError(fetchErr)) throw fetchErr;
+                  console.warn(
+                    "Failed to load Shopify product by variant SKU:",
+                    describeShopifyError(fetchErr),
+                  );
+                }
               }
             }
           }
