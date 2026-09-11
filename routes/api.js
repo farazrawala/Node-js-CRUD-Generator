@@ -599,6 +599,8 @@ router.delete("/sync_product/unlink/:id", unlinkSyncProduct);
 router.delete("/sync_products/unlink/:id", unlinkSyncProduct);
 router.delete("/sync_product/unlink", unlinkSyncProduct);
 router.delete("/sync_products/unlink", unlinkSyncProduct);
+router.delete("/sync_product/delete/:id", unlinkSyncProduct);
+router.delete("/sync_products/delete/:id", unlinkSyncProduct);
 
 // WhatsApp message worker routes
 router.get("/whatsapp_message/fetch-random", fetchRandomWhatsappMessage);

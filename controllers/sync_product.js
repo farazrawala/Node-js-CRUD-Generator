@@ -57,12 +57,20 @@ async function unlinkSyncProduct(req, res) {
 
     await invalidateModuleListCachesForReq(req, "sync_product");
 
+    const unlinkedCount = Number(result.unlinked_count) || 0;
+    const message =
+      unlinkedCount > 1
+        ? `Product unlinked from store (${unlinkedCount} mappings, including child variations)`
+        : "Product unlinked from store";
+
     return res.status(200).json({
       success: true,
       status: 200,
-      message: "Product unlinked from store",
+      message,
       data: result.mapping,
       cancelled_processes: result.cancelled_processes,
+      unlinked_count: unlinkedCount,
+      unlinked_product_ids: result.unlinked_product_ids || [],
     });
   } catch (error) {
     await logControllerError(

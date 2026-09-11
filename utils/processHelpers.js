@@ -634,9 +634,68 @@ async function upsertSyncProductMapping({
 }
 
 /**
+ * POS ids for a variable family: the Variable parent plus every child.
+ * A Single product with no variable parent returns only itself.
+ */
+async function resolveVariableFamilyProductIds(productId, companyId) {
+  const product_id = coalesceObjectId(productId);
+  if (!product_id) return [];
+
+  const productFilter = { _id: product_id, deletedAt: null };
+  const company_id = coalesceObjectId(companyId);
+  if (company_id) productFilter.company_id = company_id;
+
+  const product = await Product.findOne(productFilter)
+    .select("product_type parent_product_id")
+    .lean();
+  if (!product) return [product_id];
+
+  const type = String(product.product_type || "")
+    .trim()
+    .toLowerCase();
+  const parentRef = coalesceObjectId(product.parent_product_id);
+  const isSelfParent =
+    parentRef && String(parentRef) === String(product_id);
+
+  let rootId = product_id;
+  if (parentRef && !isSelfParent) {
+    const parentFilter = { _id: parentRef, deletedAt: null };
+    if (company_id) parentFilter.company_id = company_id;
+    const parent = await Product.findOne(parentFilter)
+      .select("product_type")
+      .lean();
+    if (
+      parent &&
+      String(parent.product_type || "")
+        .trim()
+        .toLowerCase() === "variable"
+    ) {
+      rootId = parentRef;
+    } else {
+      return [product_id];
+    }
+  } else if (type !== "variable") {
+    return [product_id];
+  }
+
+  const childFilter = {
+    parent_product_id: rootId,
+    deletedAt: null,
+    _id: { $ne: rootId },
+  };
+  if (company_id) childFilter.company_id = company_id;
+
+  const children = await Product.find(childFilter).select("_id").lean();
+  return [rootId, ...children.map((row) => row._id)].filter(Boolean);
+}
+
+/**
  * Soft-unlink a POS product from a store integration (does not delete the
  * remote Shopify/WooCommerce product). Cancels queued sync_product jobs so
  * they cannot recreate the mapping.
+ *
+ * Variable products unlink the parent mapping and every child variation
+ * mapping for the same store.
  */
 async function unlinkSyncProductMapping({
   mappingId,
@@ -674,6 +733,14 @@ async function unlinkSyncProductMapping({
     };
   }
 
+  const familyIds = await resolveVariableFamilyProductIds(
+    existing.product_id,
+    existing.company_id || company_id,
+  );
+  const productIdsToUnlink = familyIds.length
+    ? familyIds
+    : [existing.product_id];
+
   const now = new Date();
   const update = {
     deletedAt: now,
@@ -681,12 +748,22 @@ async function unlinkSyncProductMapping({
   };
   if (actor) update.updated_by = actor;
 
-  const mapping = await SyncProduct.findByIdAndUpdate(existing._id, update, {
-    new: true,
-  }).lean();
+  const mappingFilter = {
+    deletedAt: null,
+    product_id: { $in: productIdsToUnlink },
+    integration_id: existing.integration_id,
+  };
+  if (existing.company_id) {
+    mappingFilter.company_id = existing.company_id;
+  }
+
+  const mappingResult = await SyncProduct.updateMany(mappingFilter, {
+    $set: update,
+  });
+  const mapping = await SyncProduct.findById(existing._id).lean();
 
   const pendingFilter = {
-    product_id: existing.product_id,
+    product_id: { $in: productIdsToUnlink },
     integration_id: existing.integration_id,
     action: "sync_product",
     progress: "not_started",
@@ -718,7 +795,14 @@ async function unlinkSyncProductMapping({
     cancelled_processes = pending.length;
   }
 
-  return { ok: true, mapping, cancelled_processes };
+  return {
+    ok: true,
+    mapping,
+    cancelled_processes,
+    unlinked_count:
+      mappingResult.modifiedCount ?? mappingResult.nModified ?? 0,
+    unlinked_product_ids: productIdsToUnlink.map(String),
+  };
 }
 
 async function findPosProductBySyncReference(
