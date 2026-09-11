@@ -2128,6 +2128,78 @@ async function getProductsByWarehouse(req, res) {
   }
 }
 
+function escapeRegexLiteral(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isVariableProductRecord(product) {
+  return (
+    String(product?.product_type || "")
+      .trim()
+      .toLowerCase() === "variable"
+  );
+}
+
+/** Child variation ids of a Variable parent (by parent_product_id, then name). */
+async function findVariableChildIds(parentId, companyId, parentName = "") {
+  const oid = coalesceObjectId(parentId);
+  if (!oid) return [];
+
+  const or = [
+    { parent_product_id: oid },
+    { parent_product_id: String(oid) },
+  ];
+  const name = String(parentName || "").trim();
+  if (name) {
+    or.push({
+      product_type: "Single",
+      product_name: {
+        $regex: `^${escapeRegexLiteral(name)}\\s*[\\(\\[]`,
+        $options: "i",
+      },
+    });
+  }
+
+  const filter = {
+    _id: { $ne: oid },
+    $and: [activeNotDeletedCriteria()],
+    $or: or,
+  };
+  const companyOid = coalesceObjectId(companyId);
+  if (companyOid) filter.company_id = companyOid;
+
+  const children = await Product.find(filter).select("_id").lean();
+  return children.map((row) => row._id).filter(Boolean);
+}
+
+async function softDeleteSyncMappingsForProducts(
+  productIds,
+  companyId,
+  updatedBy,
+  deletedAt,
+) {
+  const ids = (Array.isArray(productIds) ? productIds : []).filter(Boolean);
+  if (!ids.length) return;
+  try {
+    const SyncProduct = require("../models/sync_product");
+    const filter = {
+      product_id: { $in: ids },
+      $and: [activeNotDeletedCriteria()],
+    };
+    const companyOid = coalesceObjectId(companyId);
+    if (companyOid) filter.company_id = companyOid;
+    const set = { deletedAt, status: "inactive" };
+    const uid = coalesceObjectId(updatedBy);
+    if (uid) set.updated_by = uid;
+    await SyncProduct.updateMany(filter, { $set: set });
+  } catch (err) {
+    console.warn(
+      "Failed to unlink sync mappings after product delete:",
+      err?.message || err,
+    );
+  }
+}
+
 async function productDelete(req, res) {
   console.log(`🔐 Product delete attempt:`, {
     id: req.params.id,
@@ -2145,6 +2217,8 @@ async function productDelete(req, res) {
     );
   }
 
+  let variantsDeleted = 0;
+
   // Manually set the request body with deletedAt data
   req.body = { deletedAt: new Date().toISOString() };
   const response = await handleGenericUpdate(req, "product", {
@@ -2153,26 +2227,45 @@ async function productDelete(req, res) {
       const parentId = coalesceObjectId(
         record?._id || existingRecord?._id || reqInner.params?.id,
       );
-      let variantsDeleted = 0;
-      if (parentId) {
-        const now = record?.deletedAt ? new Date(record.deletedAt) : new Date();
-        const softDeleteSet = { deletedAt: now, status: "inactive" };
-        const uid = coalesceObjectId(reqInner.user?._id || reqInner.user?.id);
-        if (uid) softDeleteSet.updated_by = uid;
+      const companyId = coalesceObjectId(
+        filter.company_id || reqInner.user?.company_id,
+      );
+      const now = record?.deletedAt ? new Date(record.deletedAt) : new Date();
+      const uid = coalesceObjectId(reqInner.user?._id || reqInner.user?.id);
+      const source = existingRecord || record;
 
-        const childFilter = {
-          parent_product_id: parentId,
-          deletedAt: null,
-        };
-        const companyId = coalesceObjectId(
-          filter.company_id || reqInner.user?.company_id,
+      if (parentId && isVariableProductRecord(source)) {
+        const childIds = await findVariableChildIds(
+          parentId,
+          companyId,
+          source.product_name,
         );
-        if (companyId) childFilter.company_id = companyId;
-
-        const variantResult = await Product.updateMany(childFilter, {
-          $set: softDeleteSet,
-        });
-        variantsDeleted = variantResult.modifiedCount || 0;
+        if (childIds.length) {
+          const softDeleteSet = { deletedAt: now, status: "inactive" };
+          if (uid) softDeleteSet.updated_by = uid;
+          const childFilter = {
+            _id: { $in: childIds },
+            $and: [activeNotDeletedCriteria()],
+          };
+          if (companyId) childFilter.company_id = companyId;
+          const variantResult = await Product.updateMany(childFilter, {
+            $set: softDeleteSet,
+          });
+          variantsDeleted = variantResult.modifiedCount || childIds.length;
+        }
+        await softDeleteSyncMappingsForProducts(
+          [parentId, ...childIds],
+          companyId,
+          uid,
+          now,
+        );
+      } else if (parentId) {
+        await softDeleteSyncMappingsForProducts(
+          [parentId],
+          companyId,
+          uid,
+          now,
+        );
       }
       console.log(
         `✅ Product soft deleted successfully. Variants deleted: ${variantsDeleted}`,
@@ -2180,6 +2273,12 @@ async function productDelete(req, res) {
       await invalidateProductListCache(reqInner);
     },
   });
+  if (response?.success) {
+    response.variants_deleted = variantsDeleted;
+    if (variantsDeleted > 0) {
+      response.message = `Product deleted successfully (${variantsDeleted} variation${variantsDeleted === 1 ? "" : "s"} also deleted)`;
+    }
+  }
   return res.status(response.status).json(response);
 }
 
