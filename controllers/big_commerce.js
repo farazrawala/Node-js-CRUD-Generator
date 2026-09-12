@@ -330,8 +330,13 @@ async function listSentConnections(req, res) {
       .sort({ createdAt: -1 })
       .lean();
 
-    return jsonSuccess(res, 200, groupConnectionsByStatus(rows), null, {
-      total: rows.length,
+    const mapped = rows.map((row) => ({
+      ...row,
+      ...pickConnectionSyncSettings(row),
+    }));
+
+    return jsonSuccess(res, 200, groupConnectionsByStatus(mapped), null, {
+      total: mapped.length,
     });
   } catch (error) {
     console.error("[big_commerce] listSentConnections:", error);
@@ -729,22 +734,33 @@ async function updateConnectionSettings(req, res) {
         ? body.product_settings
         : body;
 
-    let changed = false;
+    const patch = {};
     for (const key of CONNECTION_SYNC_FIELDS) {
       if (nested[key] == null) continue;
       const next = toYesNo(nested[key], null);
       if (next !== "yes" && next !== "no") {
         return jsonError(res, 400, `${key} must be "yes" or "no"`);
       }
-      if (connection[key] !== next) {
-        connection[key] = next;
-        changed = true;
-      }
+      patch[key] = next;
     }
 
-    if (changed) {
-      await connection.save();
+    if (Object.keys(patch).length === 0) {
+      return jsonError(res, 400, "No settings to update");
     }
+
+    const senderId = coalesceObjectId(connection.company_id);
+    const targetId = coalesceObjectId(connection.target_company_id);
+    const result = await CompanyConnection.updateMany(
+      {
+        status: "approved",
+        $or: [
+          { company_id: senderId, target_company_id: targetId },
+          { company_id: targetId, target_company_id: senderId },
+        ],
+      },
+      { $set: patch },
+    );
+    const changed = Number(result?.modifiedCount || 0) > 0;
 
     const row = await CompanyConnection.findById(connection._id)
       .populate(CONNECTION_POPULATE)

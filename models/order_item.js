@@ -40,6 +40,14 @@ const modelSchema = new mongoose.Schema(
     profit: {
       type: Number,
     },
+    // hide_by_vendor: {
+    //   type: Boolean,
+    //   default: false,
+    // },
+    mark_as_delivered_by_vendor: {
+      type: Boolean,
+      default: false,
+    },
 
     branch_id: {
       type: mongoose.Schema.Types.ObjectId,
@@ -116,7 +124,9 @@ async function assignOriginCompanyIds(docs, session) {
     ...new Set(
       rows
         .map((d) => String(d.product_id ?? "").trim())
-        .filter((id) => mongoose.Types.ObjectId.isValid(id) && id.length === 24),
+        .filter(
+          (id) => mongoose.Types.ObjectId.isValid(id) && id.length === 24,
+        ),
     ),
   ];
   const products =

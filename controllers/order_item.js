@@ -7,6 +7,7 @@ const {
   handleGenericGetById,
   handleGenericGetAll,
 } = require("../utils/modelHelper");
+const { listApprovedVendorSyncPartnerIds } = require("../utils/vendorOrderSync");
 
 async function order_itemCreate(req, res) {
   const response = await handleGenericCreate(req, "order_item", {
@@ -496,8 +497,11 @@ async function costOfGoodsSoldByOrderItem(req, res) {
  * GET order lines whose origin catalog is the authenticated company (A).
  * `company_id` on the line is the selling (buyer) company; `origin_company_id` is A.
  *
- * Query: skip, limit, product_id, buyer_company_id, search, from, to,
+ * Query: skip, limit, product_id, company_id (or buyer_company_id),
+ * mark_as_delivered_by_vendor, search, from, to,
  * include_own=1 (also return A's own POS lines; default is partner sales only).
+ * Partner lines are limited to approved connections with `sync_order_to_vendor=yes`.
+ * Lines with `hide_by_vendor: true` are never returned.
  */
 async function getOrderItemsByOriginCompany(req, res) {
   try {
@@ -513,14 +517,38 @@ async function getOrderItemsByOriginCompany(req, res) {
       origin_company_id: cid,
       status: "active",
       deletedAt: null,
+      hide_by_vendor: { $ne: true },
     };
-    if (!includeOwn) {
-      filter.company_id = { $ne: cid };
+
+    const partnerIds = await listApprovedVendorSyncPartnerIds(cid);
+    const allowedBuyerIds = includeOwn ? [...partnerIds, cid] : partnerIds;
+
+    const rawBuyerCompany = req.query.company_id ?? req.query.buyer_company_id;
+    if (rawBuyerCompany != null && String(rawBuyerCompany).trim() !== "") {
+      const buyerCompanyId = coalesceObjectId(rawBuyerCompany);
+      if (!(buyerCompanyId instanceof mongoose.Types.ObjectId)) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          error: "Invalid company_id",
+        });
+      }
+      const isAllowed = allowedBuyerIds.some(
+        (id) => String(id) === String(buyerCompanyId),
+      );
+      filter.company_id = isAllowed ? buyerCompanyId : { $in: [] };
+    } else {
+      filter.company_id = { $in: allowedBuyerIds };
     }
 
-    const buyerCompanyId = coalesceObjectId(req.query.buyer_company_id);
-    if (buyerCompanyId) {
-      filter.company_id = buyerCompanyId;
+    const rawDelivered =
+      req.query.mark_as_delivered_by_vendor ??
+      req.query.markAsDeliveredByVendor;
+    if (rawDelivered != null && String(rawDelivered).trim() !== "") {
+      const delivered = parseVendorBooleanFlag(rawDelivered);
+      filter.mark_as_delivered_by_vendor = delivered
+        ? { $in: [true, "true", "yes", 1, "1"] }
+        : { $nin: [true, "true", "yes", 1, "1"] };
     }
 
     const rawProductId = req.query.product_id;
@@ -627,6 +655,252 @@ async function getOrderItemsByOriginCompany(req, res) {
   }
 }
 
+function parseVendorBooleanFlag(value) {
+  if (value === undefined || value === null || value === "") return true;
+  if (value === true || value === "true" || value === 1 || value === "1") {
+    return true;
+  }
+  if (value === false || value === "false" || value === 0 || value === "0") {
+    return false;
+  }
+  return Boolean(value);
+}
+
+async function loadOriginOrderItemForVendor(req, res) {
+  const cid = resolveOrderItemReportCompanyId(req, res);
+  if (!cid) return null;
+
+  const rawId =
+    req.params.id ||
+    req.params.order_item_id ||
+    req.body?.order_item_id ||
+    req.body?.id;
+  const idStr = String(rawId || "").trim();
+  if (!idStr || !mongoose.Types.ObjectId.isValid(idStr) || idStr.length !== 24) {
+    res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid order_item id",
+      message: "A valid order_item id is required",
+    });
+    return null;
+  }
+
+  const item = await OrderItem.findOne({
+    _id: idStr,
+    origin_company_id: cid,
+    deletedAt: null,
+  });
+  if (!item) {
+    res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Order item not found",
+      message: "Order item not found for this vendor",
+    });
+    return null;
+  }
+
+  return item;
+}
+
+/**
+ * PATCH/POST `/order_item/hide/:id`
+ * Vendor (origin company) hides or unhides a sold line via `hide_by_vendor`.
+ * Body: optional `{ hide_by_vendor: true|false }` (defaults to true).
+ */
+async function hideOrderItemByVendor(req, res) {
+  try {
+    const item = await loadOriginOrderItemForVendor(req, res);
+    if (!item) return;
+
+    const hideByVendor = parseVendorBooleanFlag(
+      req.body?.hide_by_vendor ?? req.body?.hide,
+    );
+
+    item.hide_by_vendor = hideByVendor;
+    if (req.user?._id) {
+      item.updated_by = req.user._id;
+    }
+    await item.save();
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: hideByVendor
+        ? "Order item hidden by vendor"
+        : "Order item unhidden by vendor",
+      data: item,
+    });
+  } catch (error) {
+    console.error("❌ hideOrderItemByVendor:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to hide order item",
+    });
+  }
+}
+
+/**
+ * PATCH/POST `/order_item/mark-as-delivered/:id`
+ * Vendor (origin company) marks or unmarks a sold line as delivered.
+ * Body: optional `{ mark_as_delivered_by_vendor: true|false }` (defaults to true).
+ */
+async function markOrderItemDeliveredByVendor(req, res) {
+  try {
+    const item = await loadOriginOrderItemForVendor(req, res);
+    if (!item) return;
+
+    const markedDelivered = parseVendorBooleanFlag(
+      req.body?.mark_as_delivered_by_vendor ??
+        req.body?.delivered ??
+        req.body?.mark_as_delivered,
+    );
+
+    item.mark_as_delivered_by_vendor = markedDelivered;
+    if (req.user?._id) {
+      item.updated_by = req.user._id;
+    }
+    await item.save();
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: markedDelivered
+        ? "Order item marked as delivered by vendor"
+        : "Order item unmarked as delivered by vendor",
+      data: item,
+    });
+  } catch (error) {
+    console.error("❌ markOrderItemDeliveredByVendor:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to mark order item delivered",
+    });
+  }
+}
+
+const BULK_VENDOR_ORDER_ITEM_LIMIT = 200;
+
+function collectOrderItemIdsFromRequest(req) {
+  const raw =
+    req.body?.ids ??
+    req.body?.order_item_ids ??
+    req.body?.order_items ??
+    req.body?.id ??
+    req.query?.ids ??
+    req.query?.order_item_ids;
+  const list = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? raw.split(/[,\s]+/)
+      : raw != null
+        ? [raw]
+        : [];
+  const ids = [];
+  const seen = new Set();
+  for (const entry of list) {
+    const idStr = String(
+      entry && typeof entry === "object"
+        ? entry._id || entry.id || entry.order_item_id || ""
+        : entry || "",
+    ).trim();
+    if (!idStr || seen.has(idStr)) continue;
+    seen.add(idStr);
+    ids.push(idStr);
+  }
+  return ids;
+}
+
+/**
+ * PATCH/POST `/order_item/bulk-mark-as-delivered`
+ * Vendor marks or unmarks many origin lines as delivered.
+ * Body: `{ ids: string[], mark_as_delivered_by_vendor?: true|false }`
+ * (flag defaults to true). Max 200 ids.
+ */
+async function bulkMarkOrderItemsDeliveredByVendor(req, res) {
+  try {
+    const cid = resolveOrderItemReportCompanyId(req, res);
+    if (!cid) return;
+
+    const ids = collectOrderItemIdsFromRequest(req);
+    if (!ids.length) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "ids is required",
+        message: "Provide order_item ids to mark as delivered",
+      });
+    }
+    if (ids.length > BULK_VENDOR_ORDER_ITEM_LIMIT) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Too many ids",
+        message: `A maximum of ${BULK_VENDOR_ORDER_ITEM_LIMIT} order items can be updated at once`,
+      });
+    }
+
+    const invalidIds = ids.filter(
+      (idStr) =>
+        !mongoose.Types.ObjectId.isValid(idStr) || idStr.length !== 24,
+    );
+    if (invalidIds.length) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid order_item id",
+        message: "One or more order_item ids are invalid",
+        invalid_ids: invalidIds,
+      });
+    }
+
+    const objectIds = ids.map((idStr) => new mongoose.Types.ObjectId(idStr));
+    const markedDelivered = parseVendorBooleanFlag(
+      req.body?.mark_as_delivered_by_vendor ??
+        req.body?.delivered ??
+        req.body?.mark_as_delivered,
+    );
+
+    const filter = {
+      _id: { $in: objectIds },
+      origin_company_id: cid,
+      deletedAt: null,
+    };
+    const set = { mark_as_delivered_by_vendor: markedDelivered };
+    if (req.user?._id) {
+      set.updated_by = req.user._id;
+    }
+
+    const result = await OrderItem.updateMany(filter, { $set: set });
+    const updatedItems = await OrderItem.find(filter).select("_id").lean();
+    const updatedIdSet = new Set(updatedItems.map((row) => String(row._id)));
+    const notFound = ids.filter((idStr) => !updatedIdSet.has(idStr));
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: markedDelivered
+        ? "Order items marked as delivered by vendor"
+        : "Order items unmarked as delivered by vendor",
+      mark_as_delivered_by_vendor: markedDelivered,
+      requested: ids.length,
+      updated: result.modifiedCount ?? result.nModified ?? updatedItems.length,
+      matched: result.matchedCount ?? updatedItems.length,
+      not_found: notFound,
+    });
+  } catch (error) {
+    console.error("❌ bulkMarkOrderItemsDeliveredByVendor:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Failed to bulk mark order items delivered",
+    });
+  }
+}
+
 module.exports = {
   order_itemCreate,
   order_itemUpdate,
@@ -635,4 +909,7 @@ module.exports = {
   costOfGoodsSoldByOrderItem,
   profitByOrderItem,
   getOrderItemsByOriginCompany,
+  hideOrderItemByVendor,
+  markOrderItemDeliveredByVendor,
+  bulkMarkOrderItemsDeliveredByVendor,
 };

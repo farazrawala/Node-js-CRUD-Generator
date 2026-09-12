@@ -17,8 +17,24 @@ function toYesNo(value, fallback = "yes") {
   return fallback;
 }
 
+function connectionPartyId(value) {
+  if (value == null) return "";
+  if (typeof value === "object") {
+    return String(value._id ?? value.id ?? "");
+  }
+  return String(value);
+}
+
+function connectionSyncOrderValue(connection) {
+  const nested =
+    connection?.product_settings && typeof connection.product_settings === "object"
+      ? connection.product_settings
+      : null;
+  return connection?.sync_order_to_vendor ?? nested?.sync_order_to_vendor;
+}
+
 function isSyncOrderToVendorEnabled(connection) {
-  return toYesNo(connection?.sync_order_to_vendor, "yes") === "yes";
+  return toYesNo(connectionSyncOrderValue(connection), "yes") === "yes";
 }
 
 function roundQty(value) {
@@ -41,17 +57,58 @@ function vendorQtyFromLocalStock(orderedQty, localOnHand, alreadyDeducted) {
   return roundQty(ordered - Math.max(0, local));
 }
 
+/**
+ * Partner company ids with an approved connection and `sync_order_to_vendor` enabled.
+ * If any approved connection with that partner has the flag set to `no`, the partner is excluded.
+ */
+async function listApprovedVendorSyncPartnerIds(vendorCompanyId) {
+  const vendorId = coalesceObjectId(vendorCompanyId);
+  if (!vendorId) return [];
+
+  const vendorKey = String(vendorId);
+  const connections = await CompanyConnection.find({
+    status: "approved",
+    $or: [{ company_id: vendorId }, { target_company_id: vendorId }],
+  })
+    .select("company_id target_company_id sync_order_to_vendor product_settings")
+    .lean();
+
+  const blocked = new Set();
+  const allowed = new Map();
+
+  for (const connection of connections) {
+    const companyKey = connectionPartyId(connection.company_id);
+    const targetKey = connectionPartyId(connection.target_company_id);
+    const otherKey = companyKey === vendorKey ? targetKey : companyKey;
+    if (!otherKey || otherKey === vendorKey) continue;
+
+    if (!isSyncOrderToVendorEnabled(connection)) {
+      blocked.add(otherKey);
+      allowed.delete(otherKey);
+      continue;
+    }
+    if (blocked.has(otherKey) || allowed.has(otherKey)) continue;
+    const oid = coalesceObjectId(otherKey);
+    if (oid) allowed.set(otherKey, oid);
+  }
+
+  return Array.from(allowed.values());
+}
+
 async function findApprovedConnection(companyA, companyB) {
   const a = coalesceObjectId(companyA);
   const b = coalesceObjectId(companyB);
   if (!a || !b) return null;
-  return CompanyConnection.findOne({
+  const rows = await CompanyConnection.find({
     status: "approved",
     $or: [
       { company_id: a, target_company_id: b },
       { company_id: b, target_company_id: a },
     ],
   }).lean();
+  if (!rows.length) return null;
+  if (rows.some((row) => !isSyncOrderToVendorEnabled(row))) return null;
+  return rows[0];
 }
 
 async function mapLocalWarehouseQty(productIds, companyId) {
@@ -413,21 +470,10 @@ async function backfillVendorOrdersForVendor(vendorCompanyId, userId = null) {
   const vendorId = coalesceObjectId(vendorCompanyId);
   if (!vendorId) return { created: 0 };
 
-  const connections = await CompanyConnection.find({
-    status: "approved",
-    $or: [{ company_id: vendorId }, { target_company_id: vendorId }],
-  })
-    .select("company_id target_company_id sync_order_to_vendor status")
-    .lean();
+  const partnerIds = await listApprovedVendorSyncPartnerIds(vendorId);
 
   let created = 0;
-  for (const connection of connections) {
-    if (!isSyncOrderToVendorEnabled(connection)) continue;
-    const otherId =
-      String(connection.company_id) === String(vendorId) ?
-        connection.target_company_id
-      : connection.company_id;
-    if (!otherId || String(otherId) === String(vendorId)) continue;
+  for (const otherId of partnerIds) {
 
     const orders = await Order.find({
       company_id: otherId,
@@ -463,6 +509,7 @@ async function backfillVendorOrdersForVendor(vendorCompanyId, userId = null) {
 
 module.exports = {
   isSyncOrderToVendorEnabled,
+  listApprovedVendorSyncPartnerIds,
   vendorQtyFromLocalStock,
   syncBuyerOrderToVendor,
   backfillVendorOrdersForVendor,

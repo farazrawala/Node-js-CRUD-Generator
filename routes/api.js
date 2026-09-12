@@ -130,6 +130,9 @@ const {
   costOfGoodsSoldByOrderItem,
   profitByOrderItem,
   getOrderItemsByOriginCompany,
+  hideOrderItemByVendor,
+  markOrderItemDeliveredByVendor,
+  bulkMarkOrderItemsDeliveredByVendor,
 } = require("../controllers/order_item");
 const {
   checkIntegrationActive,
@@ -856,6 +859,42 @@ router.get(
 );
 router.get("/order_item/by-origin-company", getOrderItemsByOriginCompany);
 router.get("/order_items/by-origin-company", getOrderItemsByOriginCompany);
+router.patch("/order_item/hide/:id", hideOrderItemByVendor);
+router.put("/order_item/hide/:id", hideOrderItemByVendor);
+router.post("/order_item/hide/:id", hideOrderItemByVendor);
+router.patch("/order_items/hide/:id", hideOrderItemByVendor);
+router.put("/order_items/hide/:id", hideOrderItemByVendor);
+router.post("/order_items/hide/:id", hideOrderItemByVendor);
+router.patch(
+  "/order_item/bulk-mark-as-delivered",
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+router.put(
+  "/order_item/bulk-mark-as-delivered",
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+router.post(
+  "/order_item/bulk-mark-as-delivered",
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+router.patch(
+  "/order_items/bulk-mark-as-delivered",
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+router.put(
+  "/order_items/bulk-mark-as-delivered",
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+router.post(
+  "/order_items/bulk-mark-as-delivered",
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+router.patch("/order_item/mark-as-delivered/:id", markOrderItemDeliveredByVendor);
+router.put("/order_item/mark-as-delivered/:id", markOrderItemDeliveredByVendor);
+router.post("/order_item/mark-as-delivered/:id", markOrderItemDeliveredByVendor);
+router.patch("/order_items/mark-as-delivered/:id", markOrderItemDeliveredByVendor);
+router.put("/order_items/mark-as-delivered/:id", markOrderItemDeliveredByVendor);
+router.post("/order_items/mark-as-delivered/:id", markOrderItemDeliveredByVendor);
 router.get("/order/sales", findSales);
 router.get("/order/sales-day-wise", findSalesDayWise);
 router.get("/order/sales-month-wise", findSalesMonthWise);

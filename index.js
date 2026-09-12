@@ -86,6 +86,11 @@ const {
   getVendorOrderById,
   createVendorOrder,
 } = require("./controllers/big_commerce");
+const {
+  hideOrderItemByVendor,
+  markOrderItemDeliveredByVendor,
+  bulkMarkOrderItemsDeliveredByVendor,
+} = require("./controllers/order_item");
 const fileUpload = require("express-fileupload");
 const methodOverride = require("method-override");
 
@@ -462,6 +467,64 @@ app.delete(
   salesOrderReturnDeletePaths,
   checkHeaderAuthentication,
   sales_return_delete,
+);
+
+const orderItemHidePaths = [
+  "/api/order_item/hide/:id",
+  "/api/order_items/hide/:id",
+  "/pos_admin/api/order_item/hide/:id",
+  "/pos_admin/api/order_items/hide/:id",
+];
+app.patch(
+  orderItemHidePaths,
+  checkHeaderAuthentication,
+  hideOrderItemByVendor,
+);
+app.put(orderItemHidePaths, checkHeaderAuthentication, hideOrderItemByVendor);
+app.post(orderItemHidePaths, checkHeaderAuthentication, hideOrderItemByVendor);
+
+const orderItemBulkDeliveredPaths = [
+  "/api/order_item/bulk-mark-as-delivered",
+  "/api/order_items/bulk-mark-as-delivered",
+  "/pos_admin/api/order_item/bulk-mark-as-delivered",
+  "/pos_admin/api/order_items/bulk-mark-as-delivered",
+];
+app.patch(
+  orderItemBulkDeliveredPaths,
+  checkHeaderAuthentication,
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+app.put(
+  orderItemBulkDeliveredPaths,
+  checkHeaderAuthentication,
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+app.post(
+  orderItemBulkDeliveredPaths,
+  checkHeaderAuthentication,
+  bulkMarkOrderItemsDeliveredByVendor,
+);
+
+const orderItemDeliveredPaths = [
+  "/api/order_item/mark-as-delivered/:id",
+  "/api/order_items/mark-as-delivered/:id",
+  "/pos_admin/api/order_item/mark-as-delivered/:id",
+  "/pos_admin/api/order_items/mark-as-delivered/:id",
+];
+app.patch(
+  orderItemDeliveredPaths,
+  checkHeaderAuthentication,
+  markOrderItemDeliveredByVendor,
+);
+app.put(
+  orderItemDeliveredPaths,
+  checkHeaderAuthentication,
+  markOrderItemDeliveredByVendor,
+);
+app.post(
+  orderItemDeliveredPaths,
+  checkHeaderAuthentication,
+  markOrderItemDeliveredByVendor,
 );
 
 app.get(
