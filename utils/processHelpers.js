@@ -266,6 +266,31 @@ function mapRemoteOrderAddressFields(remoteOrder, store) {
   return { address, city, state, zip, country };
 }
 
+/** Shopify `note` / WooCommerce `customer_note` for the POS invoice Note field. */
+function remoteOrderCustomerNote(remoteOrder, store) {
+  if (!remoteOrder || typeof remoteOrder !== "object") return "";
+  const storeKey = String(store || "").toLowerCase();
+  const candidates =
+    storeKey === "shopify" ?
+      [
+        remoteOrder.note,
+        remoteOrder.customer_note,
+        remoteOrder.order_note,
+        remoteOrder.notes,
+      ]
+    : [
+        remoteOrder.customer_note,
+        remoteOrder.note,
+        remoteOrder.order_note,
+        remoteOrder.notes,
+      ];
+  for (const value of candidates) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 /**
  * Find or create a POS customer for an imported online order.
  * 1) Match by phone (CUSTOMER) — preferred
@@ -425,6 +450,20 @@ function categorySlugFromName(name) {
 
 function resolveCompanyId(process) {
   return coalesceObjectId(process?.company_id?._id || process?.company_id);
+}
+
+/** Company `default_cash_account` for fetched/pulled POS “Receive in account”. */
+async function resolveCompanyDefaultCashAccountId(companyId) {
+  const cid = coalesceObjectId(companyId);
+  if (!cid) return null;
+  const company = await Company.findOne({
+    _id: cid,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("default_cash_account")
+    .lean();
+  return coalesceObjectId(company?.default_cash_account);
 }
 
 function resolveIntegrationId(process) {
@@ -1443,6 +1482,7 @@ function buildPosOrderHeaderFromRemote(remoteOrder, store, ctx) {
     zip: addressFields.zip,
     country: addressFields.country,
     integration_order_id: integrationOrderId,
+    note: remoteOrderCustomerNote(remoteOrder, storeKey),
     discount,
     shipment,
     lines_subtotal: linesSubtotal,
@@ -1484,6 +1524,11 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
     order_website_status: header.order_website_status,
   };
 
+  const pulledNote = remoteOrderCustomerNote(remoteOrder, store) || header.note;
+  if (pulledNote) {
+    patch.note = pulledNote;
+  }
+
   const previousStatus = String(existing?.order_status || "").trim();
   if (header.order_status && header.order_status !== previousStatus) {
     patch.order_status = header.order_status;
@@ -1498,7 +1543,22 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
     }
   }
 
+  if (!coalesceObjectId(existing?.payment_method_accounts_id)) {
+    const cashAccountId = await resolveCompanyDefaultCashAccountId(
+      header.company_id,
+    );
+    if (cashAccountId) {
+      patch.payment_method_accounts_id = cashAccountId;
+    }
+  }
+
   await Order.updateOne({ _id: existing._id }, { $set: patch });
+  if (pulledNote) {
+    await Order.collection.updateOne(
+      { _id: existing._id },
+      { $set: { note: pulledNote } },
+    );
+  }
 
   if (patch.order_status && patch.order_status !== previousStatus) {
     await recordOrderStatusUpdate({
@@ -3101,6 +3161,7 @@ async function markProcessOutcome(processId, status, remarks) {
 module.exports = {
   categorySlugFromName,
   resolveCompanyId,
+  resolveCompanyDefaultCashAccountId,
   resolveIntegrationId,
   resolveSyncStockTotals,
   syncStockQuantity,
@@ -3179,6 +3240,7 @@ module.exports = {
   coalesceObjectId,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  remoteOrderCustomerNote,
   resolvePosCustomerEmail,
   applyFetchOrderOutboundInventory,
 };

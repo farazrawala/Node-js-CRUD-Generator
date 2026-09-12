@@ -16,7 +16,6 @@ const { recordOrderStatusUpdate } = require("../utils/orderStatusHistory");
 const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
 const Attribute = require("../models/attribute");
-const Company = require("../models/company");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   categorySlugFromName,
@@ -66,11 +65,13 @@ const {
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  remoteOrderCustomerNote,
   resolveSyncStockTotals,
   syncStockQuantity,
   formatSyncStockFieldRemark,
   applyFetchOrderOutboundInventory,
   updatePosOrderFromRemote,
+  resolveCompanyDefaultCashAccountId,
   resolveRemoteOrderIdFromPosOrder,
   mapPosOrderStatusToWoo,
   finishPullOrderBatch,
@@ -92,19 +93,6 @@ const {
 /** POS qty for sync push: max(origin_qty, warehouse_inventory.quantity) plus source field. */
 async function resolveProductStockTotals(productIds, companyId) {
   return resolveSyncStockTotals(productIds, companyId);
-}
-
-async function resolveCompanyDefaultArAccountId(companyId) {
-  const cid = coalesceObjectId(companyId);
-  if (!cid) return null;
-  const company = await Company.findOne({
-    _id: cid,
-    status: "active",
-    deletedAt: null,
-  })
-    .select("default_account_receivable_account")
-    .lean();
-  return coalesceObjectId(company?.default_account_receivable_account);
 }
 
 async function recordBrandSyncMapping(
@@ -2889,6 +2877,7 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     zip: addressFields.zip,
     country: addressFields.country,
     description: externalRef,
+    note: remoteOrderCustomerNote(remoteOrder, "woocommerce"),
     integration_order_id: integrationOrderId,
     discount: Number(remoteOrder?.discount_total) || 0,
     shipment: Number(remoteOrder?.shipping_total) || 0,
@@ -2911,9 +2900,9 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     ),
     status: "active",
   };
-  const arAccountId = await resolveCompanyDefaultArAccountId(companyId);
-  if (arAccountId) {
-    orderPayload.payment_method_accounts_id = arAccountId;
+  const cashAccountId = await resolveCompanyDefaultCashAccountId(companyId);
+  if (cashAccountId) {
+    orderPayload.payment_method_accounts_id = cashAccountId;
   }
   if (customerId) {
     orderPayload.customer_id = customerId;

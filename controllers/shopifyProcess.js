@@ -68,11 +68,13 @@ const {
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  remoteOrderCustomerNote,
   resolveSyncStockTotals,
   syncStockQuantity,
   formatSyncStockFieldRemark,
   applyFetchOrderOutboundInventory,
   updatePosOrderFromRemote,
+  resolveCompanyDefaultCashAccountId,
   resolveRemoteOrderIdFromPosOrder,
   finishPullOrderBatch,
   failPullOrderBatch,
@@ -628,6 +630,40 @@ function shopifyGidNumericId(gid) {
 
 function shopifyGraphqlData(result) {
   return result?.data || result?.body?.data || null;
+}
+
+function shopifyOrderGid(remoteOrder) {
+  const fromAdmin = String(remoteOrder?.admin_graphql_api_id || "").trim();
+  if (fromAdmin) return fromAdmin;
+  const numericId = shopifyGidNumericId(remoteOrder?.id);
+  return numericId ? `gid://shopify/Order/${numericId}` : null;
+}
+
+/** REST `fields` often omits `note`; fill it from GraphQL when missing. */
+async function attachShopifyOrderNote(graphql, remoteOrder) {
+  if (!remoteOrder || typeof remoteOrder !== "object") return remoteOrder;
+  if (String(remoteOrder.note ?? "").trim()) return remoteOrder;
+  if (!graphql) return remoteOrder;
+  const gid = shopifyOrderGid(remoteOrder);
+  if (!gid) return remoteOrder;
+  try {
+    const result = await graphql.request(
+      `query OrderNote($id: ID!) {
+        order(id: $id) { note }
+      }`,
+      { variables: { id: gid } },
+    );
+    const note = shopifyGraphqlData(result)?.order?.note;
+    if (note != null && String(note).trim() !== "") {
+      remoteOrder.note = String(note).trim();
+    }
+  } catch (err) {
+    console.warn(
+      "[shopify] GraphQL order note lookup failed:",
+      err?.message || err,
+    );
+  }
+  return remoteOrder;
 }
 
 function shopifyProductGid(productId) {
@@ -1357,18 +1393,6 @@ async function resolveCompanyDefaultWarehouseId(companyId) {
   return null;
 }
 
-async function resolveCompanyDefaultArAccountId(companyId) {
-  const cid = coalesceObjectId(companyId);
-  if (!cid) return null;
-  const company = await Company.findOne({
-    _id: cid,
-    status: "active",
-    deletedAt: null,
-  })
-    .select("default_account_receivable_account")
-    .lean();
-  return coalesceObjectId(company?.default_account_receivable_account);
-}
 
 /** Set POS warehouse qty to match Shopify (absolute sync, not delta-only on create). */
 async function syncShopifyProductWarehouseStock({
@@ -3411,6 +3435,7 @@ async function fetch_brand(req, res, process) {
 }
 
 async function importShopifyOrderToPos(remoteOrder, ctx) {
+  await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
   const { companyId, process, stats, req } = ctx;
   const logCtx = { req, process, companyId };
   const integrationId = resolveIntegrationId(process);
@@ -3572,6 +3597,7 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     zip: addressFields.zip,
     country: addressFields.country,
     description: externalRef,
+    note: remoteOrderCustomerNote(remoteOrder, "shopify"),
     integration_order_id: integrationOrderId,
     discount,
     shipment,
@@ -3592,9 +3618,9 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     created_by: coalesceObjectId(process.created_by?._id || process.created_by),
     status: "active",
   };
-  const arAccountId = await resolveCompanyDefaultArAccountId(companyId);
-  if (arAccountId) {
-    orderPayload.payment_method_accounts_id = arAccountId;
+  const cashAccountId = await resolveCompanyDefaultCashAccountId(companyId);
+  if (cashAccountId) {
+    orderPayload.payment_method_accounts_id = cashAccountId;
   }
   if (customerId) {
     orderPayload.customer_id = customerId;
@@ -3647,9 +3673,43 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
 }
 
 /**
+ * Load a Shopify order by REST id, or by order name (#1001) when the POS
+ * reference is `integration_order_id` / order_number.
+ */
+async function fetchShopifyRemoteOrder(client, remoteId) {
+  const id = String(remoteId || "").replace(/^#/, "").trim();
+  if (!id) return null;
+
+  try {
+    const detailResponse = await client.get({
+      path: `orders/${id}`,
+    });
+    if (detailResponse?.body?.order?.id) {
+      return detailResponse.body.order;
+    }
+  } catch (_) {
+    // Order number (e.g. 1001) is not the REST id — look up by name.
+  }
+
+  const listResponse = await client.get({
+    path: "orders",
+    query: {
+      name: `#${id}`,
+      status: "any",
+      limit: 1,
+    },
+  });
+  const orders = Array.isArray(listResponse?.body?.orders)
+    ? listResponse.body.orders
+    : [];
+  return orders[0] || null;
+}
+
+/**
  * Pull one Shopify order into POS — update if already imported, else insert.
  */
 async function pullShopifyOrderToPos(remoteOrder, ctx) {
+  await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
   const { companyId, process, stats, req } = ctx;
   const logCtx = { req, process, companyId };
   const integrationId = resolveIntegrationId(process);
@@ -3714,13 +3774,10 @@ async function pull_order(req, res, process) {
     });
   }
 
-  const orderFields =
-    "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,shipping_address,customer";
-
   try {
-    return await runWithShopifyClient(integration, process, async (client) => {
+    return await runWithShopifyClient(integration, process, async (client, _integration, graphql) => {
       const stats = createPullOrderStats();
-      const importCtx = { companyId, process, stats, req };
+      const importCtx = { companyId, process, stats, req, graphql };
 
       if (posOrder) {
         const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "shopify");
@@ -3732,15 +3789,23 @@ async function pull_order(req, res, process) {
           });
         }
 
-        const detailResponse = await client.get({
-          path: `orders/${remoteId}`,
-          query: { fields: orderFields },
-        });
-        const remote = detailResponse?.body?.order;
+        const remote = await fetchShopifyRemoteOrder(client, remoteId);
         if (!remote?.id) {
           return res.status(404).json({
             success: false,
             message: `Shopify order ${remoteId} not found.`,
+          });
+        }
+        await attachShopifyOrderNote(graphql, remote);
+        if (!String(remote.note || "").trim()) {
+          console.warn(
+            "[shopify pull] Shopify order has no note after REST/GraphQL",
+            { remoteId, shopifyId: remote.id, graphql: Boolean(graphql) },
+          );
+        } else {
+          console.log("[shopify pull] received note", {
+            remoteId: String(remote.id),
+            note: String(remote.note).slice(0, 120),
           });
         }
 
@@ -3797,7 +3862,6 @@ async function pull_order(req, res, process) {
       const query = {
         limit,
         status: "any",
-        fields: orderFields,
         order: "id asc",
       };
       if (offset > 0) {
@@ -4562,12 +4626,10 @@ async function fetch_order(req, res, process) {
   const { limit, offset, page } = resolveBatchPagination(process);
 
   try {
-    return await runWithShopifyClient(integration, process, async (client) => {
+    return await runWithShopifyClient(integration, process, async (client, _integration, graphql) => {
       const query = {
         limit,
         status: "any",
-        fields:
-          "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,total_discounts,total_shipping_price_set,billing_address,shipping_address,customer",
         order: "id asc",
       };
       if (offset > 0) {
@@ -4581,7 +4643,7 @@ async function fetch_order(req, res, process) {
         : [];
       const stats = createFetchOrderStats();
 
-      const importCtx = { companyId, process, stats, req };
+      const importCtx = { companyId, process, stats, req, graphql };
 
       for (const remote of remoteOrders) {
         try {
@@ -4680,14 +4742,12 @@ async function fetch_latest_order(req, res, process) {
   const perPage = resolveLatestOrderBatchLimit(process);
 
   try {
-    return await runWithShopifyClient(integration, process, async (client) => {
+    return await runWithShopifyClient(integration, process, async (client, _integration, graphql) => {
       const listResponse = await client.get({
         path: "orders",
         query: {
           limit: perPage,
           status: "any",
-          fields:
-            "id,order_number,email,financial_status,fulfillment_status,line_items,total_price,subtotal_price,total_discounts,total_shipping_price_set,billing_address,shipping_address,customer",
           order: "id desc",
         },
       });
@@ -4696,7 +4756,7 @@ async function fetch_latest_order(req, res, process) {
           listResponse.body.orders
         : [];
       const stats = createFetchOrderStats();
-      const importCtx = { companyId, process, stats, req };
+      const importCtx = { companyId, process, stats, req, graphql };
 
       for (const remote of remoteOrders) {
         try {

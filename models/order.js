@@ -357,7 +357,10 @@ const modelSchema = new mongoose.Schema(
     },
     description: {
       type: String,
-      // required: true
+    },
+    note: {
+      type: String,
+      field_name: "Note",
     },
     discount: {
       type: Number,
