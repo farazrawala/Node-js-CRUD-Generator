@@ -109,6 +109,8 @@ module.exports = {
     "shop",
     "near mosque",
     "near market",
+    "near hospital",
+    "near school",
     "unknown",
     "abc",
     "xyz",

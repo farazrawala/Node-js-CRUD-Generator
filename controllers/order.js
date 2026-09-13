@@ -3529,6 +3529,17 @@ async function order_update(req, res) {
         beforeOrder,
         beforeItems,
       );
+      const incomingOrderStatus = String(req.body?.order_status || "").trim();
+      const previousStatus = String(beforeOrder.order_status || "").trim();
+      if (incomingOrderStatus && incomingOrderStatus !== previousStatus) {
+        const mappedWebsite = resolveWebsiteStatusForPosChange(
+          req,
+          incomingOrderStatus,
+        );
+        if (mappedWebsite) {
+          req.body.order_website_status = mappedWebsite;
+        }
+      }
     }
   }
 
@@ -6323,6 +6334,69 @@ async function applyOrderStatusStockTransition({
   };
 }
 
+const POS_TO_WEBSITE_STATUS_FALLBACK = Object.freeze({
+  pending: "pending",
+  draft: "pending",
+  placed: "confirmed",
+  confirmed: "confirmed",
+  processing: "processing",
+  active: "processing",
+  packed: "shipped",
+  in_transit: "shipped",
+  delivered: "delivered",
+  completed: "completed",
+  cancelled: "voided",
+  failed: "failed",
+  on_hold: "on-hold",
+  return: "refunded",
+  return_received: "refunded",
+  duplicate: "voided",
+  products_skipped: "on-hold",
+});
+
+function resolveWebsiteStatusForPosChange(req, nextStatus) {
+  const key = String(nextStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_")
+    .replace(/\s+/g, "_");
+
+  // OMS status change always drives website status from the map (e.g. cancelled → voided).
+  // Do not keep Shopify import values like "pending" after an OMS cancel/return.
+  if (typeof Order.mapPosOrderStatusToWebsiteStatus === "function") {
+    const mapped = Order.mapPosOrderStatusToWebsiteStatus(nextStatus);
+    if (mapped) return mapped;
+  }
+  if (POS_TO_WEBSITE_STATUS_FALLBACK[key]) {
+    return POS_TO_WEBSITE_STATUS_FALLBACK[key];
+  }
+
+  const explicitWebsite = String(req.body?.order_website_status || "").trim();
+  const allowed = Array.isArray(Order.ORDER_WEBSITE_STATUS_VALUES)
+    ? Order.ORDER_WEBSITE_STATUS_VALUES
+    : Object.values(POS_TO_WEBSITE_STATUS_FALLBACK);
+  if (explicitWebsite && allowed.includes(explicitWebsite)) {
+    return explicitWebsite;
+  }
+  return null;
+}
+
+async function persistOrderWebsiteStatus(orderId, websiteStatus) {
+  if (!orderId || !websiteStatus) return;
+  const oid = new mongoose.Types.ObjectId(String(orderId));
+  const result = await Order.updateOne(
+    { _id: oid },
+    { $set: { order_website_status: websiteStatus } },
+  );
+  const matched = result?.matchedCount ?? result?.n ?? 0;
+  if (!matched) {
+    console.warn("[order_update_status] website status persist matched 0", {
+      orderId: String(orderId),
+      websiteStatus,
+    });
+  }
+}
+
 /**
  * PATCH|POST /api/order/update-status/:id
  * Body: { order_status }, optional { from_status }
@@ -6352,7 +6426,11 @@ async function order_update_status(req, res) {
 
   const nextStatus = String(
     req.body?.order_status ?? req.body?.status ?? "",
-  ).trim();
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_")
+    .replace(/\s+/g, "_");
   if (!nextStatus) {
     return res.status(400).json({
       success: false,
@@ -6412,13 +6490,46 @@ async function order_update_status(req, res) {
     });
   }
 
+  const actorUserId = coalesceObjectId(req.user?._id);
+  const websiteStatus = resolveWebsiteStatusForPosChange(req, nextStatus);
+
   if (String(existingOrder.order_status || "").trim() === nextStatus) {
+    const currentWebsite = String(existingOrder.order_website_status || "").trim();
+    if (!websiteStatus || websiteStatus === currentWebsite) {
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        message: "Order status unchanged",
+        data: {
+          order: existingOrder,
+          previous_status: existingOrder.order_status,
+          stock_action: "none",
+          stock_updates: [],
+        },
+      });
+    }
+
+    const websiteSet = { order_website_status: websiteStatus };
+    if (actorUserId) websiteSet.updated_by = actorUserId;
+    const syncedOrder = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      },
+      { $set: websiteSet },
+      { new: true, runValidators: true },
+    ).lean();
+    await persistOrderWebsiteStatus(orderId, websiteStatus);
+    if (syncedOrder) syncedOrder.order_website_status = websiteStatus;
+
     return res.status(200).json({
       success: true,
       status: 200,
-      message: "Order status unchanged",
+      message: "Website status updated",
       data: {
-        order: existingOrder,
+        order: syncedOrder || existingOrder,
         previous_status: existingOrder.order_status,
         stock_action: "none",
         stock_updates: [],
@@ -6432,7 +6543,6 @@ async function order_update_status(req, res) {
   let updatedOrder = null;
   let statusUpdateRow = null;
   const logUrl = req.originalUrl || req.path || "/api/order/update-status";
-  const actorUserId = coalesceObjectId(req.user?._id);
 
   const runBody = async (mongoSession) => {
     stockResult = await applyOrderStatusStockTransition({
@@ -6446,6 +6556,9 @@ async function order_update_status(req, res) {
     const $set = {
       order_status: nextStatus,
     };
+    if (websiteStatus) {
+      $set.order_website_status = websiteStatus;
+    }
     if (actorUserId) {
       $set.updated_by = actorUserId;
     }
@@ -6523,6 +6636,18 @@ async function order_update_status(req, res) {
       status: 500,
       error: txnError.message || "Failed to update order status",
     });
+  }
+
+  if (websiteStatus) {
+    try {
+      await persistOrderWebsiteStatus(orderId, websiteStatus);
+      if (updatedOrder) updatedOrder.order_website_status = websiteStatus;
+    } catch (websiteErr) {
+      console.error(
+        "[order_update_status] website status persist failed:",
+        websiteErr?.message || websiteErr,
+      );
+    }
   }
 
   let pushOrderQueue = null;
@@ -7218,7 +7343,9 @@ async function order_validate_address(req, res) {
 /**
  * PATCH|POST /api/order/update-address/:id
  * Body: { address?, city?, state?, zip?, country?, name?, email?, phone? }
- * Optional: { validate: true, strict: true } — run quality check; strict → 400 if severe
+ * Always validates the merged address and syncs `incomplete_address` tag
+ * (adds when incomplete, removes when complete).
+ * Optional: { strict: true } → 400 if score is severely low.
  */
 async function order_update_address(req, res) {
   const {
@@ -7303,23 +7430,18 @@ async function order_update_address(req, res) {
     country: $set.country !== undefined ? $set.country : existingOrder.country,
   };
 
-  const wantValidate =
-    req.body?.validate === true ||
-    req.body?.validate === "true" ||
-    req.query?.validate === "1" ||
-    req.query?.validate === "true";
   const strict =
     req.body?.strict === true ||
     req.body?.strict === "true" ||
     req.query?.strict === "1" ||
     req.query?.strict === "true";
 
-  let addressValidation = null;
-  if (wantValidate || strict) {
-    addressValidation = validateOrderAddressFields(mergedForValidation);
+  // Always score the merged address so incomplete_address can be added/removed.
+  const addressValidation = validateOrderAddressFields(mergedForValidation);
+  if (strict) {
     const cfg = loadAddressValidationConfig();
     const severe = cfg.severeScoreThreshold ?? cfg.minimumScore ?? 40;
-    if (strict && addressValidation.score < severe) {
+    if (addressValidation.score < severe) {
       return res.status(400).json({
         success: false,
         status: 400,
@@ -7363,28 +7485,28 @@ async function order_update_address(req, res) {
     });
   }
 
-  // Auto-tag incomplete_address when validated and score is low
+  // Keep incomplete_address in sync with the saved address (same rules as fetch import).
   if (
-    addressValidation &&
-    addressValidation.score < 70 &&
     Array.isArray(Order.ORDER_TAG_VALUES) &&
     Order.ORDER_TAG_VALUES.includes("incomplete_address")
   ) {
-    await Order.updateOne(
-      { _id: orderId },
-      { $addToSet: { tags: "incomplete_address" } },
-    );
-    updatedOrder = await Order.findById(orderId).lean();
-  } else if (
-    addressValidation &&
-    addressValidation.isValid &&
-    (updatedOrder.tags || []).includes("incomplete_address")
-  ) {
-    await Order.updateOne(
-      { _id: orderId },
-      { $pull: { tags: "incomplete_address" } },
-    );
-    updatedOrder = await Order.findById(orderId).lean();
+    const { isIncompleteOrderAddress } = require("../utils/processHelpers");
+    const incomplete = isIncompleteOrderAddress(mergedForValidation);
+    const hasTag = (updatedOrder.tags || []).includes("incomplete_address");
+
+    if (incomplete && !hasTag) {
+      await Order.updateOne(
+        { _id: orderId },
+        { $addToSet: { tags: "incomplete_address" } },
+      );
+      updatedOrder = await Order.findById(orderId).lean();
+    } else if (!incomplete && hasTag) {
+      await Order.updateOne(
+        { _id: orderId },
+        { $pull: { tags: "incomplete_address" } },
+      );
+      updatedOrder = await Order.findById(orderId).lean();
+    }
   }
 
   return res.status(200).json({

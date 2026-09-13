@@ -65,6 +65,8 @@ const {
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  isIncompleteOrderAddress,
+  applyIncompleteAddressTagIfNeeded,
   remoteOrderCustomerNote,
   resolveSyncStockTotals,
   syncStockQuantity,
@@ -2900,6 +2902,10 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     ),
     status: "active",
   };
+  const incompleteAddress = isIncompleteOrderAddress(addressFields);
+  if (incompleteAddress) {
+    orderPayload.tags = ["incomplete_address"];
+  }
   const cashAccountId = await resolveCompanyDefaultCashAccountId(companyId);
   if (cashAccountId) {
     orderPayload.payment_method_accounts_id = cashAccountId;
@@ -2909,6 +2915,10 @@ async function importWooOrderToPos(remoteOrder, ctx) {
   }
 
   const order = await Order.create(orderPayload);
+
+  if (incompleteAddress) {
+    await applyIncompleteAddressTagIfNeeded(order._id, addressFields);
+  }
 
   await recordOrderStatusUpdate({
     orderId: order._id,

@@ -266,6 +266,81 @@ function mapRemoteOrderAddressFields(remoteOrder, store) {
   return { address, city, state, zip, country };
 }
 
+/**
+ * Local address completeness check (same spirit as OMS validate-address tagging).
+ * Incomplete when score &lt; 70, invalid, or house/building number is missing.
+ */
+function isIncompleteOrderAddress(addressFields = {}) {
+  const address = String(addressFields?.address ?? "").trim();
+  const city = String(addressFields?.city ?? "").trim();
+  const zip = String(addressFields?.zip ?? "").trim();
+  const country = String(addressFields?.country ?? "").trim();
+
+  // Fast path: empty / landmark-only shipping lines are always incomplete.
+  if (!address) return true;
+  if (
+    /^\s*near\b/i.test(address) &&
+    !/\d/.test(address) &&
+    !/\b(?:house|hous|plot|flat|flt|apt|apartment|unit|suite)\b/i.test(address)
+  ) {
+    return true;
+  }
+
+  try {
+    const {
+      validateOrderAddressFields,
+    } = require("../validators/addressValidator");
+    const result = validateOrderAddressFields({
+      address,
+      city,
+      state: addressFields.state,
+      zip,
+      country,
+    });
+    if (!result) return true;
+    if (Number(result.score) < 70) return true;
+    if (result.isValid === false) return true;
+    if (
+      Array.isArray(result.missingFields) &&
+      result.missingFields.includes("house")
+    ) {
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn(
+      "[order-import] address completeness check failed:",
+      err?.message || err,
+    );
+    // Fail closed — still tag so ops can review rather than silently skipping.
+    return true;
+  }
+}
+
+/**
+ * Add `incomplete_address` tag when shipping address looks incomplete.
+ * Does not remove the tag (manual / validate-address flow owns removal).
+ */
+async function applyIncompleteAddressTagIfNeeded(orderId, addressFields) {
+  const oid = coalesceObjectId(orderId);
+  if (!oid) return false;
+  if (!isIncompleteOrderAddress(addressFields)) return false;
+
+  const OrderModel = require("../models/order");
+  if (
+    !Array.isArray(OrderModel.ORDER_TAG_VALUES) ||
+    !OrderModel.ORDER_TAG_VALUES.includes("incomplete_address")
+  ) {
+    return false;
+  }
+
+  await OrderModel.updateOne(
+    { _id: oid },
+    { $addToSet: { tags: "incomplete_address" } },
+  );
+  return true;
+}
+
 /** Shopify `note` / WooCommerce `customer_note` for the POS invoice Note field. */
 function remoteOrderCustomerNote(remoteOrder, store) {
   if (!remoteOrder || typeof remoteOrder !== "object") return "";
@@ -1560,6 +1635,16 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
     );
   }
 
+  if (String(store || "").toLowerCase() === "shopify") {
+    await applyIncompleteAddressTagIfNeeded(existing._id, {
+      address: header.address,
+      city: header.city,
+      state: header.state,
+      zip: header.zip,
+      country: header.country,
+    });
+  }
+
   if (patch.order_status && patch.order_status !== previousStatus) {
     await recordOrderStatusUpdate({
       orderId: existing._id,
@@ -1580,6 +1665,10 @@ function mapPosOrderStatusToShopifyFulfillmentAction(posStatus) {
   const s = String(posStatus || "").trim().toLowerCase();
   if (s === "cancelled" || s === "duplicate") {
     return "cancel";
+  }
+  if (s === "return" || s === "return_received") {
+    // Shopify Payment status → Refunded (fulfillment stays Fulfilled unless restocked)
+    return "refund";
   }
   if (s === "on_hold") {
     return "hold";
@@ -3240,6 +3329,8 @@ module.exports = {
   coalesceObjectId,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  isIncompleteOrderAddress,
+  applyIncompleteAddressTagIfNeeded,
   remoteOrderCustomerNote,
   resolvePosCustomerEmail,
   applyFetchOrderOutboundInventory,

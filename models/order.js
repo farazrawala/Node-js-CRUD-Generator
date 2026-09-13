@@ -182,6 +182,36 @@ const ORDER_WEBSITE_STATUS_VALUES = [
   "unfulfilled",
 ];
 
+/** POS `order_status` → `order_website_status` when status is changed in OMS/POS. */
+const POS_TO_WEBSITE_STATUS = Object.freeze({
+  pending: "pending",
+  draft: "pending",
+  placed: "confirmed",
+  confirmed: "confirmed",
+  processing: "processing",
+  active: "processing",
+  packed: "shipped",
+  in_transit: "shipped",
+  delivered: "delivered",
+  completed: "completed",
+  cancelled: "voided",
+  failed: "failed",
+  on_hold: "on-hold",
+  return: "refunded",
+  return_received: "refunded",
+  duplicate: "voided",
+  products_skipped: "on-hold",
+});
+
+function mapPosOrderStatusToWebsiteStatus(posStatus) {
+  const key = String(posStatus || "").trim().toLowerCase();
+  const mapped = POS_TO_WEBSITE_STATUS[key];
+  if (mapped && ORDER_WEBSITE_STATUS_VALUES.includes(mapped)) {
+    return mapped;
+  }
+  return null;
+}
+
 /**
  * Suggested lifecycle groupings for app logic (stock, revenue, UI filters).
  * Not enforced by Mongoose — use `classifyOrderStatus` / Sets in controllers.
@@ -920,6 +950,7 @@ if (mongoose.connection.readyState === 1) {
 module.exports = MODEL;
 module.exports.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
 module.exports.ORDER_WEBSITE_STATUS_VALUES = ORDER_WEBSITE_STATUS_VALUES;
+module.exports.mapPosOrderStatusToWebsiteStatus = mapPosOrderStatusToWebsiteStatus;
 module.exports.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
 module.exports.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;
 module.exports.getOrderStatusStockEffect = getOrderStatusStockEffect;

@@ -261,3 +261,16 @@ node scripts/run-shopify-parts-import.js --local --dry-run --company-id YOUR_ID
   "return_received",
 
 
+
+shopify status acc to our status : 
+
+pending, draft =  pending
+placed, confirmed = confirmed
+processing, active = processing
+packed, in_transit = shipped
+delivered = delivered
+completed = completed
+cancelled, duplicate = voided
+failed = failed
+on_hold, products_skipped = on-hold
+return, return_received =refunded

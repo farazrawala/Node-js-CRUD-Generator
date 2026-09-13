@@ -68,6 +68,8 @@ const {
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
   mapRemoteOrderAddressFields,
+  isIncompleteOrderAddress,
+  applyIncompleteAddressTagIfNeeded,
   remoteOrderCustomerNote,
   resolveSyncStockTotals,
   syncStockQuantity,
@@ -161,6 +163,8 @@ function buildShopifyClient(integration, { requireToken = true } = {}) {
       "read_inventory",
       "write_inventory",
       "read_locations",
+      "read_orders",
+      "write_orders",
       "read_merchant_managed_fulfillment_orders",
       "write_merchant_managed_fulfillment_orders",
     ],
@@ -3514,6 +3518,10 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
         );
       }
     }
+    await applyIncompleteAddressTagIfNeeded(
+      existing._id,
+      mapRemoteOrderAddressFields(remoteOrder, "shopify"),
+    );
     const backfill = await backfillPosOrderLinesIfEmpty(
       existing,
       remoteOrder,
@@ -3618,6 +3626,10 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     created_by: coalesceObjectId(process.created_by?._id || process.created_by),
     status: "active",
   };
+  const incompleteAddress = isIncompleteOrderAddress(addressFields);
+  if (incompleteAddress) {
+    orderPayload.tags = ["incomplete_address"];
+  }
   const cashAccountId = await resolveCompanyDefaultCashAccountId(companyId);
   if (cashAccountId) {
     orderPayload.payment_method_accounts_id = cashAccountId;
@@ -3627,6 +3639,12 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
   }
 
   const order = await Order.create(orderPayload);
+
+  // Belt-and-suspenders: create payload tags have been dropped in some runs;
+  // $addToSet after insert always persists the OMS incomplete_address tag.
+  if (incompleteAddress) {
+    await applyIncompleteAddressTagIfNeeded(order._id, addressFields);
+  }
 
   await recordOrderStatusUpdate({
     orderId: order._id,
@@ -4025,6 +4043,582 @@ async function releaseShopifyFulfillmentHolds(client, fulfillmentOrders) {
   return released;
 }
 
+/**
+ * OMS processing / confirmed = payment received. Mark pending Shopify orders as paid
+ * via GraphQL orderMarkAsPaid (Payment pending → Paid).
+ */
+async function markShopifyOrderAsPaidIfPending(client, graphql, remoteOrderId) {
+  const orderResponse = await client.get({
+    path: `orders/${remoteOrderId}`,
+    query: {
+      fields: "id,financial_status,cancelled_at,total_outstanding,currency,name",
+    },
+  });
+  const order = orderResponse?.body?.order;
+  if (!order) {
+    return { skipped: true, reason: "order_not_found" };
+  }
+  if (order.cancelled_at) {
+    return { skipped: true, reason: "cancelled" };
+  }
+
+  const financial = String(order.financial_status || "")
+    .trim()
+    .toLowerCase();
+  if (financial === "paid") {
+    return { skipped: true, reason: "already_paid", financial_status: financial };
+  }
+  if (!["pending", "authorized", "partially_paid"].includes(financial)) {
+    return { skipped: true, reason: `financial_${financial || "unknown"}`, financial_status: financial };
+  }
+
+  if (!graphql || typeof graphql.request !== "function") {
+    throw new Error(
+      "Shopify GraphQL client unavailable for orderMarkAsPaid (write_orders required).",
+    );
+  }
+
+  const gid =
+    /^\d+$/.test(String(remoteOrderId)) ?
+      `gid://shopify/Order/${remoteOrderId}`
+    : String(remoteOrderId);
+  const result = await graphql.request(
+    `mutation orderMarkAsPaid($input: OrderMarkAsPaidInput!) {
+      orderMarkAsPaid(input: $input) {
+        order {
+          id
+          name
+          displayFinancialStatus
+          legacyResourceId
+        }
+        userErrors { field message }
+      }
+    }`,
+    { variables: { input: { id: gid } } },
+  );
+  const payload = result?.data?.orderMarkAsPaid || result?.body?.data?.orderMarkAsPaid;
+  const userErrors = Array.isArray(payload?.userErrors) ? payload.userErrors : [];
+  if (userErrors.length) {
+    throw new Error(
+      userErrors.map((e) => e.message || JSON.stringify(e)).join("; "),
+    );
+  }
+
+  return {
+    skipped: false,
+    financial_status_before: financial,
+    financial_status:
+      String(payload?.order?.displayFinancialStatus || "paid")
+        .trim()
+        .toLowerCase() || "paid",
+    order_name: payload?.order?.name || order.name || null,
+  };
+}
+
+/**
+ * Keep POS `order_website_status` aligned with OMS status after a store push.
+ */
+async function syncPosWebsiteStatusAfterPush(posOrder, posStatus) {
+  const Order = require("../models/order");
+  const orderId = coalesceObjectId(posOrder?._id || posOrder?.id);
+  if (!orderId) return null;
+  const mapped =
+    typeof Order.mapPosOrderStatusToWebsiteStatus === "function"
+      ? Order.mapPosOrderStatusToWebsiteStatus(posStatus)
+      : null;
+  if (!mapped) return null;
+  await Order.updateOne(
+    { _id: orderId },
+    { $set: { order_website_status: mapped } },
+  );
+  return mapped;
+}
+
+/**
+ * Mirror OMS status onto Shopify order tags (visible in admin).
+ * Replaces any prior `oms_status:*` tag.
+ */
+async function syncShopifyOrderOmsStatusTag(client, remoteOrderId, posStatus) {
+  const status = String(posStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_")
+    .replace(/\s+/g, "_");
+  if (!status) {
+    return { updated: false, reason: "empty_status" };
+  }
+
+  const orderResponse = await client.get({
+    path: `orders/${remoteOrderId}`,
+    query: { fields: "id,tags" },
+  });
+  const order = orderResponse?.body?.order;
+  if (!order) {
+    return { updated: false, reason: "order_not_found" };
+  }
+
+  const omsTag = `oms_status:${status}`;
+  const existing = String(order.tags || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .filter((t) => !/^oms_status:/i.test(t));
+  existing.push(omsTag);
+  const tags = existing.join(", ");
+
+  await client.put({
+    path: `orders/${remoteOrderId}`,
+    data: { order: { id: Number(remoteOrderId) || remoteOrderId, tags } },
+    type: "application/json",
+  });
+
+  return { updated: true, tag: omsTag, tags };
+}
+
+/**
+ * Extract a short Shopify API error (avoid dumping full order JSON into remarks).
+ */
+function summarizeShopifyApiError(error, fallback = "Shopify request failed") {
+  const status =
+    error?.response?.code ??
+    error?.response?.statusCode ??
+    error?.statusCode ??
+    error?.status ??
+    null;
+  const body = error?.response?.body ?? error?.response?.data ?? null;
+  const errors = body?.errors;
+  let detail = "";
+  if (typeof errors === "string" && errors.trim()) {
+    detail = errors.trim();
+  } else if (errors != null) {
+    try {
+      detail = JSON.stringify(errors);
+    } catch {
+      detail = String(errors);
+    }
+  } else if (typeof body === "string" && body.trim()) {
+    detail = body.trim().slice(0, 400);
+  } else if (body?.order && typeof body.order === "object") {
+    const o = body.order;
+    detail = [
+      o.name ? `order ${o.name}` : null,
+      o.financial_status ? `financial=${o.financial_status}` : null,
+      o.fulfillment_status ? `fulfillment=${o.fulfillment_status}` : null,
+      o.cancelled_at ? "already_cancelled" : null,
+      o.closed_at ? "closed" : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+  } else if (error?.message) {
+    detail = String(error.message);
+  }
+  const parts = [];
+  if (status != null) parts.push(`status=${status}`);
+  if (detail) parts.push(detail.slice(0, 500));
+  return parts.join(" — ") || fallback;
+}
+
+async function reopenShopifyOrderIfClosed(client, remoteOrderId, order) {
+  if (!order?.closed_at) {
+    return { reopened: false };
+  }
+  await client.post({
+    path: `orders/${remoteOrderId}/open`,
+    data: {},
+    type: "application/json",
+  });
+  return { reopened: true };
+}
+
+/**
+ * Build refund transactions from calculate result, or fall back to sale/capture
+ * rows (needed for manual / draft-order payments where calculate returns none).
+ */
+async function resolveShopifyRefundTransactions(
+  client,
+  remoteOrderId,
+  order,
+  calculated,
+) {
+  const currency = String(order?.currency || "").trim() || undefined;
+  const fromCalculate = (Array.isArray(calculated?.transactions)
+    ? calculated.transactions
+    : []
+  )
+    .map((tx) => ({
+      parent_id: tx.parent_id,
+      amount: tx.amount,
+      currency: tx.currency || currency,
+      gateway: tx.gateway,
+      kind: "refund",
+    }))
+    .filter((tx) => tx.parent_id != null && Number(tx.amount) > 0);
+
+  if (fromCalculate.length) {
+    return fromCalculate;
+  }
+
+  let transactions = [];
+  try {
+    const txResponse = await client.get({
+      path: `orders/${remoteOrderId}/transactions`,
+    });
+    transactions = Array.isArray(txResponse?.body?.transactions)
+      ? txResponse.body.transactions
+      : [];
+  } catch (txErr) {
+    console.warn(
+      "[shopify push_order] list transactions for refund failed:",
+      summarizeShopifyApiError(txErr),
+    );
+    return [];
+  }
+
+  const refundable = transactions.filter((tx) => {
+    const kind = String(tx?.kind || "").toLowerCase();
+    const status = String(tx?.status || "").toLowerCase();
+    return (
+      status === "success" &&
+      (kind === "sale" || kind === "capture") &&
+      Number(tx.amount) > 0
+    );
+  });
+
+  const amount =
+    String(order?.current_total_price || order?.total_price || "").trim() ||
+    null;
+
+  return refundable.map((tx) => ({
+    parent_id: tx.id,
+    amount: amount || tx.amount,
+    currency: tx.currency || currency,
+    gateway: tx.gateway || "manual",
+    kind: "refund",
+  }));
+}
+
+/**
+ * Full refund on Shopify for OMS return / return_received.
+ * Uses refunds/calculate then refunds create (Payment status → Refunded).
+ * Inventory restock stays on POS (`no_restock`) to avoid double stock.
+ */
+async function refundShopifyOrder(client, remoteOrderId, { note, posStatus } = {}) {
+  const orderResponse = await client.get({
+    path: `orders/${remoteOrderId}`,
+  });
+  const order = orderResponse?.body?.order;
+  if (!order) {
+    throw new Error(`Shopify order #${remoteOrderId} not found for refund.`);
+  }
+
+  const financialStatus = String(order.financial_status || "")
+    .trim()
+    .toLowerCase();
+  if (financialStatus === "refunded") {
+    return {
+      skipped: true,
+      reason: "already_refunded",
+      financial_status: financialStatus,
+    };
+  }
+  if (financialStatus === "voided") {
+    return {
+      skipped: true,
+      reason: "already_voided",
+      financial_status: financialStatus,
+    };
+  }
+
+  await reopenShopifyOrderIfClosed(client, remoteOrderId, order);
+
+  const refundedQtyByLine = new Map();
+  for (const refund of Array.isArray(order.refunds) ? order.refunds : []) {
+    for (const row of Array.isArray(refund?.refund_line_items)
+      ? refund.refund_line_items
+      : []) {
+      const lineId = String(row.line_item_id ?? "");
+      if (!lineId) continue;
+      refundedQtyByLine.set(
+        lineId,
+        (refundedQtyByLine.get(lineId) || 0) + Number(row.quantity || 0),
+      );
+    }
+  }
+
+  const refundLineItems = [];
+  for (const line of Array.isArray(order.line_items) ? order.line_items : []) {
+    const lineId = line?.id;
+    if (lineId == null) continue;
+    const qty = Number(line.quantity || 0);
+    const already = refundedQtyByLine.get(String(lineId)) || 0;
+    const remaining = qty - already;
+    if (remaining > 0) {
+      refundLineItems.push({
+        line_item_id: lineId,
+        quantity: remaining,
+        restock_type: "no_restock",
+      });
+    }
+  }
+
+  const currency = String(order.currency || "").trim() || undefined;
+  const calculateBody = {
+    refund: {
+      ...(currency ? { currency } : {}),
+      shipping: { full_refund: true },
+      refund_line_items: refundLineItems,
+    },
+  };
+
+  let calculated = null;
+  try {
+    const calculateResponse = await client.post({
+      path: `orders/${remoteOrderId}/refunds/calculate`,
+      data: calculateBody,
+      type: "application/json",
+    });
+    calculated = calculateResponse?.body?.refund || null;
+  } catch (calcErr) {
+    console.warn(
+      "[shopify push_order] refund calculate failed; using transaction fallback:",
+      summarizeShopifyApiError(calcErr),
+    );
+  }
+
+  const transactions = await resolveShopifyRefundTransactions(
+    client,
+    remoteOrderId,
+    order,
+    calculated,
+  );
+
+  const createLineItems = (
+    Array.isArray(calculated?.refund_line_items) &&
+    calculated.refund_line_items.length
+      ? calculated.refund_line_items
+      : refundLineItems
+  ).map((row) => ({
+    line_item_id: row.line_item_id,
+    quantity: row.quantity,
+    restock_type: row.restock_type || "no_restock",
+    ...(row.location_id != null ? { location_id: row.location_id } : {}),
+  }));
+
+  if (!createLineItems.length && !transactions.length) {
+    return {
+      skipped: true,
+      reason: "nothing_left_to_refund",
+      financial_status: financialStatus,
+    };
+  }
+
+  const createResponse = await client.post({
+    path: `orders/${remoteOrderId}/refunds`,
+    data: {
+      refund: {
+        ...(currency ? { currency } : {}),
+        notify: false,
+        note:
+          String(note || "").trim() ||
+          `OMS status: ${posStatus || "return"}`,
+        shipping:
+          calculated?.shipping && typeof calculated.shipping === "object"
+            ? calculated.shipping
+            : { full_refund: true },
+        refund_line_items: createLineItems,
+        transactions,
+      },
+    },
+    type: "application/json",
+  });
+
+  const created = createResponse?.body?.refund;
+  return {
+    skipped: false,
+    refund_id: created?.id ?? null,
+    financial_status_before: financialStatus,
+    transactions: transactions.length,
+    line_items: createLineItems.length,
+  };
+}
+
+/**
+ * Cancel OMS → Shopify.
+ * - Unpaid/pending: SOFT cancel (fulfillment hold only). Shopify hard-cancel is
+ *   irreversible, so we must not cancel if OMS may later go back to processing.
+ * - Paid: refund then hard-cancel (Payment → Refunded / order cancelled).
+ */
+async function cancelShopifyOrder(client, remoteOrderId, { note, posStatus } = {}) {
+  const orderResponse = await client.get({
+    path: `orders/${remoteOrderId}`,
+  });
+  const order = orderResponse?.body?.order;
+  if (!order) {
+    throw new Error(`Shopify order #${remoteOrderId} not found for cancel.`);
+  }
+
+  const financialBefore = String(order.financial_status || "")
+    .trim()
+    .toLowerCase();
+  const alreadyCancelled = Boolean(order.cancelled_at);
+
+  if (alreadyCancelled) {
+    return {
+      skipped: true,
+      reason:
+        financialBefore === "voided" ? "already_voided" : "already_cancelled",
+      financial_status: financialBefore,
+      cancelled: true,
+      soft_cancel: false,
+    };
+  }
+
+  const reopen = await reopenShopifyOrderIfClosed(client, remoteOrderId, order);
+  const paidLike = ["paid", "partially_paid", "partially_refunded"].includes(
+    financialBefore,
+  );
+
+  // Unpaid: soft-cancel so OMS can later push processing / mark paid
+  if (!paidLike) {
+    const voidedParents = [];
+    if (financialBefore === "authorized" || financialBefore === "pending") {
+      let transactions = [];
+      try {
+        const txResponse = await client.get({
+          path: `orders/${remoteOrderId}/transactions`,
+        });
+        transactions = Array.isArray(txResponse?.body?.transactions)
+          ? txResponse.body.transactions
+          : [];
+      } catch (txErr) {
+        console.warn(
+          "[shopify push_order] list transactions failed:",
+          summarizeShopifyApiError(txErr),
+        );
+      }
+      for (const tx of transactions) {
+        const kind = String(tx?.kind || "").toLowerCase();
+        const status = String(tx?.status || "").toLowerCase();
+        if (kind !== "authorization" || status !== "success") continue;
+        try {
+          await client.post({
+            path: `orders/${remoteOrderId}/transactions`,
+            data: {
+              transaction: {
+                kind: "void",
+                parent_id: tx.id,
+                ...(tx.currency ? { currency: tx.currency } : {}),
+              },
+            },
+            type: "application/json",
+          });
+          voidedParents.push(tx.id);
+        } catch (voidErr) {
+          console.warn(
+            `[shopify push_order] void transaction ${tx.id} failed:`,
+            summarizeShopifyApiError(voidErr),
+          );
+        }
+      }
+    }
+
+    const fulfillmentOrders = await listShopifyFulfillmentOrders(
+      client,
+      remoteOrderId,
+    );
+    const held = await holdShopifyFulfillmentOrders(
+      client,
+      fulfillmentOrders,
+      String(note || "").trim() ||
+        `OMS soft-cancel (${posStatus || "cancelled"})`,
+    );
+
+    let financialAfter = financialBefore;
+    try {
+      const refreshed = await client.get({
+        path: `orders/${remoteOrderId}`,
+        query: { fields: "id,financial_status,cancelled_at" },
+      });
+      financialAfter = String(
+        refreshed?.body?.order?.financial_status || financialBefore,
+      )
+        .trim()
+        .toLowerCase();
+    } catch {
+      /* ignore */
+    }
+
+    return {
+      skipped: false,
+      soft_cancel: true,
+      cancelled: false,
+      reopened: Boolean(reopen?.reopened),
+      held,
+      voided_authorizations: voidedParents,
+      financial_status_before: financialBefore,
+      financial_status: financialAfter,
+      note: "Unpaid Shopify orders are held (not hard-cancelled) so OMS can reactivate them.",
+    };
+  }
+
+  // Paid: refund then hard-cancel (irreversible on Shopify)
+  let refundResult = null;
+  if (financialBefore !== "voided" && financialBefore !== "refunded") {
+    refundResult = await refundShopifyOrder(client, remoteOrderId, {
+      posStatus,
+      note:
+        String(note || "").trim() ||
+        `OMS cancel push for status ${posStatus || "cancelled"}`,
+    });
+  }
+
+  try {
+    await client.post({
+      path: `orders/${remoteOrderId}/cancel`,
+      data: {
+        reason: "other",
+        email: false,
+        restock: false,
+      },
+      type: "application/json",
+    });
+  } catch (cancelErr) {
+    const msg = summarizeShopifyApiError(cancelErr);
+    if (!/already been cancelled|cannot cancel/i.test(msg)) {
+      throw new Error(`Shopify cancel failed: ${msg}`);
+    }
+  }
+
+  let financialAfter = financialBefore;
+  let cancelledAfter = true;
+  try {
+    const refreshed = await client.get({
+      path: `orders/${remoteOrderId}`,
+      query: { fields: "id,financial_status,cancelled_at,closed_at" },
+    });
+    const refreshedOrder = refreshed?.body?.order;
+    financialAfter = String(
+      refreshedOrder?.financial_status || financialBefore,
+    )
+      .trim()
+      .toLowerCase();
+    cancelledAfter = Boolean(refreshedOrder?.cancelled_at);
+  } catch {
+    /* ignore */
+  }
+
+  return {
+    skipped: false,
+    soft_cancel: false,
+    cancelled: cancelledAfter,
+    reopened: Boolean(reopen?.reopened),
+    voided_authorizations: [],
+    refund: refundResult,
+    financial_status_before: financialBefore,
+    financial_status: financialAfter,
+  };
+}
+
 async function listShopifyOrderFulfillments(client, remoteOrderId) {
   const response = await client.get({
     path: `orders/${remoteOrderId}/fulfillments`,
@@ -4338,17 +4932,51 @@ async function push_order(req, res, process) {
     mapPosOrderStatusToShopifyFulfillmentAction(posStatus);
 
   try {
-    return await runWithShopifyClient(integration, process, async (client) => {
+    return await runWithShopifyClient(integration, process, async (client, _integration, graphql) => {
       const syncResult = {
         action: fulfillmentAction,
         remote_id: remoteId,
         fulfillment_orders: [],
       };
 
+      // Shopify cancel is irreversible. Block every push except cancel itself.
+      if (fulfillmentAction !== "cancel") {
+        const liveRes = await client.get({
+          path: `orders/${remoteId}`,
+        });
+        const liveOrder = liveRes?.body?.order;
+        const isCancelled =
+          Boolean(liveOrder?.cancelled_at) ||
+          String(liveOrder?.cancel_reason || "").trim() !== "";
+        if (isCancelled) {
+          const msg =
+            `Shopify ${liveOrder?.name || "#" + remoteId} is CANCELLED (permanent). ` +
+            `OMS status "${posStatus}" cannot update it. ` +
+            `Fetch/create a new Shopify order to test Processing/Confirmed/Return.`;
+          console.warn("[shopify push_order]", msg);
+          await markProcessOutcome(process._id, "failed", msg);
+          return res.status(409).json({
+            success: false,
+            message: msg,
+            data: {
+              ...syncResult,
+              shopify_cancelled: true,
+              cancelled_at: liveOrder?.cancelled_at || null,
+              financial_status: liveOrder?.financial_status || null,
+            },
+          });
+        }
+      }
+
       if (fulfillmentAction === "cancel") {
-        await client.post({
-          path: `orders/${remoteId}/cancel`,
-          data: {},
+        syncResult.cancel = await cancelShopifyOrder(client, remoteId, {
+          posStatus,
+          note: `OMS cancel push for ${posOrder.order_no || posOrder._id}`,
+        });
+      } else if (fulfillmentAction === "refund") {
+        syncResult.refund = await refundShopifyOrder(client, remoteId, {
+          posStatus,
+          note: `OMS return push for ${posOrder.order_no || posOrder._id}`,
         });
       } else if (fulfillmentAction === "none") {
         syncResult.skipped = true;
@@ -4383,10 +5011,61 @@ async function push_order(req, res, process) {
             `OMS status: ${posStatus}`,
           );
         } else if (fulfillmentAction === "release_hold") {
+          // processing / confirmed / placed / active = payment received
+          try {
+            const closedCheck = await client.get({
+              path: `orders/${remoteId}`,
+            });
+            if (closedCheck?.body?.order?.closed_at) {
+              await reopenShopifyOrderIfClosed(
+                client,
+                remoteId,
+                closedCheck.body.order,
+              );
+            }
+          } catch (reopenErr) {
+            console.warn(
+              "[shopify push_order] reopen check failed:",
+              summarizeShopifyApiError(reopenErr),
+            );
+          }
+          try {
+            syncResult.marked_paid = await markShopifyOrderAsPaidIfPending(
+              client,
+              graphql,
+              remoteId,
+            );
+          } catch (paidErr) {
+            console.warn(
+              "[shopify push_order] mark as paid failed:",
+              summarizeShopifyApiError(paidErr),
+            );
+            syncResult.marked_paid = {
+              skipped: true,
+              reason: "mark_paid_failed",
+              error: summarizeShopifyApiError(paidErr),
+            };
+          }
           syncResult.released = await releaseShopifyFulfillmentHolds(
             client,
             fulfillmentOrders,
           );
+          if (!(syncResult.released || []).length) {
+            try {
+              syncResult.shipment_events =
+                await syncShopifyFulfillmentShipmentEvents(
+                  client,
+                  remoteId,
+                  { tracking_status: "confirmed" },
+                  posStatus,
+                );
+            } catch (eventErr) {
+              console.warn(
+                "[shopify push_order] confirmed event skipped:",
+                summarizeShopifyApiError(eventErr),
+              );
+            }
+          }
         } else if (fulfillmentAction === "ship_with_tracking") {
           const tracking = await resolvePosOrderTrackingForPush(posOrder);
           syncResult.shipment = await syncShopifyOrderShipmentTracking(
@@ -4415,13 +5094,68 @@ async function push_order(req, res, process) {
         }
       }
 
+      try {
+        syncResult.oms_status_tag = await syncShopifyOrderOmsStatusTag(
+          client,
+          remoteId,
+          posStatus,
+        );
+      } catch (tagErr) {
+        console.warn(
+          "[shopify push_order] oms status tag failed:",
+          describeShopifyError(tagErr),
+        );
+        syncResult.oms_status_tag = {
+          updated: false,
+          error: describeShopifyError(tagErr),
+        };
+      }
+
       const label = posOrder.order_no || posOrder._id;
       const actionSummary =
-        fulfillmentAction === "cancel" ? "cancelled"
+        fulfillmentAction === "cancel" ?
+          syncResult.cancel?.skipped
+            ? `cancel skipped (${syncResult.cancel?.reason || "already voided"})`
+            : syncResult.cancel?.soft_cancel
+              ? `soft-cancelled (held ${(syncResult.cancel?.held || []).length} FO; reversible)`
+              : `hard-cancelled → ${syncResult.cancel?.financial_status || "voided"}` +
+                (syncResult.cancel?.reopened ? ", reopened first" : "") +
+                (syncResult.cancel?.refund && !syncResult.cancel.refund.skipped
+                  ? `, refund #${syncResult.cancel.refund.refund_id || "—"}`
+                  : syncResult.cancel?.refund?.skipped
+                    ? `, refund skipped (${syncResult.cancel.refund.reason})`
+                    : "")
+        : fulfillmentAction === "refund" ?
+          syncResult.refund?.skipped
+            ? `refund skipped (${syncResult.refund?.reason || "already refunded"})`
+            : `refunded (refund #${syncResult.refund?.refund_id || "—"})`
         : fulfillmentAction === "hold" ?
           `held ${(syncResult.held || []).length} fulfillment order(s)`
         : fulfillmentAction === "release_hold" ?
-          `released ${(syncResult.released || []).length} hold(s)`
+          [
+            syncResult.marked_paid && !syncResult.marked_paid.skipped
+              ? `marked paid (${syncResult.marked_paid.financial_status_before} → ${syncResult.marked_paid.financial_status})`
+              : syncResult.marked_paid?.reason === "already_paid"
+                ? "already paid"
+                : syncResult.marked_paid?.reason === "cancelled"
+                  ? "blocked: Shopify order cancelled"
+                : syncResult.marked_paid?.reason === "mark_paid_failed"
+                  ? `mark paid failed (${syncResult.marked_paid.error || "error"})`
+                  : syncResult.marked_paid?.reason
+                    ? `mark paid skipped (${syncResult.marked_paid.reason})`
+                    : null,
+            (syncResult.released || []).length
+              ? `released ${(syncResult.released || []).length} hold(s)`
+              : null,
+            (syncResult.shipment_events || []).length
+              ? `confirmed event (${(syncResult.shipment_events || []).length})`
+              : null,
+            syncResult.oms_status_tag?.updated
+              ? `tagged ${syncResult.oms_status_tag.tag}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(", ") || `no holds; tagged oms_status:${posStatus}`
         : fulfillmentAction === "ship_with_tracking" ?
           syncResult.shipment?.action === "fulfilled" ?
             `fulfilled with tracking (${syncResult.shipment?.tracking?.number || "—"})` +
@@ -4438,8 +5172,21 @@ async function push_order(req, res, process) {
           : "no shipment tracking update"
         : fulfillmentAction === "deliver" ?
           `delivered (${(syncResult.delivered || []).length} fulfillment event(s))`
-        : "no fulfillment action";
+        : syncResult.oms_status_tag?.updated
+          ? `tagged ${syncResult.oms_status_tag.tag}`
+          : "no fulfillment action";
       const remarks = `Order ${label} pushed to Shopify #${remoteId} (OMS status: ${posStatus}, ${actionSummary}).`;
+      try {
+        syncResult.pos_website_status = await syncPosWebsiteStatusAfterPush(
+          posOrder,
+          posStatus,
+        );
+      } catch (posWebsiteErr) {
+        console.warn(
+          "[shopify push_order] POS website status sync failed:",
+          posWebsiteErr?.message || posWebsiteErr,
+        );
+      }
       await markProcessOutcome(process._id, "completed", remarks);
 
       return res.status(200).json({
@@ -4457,17 +5204,26 @@ async function push_order(req, res, process) {
   } catch (error) {
     console.error(
       "Shopify order push failed:",
-      error?.response?.body || error?.response?.data || error?.message || error,
+      summarizeShopifyApiError(error, error?.message || "push failed"),
+      error?.response?.body?.errors || "",
     );
     const errorMessage = formatShopifyFulfillmentScopeError(
       error,
       "Failed to push order to Shopify.",
     );
-    await markProcessOutcome(process._id, "failed", errorMessage);
+    const shortMessage = summarizeShopifyApiError(
+      error,
+      errorMessage || "Failed to push order to Shopify.",
+    );
+    await markProcessOutcome(
+      process._id,
+      "failed",
+      `push_order: ${shortMessage}`.slice(0, 500),
+    );
     return res.status(500).json({
       success: false,
-      message: errorMessage,
-      error: error?.response?.body || error?.response?.data || error,
+      message: shortMessage,
+      error: error?.response?.body?.errors || shortMessage,
     });
   }
 }
