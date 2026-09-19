@@ -47,6 +47,7 @@ const {
   orderExternalRef,
   findExistingOrderByExternalRef,
   findExistingImportedOrder,
+  createImportedPosOrderOrGetExisting,
   resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
   buildPosOrderLineItemsFromRemote,
@@ -2914,7 +2915,25 @@ async function importWooOrderToPos(remoteOrder, ctx) {
     orderPayload.customer_id = customerId;
   }
 
-  const order = await Order.create(orderPayload);
+  const createdResult = await createImportedPosOrderOrGetExisting(orderPayload);
+  if (!createdResult.created) {
+    recordOrderSkip(
+      stats,
+      {
+        store: "woocommerce",
+        remote_id: remoteId,
+        order_number: remoteOrder?.number || remoteOrder?.id,
+        reason: "already_imported",
+        detail:
+          createdResult.order?.order_no ?
+            `POS ${createdResult.order.order_no} (duplicate key)`
+          : `POS order ${createdResult.order?._id} (duplicate key)`,
+      },
+      logCtx,
+    );
+    return;
+  }
+  const order = createdResult.order;
 
   if (incompleteAddress) {
     await applyIncompleteAddressTagIfNeeded(order._id, addressFields);

@@ -1482,8 +1482,11 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
     // If allowedFields is specified, only allow those fields
     if (allowedFields.length > 0) {
       Object.keys(req.body).forEach((key) => {
-        if (modelSchema[key] && allowedFields.includes(key)) {
-          const fieldConfig = modelSchema[key];
+        if (
+          (modelSchema[key] || Model.schema.paths[key]) &&
+          allowedFields.includes(key)
+        ) {
+          const fieldConfig = modelSchema[key] || { type: String };
           let value = req.body[key];
 
           // Handle ObjectID fields - convert empty strings to null
@@ -1505,7 +1508,7 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
             } else {
               // For non-ObjectID fields, trim as usual
               // Only trim if value exists and has a trim method (strings)
-              if (value && typeof value === "string") {
+              if (typeof value === "string") {
                 updateData[key] = value.trim();
               } else if (value !== undefined && value !== null) {
                 // For non-string values (numbers, booleans, objects, arrays), keep as is
@@ -1518,8 +1521,8 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
     } else {
       // If no allowedFields specified, allow all fields except password for security
       Object.keys(req.body).forEach((key) => {
-        if (modelSchema[key] && key !== "password") {
-          const fieldConfig = modelSchema[key];
+        if ((modelSchema[key] || Model.schema.paths[key]) && key !== "password") {
+          const fieldConfig = modelSchema[key] || { type: String };
           let value = req.body[key];
 
           // Handle ObjectID fields - convert empty strings to null
@@ -1540,8 +1543,8 @@ const handleGenericUpdateCore = async (req, controllerName, options = {}) => {
               }
             } else {
               // For non-ObjectID fields, trim as usual
-              // Only trim if value exists and has a trim method (strings)
-              if (value && typeof value === "string") {
+              // Keep empty strings so address fields can be cleared.
+              if (typeof value === "string") {
                 updateData[key] = value.trim();
               } else if (value !== undefined && value !== null) {
                 // For non-string values (numbers, booleans, objects, arrays), keep as is

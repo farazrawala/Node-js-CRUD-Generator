@@ -45,6 +45,14 @@ const modelSchema = new mongoose.Schema(
       field_name: "Token",
       field_type: "password",
     },
+    pickup_address: {
+      type: String,
+      field_name: "Pickup Address",
+    },
+    return_address: {
+      type: String,
+      field_name: "Return Address",
+    },
     /** TCS OAuth client id — used to auto-refresh bearer Token when missing/expired. */
     client_id: {
       type: String,

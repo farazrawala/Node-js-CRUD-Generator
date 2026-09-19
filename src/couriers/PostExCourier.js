@@ -15,6 +15,7 @@ const {
 } = require("./errors");
 const { httpRequest } = require("../utils/httpClient");
 const courierLogger = require("../utils/courierLogger");
+const { courierRemarksText } = require("../utils/orderContextLoader");
 
 const DEFAULT_PROD = "https://api.postex.pk/services/integration/api";
 /** Sandbox / test merchant API (same host; use sandbox token from PostEx). */
@@ -167,7 +168,10 @@ class PostExCourier extends BaseCourier {
     const shipping = order.shippingAddress || {};
     const customer = order.customer || {};
     const cityName =
-      shipping.city || order.city || customer.city || settings.default_city;
+      order.city ||
+      shipping.city ||
+      customer.city ||
+      settings.default_city;
     if (!cityName) throw invalidCity(cityName);
 
     // PostEx: items = parcel count; API requires greater than 0 and less than 100.
@@ -180,6 +184,11 @@ class PostExCourier extends BaseCourier {
       Math.round(Number(settings.invoiceDivision || settings.invoice_division || 1)),
     );
     const codAmount = Math.max(0, Math.round(Number(order.codAmount) || 0));
+    // PostEx API only allows Normal | Reverse | Replacement for orderType.
+    // COD is represented by invoicePayment (>0). Label "Order Type: COD" is stamped later.
+    const orderType = String(
+      settings.orderType || settings.order_type || "Normal",
+    );
 
     const payload = {
       cityName: String(cityName).trim(),
@@ -195,27 +204,43 @@ class PostExCourier extends BaseCourier {
       invoiceDivision,
       invoicePayment: codAmount,
       items,
+      // One item per line on the airway bill "Order Details" row: "Item name x qty".
       orderDetail: String(
-        order.contentDesc ||
-          order.description ||
-          (order.items || [])
-            .map((i) => `${i.qty || 1}x ${i.name || "Item"}`)
-            .join(", ") ||
+        (order.items || [])
+          .map((i) => {
+            const name = String(i?.name || "Item").trim() || "Item";
+            const qtyRaw = i?.qty ?? i?.quantity ?? 1;
+            const qtyNum =
+              typeof qtyRaw === "number"
+                ? qtyRaw
+                : parseFloat(String(qtyRaw).replace(/,/g, ""));
+            const qty = Number.isFinite(qtyNum) && qtyNum > 0 ? qtyNum : 1;
+            const qtyLabel = Number.isInteger(qty)
+              ? String(qty)
+              : String(Math.round(qty * 100) / 100);
+            return `${name} x ${qtyLabel}`;
+          })
+          .filter(Boolean)
+          .join("\n") ||
+          order.contentDesc ||
           "Goods",
       ).slice(0, 500),
       orderRefNumber: String(order.order_no || order._id).slice(0, 50),
-      orderType: String(settings.orderType || settings.order_type || "Normal"),
-      transactionNotes: String(order.remarks || order.description || "").slice(
-        0,
-        500,
-      ),
+      orderType,
+      // PostEx label "Remarks" — POS note only (never order.description).
+      transactionNotes: courierRemarksText(order),
     };
 
+    const customPickup = String(
+      this.config.pickup_address || settings.pickup_address || "",
+    ).trim();
+    // Never use account_no as pickupAddressCode when a custom pickup_address is set
+    // (account_no "001" is the old Karachi merchant address).
     const pickupCode =
       settings.pickupAddressCode ||
       settings.pickup_address_code ||
       this.config.pickup_location ||
-      this.config.account_no ||
+      (customPickup ? null : this.config.account_no) ||
       null;
     if (pickupCode) payload.pickupAddressCode = String(pickupCode);
 
@@ -231,7 +256,201 @@ class PostExCourier extends BaseCourier {
     return payload;
   }
 
+  /**
+   * Courier Integration `pickup_address` / `return_address` → PostEx merchant
+   * addresses (label Shipper Information). Creates missing addresses when needed.
+   * @param {import('../utils/orderContextLoader').OrderContext} order
+   */
+  async resolveMerchantAddressCodes(order) {
+    const settings =
+      this.config.settings && typeof this.config.settings === "object"
+        ? { ...this.config.settings }
+        : {};
+    this.config.settings = settings;
+
+    const pickupText = String(
+      this.config.pickup_address || settings.pickup_address || "",
+    ).trim();
+    const returnText = String(
+      this.config.return_address || settings.return_address || "",
+    ).trim();
+    if (!pickupText && !returnText) return;
+
+    const norm = (v) =>
+      String(v || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, " ");
+
+    let addresses = await this.getMerchantAddresses();
+
+    const findByAddress = (text) =>
+      addresses.find((a) => norm(a.address) === norm(text));
+
+    if (pickupText) {
+      let match = findByAddress(pickupText);
+      if (!match) {
+        match = await this.createMerchantAddress({
+          address: pickupText,
+          addressTypeId: 2,
+          order,
+        });
+        addresses = await this.getMerchantAddresses();
+        match = findByAddress(pickupText) || match;
+      }
+      const code = String(
+        match?.addressCode || match?.pickupAddressCode || "",
+      ).trim();
+      if (!code) {
+        throw fromProviderMessage(
+          `PostEx pickup address "${pickupText}" could not be resolved to an addressCode. Check courier Pickup Address.`,
+          { provider: this.providerName, httpStatus: 400 },
+        );
+      }
+      // Drop stale code (e.g. account_no "001" / old Karachi address).
+      settings.pickupAddressCode = code;
+      settings.pickup_address_code = code;
+      delete settings.pickupAddressCode_old;
+      this.config.settings = settings;
+      this.config.pickup_location = code;
+
+      courierLogger.log("info", "postex_pickup_address_resolved", {
+        provider: this.providerName,
+        pickupText,
+        pickupAddressCode: code,
+      });
+    }
+
+    if (returnText) {
+      let match = findByAddress(returnText);
+      if (!match) {
+        await this.createMerchantAddress({
+          address: returnText,
+          addressTypeId: 1,
+          order,
+        });
+        addresses = await this.getMerchantAddresses();
+        match = findByAddress(returnText);
+      }
+      courierLogger.log("info", "postex_return_address_synced", {
+        provider: this.providerName,
+        returnText,
+        addressCode: match?.addressCode || null,
+      });
+    }
+  }
+
+  /**
+   * GET /order/v1/get-merchant-address
+   * @returns {Promise<object[]>}
+   */
+  async getMerchantAddresses() {
+    const url = this.endpoint("order/v1/get-merchant-address");
+    const res = await httpRequest(url, {
+      method: "GET",
+      provider: this.providerName,
+      headers: this.authHeaders(),
+    });
+    if (!this.isSuccessStatus(res.data)) {
+      throw fromProviderMessage(
+        this.extractErrorMessage(res, "PostEx get-merchant-address failed"),
+        { provider: this.providerName, details: res.data },
+      );
+    }
+    const list = Array.isArray(res.data?.dist) ? res.data.dist : [];
+    return list.map((row) => ({
+      address: row.address || row.Address || "",
+      addressCode: row.addressCode || row.AddressCode || row.pickupAddressCode || "",
+      cityName: row.cityName || row.CityName || "",
+      phone1: row.phone1 || "",
+      contactPersonName: row.contactPersonName || "",
+      raw: row,
+    }));
+  }
+
+  /**
+   * POST /order/v2/create-merchant-address
+   * addressTypeId: 1 = Return, 2 = Pickup
+   * @param {object} opts
+   * @param {string} opts.address
+   * @param {number} opts.addressTypeId
+   * @param {object} [opts.order]
+   */
+  async createMerchantAddress({ address, addressTypeId, order = {} }) {
+    const settings = this.config.settings || {};
+    const company = order.company || {};
+    const warehouse = order.warehouse || {};
+    const cityName = String(
+      warehouse.city ||
+        settings.shipper_city ||
+        settings.default_city ||
+        order.city ||
+        "Karachi",
+    ).trim();
+    const contact = String(
+      settings.contactPersonName ||
+        company.company_name ||
+        "Shipper",
+    ).trim();
+    const phone = this.normalizePkMobile(
+      warehouse.phone || company.company_phone || settings.shipper_phone,
+    );
+
+    const body = {
+      address: String(address || "").trim(),
+      addressTypeId: Number(addressTypeId) || 2,
+      cityName,
+      contactPersonName: contact,
+      phone1: phone,
+      phone2: phone,
+      phone3: phone,
+      wareHouseManagerName: contact,
+    };
+
+    const url = this.endpoint("order/v2/create-merchant-address");
+    courierLogger.log("info", "postex_create_merchant_address", {
+      provider: this.providerName,
+      addressTypeId: body.addressTypeId,
+      cityName,
+      address: body.address,
+    });
+
+    const res = await httpRequest(url, {
+      method: "POST",
+      provider: this.providerName,
+      headers: this.authHeaders({ "Content-Type": "application/json" }),
+      body,
+    });
+
+    if (!this.isSuccessStatus(res.data)) {
+      throw fromProviderMessage(
+        this.extractErrorMessage(res, "PostEx create-merchant-address failed"),
+        { provider: this.providerName, details: res.data },
+      );
+    }
+
+    const dist = res.data?.dist && typeof res.data.dist === "object" ? res.data.dist : {};
+    const code = String(
+      dist.addressCode ||
+        dist.pickupAddressCode ||
+        dist.AddressCode ||
+        res.data?.addressCode ||
+        res.data?.pickupAddressCode ||
+        "",
+    ).trim();
+
+    return {
+      address: body.address,
+      addressCode: code,
+      cityName,
+      phone1: phone,
+      contactPersonName: contact,
+      raw: res.data,
+    };
+  }
+
   async createShipment(order) {
+    await this.resolveMerchantAddressCodes(order);
     const payload = this.buildCreateOrderPayload(order);
     const url = this.endpoint("order/v3/create-order");
 

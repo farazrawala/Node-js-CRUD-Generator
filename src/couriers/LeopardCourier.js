@@ -16,6 +16,7 @@ const {
 } = require("./errors");
 const { httpRequest } = require("../utils/httpClient");
 const courierLogger = require("../utils/courierLogger");
+const { courierRemarksText } = require("../utils/orderContextLoader");
 
 const DEFAULT_PROD = "https://merchantapi.leopardscourier.com/api/";
 const DEFAULT_SANDBOX = "https://merchantapistaging.leopardscourier.com/api/";
@@ -80,7 +81,12 @@ class LeopardCourier extends BaseCourier {
       shipment_name_eng: String(settings.shipment_name_eng || "self"),
       shipment_email: String(settings.shipment_email || "self"),
       shipment_phone: String(settings.shipment_phone || "self"),
-      shipment_address: String(settings.shipment_address || "self"),
+      shipment_address: String(
+        this.config.pickup_address ||
+          settings.pickup_address ||
+          settings.shipment_address ||
+          "self",
+      ),
       consignment_name_eng: String(
         shipping.name || customer.name || order.name || "Customer",
       ),
@@ -93,9 +99,7 @@ class LeopardCourier extends BaseCourier {
       consignment_address: String(
         shipping.address || order.address || "Address",
       ),
-      special_instructions: String(
-        order.description || order.remarks || "n/a",
-      ),
+      special_instructions: courierRemarksText(order) || "n/a",
     };
   }
 

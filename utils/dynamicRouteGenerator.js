@@ -569,6 +569,13 @@ function generateControllerFunctions(modelName) {
           if (flagError) {
             throw new Error(flagError.message);
           }
+        } else if (
+          // handleGenericUpdate strips `password` by default; re-apply for
+          // credential models (courier, integration, etc.) when provided.
+          req.body?.password != null &&
+          String(req.body.password).trim() !== ""
+        ) {
+          updateData.password = String(req.body.password).trim();
         }
         if (priorBeforeUpdate) {
           await priorBeforeUpdate(updateData, req, existingRecord);

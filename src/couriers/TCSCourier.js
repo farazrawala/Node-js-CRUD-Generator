@@ -16,6 +16,7 @@ const {
 } = require("./errors");
 const { httpRequest } = require("../utils/httpClient");
 const courierLogger = require("../utils/courierLogger");
+const { courierRemarksText } = require("../utils/orderContextLoader");
 
 const DEFAULT_PROD = "https://ociconnect.tcscourier.com";
 const DEFAULT_SANDBOX = "https://devconnect.tcscourier.com";
@@ -745,11 +746,18 @@ class TCSCourier extends BaseCourier {
       settings.costcentercityname ||
       "Karachi";
     const address = String(
-      order.warehouse?.address ||
+      this.config.pickup_address ||
+        settings.pickup_address ||
+        order.warehouse?.address ||
         company.company_address ||
         settings.shipper_address ||
         "Warehouse",
     ).slice(0, 120);
+    const returnAddress = String(
+      this.config.return_address ||
+        settings.return_address ||
+        address,
+    ).slice(0, 360);
 
     const headers = await this.authHeaders();
     // Swagger createCostCenterCodeReq (additionalProperties: false) —
@@ -762,7 +770,7 @@ class TCSCourier extends BaseCourier {
         settings.costcentername || company.company_name || "POS Cost Center",
       ).slice(0, 100),
       pickupaddress: address.slice(0, 360),
-      returnaddress: address.slice(0, 360),
+      returnaddress: returnAddress.slice(0, 360),
       islabelprint: "yes",
       accountnumber: String(accountNo).slice(0, 12),
       phonenumber: this.normalizePkMobile(
@@ -891,7 +899,9 @@ class TCSCourier extends BaseCourier {
           settings.shippername || company.company_name || "Shipper",
         ).slice(0, 50),
         address1: String(
-          shipper.address ||
+          this.config.pickup_address ||
+            settings.pickup_address ||
+            shipper.address ||
             company.company_address ||
             settings.shipper_address ||
             "Warehouse",
@@ -972,7 +982,7 @@ class TCSCourier extends BaseCourier {
         weightinkg: weight,
         pieces: Math.max(1, Math.round(Number(pieces) || 1)),
         fragile: Boolean(settings.fragile),
-        remarks: String(order.description || order.remarks || "").slice(0, 500),
+        remarks: courierRemarksText(order),
         skus: (order.items || []).map((item) => ({
           description: String(item.name || "Item").slice(0, 50),
           quantity: Math.max(1, Math.round(Number(item.qty) || 1)),

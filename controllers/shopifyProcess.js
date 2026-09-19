@@ -50,6 +50,10 @@ const {
   orderExternalRef,
   findExistingOrderByExternalRef,
   findExistingImportedOrder,
+  createImportedPosOrderOrGetExisting,
+  extractShopifyFulfillmentTracking,
+  buildPosTrackingFieldsFromShopify,
+  upsertImportedCourierShipmentFromTracking,
   resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
   buildPosOrderLineItemsFromRemote,
@@ -3438,7 +3442,49 @@ async function fetch_brand(req, res, process) {
   }
 }
 
+/**
+ * List endpoints sometimes omit nested fulfillments. When Shopify reports a
+ * fulfillment status but no tracking is present, load order detail / fulfillments.
+ */
+async function enrichShopifyOrderFulfillments(remoteOrder, client) {
+  if (!remoteOrder?.id || !client) return remoteOrder;
+  if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
+
+  const fulfillmentStatus = String(remoteOrder.fulfillment_status || "")
+    .trim()
+    .toLowerCase();
+  if (!fulfillmentStatus || fulfillmentStatus === "null") {
+    return remoteOrder;
+  }
+
+  try {
+    const detailResponse = await client.get({
+      path: `orders/${remoteOrder.id}`,
+    });
+    const full = detailResponse?.body?.order;
+    if (Array.isArray(full?.fulfillments) && full.fulfillments.length) {
+      remoteOrder.fulfillments = full.fulfillments;
+      if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
+    }
+
+    const fulfillmentsResponse = await client.get({
+      path: `orders/${remoteOrder.id}/fulfillments`,
+    });
+    const list = fulfillmentsResponse?.body?.fulfillments;
+    if (Array.isArray(list) && list.length) {
+      remoteOrder.fulfillments = list;
+    }
+  } catch (err) {
+    console.warn(
+      `[shopify] fulfillments enrich failed for order ${remoteOrder.id}:`,
+      err?.message || err,
+    );
+  }
+  return remoteOrder;
+}
+
 async function importShopifyOrderToPos(remoteOrder, ctx) {
+  await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client);
   await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
   const { companyId, process, stats, req } = ctx;
   const logCtx = { req, process, companyId };
@@ -3518,17 +3564,34 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
         );
       }
     }
-    await applyIncompleteAddressTagIfNeeded(
-      existing._id,
-      mapRemoteOrderAddressFields(remoteOrder, "shopify"),
-    );
+
+    const beforeCn = String(existing.courier_tracking_number || "").trim();
+    const beforeStatus = String(existing.order_status || "").trim();
+    const beforeWebsite = String(existing.order_website_status || "").trim();
+
+    await updatePosOrderFromRemote(existing, remoteOrder, "shopify", {
+      companyId,
+      process,
+      integrationId,
+    });
+
+    const refreshed = await Order.findById(existing._id)
+      .select(
+        "courier_tracking_number order_status order_website_status",
+      )
+      .lean();
+    const trackingOrStatusChanged =
+      String(refreshed?.courier_tracking_number || "").trim() !== beforeCn ||
+      String(refreshed?.order_status || "").trim() !== beforeStatus ||
+      String(refreshed?.order_website_status || "").trim() !== beforeWebsite;
+
     const backfill = await backfillPosOrderLinesIfEmpty(
       existing,
       remoteOrder,
       "shopify",
       ctx,
     );
-    if (backfill?.backfilled) {
+    if (backfill?.backfilled || trackingOrStatusChanged) {
       stats.updated = (stats.updated || 0) + 1;
       return;
     }
@@ -3638,7 +3701,38 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     orderPayload.customer_id = customerId;
   }
 
-  const order = await Order.create(orderPayload);
+  const remoteTracking = extractShopifyFulfillmentTracking(remoteOrder);
+  const trackingFields = buildPosTrackingFieldsFromShopify(remoteTracking);
+  Object.assign(orderPayload, trackingFields);
+
+  const createdResult = await createImportedPosOrderOrGetExisting(orderPayload);
+  if (!createdResult.created) {
+    recordOrderSkip(
+      stats,
+      {
+        store: "shopify",
+        remote_id: remoteId,
+        order_number: remoteOrder?.order_number,
+        reason: "already_imported",
+        detail:
+          createdResult.order?.order_no ?
+            `POS ${createdResult.order.order_no} (duplicate key)`
+          : `POS order ${createdResult.order?._id} (duplicate key)`,
+      },
+      logCtx,
+    );
+    return;
+  }
+  const order = createdResult.order;
+
+  if (remoteTracking?.tracking_number) {
+    await upsertImportedCourierShipmentFromTracking({
+      companyId,
+      orderId: order._id,
+      tracking: remoteTracking,
+      createdBy: process.created_by?._id || process.created_by,
+    });
+  }
 
   // Belt-and-suspenders: create payload tags have been dropped in some runs;
   // $addToSet after insert always persists the OMS incomplete_address tag.
@@ -3727,6 +3821,7 @@ async function fetchShopifyRemoteOrder(client, remoteId) {
  * Pull one Shopify order into POS — update if already imported, else insert.
  */
 async function pullShopifyOrderToPos(remoteOrder, ctx) {
+  await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client);
   await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
   const { companyId, process, stats, req } = ctx;
   const logCtx = { req, process, companyId };
@@ -3795,7 +3890,7 @@ async function pull_order(req, res, process) {
   try {
     return await runWithShopifyClient(integration, process, async (client, _integration, graphql) => {
       const stats = createPullOrderStats();
-      const importCtx = { companyId, process, stats, req, graphql };
+      const importCtx = { companyId, process, stats, req, graphql, client };
 
       if (posOrder) {
         const remoteId = resolveRemoteOrderIdFromPosOrder(posOrder, "shopify");
@@ -4135,8 +4230,10 @@ async function syncPosWebsiteStatusAfterPush(posOrder, posStatus) {
 }
 
 /**
- * Mirror OMS status onto Shopify order tags (visible in admin).
- * Replaces any prior `oms_status:*` tag.
+ * Mirror OMS status onto Shopify (visible in admin):
+ * - tag `oms_status:<status>`
+ * - note attribute `OMS Status` (Additional details)
+ * Retries on Shopify development-store 429 rate limits.
  */
 async function syncShopifyOrderOmsStatusTag(client, remoteOrderId, posStatus) {
   const status = String(posStatus || "")
@@ -4148,31 +4245,80 @@ async function syncShopifyOrderOmsStatusTag(client, remoteOrderId, posStatus) {
     return { updated: false, reason: "empty_status" };
   }
 
-  const orderResponse = await client.get({
-    path: `orders/${remoteOrderId}`,
-    query: { fields: "id,tags" },
-  });
-  const order = orderResponse?.body?.order;
-  if (!order) {
-    return { updated: false, reason: "order_not_found" };
+  const omsTag = `oms_status:${status}`;
+  const omsLabel = status.replace(/_/g, " ");
+  const orderId = Number(remoteOrderId) || remoteOrderId;
+  const maxAttempts = 4;
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const orderResponse = await client.get({
+        path: `orders/${remoteOrderId}`,
+        query: { fields: "id,tags,note_attributes" },
+      });
+      const order = orderResponse?.body?.order;
+      if (!order) {
+        return { updated: false, reason: "order_not_found" };
+      }
+
+      const existingTags = String(order.tags || "")
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .filter((t) => !/^oms_status:/i.test(t));
+      existingTags.push(omsTag);
+      const tags = existingTags.join(", ");
+
+      const noteAttributes = (
+        Array.isArray(order.note_attributes) ? order.note_attributes : []
+      )
+        .map((a) => ({
+          name: String(a?.name ?? "").trim(),
+          value: String(a?.value ?? ""),
+        }))
+        .filter((a) => a.name && !/^oms status$/i.test(a.name));
+      noteAttributes.push({ name: "OMS Status", value: omsLabel });
+
+      await client.put({
+        path: `orders/${remoteOrderId}`,
+        data: {
+          order: {
+            id: orderId,
+            tags,
+            note_attributes: noteAttributes,
+          },
+        },
+        type: "application/json",
+      });
+
+      return {
+        updated: true,
+        tag: omsTag,
+        tags,
+        note_attribute: { name: "OMS Status", value: omsLabel },
+        attempts: attempt,
+      };
+    } catch (err) {
+      lastError = err;
+      const code =
+        err?.response?.code ?? err?.response?.statusCode ?? err?.statusCode;
+      const msg = String(err?.message || "");
+      const isRateLimited =
+        Number(code) === 429 ||
+        /rate limit|throttl|try again in a minute/i.test(msg);
+      if (!isRateLimited || attempt >= maxAttempts) {
+        throw err;
+      }
+      const waitMs = Math.min(60_000, 15_000 * attempt);
+      console.warn(
+        `[shopify push_order] oms status sync rate-limited; retry ${attempt}/${maxAttempts} in ${waitMs}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 
-  const omsTag = `oms_status:${status}`;
-  const existing = String(order.tags || "")
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean)
-    .filter((t) => !/^oms_status:/i.test(t));
-  existing.push(omsTag);
-  const tags = existing.join(", ");
-
-  await client.put({
-    path: `orders/${remoteOrderId}`,
-    data: { order: { id: Number(remoteOrderId) || remoteOrderId, tags } },
-    type: "application/json",
-  });
-
-  return { updated: true, tag: omsTag, tags };
+  throw lastError || new Error("Shopify OMS status sync failed");
 }
 
 /**
@@ -5399,7 +5545,7 @@ async function fetch_order(req, res, process) {
         : [];
       const stats = createFetchOrderStats();
 
-      const importCtx = { companyId, process, stats, req, graphql };
+      const importCtx = { companyId, process, stats, req, graphql, client };
 
       for (const remote of remoteOrders) {
         try {
@@ -5512,7 +5658,7 @@ async function fetch_latest_order(req, res, process) {
           listResponse.body.orders
         : [];
       const stats = createFetchOrderStats();
-      const importCtx = { companyId, process, stats, req, graphql };
+      const importCtx = { companyId, process, stats, req, graphql, client };
 
       for (const remote of remoteOrders) {
         try {

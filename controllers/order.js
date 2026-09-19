@@ -149,35 +149,67 @@ async function attachCourierTrackingToOrders(orders) {
 
   return orders.map((order) => {
     const shipment = byOrderId.get(String(order._id));
-    if (!shipment) return order;
-    const tracking_id = shipment.tracking_number || null;
+    if (shipment) {
+      const tracking_id = shipment.tracking_number || null;
+      const tracking_url =
+        shipment.label_url ||
+        buildPublicCourierTrackingUrl(shipment.courier, tracking_id) ||
+        null;
+      const apiRequest =
+        shipment.api_request && typeof shipment.api_request === "object" ?
+          shipment.api_request
+        : null;
+      const courier_company =
+        apiRequest ?
+          String(
+            apiRequest.courierCompany || apiRequest.courier_company || "",
+          ).trim() || null
+        : null;
+      return {
+        ...order,
+        tracking_id,
+        tracking_number: tracking_id,
+        tracking_url,
+        courier_provider: shipment.courier || null,
+        courier_company,
+        courier_shipment: {
+          tracking_number: tracking_id,
+          courier: shipment.courier || null,
+          courier_company,
+          label_url: shipment.label_url || null,
+          shipment_status: shipment.shipment_status || null,
+        },
+      };
+    }
+
+    // Fallback: CN imported from Shopify/Woo onto the order (no courier_shipment yet).
+    const tracking_id =
+      String(order.courier_tracking_number || "").trim() || null;
+    if (!tracking_id) return order;
+
+    const details = String(order.tracking_details || "");
+    const courierMatch = details.match(/Courier:\s*([^|]+)/i);
+    const urlMatch = details.match(/URL:\s*(\S+)/i);
+    const courierName =
+      (courierMatch && String(courierMatch[1] || "").trim()) || null;
     const tracking_url =
-      shipment.label_url ||
-      buildPublicCourierTrackingUrl(shipment.courier, tracking_id) ||
+      (urlMatch && String(urlMatch[1] || "").trim()) ||
+      buildPublicCourierTrackingUrl(courierName, tracking_id) ||
       null;
-    const apiRequest =
-      shipment.api_request && typeof shipment.api_request === "object" ?
-        shipment.api_request
-      : null;
-    const courier_company =
-      apiRequest ?
-        String(
-          apiRequest.courierCompany || apiRequest.courier_company || "",
-        ).trim() || null
-      : null;
+
     return {
       ...order,
       tracking_id,
       tracking_number: tracking_id,
       tracking_url,
-      courier_provider: shipment.courier || null,
-      courier_company,
+      courier_provider: courierName,
+      courier_company: courierName,
       courier_shipment: {
         tracking_number: tracking_id,
-        courier: shipment.courier || null,
-        courier_company,
-        label_url: shipment.label_url || null,
-        shipment_status: shipment.shipment_status || null,
+        courier: courierName,
+        courier_company: courierName,
+        label_url: tracking_url,
+        shipment_status: order.tracking_status || null,
       },
     };
   });

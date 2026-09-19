@@ -148,6 +148,14 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
       settings.cost_center ||
       settings.pickup_location ||
       null,
+    pickup_address:
+      legacy.pickup_address ||
+      settings.pickup_address ||
+      null,
+    return_address:
+      legacy.return_address ||
+      settings.return_address ||
+      null,
     service_type: legacy.service_type || settings.service_type || null,
     settings: {
       ...settings,
@@ -156,6 +164,14 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
         legacy.cost_center ||
         settings.cost_center ||
         legacy.pickup_location ||
+        null,
+      pickup_address:
+        legacy.pickup_address || settings.pickup_address || null,
+      return_address:
+        legacy.return_address || settings.return_address || null,
+      shipper_address:
+        settings.shipper_address ||
+        legacy.pickup_address ||
         null,
     },
     _legacy: true,
@@ -371,6 +387,60 @@ async function createShipment(orderId, options = {}) {
         options.pickup_location ||
         null,
     };
+
+    // Override COD collect amount from booking UI when provided.
+    const rawIsCod = options.isCod ?? options.is_cod ?? options.cod;
+    const hasCodFlag = rawIsCod !== undefined && rawIsCod !== null && rawIsCod !== "";
+    const isCod =
+      rawIsCod === true ||
+      rawIsCod === "true" ||
+      rawIsCod === "1" ||
+      rawIsCod === 1;
+    const rawAmount = options.codAmount ?? options.cod_amount ?? options.amount ?? options.total_amount;
+    if (hasCodFlag) {
+      if (isCod) {
+        let amount = Number(rawAmount);
+        // Fall back to order total when UI sent COD without a usable amount
+        // (common when amount_received > total_amount leaves remaining COD at 0).
+        if (!Number.isFinite(amount) || amount <= 0) {
+          amount = Number(
+            order.declaredValue ??
+              order.total_amount ??
+              order.order_items_total ??
+              order.codAmount ??
+              0,
+          );
+        }
+        order.codAmount = Number.isFinite(amount) && amount >= 0 ? amount : 0;
+        order.isCod = true;
+      } else {
+        order.codAmount = 0;
+        order.isCod = false;
+      }
+    } else if (rawAmount != null && rawAmount !== "") {
+      const amount = Number(rawAmount);
+      if (Number.isFinite(amount) && amount >= 0) {
+        order.codAmount = amount;
+        order.isCod = amount > 0;
+      }
+    }
+
+    // Override destination city from booking UI / request body when provided.
+    // Prefer order.city (invoice City field) over warehouse/pickup defaults.
+    const destCity = String(
+      options.city ||
+        options.destinationCity ||
+        options.destination_city ||
+        options.cityName ||
+        options.city_name ||
+        "",
+    ).trim();
+    if (destCity) {
+      order.city = destCity;
+      if (order.shippingAddress && typeof order.shippingAddress === "object") {
+        order.shippingAddress = { ...order.shippingAddress, city: destCity };
+      }
+    }
 
     const result = await driver.createShipment(order);
 
@@ -939,10 +1009,68 @@ async function printLabel(orderId, options = {}) {
     await shipment.save();
   }
 
+  let labelBase64 = result.labelBase64 || null;
+  const courierKey = String(shipment.courier || result.courier || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+
+  // PostEx airway bill: stamp company logo before PostEx logo on the PDF header.
+  // Also stamp COD amount / Order Type when booking stored a collectable amount.
+  if (courierKey === "postex" || courierKey === "postexpk") {
+    try {
+      if (!labelBase64 && result.labelUrl) {
+        const res = await fetch(String(result.labelUrl));
+        if (res.ok) {
+          labelBase64 = Buffer.from(await res.arrayBuffer()).toString("base64");
+        }
+      }
+      if (labelBase64) {
+        const shipmentCod = Number(shipment.cod_amount);
+        const rawIsCod = options.isCod ?? options.is_cod ?? options.cod;
+        const explicitCod =
+          rawIsCod === true ||
+          rawIsCod === "true" ||
+          rawIsCod === "1" ||
+          rawIsCod === 1;
+        const explicitNotCod =
+          rawIsCod === false ||
+          rawIsCod === "false" ||
+          rawIsCod === "0" ||
+          rawIsCod === 0;
+        const queryAmount = Number(
+          options.codAmount ?? options.cod_amount ?? options.amount ?? options.total_amount,
+        );
+        const codAmount = Number.isFinite(queryAmount)
+          ? queryAmount
+          : Number.isFinite(shipmentCod)
+            ? shipmentCod
+            : 0;
+        const isCod = explicitCod || (!explicitNotCod && codAmount > 0);
+
+        const { stampPostexLabelLogos } = require("../utils/stampCourierLabelLogos");
+        const stamped = await stampPostexLabelLogos(
+          Buffer.from(labelBase64, "base64"),
+          company,
+          {
+            isCod,
+            codAmount,
+          },
+        );
+        labelBase64 = stamped.toString("base64");
+      }
+    } catch (stampErr) {
+      console.warn(
+        "[courier] Failed to stamp PostEx label logos:",
+        stampErr?.message || stampErr,
+      );
+    }
+  }
+
   return {
     success: true,
     label_url: result.labelUrl || shipment.label_url || null,
-    label_base64: result.labelBase64 || null,
+    label_base64: labelBase64,
     content_type: result.contentType || "application/pdf",
     tracking_number: shipment.tracking_number,
     printtype: result.printtype ?? options.printtype ?? null,

@@ -16,6 +16,7 @@ const {
 } = require("./errors");
 const { httpRequest } = require("../utils/httpClient");
 const courierLogger = require("../utils/courierLogger");
+const { courierRemarksText } = require("../utils/orderContextLoader");
 
 const DEFAULT_HOST = "https://partners.flaship.pk";
 
@@ -356,10 +357,7 @@ class FlagshipCourier extends BaseCourier {
       courierCompany,
       courierOption,
       pickuplocation,
-      specialInstructions: String(order.remarks || order.description || "").slice(
-        0,
-        500,
-      ),
+      specialInstructions: courierRemarksText(order),
       externalref: String(order.order_no || order._id || "").slice(0, 50),
     };
   }

@@ -97,6 +97,30 @@ async function createShipment(req, res) {
         req.body?.pickup_location ||
         req.query?.pickuplocation ||
         null,
+      isCod:
+        req.body?.isCod ??
+        req.body?.is_cod ??
+        req.body?.cod ??
+        req.query?.isCod ??
+        req.query?.is_cod ??
+        req.query?.cod,
+      codAmount:
+        req.body?.codAmount ??
+        req.body?.cod_amount ??
+        req.body?.amount ??
+        req.body?.total_amount ??
+        req.query?.codAmount ??
+        req.query?.cod_amount ??
+        req.query?.amount ??
+        req.query?.total_amount,
+      city:
+        req.body?.city ||
+        req.body?.destinationCity ||
+        req.body?.destination_city ||
+        req.body?.cityName ||
+        req.body?.city_name ||
+        req.query?.city ||
+        null,
     });
 
     return res.status(result.queued ? 202 : 201).json(result);
@@ -184,6 +208,13 @@ async function printLabel(req, res) {
       printtype: req.query?.printtype ?? req.query?.printType,
       shipperDetails: req.query?.shipperDetails,
       accounttype: req.query?.accounttype ?? req.query?.accountType,
+      isCod: req.query?.isCod ?? req.query?.is_cod ?? req.query?.cod,
+      codAmount:
+        req.query?.codAmount ??
+        req.query?.cod_amount ??
+        req.query?.amount ??
+        req.query?.totalAmount ??
+        req.query?.total_amount,
     });
     return res.status(200).json(result);
   } catch (err) {

@@ -551,6 +551,40 @@ modelSchema.index(
   },
 );
 
+/**
+ * Prevent duplicate Shopify/Woo imports of the same remote order
+ * (`description` like `shopify:order:123`). Partial so POS-only rows
+ * without an external ref are unaffected.
+ */
+modelSchema.index(
+  { company_id: 1, description: 1 },
+  {
+    unique: true,
+    name: "company_external_order_ref_unique",
+    partialFilterExpression: {
+      deletedAt: null,
+      description: { $type: "string", $gt: "" },
+    },
+  },
+);
+
+/**
+ * Secondary guard when description is missing/mismatched but
+ * integration_order_id is set (e.g. Shopify #1013).
+ */
+modelSchema.index(
+  { company_id: 1, integration_id: 1, integration_order_id: 1 },
+  {
+    unique: true,
+    name: "company_integration_order_id_unique",
+    partialFilterExpression: {
+      deletedAt: null,
+      integration_id: { $exists: true, $type: "objectId" },
+      integration_order_id: { $type: "string", $gt: "" },
+    },
+  },
+);
+
 /** Tenant order lists and status dashboards (partialFilter: active sales rows). */
 modelSchema.index(
   { company_id: 1, order_status: 1, createdAt: -1 },
@@ -913,8 +947,139 @@ MODEL.getOrderStatusStockEffect = getOrderStatusStockEffect;
 MODEL.getOrderStatusStockAction = getOrderStatusStockAction;
 
 /**
+ * Soft-delete older duplicate imported orders so unique indexes can build.
+ * Keeps the best row per key (prefer more advanced OMS status, then newest).
+ * @param {import('mongodb').Collection} coll
+ */
+async function softDeleteDuplicateImportedOrders(coll) {
+  const now = new Date();
+  let softDeleted = 0;
+
+  const STATUS_RANK = {
+    delivered: 100,
+    completed: 100,
+    in_transit: 80,
+    shipped: 80,
+    packed: 70,
+    processing: 60,
+    active: 60,
+    confirmed: 50,
+    placed: 40,
+    pending: 20,
+    pending_payment: 20,
+    draft: 10,
+    on_hold: 15,
+    products_skipped: 15,
+    failed: 5,
+    cancelled: 0,
+    duplicate: 0,
+    return: 0,
+    return_received: 0,
+  };
+
+  function rankStatus(status) {
+    return STATUS_RANK[String(status || "").trim().toLowerCase()] ?? 30;
+  }
+
+  function pickKeeper(rows) {
+    return [...(rows || [])].sort((a, b) => {
+      const statusDiff = rankStatus(b.order_status) - rankStatus(a.order_status);
+      if (statusDiff !== 0) return statusDiff;
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return String(b.id).localeCompare(String(a.id));
+    })[0];
+  }
+
+  async function softDeleteLosers(groups) {
+    for (const group of groups) {
+      const rows = group.ids || [];
+      if (rows.length < 2) continue;
+      const keeper = pickKeeper(rows);
+      if (!keeper?.id) continue;
+      const losers = rows
+        .filter((row) => String(row.id) !== String(keeper.id))
+        .map((row) => row.id);
+      if (!losers.length) continue;
+      const result = await coll.updateMany(
+        { _id: { $in: losers }, deletedAt: null },
+        {
+          $set: {
+            deletedAt: now,
+            status: "inactive",
+            updatedAt: now,
+          },
+        },
+      );
+      softDeleted += result.modifiedCount || 0;
+    }
+  }
+
+  const byDescription = await coll
+    .aggregate([
+      {
+        $match: {
+          deletedAt: null,
+          description: { $type: "string", $gt: "" },
+        },
+      },
+      {
+        $group: {
+          _id: { company_id: "$company_id", description: "$description" },
+          ids: {
+            $push: {
+              id: "$_id",
+              createdAt: "$createdAt",
+              order_status: "$order_status",
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+    ])
+    .toArray();
+  await softDeleteLosers(byDescription);
+
+  const byIntegration = await coll
+    .aggregate([
+      {
+        $match: {
+          deletedAt: null,
+          integration_id: { $exists: true, $ne: null },
+          integration_order_id: { $type: "string", $gt: "" },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            company_id: "$company_id",
+            integration_id: "$integration_id",
+            integration_order_id: "$integration_order_id",
+          },
+          ids: {
+            $push: {
+              id: "$_id",
+              createdAt: "$createdAt",
+              order_status: "$order_status",
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+    ])
+    .toArray();
+  await softDeleteLosers(byIntegration);
+
+  return softDeleted;
+}
+
+/**
  * Drop legacy global unique index on `order_no` only. Numbering is per-tenant via
  * `company_id_1_order_no_1` (partial); the old index blocked the same ORD-#### across companies.
+ * Also dedupes imported Shopify/Woo refs then syncs unique import indexes.
  */
 async function dropObsoleteOrderNoUniqueIndex() {
   try {
@@ -932,6 +1097,14 @@ async function dropObsoleteOrderNoUniqueIndex() {
         );
       }
     }
+
+    const softDeleted = await softDeleteDuplicateImportedOrders(coll);
+    if (softDeleted > 0) {
+      console.log(
+        `[order] Soft-deleted ${softDeleted} duplicate imported order(s) before unique index sync`,
+      );
+    }
+
     const { dropped, created } = await MODEL.syncIndexes();
     if (dropped?.length || created?.length) {
       console.log("[order] syncIndexes:", { dropped, created });

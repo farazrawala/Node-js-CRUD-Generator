@@ -1026,6 +1026,40 @@ async function findExistingImportedOrder(
   }).lean();
 }
 
+/** Mongo duplicate-key (E11000) — used when unique import indexes race. */
+function isMongoDuplicateKeyError(err) {
+  if (!err || typeof err !== "object") return false;
+  const code = Number(err.code);
+  if (code === 11000 || code === 11001) return true;
+  const msg = String(err.message || "");
+  return /E11000|duplicate key/i.test(msg);
+}
+
+/**
+ * Create an imported POS order, or return the existing row when a concurrent
+ * import hits the unique external-ref / integration_order_id index.
+ * @returns {Promise<{ order: object, created: boolean }>}
+ */
+async function createImportedPosOrderOrGetExisting(orderPayload) {
+  try {
+    const order = await Order.create(orderPayload);
+    return { order, created: true };
+  } catch (err) {
+    if (!isMongoDuplicateKeyError(err)) {
+      throw err;
+    }
+    const existing = await findExistingImportedOrder(orderPayload.company_id, {
+      externalRef: orderPayload.description,
+      integrationId: orderPayload.integration_id,
+      integrationOrderId: orderPayload.integration_order_id,
+    });
+    if (!existing) {
+      throw err;
+    }
+    return { order: existing, created: false };
+  }
+}
+
 async function resolvePosProductForRemoteLine({
   integrationId,
   companyId,
@@ -1367,34 +1401,102 @@ function fallbackRemoteOrderLinesSubtotal(remoteOrder, store) {
   return round2(Math.max(0, total - shipping + discount));
 }
 
-function mapShopifyOrderStatus(financialStatus, fulfillmentStatus) {
+function mapShopifyOrderStatus(
+  financialStatus,
+  fulfillmentStatus,
+  shipmentStatus,
+) {
   const fin = String(financialStatus || "").toLowerCase();
   const fulf = String(fulfillmentStatus || "").toLowerCase();
+  const ship = String(shipmentStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
 
   if (fin === "refunded" || fin === "partially_refunded") {
-    return "refunded";
+    return "cancelled";
   }
   if (fin === "voided") {
     return "cancelled";
   }
-  if (fin === "paid" && (fulf === "fulfilled" || fulf === "partial")) {
-    return "completed";
+
+  // Fulfillment wins over unpaid/pending payment (common for COD).
+  if (ship === "delivered") {
+    return "delivered";
   }
+  if (fulf === "fulfilled" || fulf === "partial") {
+    if (ship === "out_for_delivery" || ship === "in_transit") {
+      return "in_transit";
+    }
+    return "in_transit";
+  }
+
   if (fin === "paid") {
     return "confirmed";
   }
   if (fin === "pending" || fin === "authorized") {
     return "pending";
   }
-  if (fulf === "fulfilled") {
-    return "delivered";
-  }
   return "placed";
+}
+
+/** Higher = more advanced fulfillment. Used to avoid pull downgrades. */
+const POS_ORDER_STATUS_RANK = Object.freeze({
+  draft: 0,
+  pending: 1,
+  on_hold: 1,
+  placed: 2,
+  confirmed: 3,
+  processing: 3,
+  active: 3,
+  packed: 4,
+  in_transit: 5,
+  // Legacy / invalid values previously written by older Shopify mappers
+  completed: 6,
+  delivered: 6,
+  cancelled: 90,
+  failed: 90,
+  duplicate: 90,
+});
+
+const POS_WEBSITE_STATUS_RANK = Object.freeze({
+  pending: 1,
+  confirmed: 2,
+  processing: 2,
+  "on-hold": 1,
+  // Legacy raw Shopify financial_status persisted as website status
+  paid: 2,
+  shipped: 4,
+  delivered: 5,
+  cancelled: 90,
+  refunded: 90,
+  voided: 90,
+  failed: 90,
+  completed: 5,
+});
+
+function shouldApplyRemoteStatus(previous, next, rankMap) {
+  const prev = String(previous || "")
+    .trim()
+    .toLowerCase();
+  const nxt = String(next || "")
+    .trim()
+    .toLowerCase();
+  if (!nxt || nxt === prev) return false;
+  const prevRank = rankMap[prev];
+  const nextRank = rankMap[nxt];
+  // Unknown previous (e.g. legacy "completed"/"paid") → always allow remap
+  if (prevRank == null) return true;
+  if (nextRank == null) return true;
+  // Allow moving into cancelled/failed; block fulfillment regress (e.g. delivered→pending).
+  if (nextRank >= 90) return true;
+  if (prevRank >= 4 && nextRank < prevRank) return false;
+  return true;
 }
 
 /**
  * Raw store status for `order.order_website_status`.
- * WooCommerce → `status`; Shopify → `financial_status` (fallback fulfillment_status).
+ * WooCommerce → `status`; Shopify → fulfillment/shipment first, then payment.
  */
 function resolveOrderWebsiteStatus(remoteOrder, store) {
   const Order = require("../models/order");
@@ -1411,10 +1513,31 @@ function resolveOrderWebsiteStatus(remoteOrder, store) {
   const storeKey = String(store || "").toLowerCase();
   let raw = "";
   if (storeKey === "shopify") {
-    raw =
-      remoteOrder?.financial_status ||
-      remoteOrder?.fulfillment_status ||
-      "";
+    const fin = String(remoteOrder?.financial_status || "")
+      .trim()
+      .toLowerCase();
+    const fulf = String(remoteOrder?.fulfillment_status || "")
+      .trim()
+      .toLowerCase();
+    const tracking = extractShopifyFulfillmentTracking(remoteOrder);
+    const ship = String(tracking?.shipment_status || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+
+    if (fin === "refunded" || fin === "partially_refunded") {
+      raw = "refunded";
+    } else if (fin === "voided") {
+      raw = "cancelled";
+    } else if (ship === "delivered") {
+      raw = "delivered";
+    } else if (fulf === "fulfilled" || fulf === "partial") {
+      raw = "shipped";
+    } else if (fin === "paid" || fin === "partially_paid") {
+      raw = "confirmed";
+    } else {
+      raw = "pending";
+    }
   } else {
     raw = remoteOrder?.status || "";
   }
@@ -1537,11 +1660,16 @@ function buildPosOrderHeaderFromRemote(remoteOrder, store, ctx) {
     linesSubtotal = fallbackRemoteOrderLinesSubtotal(remoteOrder, storeKey);
   }
 
+  const shopifyTracking =
+    storeKey === "shopify" ?
+      extractShopifyFulfillmentTracking(remoteOrder)
+    : null;
   const orderStatus =
     storeKey === "shopify" ?
       mapShopifyOrderStatus(
         remoteOrder?.financial_status,
         remoteOrder?.fulfillment_status,
+        shopifyTracking?.shipment_status,
       )
     : mapWooOrderStatus(remoteOrder?.status);
 
@@ -1596,7 +1724,6 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
     shipment: header.shipment,
     lines_subtotal: header.lines_subtotal,
     amount_received: header.amount_received,
-    order_website_status: header.order_website_status,
   };
 
   const pulledNote = remoteOrderCustomerNote(remoteOrder, store) || header.note;
@@ -1605,8 +1732,25 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
   }
 
   const previousStatus = String(existing?.order_status || "").trim();
-  if (header.order_status && header.order_status !== previousStatus) {
+  if (
+    shouldApplyRemoteStatus(
+      previousStatus,
+      header.order_status,
+      POS_ORDER_STATUS_RANK,
+    )
+  ) {
     patch.order_status = header.order_status;
+  }
+
+  const previousWebsite = String(existing?.order_website_status || "").trim();
+  if (
+    shouldApplyRemoteStatus(
+      previousWebsite,
+      header.order_website_status,
+      POS_WEBSITE_STATUS_RANK,
+    )
+  ) {
+    patch.order_website_status = header.order_website_status;
   }
 
   if (!existing?.customer_id && header.customerResolve) {
@@ -1627,12 +1771,50 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
     }
   }
 
+  let appliedShopifyTracking = null;
+  if (String(store || "").toLowerCase() === "shopify") {
+    const remoteTracking = extractShopifyFulfillmentTracking(remoteOrder);
+    const trackingFields = buildPosTrackingFieldsFromShopify(remoteTracking);
+    const existingCn = String(existing?.courier_tracking_number || "").trim();
+    // Prefer POS-booked tracking when already set; otherwise import from Shopify.
+    if (trackingFields.courier_tracking_number && !existingCn) {
+      Object.assign(patch, trackingFields);
+      appliedShopifyTracking = remoteTracking;
+    } else if (trackingFields.courier_tracking_number && existingCn) {
+      // Same CN (or Shopify CN already on POS): still refresh status/details.
+      if (trackingFields.tracking_status) {
+        patch.tracking_status = trackingFields.tracking_status;
+      }
+      if (trackingFields.tracking_details) {
+        patch.tracking_details = trackingFields.tracking_details;
+      }
+      appliedShopifyTracking = remoteTracking;
+    } else if (
+      trackingFields.tracking_status &&
+      !String(existing?.tracking_status || "").trim()
+    ) {
+      patch.tracking_status = trackingFields.tracking_status;
+      if (trackingFields.tracking_details) {
+        patch.tracking_details = trackingFields.tracking_details;
+      }
+    }
+  }
+
   await Order.updateOne({ _id: existing._id }, { $set: patch });
   if (pulledNote) {
     await Order.collection.updateOne(
       { _id: existing._id },
       { $set: { note: pulledNote } },
     );
+  }
+
+  if (appliedShopifyTracking) {
+    await upsertImportedCourierShipmentFromTracking({
+      companyId: existing.company_id || header.company_id,
+      orderId: existing._id,
+      tracking: appliedShopifyTracking,
+      createdBy: ctx?.process?.created_by?._id || ctx?.process?.created_by,
+    });
   }
 
   if (String(store || "").toLowerCase() === "shopify") {
@@ -1727,6 +1909,203 @@ function mapTrackingStatusToShopifyFulfillmentEvent(trackingStatus, orderStatus)
   if (["packed"].includes(order) && raw) return "confirmed";
 
   return raw ? "confirmed" : null;
+}
+
+/**
+ * Shopify fulfillment `shipment_status` → POS `tracking_status`.
+ * @param {string} shipmentStatus
+ * @returns {string}
+ */
+function mapShopifyShipmentStatusToPosTrackingStatus(shipmentStatus) {
+  const s = String(shipmentStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const map = {
+    label_printed: "booked",
+    label_purchased: "booked",
+    attempted_delivery: "out_for_delivery",
+    ready_for_pickup: "booked",
+    confirmed: "booked",
+    in_transit: "in_transit",
+    out_for_delivery: "out_for_delivery",
+    delivered: "delivered",
+    failure: "failed",
+  };
+  return map[s] || (s ? s : "");
+}
+
+/**
+ * Read tracking from Shopify order fulfillments (nested on REST order payload).
+ * Prefers the latest non-cancelled fulfillment that has a tracking number.
+ *
+ * @param {object} remoteOrder
+ * @param {object[]} [fulfillments] optional prefetched fulfillments
+ * @returns {{ tracking_number: string, courier_name: string, tracking_url: string, tracking_status: string, shipment_status: string } | null}
+ */
+function extractShopifyFulfillmentTracking(remoteOrder, fulfillments) {
+  const list = Array.isArray(fulfillments)
+    ? fulfillments
+    : Array.isArray(remoteOrder?.fulfillments)
+      ? remoteOrder.fulfillments
+      : [];
+  if (!list.length) return null;
+
+  const ranked = [...list]
+    .map((f, index) => ({ f, index }))
+    .filter(({ f }) => {
+      const status = String(f?.status || "").trim().toLowerCase();
+      return status !== "cancelled" && status !== "error";
+    })
+    .sort((a, b) => {
+      const ta = new Date(a.f?.updated_at || a.f?.created_at || 0).getTime();
+      const tb = new Date(b.f?.updated_at || b.f?.created_at || 0).getTime();
+      if (tb !== ta) return tb - ta;
+      return b.index - a.index;
+    });
+
+  for (const { f } of ranked) {
+    const numbers = Array.isArray(f?.tracking_numbers)
+      ? f.tracking_numbers
+      : [];
+    const number = String(
+      f?.tracking_number || numbers.find((n) => String(n || "").trim()) || "",
+    ).trim();
+    if (!number) continue;
+
+    const urls = Array.isArray(f?.tracking_urls) ? f.tracking_urls : [];
+    const tracking_url = String(
+      f?.tracking_url || urls.find((u) => String(u || "").trim()) || "",
+    ).trim();
+    const courier_name = String(f?.tracking_company || "").trim();
+    const shipment_status = String(f?.shipment_status || "").trim();
+    const tracking_status =
+      mapShopifyShipmentStatusToPosTrackingStatus(shipment_status);
+
+    return {
+      tracking_number: number,
+      courier_name,
+      tracking_url,
+      tracking_status,
+      shipment_status,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Build POS order $set fields from Shopify fulfillment tracking.
+ * @param {object|null} tracking
+ * @returns {object}
+ */
+function buildPosTrackingFieldsFromShopify(tracking) {
+  if (!tracking?.tracking_number) return {};
+  const fields = {
+    courier_tracking_number: String(tracking.tracking_number).trim(),
+  };
+  if (tracking.tracking_status) {
+    fields.tracking_status = String(tracking.tracking_status).trim();
+  }
+  const detailParts = [
+    tracking.courier_name ? `Courier: ${tracking.courier_name}` : null,
+    tracking.tracking_url ? `URL: ${tracking.tracking_url}` : null,
+    tracking.shipment_status
+      ? `Shopify: ${tracking.shipment_status}`
+      : null,
+  ].filter(Boolean);
+  if (detailParts.length) {
+    fields.tracking_details = detailParts.join(" | ").slice(0, 500);
+  }
+  return fields;
+}
+
+/**
+ * Ensure list UI can show Shopify-imported tracking (reads courier_shipments).
+ */
+async function upsertImportedCourierShipmentFromTracking({
+  companyId,
+  orderId,
+  tracking,
+  createdBy,
+}) {
+  if (!tracking?.tracking_number || !companyId || !orderId) return null;
+
+  let CourierShipment;
+  try {
+    CourierShipment = require("../src/models/courier_shipment.model");
+  } catch {
+    return null;
+  }
+
+  const {
+    PROVIDERS,
+    UNIFIED_STATUSES,
+    normalizeProviderKey,
+  } = require("../src/couriers/constants");
+
+  const courier =
+    normalizeProviderKey(tracking.courier_name) ||
+    (String(tracking.courier_name || "")
+      .toLowerCase()
+      .includes("post") ?
+      PROVIDERS.POSTEX
+    : null);
+  if (!courier) return null;
+
+  const statusKey = String(tracking.tracking_status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const statusMap = {
+    booked: UNIFIED_STATUSES.BOOKED,
+    confirmed: UNIFIED_STATUSES.BOOKED,
+    in_transit: UNIFIED_STATUSES.IN_TRANSIT,
+    out_for_delivery: UNIFIED_STATUSES.OUT_FOR_DELIVERY,
+    delivered: UNIFIED_STATUSES.DELIVERED,
+    failed: UNIFIED_STATUSES.FAILED,
+  };
+  const shipment_status =
+    statusMap[statusKey] || UNIFIED_STATUSES.BOOKED;
+  const tracking_number = String(tracking.tracking_number).trim();
+  const label_url = String(tracking.tracking_url || "").trim() || null;
+
+  const existing = await CourierShipment.findOne({
+    order_id: orderId,
+    tracking_number,
+    deletedAt: null,
+  }).lean();
+
+  if (existing?._id) {
+    await CourierShipment.updateOne(
+      { _id: existing._id },
+      {
+        $set: {
+          shipment_status,
+          ...(label_url ? { label_url } : {}),
+          courier,
+          last_tracking_sync: new Date(),
+        },
+      },
+    );
+    return existing._id;
+  }
+
+  const created = await CourierShipment.create({
+    company_id: companyId,
+    order_id: orderId,
+    courier,
+    tracking_number,
+    shipment_status,
+    label_url,
+    api_request: {
+      source: "shopify_import",
+      courier_company: tracking.courier_name || null,
+    },
+    created_by: createdBy || undefined,
+    last_tracking_sync: new Date(),
+  });
+  return created?._id || null;
 }
 
 /** POS order_status → WooCommerce order status. */
@@ -3264,6 +3643,8 @@ module.exports = {
   resolveIntegrationOrderId,
   findExistingOrderByExternalRef,
   findExistingImportedOrder,
+  isMongoDuplicateKeyError,
+  createImportedPosOrderOrGetExisting,
   resolvePosProductForRemoteLine,
   buildPosOrderLineItemsFromRemote,
   backfillPosOrderLinesIfEmpty,
@@ -3278,6 +3659,10 @@ module.exports = {
   mapPosOrderStatusToWoo,
   mapPosOrderStatusToShopifyFulfillmentAction,
   mapTrackingStatusToShopifyFulfillmentEvent,
+  mapShopifyShipmentStatusToPosTrackingStatus,
+  extractShopifyFulfillmentTracking,
+  buildPosTrackingFieldsFromShopify,
+  upsertImportedCourierShipmentFromTracking,
   resolvePosOrderTrackingForPush,
   buildPosOrderTrackingMetaEntries,
   mergeWooOrderMetaData,

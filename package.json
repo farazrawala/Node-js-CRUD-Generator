@@ -37,6 +37,7 @@
     "mysql2": "^3.22.2",
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.10",
+    "pdf-lib": "^1.17.1",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
     "prom-client": "^15.1.3",

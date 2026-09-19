@@ -14,6 +14,7 @@ const { orderNotFound } = require("../couriers/errors");
  * @property {string} [email]
  * @property {string} [phone]
  * @property {string} [address]
+ * @property {string} [note]
  * @property {string} [description]
  * @property {string} [city]
  * @property {string} [province]
@@ -30,7 +31,7 @@ const { orderNotFound } = require("../couriers/errors");
  * @property {object[]} items
  * @property {number} [declaredValue]
  * @property {string} [contentDesc]
- * @property {string} [remarks]
+ * @property {string} [remarks] Courier remarks — from order.note
  */
 
 /**
@@ -111,10 +112,30 @@ async function loadOrderContext(orderId, opts = {}) {
       ? Math.max(1, Math.round(explicitPackages))
       : 1;
 
-  const totalAmount = Number(order.total_amount) || 0;
+  const totalAmount = (() => {
+    const fromOrder = Number(
+      order.total_amount ??
+        order.totalAmount ??
+        order.order_items_total ??
+        order.orderItemsTotal ??
+        order.grand_total ??
+        order.total,
+    );
+    if (Number.isFinite(fromOrder) && fromOrder > 0) return round2(fromOrder);
+    const fromItems = enrichedItems.reduce((sum, it) => {
+      const qty = Number(it.qty) || 1;
+      const price = Number(it.price ?? it.rate ?? it.product_id?.price) || 0;
+      return sum + qty * price;
+    }, 0);
+    return round2(fromItems);
+  })();
   const amountReceived = Number(order.amount_received) || 0;
   // Remaining balance treated as COD when not fully paid.
-  const codAmount = Math.max(0, round2(totalAmount - amountReceived));
+  let codAmount = Math.max(0, round2(totalAmount - amountReceived));
+  // amount_received > total usually means bad import data — keep full total as COD.
+  if (totalAmount > 0 && amountReceived > totalAmount) {
+    codAmount = totalAmount;
+  }
 
   const shippingAddress = {
     name: order.name || customer?.name || "",
@@ -122,11 +143,13 @@ async function loadOrderContext(orderId, opts = {}) {
     email: order.email || customer?.email || "",
     address: order.address || customer?.address || "",
     address2: "",
-    city: order.city || customer?.city || warehouse?.city || "",
-    province: order.province || order.state || customer?.state || warehouse?.state || "",
+    // Destination city must come from the order (invoice City field), not the
+    // warehouse/pickup city — otherwise PostEx labels show Origin as Destination.
+    city: order.city || customer?.city || "",
+    province: order.province || order.state || customer?.state || "",
     country: order.country || "Pakistan",
     country_code: order.country_code || "PK",
-    zip: order.zip || order.postal_code || warehouse?.zip_code || "",
+    zip: order.zip || order.postal_code || "",
     city_id: order.city_id || null,
     area: order.area || "",
     landmark: order.landmark || "",
@@ -159,10 +182,29 @@ async function loadOrderContext(orderId, opts = {}) {
       .slice(0, 3)
       .join(", ")
       .slice(0, 50) || "Goods",
-    remarks: order.description || "",
+    // Courier label "Remarks" / special instructions — order `note` only.
+    // Never use `description` (holds external refs like shopify:order:…).
+    remarks: courierRemarksText(order),
   };
 
   return ctx;
+}
+
+/**
+ * Human courier remarks from POS `note`. Skips empty values and integration
+ * refs accidentally stored on note/remarks (`shopify:order:…`).
+ * @param {object} order
+ * @returns {string}
+ */
+function courierRemarksText(order) {
+  const candidates = [order?.note, order?.remarks];
+  for (const value of candidates) {
+    const text = String(value ?? "").trim();
+    if (!text) continue;
+    if (/^(shopify|woocommerce):order:/i.test(text)) continue;
+    return text.slice(0, 500);
+  }
+  return "";
 }
 
 function round2(n) {
@@ -183,4 +225,4 @@ function productWeightToKg(raw) {
   return n;
 }
 
-module.exports = { loadOrderContext, productWeightToKg };
+module.exports = { loadOrderContext, productWeightToKg, courierRemarksText };
