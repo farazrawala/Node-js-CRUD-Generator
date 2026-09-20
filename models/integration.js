@@ -14,15 +14,15 @@ const modelSchema = new mongoose.Schema(
     },
     address: {
       type: String,
-      required: true,
+      // required: true,
     },
     city: {
       type: String,
-      required: true,
+      // required: true,
     },
     state: {
       type: String,
-      required: true,
+      // required: true,
     },
     email: {
       type: String,
