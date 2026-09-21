@@ -1,0 +1,47 @@
+# Deploy full Node.js app to https://pos.tgcrm.net/pos_admin
+#
+# FTP user home should already be the pos_admin folder (cPanel FTP account
+# pos_admin@pos.tgcrm.net). server-dir: / then maps to that URL.
+
+name: Deploy live (FTP)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-live-ftp
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync application files to pos_admin
+        uses: SamKirkland/FTP-Deploy-Action@4.3.3
+        with:
+          server: 203.161.41.148
+          username: pos_admin@pos.tgcrm.net
+          password: ")Y)r%],JIT+qUM]4"
+          local-dir: ./
+          server-dir: /
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/node_modules
+            **/uploads/**
+            **/uploads
+            **/logs/**
+            **/logs
+            deploy/github_actions_key.pem
+            deploy/github_actions_key.pem.example
+            **/.env
+            **/.env.*
