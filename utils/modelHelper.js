@@ -2925,6 +2925,46 @@ const SEARCH_SKIP_FIELD_NAMES = new Set([
 const SEARCHABLE_NUMBER_INSTANCES = new Set(["Number", "Decimal128"]);
 
 /**
+ * String schema fields that are often stored as numbers in Mongo
+ * (barcode imports, numeric SKUs). `{ $regex, $options }` on those
+ * values throws "Can't use $options with int/long".
+ */
+const MIXED_STRING_NUMBER_SEARCH_FIELDS = new Set([
+  "barcode",
+  "sku",
+  "product_code",
+]);
+
+function buildMixedTypeTextSearchClauses(field, searchTerm, escaped) {
+  const clauses = [
+    {
+      $expr: {
+        $regexMatch: {
+          input: {
+            $trim: {
+              input: { $toString: { $ifNull: [`$${field}`, ""] } },
+            },
+          },
+          regex: escaped,
+          options: "i",
+        },
+      },
+    },
+  ];
+  const trimmed = String(searchTerm ?? "").trim();
+  if (trimmed) {
+    clauses.push({ [field]: trimmed });
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const num = Number(trimmed);
+    if (Number.isSafeInteger(num)) {
+      clauses.push({ [field]: num });
+    }
+  }
+  return clauses;
+}
+
+/**
  * Top-level string and number fields on a Mongoose schema (for generic text search).
  */
 function getDefaultSearchFieldsFromModel(Model) {
@@ -2956,22 +2996,11 @@ function buildSearchOrClause(field, searchTerm, escaped, schemaPath) {
     return [{ [field]: new mongoose.Types.ObjectId(str) }];
   }
 
-  if (SEARCHABLE_NUMBER_INSTANCES.has(inst)) {
-    const clauses = [
-      {
-        $expr: {
-          $regexMatch: {
-            input: { $ifNull: [{ $toString: `$${field}` }, ""] },
-            regex: escaped,
-          },
-        },
-      },
-    ];
-    const num = Number(searchTerm);
-    if (searchTerm !== "" && Number.isFinite(num)) {
-      clauses.push({ [field]: num });
-    }
-    return clauses;
+  if (
+    SEARCHABLE_NUMBER_INSTANCES.has(inst) ||
+    MIXED_STRING_NUMBER_SEARCH_FIELDS.has(field)
+  ) {
+    return buildMixedTypeTextSearchClauses(field, searchTerm, escaped);
   }
   return [{ [field]: { $regex: escaped, $options: "i" } }];
 }
@@ -4153,6 +4182,7 @@ module.exports = {
   handleGenericFindOne,
   handleImageUpload,
   parseSearchFieldsFromQuery,
+  mergeSearchIntoFilter,
   buildPopulateFromQuery,
   shouldTreatQueryKeyAsPopulateOnly,
   activeNotDeletedCriteria,

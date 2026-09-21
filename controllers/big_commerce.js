@@ -11,6 +11,7 @@ const {
   coalesceObjectId,
   activeNotDeletedCriteria,
   parseSearchFieldsFromQuery,
+  mergeSearchIntoFilter,
 } = require("../utils/modelHelper");
 const VendorOrder = require("../models/vendor_order");
 const {
@@ -1000,6 +1001,21 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * POS-style search. Always includes name/code/sku/barcode.
+ * Skips `{ $regex, $options }` on ObjectIds and numeric barcodes
+ * (Mongo: "Can't use $options").
+ */
+function applyMarketplaceProductSearch(filter, query = {}) {
+  const search = query.search != null ? String(query.search).trim() : "";
+  if (!search) return filter;
+  const parsed = parseSearchFieldsFromQuery(query.searchFields) || [];
+  const fields = [
+    ...new Set([...DEFAULT_BC_POS_SEARCH_FIELDS, ...parsed]),
+  ];
+  return mergeSearchIntoFilter(filter, search, fields, Product);
+}
+
 /** Default threshold: in_stock > N, low_stock is 0 < qty < N. */
 const DEFAULT_STOCK_THRESHOLD = 10;
 
@@ -1317,18 +1333,6 @@ async function getBigCommerceProductsActivePos(req, res) {
       filter.brand_id = brandId;
     }
 
-    const search = req.query.search ? String(req.query.search).trim() : "";
-    if (search) {
-      const fields =
-        parseSearchFieldsFromQuery(req.query.searchFields) ||
-        DEFAULT_BC_POS_SEARCH_FIELDS;
-      const regex = { $regex: escapeRegex(search), $options: "i" };
-      filter.$and = [
-        ...(filter.$and || []),
-        { $or: fields.map((field) => ({ [field]: regex })) },
-      ];
-    }
-
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
     const stockFilter = parseStockFilterQuery(req.query || {});
@@ -1366,8 +1370,10 @@ async function getBigCommerceProductsActivePos(req, res) {
         companyOids.length === 1 ? companyOids[0] : { $in: companyOids },
     };
 
+    const queryFilter = applyMarketplaceProductSearch(filter, req.query || {});
+
     const [data, total] = await Promise.all([
-      Product.find(filter)
+      Product.find(queryFilter)
         .select(BIG_COMMERCE_POS_PRODUCT_SELECT)
         .populate("brand_id", "name")
         .populate("category_id", "name")
@@ -1385,7 +1391,7 @@ async function getBigCommerceProductsActivePos(req, res) {
         .skip(skip)
         .limit(limit)
         .lean({ virtuals: true }),
-      Product.countDocuments(filter),
+      Product.countDocuments(queryFilter),
     ]);
 
     const enriched = (data || []).map((row) => {
@@ -1515,19 +1521,6 @@ async function getPartnerProducts(req, res) {
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const skip = parseInt(req.query.skip, 10) || 0;
-    const search = req.query.search ? String(req.query.search).trim() : "";
-
-    if (search) {
-      filter.$and = [
-        ...(filter.$and || []),
-        {
-          $or: [
-            { product_name: { $regex: search, $options: "i" } },
-            { product_code: { $regex: search, $options: "i" } },
-          ],
-        },
-      ];
-    }
 
     const categoryId = coalesceObjectId(
       req.query.category_id ?? req.query.categoryId,
@@ -1541,8 +1534,10 @@ async function getPartnerProducts(req, res) {
       filter.brand_id = brandId;
     }
 
+    const queryFilter = applyMarketplaceProductSearch(filter, req.query || {});
+
     const [data, total] = await Promise.all([
-      Product.find(filter)
+      Product.find(queryFilter)
         .select(PARTNER_PRODUCT_SELECT)
         .populate("brand_id", "name")
         .populate("category_id", "name")
@@ -1550,7 +1545,7 @@ async function getPartnerProducts(req, res) {
         .skip(skip)
         .limit(limit)
         .lean(),
-      Product.countDocuments(filter),
+      Product.countDocuments(queryFilter),
     ]);
 
     return jsonSuccess(res, 200, data, null, {
@@ -2043,18 +2038,6 @@ async function getFetchedProducts(req, res) {
       ];
     }
 
-    const search = req.query.search ? String(req.query.search).trim() : "";
-    if (search) {
-      const fields =
-        parseSearchFieldsFromQuery(req.query.searchFields) ||
-        DEFAULT_BC_POS_SEARCH_FIELDS;
-      const regex = { $regex: escapeRegex(search), $options: "i" };
-      filter.$and = [
-        ...(filter.$and || []),
-        { $or: fields.map((field) => ({ [field]: regex })) },
-      ];
-    }
-
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
 
@@ -2065,8 +2048,10 @@ async function getFetchedProducts(req, res) {
       "origin_qty",
     ].join(" ");
 
+    const queryFilter = applyMarketplaceProductSearch(filter, req.query || {});
+
     const [data, total] = await Promise.all([
-      Product.find(filter)
+      Product.find(queryFilter)
         .select(selectFields)
         .populate("brand_id", "name")
         .populate("category_id", "name")
@@ -2083,7 +2068,7 @@ async function getFetchedProducts(req, res) {
         .skip(skip)
         .limit(limit)
         .lean(),
-      Product.countDocuments(filter),
+      Product.countDocuments(queryFilter),
     ]);
 
     return jsonSuccess(res, 200, data, null, {

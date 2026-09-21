@@ -138,6 +138,13 @@ const modelSchema = new mongoose.Schema(
       field_name: "Sync product status",
       field_type: "select",
     },
+    sync_product_stock: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync product stock",
+      field_type: "select",
+    },
 
     // default fields
     company_id: {

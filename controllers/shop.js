@@ -16,6 +16,7 @@ const WarehouseInventory = require("../models/warehouse_inventory");
 const {
   coalesceObjectId,
   parseSearchFieldsFromQuery,
+  mergeSearchIntoFilter,
 } = require("../utils/modelHelper");
 const {
   allowAddToCartWhenStockInsufficient,
@@ -75,10 +76,6 @@ function jsonSuccess(res, status, data, message, meta = {}) {
 function isValidObjectId(value) {
   const id = coalesceObjectId(value);
   return id != null && mongoose.Types.ObjectId.isValid(String(id));
-}
-
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function roundStockQty(value) {
@@ -809,18 +806,6 @@ async function getShopProducts(req, res) {
     );
     if (brandId) filter.brand_id = brandId;
 
-    const search = req.query.search ? String(req.query.search).trim() : "";
-    if (search) {
-      const fields =
-        parseSearchFieldsFromQuery(req.query.searchFields) ||
-        DEFAULT_SEARCH_FIELDS;
-      const regex = { $regex: escapeRegex(search), $options: "i" };
-      filter.$and = [
-        ...(filter.$and || []),
-        { $or: fields.map((field) => ({ [field]: regex })) },
-      ];
-    }
-
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const skip =
@@ -867,8 +852,19 @@ async function getShopProducts(req, res) {
         companyOids.length === 1 ? companyOids[0] : { $in: companyOids },
     };
 
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    const parsedSearchFields =
+      parseSearchFieldsFromQuery(req.query.searchFields) || [];
+    const searchFields = [
+      ...new Set([...DEFAULT_SEARCH_FIELDS, ...parsedSearchFields]),
+    ];
+    const queryFilter =
+      search ?
+        mergeSearchIntoFilter(filter, search, searchFields, Product)
+      : filter;
+
     const [rows, total] = await Promise.all([
-      Product.find(filter)
+      Product.find(queryFilter)
         .select(SHOP_PRODUCT_SELECT)
         .populate("brand_id", "name")
         .populate("category_id", "name")
@@ -881,7 +877,7 @@ async function getShopProducts(req, res) {
         .skip(skip)
         .limit(limit)
         .lean({ virtuals: true }),
-      Product.countDocuments(filter),
+      Product.countDocuments(queryFilter),
     ]);
 
     const parentIds = rows.map((row) => row._id);
