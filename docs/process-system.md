@@ -6,7 +6,7 @@ This document describes the **Process queue**: background-style jobs that connec
 
 ## Overview
 
-1. You **insert a process record** in Admin (or via API) with an **action** (`sync_product`, `sync_category`, `fetch_products`, etc.) and link it to an **integration** (which defines `store_type`: WooCommerce or Shopify).
+1. You **insert a process record** in Admin (or via API) with an **action** (`sync_product`, `sync_category`, `fetch_products`, etc.) and link it to an **integration** (which defines `store_type`: WooCommerce, Shopify, or Daraz).
 2. You call **`GET` or `POST` `/api/process/execute-process`** (with auth).
 3. The server loads the **next active process** for your company, reads integration credentials, runs the matching handler, and **updates the process row** (`progress`, `status`, `page`, `hits`, `count`, `remarks`).
 
@@ -26,7 +26,7 @@ flowchart TD
   D -->|none| E[400 No process found]
   D -->|found| F{action + integration.store_type}
   F -->|fetch_category + woocommerce| G[Batch import categories\nstore → POS]
-  F -->|sync_product + shopify| H[Push one product\nPOS → store]
+  F -->|sync_product + shopify / daraz| H[Push one product\nPOS → store]
   F -->|sync_category + shopify| N[Push one category\nPOS → store]
   F -->|fetch_products| I[Batch import products\nstore → POS]
   G --> J[Update page, hits, count,\nprogress, remarks]
@@ -263,7 +263,7 @@ Required dropdowns: **Integration**, **Action**, **Status**. For push jobs also 
 | `GET /api/process/execute-process` | Implemented (GET or POST) |
 | Queue loader (`priority`, `company_id`, `process_id`) | Implemented |
 | `fetch_category` → WooCommerce / Shopify (batch import) | Implemented |
-| `sync_product` → WooCommerce / Shopify | Implemented |
+| `sync_product` → WooCommerce / Shopify / Daraz | Implemented |
 | `sync_category` → push one category to store | Implemented |
 | `fetch_products` batch import | Stub / commented in controller |
 | `hits`, `progress` updates on batch import | Implemented |
@@ -292,6 +292,7 @@ Required dropdowns: **Integration**, **Action**, **Status**. For push jobs also 
 | `controllers/process.js` | Queue loader + `execute_process` router |
 | `controllers/woocommerceProcess.js` | WooCommerce fetch/sync handlers |
 | `controllers/shopifyProcess.js` | Shopify fetch/sync handlers |
+| `controllers/darazProcess.js` | Daraz PK fetch/sync handlers |
 | `utils/processHelpers.js` | Shared batch helpers, dispatch, process status updates |
 | `routes/api.js` | Route registration |
 | `routes/admin.js` | Admin CRUD for process records |

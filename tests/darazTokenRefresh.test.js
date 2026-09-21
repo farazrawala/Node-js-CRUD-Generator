@@ -11,8 +11,10 @@ const {
   CREATE_TOKEN_PATH,
   REFRESH_TOKEN_PATH,
   signDarazRequest,
+  darazHttpMethod,
   buildDarazAuthorizeUrl,
   buildDarazRequest,
+  darazErrorText,
   tokenPatchFromDarazPayload,
   publicTokenResult,
   resolveDarazTokenAction,
@@ -89,6 +91,37 @@ describe("darazTokenRefresh Pakistan gateway", () => {
     assert.equal(request.apiParams.refresh_token, "rt-1");
     assert.match(request.body, /refresh_token=rt-1/);
     assert.doesNotMatch(request.url, /daraz\.com\.bd|daraz\.lk/);
+  });
+
+  it("uses GET for /products/get with all params in the query string", () => {
+    const request = buildDarazRequest({
+      apiPath: "/products/get",
+      appKey: "APPKEY",
+      appSecret: "APPSECRET",
+      apiParams: {
+        access_token: "at-1",
+        filter: "all",
+        sku_seller_list: JSON.stringify(["SKU-1"]),
+        limit: "10",
+        offset: "0",
+      },
+      timestamp: "1710000000000",
+    });
+    assert.equal(request.method, "GET");
+    assert.equal(request.body, "");
+    const parsed = new URL(request.url);
+    assert.equal(parsed.origin + parsed.pathname, `${DARAZ_PK_REST_BASE}/products/get`);
+    assert.equal(parsed.searchParams.get("access_token"), "at-1");
+    assert.equal(parsed.searchParams.get("filter"), "all");
+    assert.equal(parsed.searchParams.get("limit"), "10");
+    assert.ok(parsed.searchParams.get("sign"));
+  });
+
+  it("keeps POST for /product/create", () => {
+    assert.equal(darazHttpMethod("/product/create"), "POST");
+    assert.equal(darazHttpMethod("/products/get"), "GET");
+    assert.equal(darazHttpMethod("/product/item/get"), "GET");
+    assert.equal(darazHttpMethod("/auth/token/refresh"), "POST");
   });
 });
 
@@ -308,5 +341,80 @@ describe("darazTokenRefresh POS refresh button inputs", () => {
       DARAZ_PK_DEFAULT_CALLBACK,
     );
     assert.equal(parsed.searchParams.get("client_id"), "506036");
+  });
+});
+
+describe("darazTokenRefresh error text", () => {
+  it("includes nested field errors from E500 create payloads", () => {
+    const text = darazErrorText({
+      code: "4139",
+      message: "E500: Create product failed",
+      request_id: "req-1",
+      detail: [{ Field: "brand", Message: "C011: not a valid value" }],
+    });
+    assert.match(text, /4139/);
+    assert.match(text, /E500: Create product failed/);
+    assert.match(text, /brand: C011: not a valid value/);
+    assert.match(text, /Main image is required/);
+    assert.match(text, /request_id=req-1/);
+  });
+});
+
+describe("darazTokenRefresh POST query vs body", () => {
+  it("puts access_token in the query and payload in the body for /product/create", () => {
+    const request = buildDarazRequest({
+      apiPath: "/product/create",
+      appKey: "APPKEY",
+      appSecret: "APPSECRET",
+      apiParams: {
+        access_token: "at-1",
+        payload: "<Request/>",
+      },
+      timestamp: "1710000000000",
+    });
+    assert.equal(request.method, "POST");
+    const parsed = new URL(request.url);
+    assert.equal(parsed.searchParams.get("access_token"), "at-1");
+    assert.match(request.body, /payload=/);
+    assert.doesNotMatch(request.body, /access_token=/);
+  });
+});
+
+describe("darazTokenRefresh image upload", () => {
+  it("POSTs multipart /image/upload without putting the file in the signed query", async () => {
+    const { callDarazImageUpload } = require("../utils/darazTokenRefresh");
+    const calls = [];
+    const fetchImpl = async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            code: "0",
+            data: {
+              image: {
+                url: "https://pk-live.slatic.net/original/uploaded.jpg",
+              },
+            },
+          }),
+      };
+    };
+    const data = await callDarazImageUpload({
+      appKey: "APPKEY",
+      appSecret: "APPSECRET",
+      accessToken: "at-1",
+      fileBuffer: Buffer.from("fake-image"),
+      filename: "product.png",
+      fetchImpl,
+    });
+    assert.equal(data.image.url, "https://pk-live.slatic.net/original/uploaded.jpg");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].options.method, "POST");
+    const parsed = new URL(calls[0].url);
+    assert.equal(parsed.origin + parsed.pathname, `${DARAZ_PK_REST_BASE}/image/upload`);
+    assert.equal(parsed.searchParams.get("access_token"), "at-1");
+    assert.ok(!parsed.searchParams.has("image"));
+    assert.ok(calls[0].options.body instanceof FormData);
   });
 });

@@ -55,6 +55,34 @@ function extractShopifyImageUrls(
   return [];
 }
 
+function extractDarazImageUrls(remote = {}) {
+  const urls = [];
+  const images = remote?.images || remote?.Images || {};
+  const lists = [
+    images.image,
+    images.Image,
+    remote?.skus?.[0]?.Images,
+    remote?.skus?.[0]?.images,
+  ];
+  for (const list of lists) {
+    if (Array.isArray(list)) {
+      for (const image of list) {
+        const src = String(
+          typeof image === "string" ? image : image?.url || image?.src || "",
+        ).trim();
+        if (src) urls.push(src);
+      }
+    } else if (typeof list === "string" && list.trim()) {
+      urls.push(list.trim());
+    }
+  }
+  const main = String(
+    remote?.main_image || remote?.image || images.main || "",
+  ).trim();
+  if (main) urls.unshift(main);
+  return [...new Set(urls.filter(Boolean))];
+}
+
 /**
  * Download remote store image URLs into uploads/products/<company_id>/<product_id>/
  * and update the product row.
@@ -115,6 +143,7 @@ async function syncFetchProductImages(
 module.exports = {
   extractWooImageUrls,
   extractShopifyImageUrls,
+  extractDarazImageUrls,
   isLocalProductAssetPath,
   syncFetchProductImages,
 };

@@ -246,6 +246,21 @@ function mapRemoteOrderAddressFields(remoteOrder, store) {
     state = String(src.province || src.province_code || "").trim();
     zip = String(src.zip || "").trim();
     country = String(src.country || src.country_code || "").trim();
+  } else if (storeKey === "daraz") {
+    const shipping = remoteOrder?.address_shipping || remoteOrder?.shipping || {};
+    const billing = remoteOrder?.address_billing || remoteOrder?.billing || {};
+    const src =
+      shipping.address1 || shipping.address_1 || shipping.city ?
+        shipping
+      : billing;
+    street1 = String(src.address1 || src.address_1 || "").trim();
+    street2 = String(src.address2 || src.address_2 || "").trim();
+    city = String(src.city || "").trim();
+    state = String(
+      src.address5 || src.state || src.province || "",
+    ).trim();
+    zip = String(src.post_code || src.postcode || src.zip || "").trim();
+    country = String(src.country || "PK").trim();
   } else {
     // WooCommerce (and default)
     const shipping = remoteOrder?.shipping || {};
@@ -971,6 +986,12 @@ function resolveIntegrationOrderId(store, remoteOrder, remoteId) {
       return String(orderNo).trim();
     }
   }
+  if (store === "daraz") {
+    const orderNo = remoteOrder?.order_number ?? remoteOrder?.order_id;
+    if (orderNo != null && String(orderNo).trim() !== "") {
+      return String(orderNo).trim();
+    }
+  }
   return remoteId != null ? String(remoteId).trim() : "";
 }
 
@@ -1093,7 +1114,7 @@ async function resolvePosProductForRemoteLine({
       }
     }
 
-    if (variantId && (storeKey === "shopify" || storeKey === "woocommerce")) {
+    if (variantId && (storeKey === "shopify" || storeKey === "woocommerce" || storeKey === "daraz")) {
       const byVariant = await findPosProductBySyncReference(
         integration_id,
         company_id,
@@ -1159,6 +1180,9 @@ function resolveRemoteLineVariantId(line, store) {
   const storeKey = String(store || "").trim().toLowerCase();
   if (storeKey === "woocommerce") {
     return line?.variation_id;
+  }
+  if (storeKey === "daraz") {
+    return line?.sku_id || line?.SkuId || line?.variation_id;
   }
   return line?.variant_id;
 }
@@ -1324,6 +1348,27 @@ async function backfillPosOrderLinesIfEmpty(existing, remoteOrder, store, ctx) {
     backfilled: true,
     order_status: nextStatus,
   };
+}
+
+/** Daraz PK statuses → POS `order_status`. */
+function mapDarazOrderStatus(status) {
+  const map = {
+    unpaid: "pending_payment",
+    pending: "placed",
+    packed: "processing",
+    ready_to_ship: "processing",
+    shipped: "shipped",
+    delivered: "delivered",
+    canceled: "cancelled",
+    cancelled: "cancelled",
+    returned: "refunded",
+    failed: "failed",
+  };
+  const key = String(status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return map[key] || "placed";
 }
 
 /** WooCommerce `status` → POS `order_status` (see ORDER_STATUS_VALUES in models/order.js). */
@@ -1538,6 +1583,24 @@ function resolveOrderWebsiteStatus(remoteOrder, store) {
     } else {
       raw = "pending";
     }
+  } else if (storeKey === "daraz") {
+    const statuses = Array.isArray(remoteOrder?.statuses)
+      ? remoteOrder.statuses
+      : [];
+    const rawStatus = String(
+      statuses[0] || remoteOrder?.status || "",
+    )
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+    if (rawStatus === "delivered") raw = "delivered";
+    else if (rawStatus === "shipped" || rawStatus === "ready_to_ship") {
+      raw = "shipped";
+    } else if (rawStatus === "canceled" || rawStatus === "cancelled") {
+      raw = "cancelled";
+    } else if (rawStatus === "returned") raw = "refunded";
+    else if (rawStatus === "packed" || rawStatus === "pending") raw = "confirmed";
+    else raw = "pending";
   } else {
     raw = remoteOrder?.status || "";
   }
@@ -1553,7 +1616,7 @@ function resolveOrderWebsiteStatus(remoteOrder, store) {
 /** Parse `description` like `shopify:order:123` → `{ store, remoteId }`. */
 function parseOrderExternalRef(description) {
   const raw = String(description ?? "").trim();
-  const match = raw.match(/^(shopify|woocommerce):order:(.+)$/i);
+  const match = raw.match(/^(shopify|woocommerce|daraz):order:(.+)$/i);
   if (!match) {
     return null;
   }
@@ -2935,14 +2998,45 @@ function resolveLatestOrderBatchLimit(process) {
   );
 }
 
+function normalizeProcessStoreType(storeType) {
+  return String(storeType || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+function resolveDarazProcessHandler(action) {
+  const mapped =
+    action === "fetch_products" ? "fetch_product" : String(action || "").trim();
+  if (!mapped) return null;
+  try {
+    const darazProcess = require("../controllers/darazProcess");
+    return typeof darazProcess[mapped] === "function" ?
+        darazProcess[mapped]
+      : null;
+  } catch (err) {
+    console.error(
+      "[process] failed to load darazProcess handler:",
+      err?.message || err,
+    );
+    return null;
+  }
+}
+
 function dispatchByStoreType(req, res, process, handlers) {
-  const storeType = process.integration_id?.store_type;
-  if (storeType === "woocommerce" && handlers.woocommerce) {
-    return handlers.woocommerce(req, res, process);
+  const storeType = normalizeProcessStoreType(
+    process.integration_id?.store_type,
+  );
+  let handler =
+    handlers?.[storeType] ||
+    (storeType === "daraz" ?
+      resolveDarazProcessHandler(process.action)
+    : null);
+
+  if (typeof handler === "function") {
+    return handler(req, res, process);
   }
-  if (storeType === "shopify" && handlers.shopify) {
-    return handlers.shopify(req, res, process);
-  }
+
   return res.status(400).json({
     success: false,
     message: `Unsupported or missing store type for this action: ${storeType || "unknown"}`,
@@ -3650,6 +3744,7 @@ module.exports = {
   backfillPosOrderLinesIfEmpty,
   resolveFetchOrderImportStatus,
   mapWooOrderStatus,
+  mapDarazOrderStatus,
   mapShopifyOrderStatus,
   resolveOrderWebsiteStatus,
   parseOrderExternalRef,

@@ -731,6 +731,7 @@ module.exports = {
   toShopifyDescriptionHtml,
   resolvePosProductSku,
   resolvePublicAssetUrl,
+  resolveUploadFileOnDisk,
   resolveSyncProductPrice,
   buildWooCommerceProductSyncPayload,
   buildWooCommerceVariationSyncPayload,

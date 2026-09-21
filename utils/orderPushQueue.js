@@ -8,8 +8,6 @@ const {
 const { resolveRemoteOrderIdFromPosOrder } = require("./processHelpers");
 
 const PUSH_ORDER_STORE_TYPES = new Set(["shopify", "woocommerce"]);
-const TRACKING_PUSH_STORE_TYPES = new Set(["shopify", "woocommerce"]);
-const WOO_TRACKING_PUSH_STORE_TYPES = new Set(["woocommerce"]);
 
 const TRACKING_QUEUE_FIELDS = [
   "courier_tracking_number",
@@ -102,6 +100,28 @@ async function createPushOrderProcess({
   const remoteId = resolveRemoteOrderIdFromPosOrder(order, storeType);
   if (!remoteId) {
     return { queued: false, reason: "no_remote_order_ref" };
+  }
+
+  if (action === "push_order_tracking") {
+    const pending = await ProcessModel.findOne({
+      order_id: orderId,
+      action,
+      company_id,
+      progress: "not_started",
+      deletedAt: null,
+    })
+      .select("_id")
+      .lean();
+    if (pending) {
+      return {
+        queued: false,
+        reason: "already_queued",
+        process_id: pending._id,
+        integration_id,
+        order_id: orderId,
+        action,
+      };
+    }
   }
 
   const doc = await ProcessModel.create({
@@ -232,6 +252,7 @@ async function enqueuePushOrderTrackingForWebsiteOrder({
     return { queued: false, reason: "order_not_found" };
   }
 
+  const beforeOrder = { ...order };
   const trackingNumber = String(shipment?.tracking_number || "").trim();
   if (trackingNumber && trackingNumber !== String(order.courier_tracking_number || "").trim()) {
     order = await Order.findByIdAndUpdate(
@@ -243,30 +264,9 @@ async function enqueuePushOrderTrackingForWebsiteOrder({
       .lean();
   }
 
-  if (!isWebsiteIntegrationOrder(order)) {
-    return { queued: false, reason: "not_website_integration_order" };
-  }
-
-  const integration_id = coalesceObjectId(order.integration_id);
-  const integration = await findIntegrationIfActive(
-    integration_id,
-    order.company_id,
-  );
-  if (!integration) {
-    return { queued: false, reason: "integration_inactive" };
-  }
-
-  const storeType = String(integration.store_type || "").trim().toLowerCase();
-  if (!TRACKING_PUSH_STORE_TYPES.has(storeType)) {
-    return {
-      queued: false,
-      reason: "unsupported_store_type",
-      store_type: storeType || null,
-    };
-  }
-
-  return enqueuePushOrderTrackingJob({
-    order,
+  return maybeEnqueuePushOrderTrackingJob({
+    beforeOrder,
+    afterOrder: order,
     companyId: order.company_id,
     createdBy,
     remarks,

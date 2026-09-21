@@ -574,21 +574,25 @@ async function enqueueShipmentCreation(order, options, reason) {
 }
 
 /**
- * Queue push_order_tracking for WooCommerce website orders after courier poll.
+ * Queue push_order_tracking only when courier / tracking fields actually changed.
  */
 async function queueWooTrackingPushAfterCourierPoll(shipment, options = {}) {
   try {
     const {
-      enqueuePushOrderTrackingForWooCommerceOrder,
+      maybeEnqueuePushOrderTrackingJob,
     } = require("../../utils/orderPushQueue");
-    return await enqueuePushOrderTrackingForWooCommerceOrder({
-      orderId: shipment.order_id,
+    const Order = mongoose.model("order");
+    const afterOrder = shipment.order_id
+      ? await Order.findById(shipment.order_id).lean()
+      : null;
+    return await maybeEnqueuePushOrderTrackingJob({
+      beforeOrder: options.beforeOrder || null,
+      afterOrder,
       companyId: options.companyId || shipment.company_id,
       createdBy: options.createdBy || null,
-      shipment,
       remarks:
         options.trackingPushRemarks ||
-        "Auto push_order_tracking after GET /courier/order/:orderId/tracking",
+        "Auto push_order_tracking after courier tracking change",
       priority: options.trackingPushPriority ?? 50,
     });
   } catch (err) {
@@ -699,6 +703,11 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     },
   );
 
+  const Order = mongoose.model("order");
+  const beforeOrder = shipment.order_id
+    ? await Order.findById(shipment.order_id).lean()
+    : null;
+
   const orderTracking = await persistOrderTracking(shipment, result);
 
   const lastStatus =
@@ -713,7 +722,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
 
   const push_order_tracking = await queueWooTrackingPushAfterCourierPoll(
     shipment,
-    options,
+    { ...options, beforeOrder },
   );
 
   return {
@@ -768,11 +777,6 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     shipment.shipment_status ||
     null;
 
-  const push_order_tracking = await queueWooTrackingPushAfterCourierPoll(
-    shipment,
-    options,
-  );
-
   return {
     success: true,
     stale: true,
@@ -787,7 +791,10 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     tracking_details: trackingDetails,
     history,
     last_tracking_sync: shipment.last_tracking_sync || null,
-    push_order_tracking,
+    push_order_tracking: {
+      queued: false,
+      reason: "stale_tracking",
+    },
     warning: err?.message || "Courier tracking unavailable; showing last saved records",
     raw: options.includeRaw ? trackingDetails : undefined,
   };
@@ -826,7 +833,9 @@ async function persistOrderTracking(shipment, result) {
   let order = null;
   try {
     order = await Order.findById(shipment.order_id)
-      .select("order_status company_id deletedAt status")
+      .select(
+        "order_status company_id deletedAt status courier_tracking_number tracking_status",
+      )
       .lean();
   } catch (err) {
     courierLogger.apiError({
@@ -837,8 +846,22 @@ async function persistOrderTracking(shipment, result) {
   }
 
   const update = {};
-  if (lastStatus) update.tracking_status = String(lastStatus);
+  const nextTrackingStatus = lastStatus ? String(lastStatus) : "";
+  if (
+    nextTrackingStatus &&
+    nextTrackingStatus !== String(order?.tracking_status || "").trim()
+  ) {
+    update.tracking_status = nextTrackingStatus;
+  }
   if (details) update.tracking_details = details;
+
+  const trackingNumber = String(shipment?.tracking_number || "").trim();
+  if (
+    trackingNumber &&
+    trackingNumber !== String(order?.courier_tracking_number || "").trim()
+  ) {
+    update.courier_tracking_number = trackingNumber;
+  }
 
   const currentStatus = String(order?.order_status || "").trim();
   const shouldSetOrderStatus = Boolean(

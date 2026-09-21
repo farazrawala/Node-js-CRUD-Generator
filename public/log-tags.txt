@@ -36,9 +36,6 @@ failed_bigcommerce
 failed_shopify
 failed_woocommerce
 fetch_order
-pull_order
-push_order
-push_order_tracking
 fetch_product
 generic_create
 generic_update
@@ -74,11 +71,14 @@ process
 product
 products
 public
+pull_order
 purchase
 purchase_order
 purchase_order_delete
 purchase_order_update
 purchase_return
+push_order
+push_order_tracking
 put
 queue_bigcommerce_product_reset
 recent-product-ids
@@ -100,6 +100,7 @@ stock_alert
 stock_recount
 stock_transfer
 sync
+sync_category
 sync_product
 tracking
 transaction

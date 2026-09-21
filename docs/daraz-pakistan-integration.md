@@ -28,8 +28,14 @@ Implemented now:
 1. Generate access token from seller authorization `code` + app key/secret.
 2. Refresh access token from stored (or override) `refresh_token` + app key/secret.
 3. Cron to refresh every Daraz integration that already has a `refresh_token`.
+4. Process jobs in `controllers/darazProcess.js` (same actions as Woo/Shopify): `fetch_category`, `fetch_brand`, `fetch_product`, `sync_product`, `sync_category`, `sync_brand`, `fetch_order`, `fetch_latest_order`, `pull_order`, `push_order`, `push_order_tracking`.
 
-Not implemented yet (future docs in this same series): products, orders, stock.
+Daraz marketplace notes:
+
+- Categories and brands are platform-defined; POS cannot create them. `sync_category` looks up the official Daraz tree by POS category name (or numeric/`daraz-` slug) and stores the leaf `category_id`. `fetch_category` imports the tree into POS.
+- `sync_product` works like Shopify: lookup by `sync_product` mapping, then SellerSku; update name/price/stock/images when those integration flags are on; otherwise create a Daraz listing (`/product/create`). Create needs a Daraz **leaf** category: an existing `sync_category` mapping, a numeric/daraz slug, or a POS category name that matches the live Daraz tree. Variable products push parent + variation SKUs as one item.
+- `push_order` cannot create a Daraz marketplace order. After fetch, it packs / ready-to-ship / cancels the existing Daraz order.
+- All REST calls use `https://api.daraz.pk/rest` and require a valid access token. Read APIs (`/products/get`, `/orders/get`, …) are **GET**; token, create, update, pack, RTS, and cancel are **POST**.
 
 ## Integration record (`store_type = daraz`)
 
@@ -240,6 +246,7 @@ Signature steps (implemented in `utils/darazTokenRefresh.js`):
 | File                         | Role                                    |
 | ---------------------------- | --------------------------------------- |
 | `utils/darazTokenRefresh.js` | PK gateway, HMAC sign, create + refresh |
+| `controllers/darazProcess.js` | Fetch/sync/push process jobs            |
 | `controllers/integration.js` | Generate / refresh / cron handlers      |
 | `routes/api.js`              | HTTP routes                             |
 | `models/integration.js`      | `refresh_token`, `refresh_token_expiry` |

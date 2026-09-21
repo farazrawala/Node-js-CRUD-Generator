@@ -222,12 +222,33 @@ function buildDarazAuthorizeUrl({
   return `${DARAZ_PK_AUTHORIZE_BASE}?${query.toString()}`;
 }
 
+function compactDarazParams(params) {
+  return Object.fromEntries(
+    Object.entries(params || {}).filter(
+      ([, value]) => value != null && String(value).trim() !== "",
+    ),
+  );
+}
+
+/**
+ * Official Open Platform methodType: `/…/get` and trace are GET.
+ * Token, create, update, pack, RTS, cancel, image migrate are POST.
+ * https://open.daraz.com/doc/api.htm
+ */
+function darazHttpMethod(apiPath) {
+  const path = String(apiPath || "").toLowerCase();
+  if (path.startsWith("/auth/token/")) return "POST";
+  if (path.endsWith("/get") || path.includes("/trace")) return "GET";
+  return "POST";
+}
+
 function buildDarazRequest({
   apiPath,
   appKey,
   appSecret,
   apiParams = {},
   timestamp,
+  httpMethod,
 }) {
   const path = String(apiPath || "");
   const key = trimCredential(appKey);
@@ -242,13 +263,14 @@ function buildDarazRequest({
     );
   }
 
+  const method = String(httpMethod || darazHttpMethod(path)).toUpperCase();
   const ts = timestamp == null ? String(Date.now()) : String(timestamp);
-  const merged = {
+  const merged = compactDarazParams({
     app_key: key,
     timestamp: ts,
     sign_method: DARAZ_SIGN_METHOD,
     ...apiParams,
-  };
+  });
 
   const sign = signDarazRequest(path, merged, secret);
   const sysParams = {
@@ -258,17 +280,70 @@ function buildDarazRequest({
     sign,
   };
 
-  const query = new URLSearchParams(sysParams);
-  const url = `${DARAZ_PK_REST_BASE}${path}?${query.toString()}`;
-  const body = new URLSearchParams(
-    Object.fromEntries(
-      Object.entries(apiParams).filter(
-        ([, value]) => value != null && String(value).trim() !== "",
-      ),
-    ),
-  ).toString();
+  if (method === "GET") {
+    const query = new URLSearchParams({ ...merged, sign });
+    return {
+      url: `${DARAZ_PK_REST_BASE}${path}?${query.toString()}`,
+      body: "",
+      method: "GET",
+      sign,
+      sysParams,
+      apiParams,
+      apiPath: path,
+    };
+  }
 
-  return { url, body, sign, sysParams, apiParams, apiPath: path };
+  const bodyParams = compactDarazParams(
+    Object.fromEntries(
+      Object.entries(apiParams || {}).filter(([key]) => key !== "access_token"),
+    ),
+  );
+  const queryParams = { ...sysParams };
+  const accessToken = trimCredential(apiParams?.access_token);
+  if (accessToken) queryParams.access_token = accessToken;
+  const body = new URLSearchParams(bodyParams).toString();
+  return {
+    url: `${DARAZ_PK_REST_BASE}${path}?${new URLSearchParams(queryParams).toString()}`,
+    body,
+    method: "POST",
+    sign,
+    sysParams,
+    apiParams,
+    apiPath: path,
+  };
+}
+
+function collectDarazErrorDetails(value, acc = []) {
+  if (value == null) return acc;
+  if (typeof value === "string" || typeof value === "number") {
+    const text = String(value).trim();
+    if (text) acc.push(text);
+    return acc;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectDarazErrorDetails(item, acc));
+    return acc;
+  }
+  if (typeof value === "object") {
+    const field = value.field || value.Field || value.attribute || value.name;
+    const message =
+      value.message ||
+      value.Message ||
+      value.msg ||
+      value.error ||
+      value.detail;
+    if (field && message) {
+      acc.push(`${field}: ${message}`);
+    } else if (message && typeof message !== "object") {
+      acc.push(String(message));
+    }
+    for (const key of ["detail", "details", "errors", "Errors", "sub_msg", "sub_message"]) {
+      if (value[key] != null && value[key] !== message) {
+        collectDarazErrorDetails(value[key], acc);
+      }
+    }
+  }
+  return acc;
 }
 
 function darazErrorText(payload, fallback = "Daraz request failed") {
@@ -280,6 +355,17 @@ function darazErrorText(payload, fallback = "Daraz request failed") {
   const parts = [];
   if (code) parts.push(String(code));
   if (message) parts.push(String(message));
+  const details = [
+    ...collectDarazErrorDetails(payload.detail),
+    ...collectDarazErrorDetails(payload.details),
+    ...collectDarazErrorDetails(payload.data),
+  ].filter((item, index, all) => item && all.indexOf(item) === index && item !== String(message || ""));
+  if (details.length) parts.push(details.join("; "));
+  if (String(code) === "4139") {
+    parts.push(
+      "Main image is required — product images must be migrated to Daraz CDN first",
+    );
+  }
   if (requestId) parts.push(`request_id=${requestId}`);
   return parts.length ? parts.join(": ") : fallback;
 }
@@ -307,14 +393,15 @@ async function callDarazRest({
     timestamp,
   });
 
-  const response = await fetchImpl(request.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
-      Accept: "application/json",
-    },
-    body: request.body,
-  });
+  const headers = { Accept: "application/json" };
+  const fetchOptions = { method: request.method || "POST", headers };
+  if (request.method !== "GET") {
+    headers["Content-Type"] =
+      "application/x-www-form-urlencoded;charset=utf-8";
+    fetchOptions.body = request.body;
+  }
+
+  const response = await fetchImpl(request.url, fetchOptions);
 
   const raw = await response.text();
   let data = {};
@@ -324,14 +411,100 @@ async function callDarazRest({
     data = { raw };
   }
 
-  if (!response.ok || !isDarazSuccess(data) || !data.access_token) {
+  if (!response.ok || !isDarazSuccess(data)) {
     const status = response.status;
+    console.error(
+      `[daraz] ${apiPath} failed HTTP ${status}:`,
+      String(raw || "").slice(0, 2000),
+    );
     throw new Error(
       `Daraz ${apiPath} failed (HTTP ${status}): ${darazErrorText(data, raw || response.statusText)}`,
     );
   }
 
   return { data, raw, request };
+}
+
+function mimeFromFilename(filename) {
+  const ext = String(filename || "")
+    .toLowerCase()
+    .split(".")
+    .pop();
+  if (ext === "png") return "image/png";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  return "image/jpeg";
+}
+
+async function callDarazImageUpload({
+  appKey,
+  appSecret,
+  accessToken,
+  fileBuffer,
+  filename = "product.jpg",
+  fetchImpl = fetch,
+}) {
+  const apiPath = "/image/upload";
+  const key = trimCredential(appKey);
+  const secret = trimCredential(appSecret);
+  const token = trimCredential(accessToken);
+  if (!key || !secret || !token) {
+    throw new Error("Daraz image upload requires app_key, app_secret, and access_token.");
+  }
+  const ts = String(Date.now());
+  const merged = compactDarazParams({
+    app_key: key,
+    timestamp: ts,
+    sign_method: DARAZ_SIGN_METHOD,
+    access_token: token,
+  });
+  const sign = signDarazRequest(apiPath, merged, secret);
+  const url = `${DARAZ_PK_REST_BASE}${apiPath}?${new URLSearchParams({
+    ...merged,
+    sign,
+  }).toString()}`;
+
+  const form = new FormData();
+  const bytes =
+    fileBuffer instanceof Uint8Array ? fileBuffer : Buffer.from(fileBuffer);
+  const type = mimeFromFilename(filename);
+  const blob =
+    typeof File === "function"
+      ? new File([bytes], filename, { type })
+      : new Blob([bytes], { type });
+  form.append("image", blob, filename);
+
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    body: form,
+  });
+  const raw = await response.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch (_) {
+    data = { raw };
+  }
+  if (!response.ok || !isDarazSuccess(data)) {
+    console.error(
+      `[daraz] ${apiPath} failed HTTP ${response.status}:`,
+      String(raw || "").slice(0, 2000),
+    );
+    throw new Error(
+      `Daraz ${apiPath} failed (HTTP ${response.status}): ${darazErrorText(data, raw || response.statusText)}`,
+    );
+  }
+  return darazResultData({ data, raw });
+}
+
+/** Business APIs return `{ code: "0", data: { ... } }`. */
+function darazResultData(result) {
+  const payload = result?.data;
+  if (payload && typeof payload === "object" && payload.data != null) {
+    return payload.data;
+  }
+  return payload || {};
 }
 
 function tokenPatchFromDarazPayload(payload, fromDate = new Date()) {
@@ -481,9 +654,13 @@ module.exports = {
   expiryFromSeconds,
   buildDarazRefreshTokenExpiry,
   signDarazRequest,
+  darazHttpMethod,
   buildDarazAuthorizeUrl,
   buildDarazRequest,
   callDarazRest,
+  callDarazImageUpload,
+  darazResultData,
+  darazErrorText,
   tokenPatchFromDarazPayload,
   publicTokenResult,
   createDarazAccessToken,

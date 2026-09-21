@@ -15,6 +15,20 @@ const Brand = require("../models/brands");
 const Order = require("../models/order");
 const woocommerceProcess = require("./woocommerceProcess");
 const shopifyProcess = require("./shopifyProcess");
+const darazProcess = require("./darazProcess");
+
+function darazHandler(name) {
+  const mapped = name === "fetch_products" ? "fetch_product" : name;
+  const handler =
+    darazProcess?.[mapped] || require("./darazProcess")[mapped];
+  if (typeof handler === "function") return handler;
+  return async function missingDarazHandler(req, res) {
+    return res.status(500).json({
+      success: false,
+      message: `Daraz handler is missing for action ${mapped}.`,
+    });
+  };
+}
 const {
   queue_bigcommerce_product_reset,
   apply_bigcommerce_product_reset,
@@ -48,7 +62,7 @@ const {
 
 /**
  * Process queue orchestrator.
- * Loads the next active job and delegates to woocommerceProcess / shopifyProcess.
+ * Loads the next active job and delegates to woocommerceProcess / shopifyProcess / darazProcess.
  */
 
 function buildCompanyIdCriteria(companyId) {
@@ -1041,6 +1055,7 @@ async function runProcessAction(req, res, process) {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.sync_product,
         shopify: shopifyProcess.sync_product,
+        daraz: darazHandler("sync_product"),
       });
     }
     case "fetch_product":
@@ -1048,60 +1063,70 @@ async function runProcessAction(req, res, process) {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_product,
         shopify: shopifyProcess.fetch_product,
+        daraz: darazHandler("fetch_product"),
       });
     }
     case "fetch_category": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_category,
         shopify: shopifyProcess.fetch_category,
+        daraz: darazHandler("fetch_category"),
       });
     }
     case "sync_category": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.sync_category,
         shopify: shopifyProcess.sync_category,
+        daraz: darazHandler("sync_category"),
       });
     }
     case "fetch_brand": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_brand,
         shopify: shopifyProcess.fetch_brand,
+        daraz: darazHandler("fetch_brand"),
       });
     }
     case "sync_brand": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.sync_brand,
         shopify: shopifyProcess.sync_brand,
+        daraz: darazHandler("sync_brand"),
       });
     }
     case "fetch_order": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_order,
         shopify: shopifyProcess.fetch_order,
+        daraz: darazHandler("fetch_order"),
       });
     }
     case "fetch_latest_order": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.fetch_latest_order,
         shopify: shopifyProcess.fetch_latest_order,
+        daraz: darazHandler("fetch_latest_order"),
       });
     }
     case "pull_order": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.pull_order,
         shopify: shopifyProcess.pull_order,
+        daraz: darazHandler("pull_order"),
       });
     }
     case "push_order": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.push_order,
         shopify: shopifyProcess.push_order,
+        daraz: darazHandler("push_order"),
       });
     }
     case "push_order_tracking": {
       return dispatchByStoreType(req, res, process, {
         woocommerce: woocommerceProcess.push_order_tracking,
         shopify: shopifyProcess.push_order_tracking,
+        daraz: darazHandler("push_order_tracking"),
       });
     }
     case "queue_bigcommerce_product_reset": {
