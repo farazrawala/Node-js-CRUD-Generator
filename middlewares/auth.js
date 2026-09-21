@@ -192,6 +192,22 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/integration\/generate-token\/.*/,
     "/integration/generate-tokens-cron",
     "/api/integration/generate-tokens-cron",
+    "/integration/daraz/generate-token",
+    "/api/integration/daraz/generate-token",
+    /^\/integration\/daraz\/generate-token\/.*/,
+    /^\/api\/integration\/daraz\/generate-token\/.*/,
+    "/integration/daraz/authorize-url",
+    "/api/integration/daraz/authorize-url",
+    /^\/integration\/daraz\/authorize-url\/.*/,
+    /^\/api\/integration\/daraz\/authorize-url\/.*/,
+    "/integration/daraz/callback",
+    "/api/integration/daraz/callback",
+    "/integration/daraz/refresh-token",
+    "/api/integration/daraz/refresh-token",
+    /^\/integration\/daraz\/refresh-token\/.*/,
+    /^\/api\/integration\/daraz\/refresh-token\/.*/,
+    "/integration/daraz/refresh-tokens-cron",
+    "/api/integration/daraz/refresh-tokens-cron",
     "/whatsapp_message/fetch-random",
     "/api/whatsapp_message/fetch-random",
     "/whatsapp_messages/fetch-random",
@@ -260,10 +276,19 @@ async function checkHeaderAuthentication(req, res, next) {
   const normalizedCandidates = [
     ...new Set(pathCandidates.map((p) => stripBasePath(p))),
   ];
+  const allPathCandidates = [...pathCandidates, ...normalizedCandidates];
+
+  const isDarazTokenPublicPath = allPathCandidates.some((p) =>
+    /\/integration\/daraz\/(authorize-url|generate-token|refresh-token|refresh-tokens-cron|callback)/.test(
+      String(p || ""),
+    ),
+  );
 
   // Check if current route should be public
-  const isPublicRoute = publicRoutePatterns.some((pattern) => {
-    const candidates = [...pathCandidates, ...normalizedCandidates];
+  const isPublicRoute =
+    isDarazTokenPublicPath ||
+    publicRoutePatterns.some((pattern) => {
+    const candidates = allPathCandidates;
     if (typeof pattern === "string") {
       return candidates.some((p) => p === pattern || p === withBasePath(pattern));
     }

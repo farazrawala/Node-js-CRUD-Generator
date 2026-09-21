@@ -2456,10 +2456,14 @@ function buildVariantDescription(baseDescription, attributes = []) {
         });
       }
 
-      if (String(integration.store_type || "").toLowerCase() !== "shopify") {
+      const storeType = String(integration.store_type || "").toLowerCase();
+      if (storeType === "daraz") {
+        return handleDarazTokenRequest(req, res);
+      }
+      if (storeType !== "shopify") {
         return res.status(400).json({
           success: false,
-          message: `Token generation is only supported for Shopify integrations (got store_type=${integration.store_type || "n/a"}).`,
+          message: `Token generation is only supported for Shopify or Daraz integrations (got store_type=${integration.store_type || "n/a"}).`,
         });
       }
 
@@ -2747,6 +2751,453 @@ function buildVariantDescription(baseDescription, attributes = []) {
       });
     }
   }
+
+  function pickRequestValue(req, keys = []) {
+    for (const key of keys) {
+      const fromBody = req.body?.[key];
+      const fromQuery = req.query?.[key];
+      if (fromBody != null && String(fromBody).trim() !== "") {
+        return String(fromBody).trim();
+      }
+      if (fromQuery != null && String(fromQuery).trim() !== "") {
+        return String(fromQuery).trim();
+      }
+    }
+    return "";
+  }
+
+  async function loadDarazIntegrationForToken(req) {
+    const Integration = require("../models/integration");
+    const { coalesceObjectId } = require("../utils/modelHelper");
+
+    const integrationId = coalesceObjectId(
+      req.params?.id ||
+        req.body?.integration_id ||
+        req.body?.id ||
+        req.query?.integration_id ||
+        req.query?.id,
+    );
+
+    if (!integrationId) {
+      return {
+        error: {
+          status: 400,
+          message:
+            "integration_id is required. Use /integration/daraz/generate-token/:id, /integration/daraz/refresh-token/:id, or pass integration_id.",
+        },
+      };
+    }
+
+    const companyId = coalesceObjectId(
+      req.body?.company_id || req.query?.company_id || req.user?.company_id,
+    );
+
+    const filter = {
+      _id: integrationId,
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+    if (companyId) {
+      filter.company_id = companyId;
+    }
+
+    let integration = await Integration.findOne(filter).lean();
+    if (!integration) {
+      return {
+        error: {
+          status: 404,
+          message: companyId
+            ? "Integration not found for this company, or it was deleted."
+            : "Integration not found, or it was deleted.",
+        },
+      };
+    }
+
+    if (String(integration.store_type || "").toLowerCase() !== "daraz") {
+      return {
+        error: {
+          status: 400,
+          message: `Daraz token APIs only support store_type=daraz (got store_type=${integration.store_type || "n/a"}).`,
+        },
+      };
+    }
+
+    const overrideKey = pickRequestValue(req, ["key", "app_key", "client_id"]);
+    const overrideSecret = pickRequestValue(req, [
+      "secret",
+      "app_secret",
+      "client_secret",
+    ]);
+    const credentialPatch = {};
+    if (overrideKey) credentialPatch.key = overrideKey;
+    if (overrideSecret) credentialPatch.secret = overrideSecret;
+
+    if (Object.keys(credentialPatch).length > 0) {
+      integration = await Integration.findByIdAndUpdate(
+        integrationId,
+        { $set: credentialPatch },
+        { new: true },
+      ).lean();
+    }
+
+    return { integration, integrationId };
+  }
+
+  /**
+   * GET /api/integration/daraz/authorize-url/:id
+   * Pakistan seller login URL. redirect_uri must match the Daraz app Callback URL
+   * (default: pos_webhook/webhook.php?callback=daraz).
+   */
+  async function getDarazAuthorizeUrl(req, res) {
+    try {
+      const {
+        buildDarazAuthorizeUrl,
+        DARAZ_PK_DEFAULT_CALLBACK,
+        DARAZ_PK_AUTHORIZE_BASE,
+        trimCredential,
+      } = require("../utils/darazTokenRefresh");
+
+      const loaded = await loadDarazIntegrationForToken(req);
+      if (loaded.error) {
+        return res.status(loaded.error.status).json({
+          success: false,
+          message: loaded.error.message,
+        });
+      }
+
+      const { integration, integrationId } = loaded;
+      const appKey = trimCredential(integration.key);
+      if (!appKey) {
+        return res.status(400).json({
+          success: false,
+          message: "integration.key (app_key) is required to build the Daraz authorize URL.",
+        });
+      }
+
+      const redirectUri =
+        trimCredential(
+          req.query?.redirect_uri ||
+            req.body?.redirect_uri ||
+            process.env.DARAZ_PK_REDIRECT_URI,
+        ) || DARAZ_PK_DEFAULT_CALLBACK;
+
+      const authorize_url = buildDarazAuthorizeUrl({
+        appKey,
+        redirectUri,
+        state: String(integrationId),
+        forceAuth: true,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Open authorize_url, sign in to Daraz Pakistan, then paste code=4_... from the webhook callback (email) into Generate Token.",
+        data: {
+          authorize_url,
+          authorize_host: DARAZ_PK_AUTHORIZE_BASE,
+          redirect_uri: redirectUri,
+          webhook_url: redirectUri,
+          app_key: appKey,
+          integration_id: String(integrationId),
+        },
+      });
+    } catch (error) {
+      console.error("❌ getDarazAuthorizeUrl:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to build Daraz authorize URL",
+      });
+    }
+  }
+
+  /**
+   * GET /api/integration/daraz/callback
+   * Optional Node receiver if the Daraz app Callback URL is pointed here.
+   * Query: code=4_...&state=<integration_id>
+   */
+  async function darazOAuthCallback(req, res) {
+    try {
+      const {
+        extractDarazSellerCode,
+        trimCredential,
+      } = require("../utils/darazTokenRefresh");
+      const Integration = require("../models/integration");
+      const { coalesceObjectId } = require("../utils/modelHelper");
+
+      const code =
+        extractDarazSellerCode(req.originalUrl || "") ||
+        extractDarazSellerCode(pickRequestValue(req, ["code"]));
+      const integrationId = coalesceObjectId(
+        pickRequestValue(req, ["state", "integration_id", "id"]),
+      );
+
+      if (code && integrationId) {
+        await Integration.findByIdAndUpdate(integrationId, {
+          $set: { token: code },
+        });
+      }
+
+      const safeCode = (trimCredential(code) || "").replace(/[<>&]/g, "");
+      res.status(200).type("html").send(
+        `<!doctype html><html><body style="font-family:sans-serif;padding:24px">
+          <h2>Daraz callback received</h2>
+          <p>${safeCode ? "Seller code captured. Return to POS and click <b>Generate Token</b>." : "No code= on this request."}</p>
+          ${safeCode ? `<p><code>${safeCode}</code></p>` : ""}
+        </body></html>`,
+      );
+    } catch (error) {
+      console.error("❌ darazOAuthCallback:", error);
+      res.status(500).type("html").send(
+        "<!doctype html><html><body>Daraz callback failed.</body></html>",
+      );
+    }
+  }
+
+  /**
+   * POS "Refresh token" for Daraz PK.
+   * Same handler for generate-token and refresh-token:
+   * 1. `code` → /auth/token/create
+   * 2. `refresh_token` field → /auth/token/refresh
+   * 3. else `token` field as refresh_token (or as auth code if it looks like 4_... / 0_...)
+   */
+  async function handleDarazTokenRequest(req, res) {
+    try {
+      const {
+        createDarazAccessToken,
+        refreshDarazAccessToken,
+        publicTokenResult,
+        resolveDarazTokenAction,
+        DARAZ_MISSING_SELLER_CODE_MESSAGE,
+        DARAZ_CALLBACK_WITHOUT_CODE_MESSAGE,
+        isDarazCallbackUrlWithoutCode,
+        trimCredential,
+      } = require("../utils/darazTokenRefresh");
+
+      const loaded = await loadDarazIntegrationForToken(req);
+      if (loaded.error) {
+        return res.status(loaded.error.status).json({
+          success: false,
+          message: loaded.error.message,
+        });
+      }
+
+      const { integration, integrationId } = loaded;
+      const appKey = trimCredential(integration.key);
+      const appSecret = trimCredential(integration.secret);
+      if (!appKey || !appSecret) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "integration.key (app_key) and integration.secret (app_secret) are required.",
+        });
+      }
+
+      const resolved = resolveDarazTokenAction({
+        code: pickRequestValue(req, ["code", "auth_code", "authorization_code"]),
+        refreshToken: pickRequestValue(req, ["refresh_token"]),
+        storedRefreshToken: integration.refresh_token,
+        storedAccessToken: pickRequestValue(req, ["token"]) || integration.token,
+      });
+
+      if (resolved.action === "missing") {
+        const pasted =
+          pickRequestValue(req, [
+            "code",
+            "auth_code",
+            "authorization_code",
+            "token",
+          ]) || trimCredential(integration.token) || "";
+        return res.status(400).json({
+          success: false,
+          message: isDarazCallbackUrlWithoutCode(pasted)
+            ? DARAZ_CALLBACK_WITHOUT_CODE_MESSAGE
+            : DARAZ_MISSING_SELLER_CODE_MESSAGE,
+        });
+      }
+
+      const uuid = pickRequestValue(req, ["uuid"]);
+      const result =
+        resolved.action === "create"
+          ? await createDarazAccessToken({
+              appKey,
+              appSecret,
+              code: resolved.code,
+              uuid: uuid || undefined,
+              integrationId,
+            })
+          : await refreshDarazAccessToken({
+              appKey,
+              appSecret,
+              refreshToken: resolved.refreshToken,
+              integrationId,
+            });
+
+      const grantType =
+        resolved.action === "create" ? "authorization_code" : "refresh_token";
+      const message =
+        resolved.action === "create"
+          ? "Daraz Pakistan access token generated and saved on integration.token (refresh_token also saved)."
+          : "Daraz Pakistan access token refreshed and saved on integration.token. Latest refresh_token was also saved.";
+
+      return res.status(200).json({
+        success: true,
+        message,
+        data: {
+          ...publicTokenResult(result.payload, integrationId),
+          grant_type: grantType,
+        },
+      });
+    } catch (error) {
+      console.error("❌ handleDarazTokenRequest:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to refresh Daraz access token",
+      });
+    }
+  }
+
+  async function generateDarazIntegrationToken(req, res) {
+    return handleDarazTokenRequest(req, res);
+  }
+
+  async function refreshDarazIntegrationToken(req, res) {
+    return handleDarazTokenRequest(req, res);
+  }
+
+  /**
+   * GET/POST /api/integration/daraz/refresh-tokens-cron
+   *
+   * Cron: refresh every Pakistan Daraz integration that has a refresh_token.
+   * Optional query/body: company_id, status (default "active", pass "all" for inactive).
+   */
+  async function refreshDarazIntegrationTokensCron(req, res) {
+    try {
+      const {
+        refreshDarazAccessToken,
+        createDarazAccessToken,
+        maskToken,
+        trimCredential,
+        resolveDarazTokenAction,
+      } = require("../utils/darazTokenRefresh");
+      const Integration = require("../models/integration");
+      const { coalesceObjectId } = require("../utils/modelHelper");
+
+      const companyId = coalesceObjectId(
+        req.body?.company_id || req.query?.company_id || req.user?.company_id,
+      );
+      const statusRaw = String(
+        req.body?.status ?? req.query?.status ?? "active",
+      )
+        .trim()
+        .toLowerCase();
+
+      const filter = {
+        store_type: "daraz",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      };
+      if (companyId) {
+        filter.company_id = companyId;
+      }
+      if (statusRaw && statusRaw !== "all") {
+        filter.status = statusRaw;
+      }
+
+      const integrations = await Integration.find(filter)
+        .sort({ createdAt: 1 })
+        .lean();
+
+      const refreshed = [];
+      const skipped = [];
+      const failed = [];
+
+      for (const integration of integrations) {
+        const integrationId = String(integration._id);
+        const name = integration.name || null;
+        const appKey = trimCredential(integration.key);
+        const appSecret = trimCredential(integration.secret);
+        const resolved = resolveDarazTokenAction({
+          storedRefreshToken: integration.refresh_token,
+          storedAccessToken: integration.token,
+        });
+
+        if (!appKey || !appSecret) {
+          skipped.push({
+            integration_id: integrationId,
+            name,
+            reason: "missing_app_key_or_app_secret",
+          });
+          continue;
+        }
+
+        if (resolved.action === "missing") {
+          skipped.push({
+            integration_id: integrationId,
+            name,
+            reason: "missing_refresh_token",
+          });
+          continue;
+        }
+
+        try {
+          const result =
+            resolved.action === "create"
+              ? await createDarazAccessToken({
+                  appKey,
+                  appSecret,
+                  code: resolved.code,
+                  integrationId: integration._id,
+                })
+              : await refreshDarazAccessToken({
+                  appKey,
+                  appSecret,
+                  refreshToken: resolved.refreshToken,
+                  integrationId: integration._id,
+                });
+          refreshed.push({
+            integration_id: integrationId,
+            name,
+            access_token_masked: maskToken(result.access_token),
+            refresh_token_masked: maskToken(result.refresh_token),
+            expires_in: result.expires_in,
+            refresh_expires_in: result.refresh_expires_in,
+          });
+        } catch (err) {
+          failed.push({
+            integration_id: integrationId,
+            name,
+            error: err.message || "Token refresh failed",
+          });
+        }
+      }
+
+      const summary = {
+        total: integrations.length,
+        refreshed: refreshed.length,
+        skipped: skipped.length,
+        failed: failed.length,
+      };
+
+      return res.status(
+        failed.length && !refreshed.length ? 500 : 200,
+      ).json({
+        success: failed.length === 0 || refreshed.length > 0,
+        message: `Daraz PK token cron finished: refreshed ${summary.refreshed}, skipped ${summary.skipped}, failed ${summary.failed} of ${summary.total}.`,
+        data: {
+          country: "pk",
+          gateway: "https://api.daraz.pk/rest",
+          summary,
+          refreshed,
+          skipped,
+          failed,
+        },
+      });
+    } catch (error) {
+      console.error("❌ refreshDarazIntegrationTokensCron:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to run Daraz token cron",
+      });
+    }
+  }
   
   module.exports = {
   
@@ -2759,5 +3210,10 @@ function buildVariantDescription(baseDescription, attributes = []) {
     queueStoreProductFetch,
     generateShopifyIntegrationToken,
     generateShopifyIntegrationTokensCron,
+    generateDarazIntegrationToken,
+    refreshDarazIntegrationToken,
+    refreshDarazIntegrationTokensCron,
+    getDarazAuthorizeUrl,
+    darazOAuthCallback,
   };
   

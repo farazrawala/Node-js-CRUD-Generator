@@ -2741,6 +2741,9 @@ const integrationAdminCRUD = adminCrudGenerator(
     "secret",
     "key",
     "token",
+    "token_expiry",
+    "refresh_token",
+    "refresh_token_expiry",
     "description",
     "image",
     "sync_product_name",
@@ -2803,6 +2806,7 @@ const integrationAdminCRUD = adminCrudGenerator(
     },
     fieldLabels: {
       company_name: "Company",
+      token: "Token / Daraz seller code",
     },
     fieldOptions: {
       store_type: [

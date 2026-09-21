@@ -49,11 +49,22 @@ const modelSchema = new mongoose.Schema(
     token: {
       type: String,
       // required: true,
+      field_name: "Token / Daraz seller code",
     },
     token_expiry: {
       type: Date,
       default: null,
       field_name: "Token Expiry",
+    },
+    refresh_token: {
+      type: String,
+      field_name: "Refresh Token",
+    },
+    refresh_token_expiry: {
+      type: Date,
+      default: null,
+      field_name: "Refresh Token Expiry",
+      // Daraz PK: always 24 hours from generate/refresh (see buildDarazRefreshTokenExpiry).
     },
     description: {
       type: String,

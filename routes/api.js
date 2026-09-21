@@ -144,6 +144,11 @@ const {
   queueStoreProductFetch,
   generateShopifyIntegrationToken,
   generateShopifyIntegrationTokensCron,
+  generateDarazIntegrationToken,
+  refreshDarazIntegrationToken,
+  refreshDarazIntegrationTokensCron,
+  getDarazAuthorizeUrl,
+  darazOAuthCallback,
 } = require("../controllers/integration");
 const { unlinkSyncProduct } = require("../controllers/sync_product");
 
@@ -581,6 +586,38 @@ router.post(
 router.get(
   "/integration/generate-tokens-cron",
   generateShopifyIntegrationTokensCron,
+);
+router.get("/integration/daraz/authorize-url/:id", getDarazAuthorizeUrl);
+router.get("/integration/daraz/authorize-url", getDarazAuthorizeUrl);
+router.get("/integration/daraz/callback", darazOAuthCallback);
+router.post("/integration/daraz/callback", darazOAuthCallback);
+router.post(
+  "/integration/daraz/generate-token/:id",
+  generateDarazIntegrationToken,
+);
+router.get(
+  "/integration/daraz/generate-token/:id",
+  generateDarazIntegrationToken,
+);
+router.post("/integration/daraz/generate-token", generateDarazIntegrationToken);
+router.get("/integration/daraz/generate-token", generateDarazIntegrationToken);
+router.post(
+  "/integration/daraz/refresh-token/:id",
+  refreshDarazIntegrationToken,
+);
+router.get(
+  "/integration/daraz/refresh-token/:id",
+  refreshDarazIntegrationToken,
+);
+router.post("/integration/daraz/refresh-token", refreshDarazIntegrationToken);
+router.get("/integration/daraz/refresh-token", refreshDarazIntegrationToken);
+router.post(
+  "/integration/daraz/refresh-tokens-cron",
+  refreshDarazIntegrationTokensCron,
+);
+router.get(
+  "/integration/daraz/refresh-tokens-cron",
+  refreshDarazIntegrationTokensCron,
 );
 router.get("/integration/sync-store-category/:id", syncStoreCategory);
 // router.get("/integration/sync-store-brand/:id", syncStoreBrand);

@@ -1,7 +1,7 @@
 # API Reference
 
 Complete catalog of HTTP APIs under `/api` as of this document.  
-Related deep-dives: [queue-apis.md](./queue-apis.md), [warehouse-inventory-api-reference.md](./warehouse-inventory-api-reference.md), [process-system.md](./process-system.md), [income-statement-and-profit-calculations.md](./income-statement-and-profit-calculations.md).
+Related deep-dives: [queue-apis.md](./queue-apis.md), [warehouse-inventory-api-reference.md](./warehouse-inventory-api-reference.md), [process-system.md](./process-system.md), [income-statement-and-profit-calculations.md](./income-statement-and-profit-calculations.md), [daraz-pakistan-integration.md](./daraz-pakistan-integration.md).
 
 ---
 
@@ -37,6 +37,14 @@ Authorization: Bearer <token>
 | `GET` / `POST` | `/integration/generate-token` | Generate Shopify token (by integration_id) |
 | `GET` / `POST` | `/integration/generate-token/:id` | Generate Shopify token for integration |
 | `GET` / `POST` | `/integration/generate-tokens-cron` | Cron: refresh all Shopify integration tokens |
+| `GET` / `POST` | `/integration/daraz/generate-token` | Generate Daraz PK token (by integration_id) |
+| `GET` / `POST` | `/integration/daraz/generate-token/:id` | Generate Daraz PK token for integration |
+| `GET` | `/integration/daraz/authorize-url` | Daraz PK seller authorize URL (by integration_id) |
+| `GET` | `/integration/daraz/authorize-url/:id` | Daraz PK seller authorize URL for integration |
+| `GET` / `POST` | `/integration/daraz/callback` | Optional Node OAuth callback (`code` + `state`) |
+| `GET` / `POST` | `/integration/daraz/refresh-token` | Refresh Daraz PK token (by integration_id) |
+| `GET` / `POST` | `/integration/daraz/refresh-token/:id` | Refresh Daraz PK token for integration |
+| `GET` / `POST` | `/integration/daraz/refresh-tokens-cron` | Cron: refresh all Daraz PK integration tokens |
 | `POST` | `/chat/create/:pos_auth_token` | Insert received WhatsApp chat (POS token in URL) |
 | `GET` | `/chat/fetch-random` | Next pending outbound chat; claims it as `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | Unknown-contact daily limit check (+ usage bump) |
@@ -417,7 +425,7 @@ Full queue docs: [queue-apis.md](./queue-apis.md).
 
 ---
 
-## Integrations (WooCommerce / Shopify sync)
+## Integrations (WooCommerce / Shopify / Daraz PK)
 
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
@@ -425,6 +433,14 @@ Full queue docs: [queue-apis.md](./queue-apis.md).
 | `GET` / `POST` | `/integration/generate-token/:id` | No | Generate Shopify token → save on integration |
 | `GET` / `POST` | `/integration/generate-token` | No | Same via `integration_id` |
 | `GET` / `POST` | `/integration/generate-tokens-cron` | No | Cron: refresh all Shopify tokens |
+| `GET` / `POST` | `/integration/daraz/generate-token/:id` | No | Generate Daraz PK token from authorization `code` |
+| `GET` / `POST` | `/integration/daraz/generate-token` | No | Same via `integration_id` |
+| `GET` | `/integration/daraz/authorize-url/:id` | No | Pakistan seller login URL (`redirect_uri` = registered webhook) |
+| `GET` | `/integration/daraz/authorize-url` | No | Same via `integration_id` |
+| `GET` / `POST` | `/integration/daraz/callback` | No | Optional Node receiver for `code=4_...` |
+| `GET` / `POST` | `/integration/daraz/refresh-token/:id` | No | Refresh Daraz PK token from `refresh_token` |
+| `GET` / `POST` | `/integration/daraz/refresh-token` | No | Same via `integration_id` |
+| `GET` / `POST` | `/integration/daraz/refresh-tokens-cron` | No | Cron: refresh all Daraz PK tokens |
 | `GET` | `/integration/sync-store-category/:id` | Yes | Sync categories |
 | `GET` / `POST` | `/integration/sync-store-product/:id` | Yes | Sync / fetch products |
 | `GET` / `POST` | `/integration/sync-store-product/:id/queue` | Yes | Queue product fetch |
@@ -432,7 +448,7 @@ Full queue docs: [queue-apis.md](./queue-apis.md).
 | `GET` | `/integration/store-product-variations/:id/:remoteProductId` | Yes | List remote variations |
 
 Dynamic CRUD: `/integration/*`.  
-Related: [woocommerce_to_local_product_sync.md](./woocommerce_to_local_product_sync.md), [shopify_to_local_product_sync.md](./shopify_to_local_product_sync.md), [sync_product_to_shopify.md](./sync_product_to_shopify.md).
+Related: [woocommerce_to_local_product_sync.md](./woocommerce_to_local_product_sync.md), [shopify_to_local_product_sync.md](./shopify_to_local_product_sync.md), [sync_product_to_shopify.md](./sync_product_to_shopify.md), [daraz-pakistan-integration.md](./daraz-pakistan-integration.md).
 
 ---
 
