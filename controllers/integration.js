@@ -2188,14 +2188,70 @@ function buildVariantDescription(baseDescription, attributes = []) {
         const session = shopify.session.customAppSession(shopDomain);
         session.accessToken = store.token;
         const client = new shopify.clients.Rest({ session });
-        const productResponse = await client.get({
-          path: `products/${remoteProductId}`,
-        });
-        const product = productResponse?.body?.product || null;
+
+        // `remoteProductId` is usually the parent product id, but a pasted
+        // storefront/customer link (…/products/handle?variant=123) only ever
+        // carries a variant id. Try it as a product first, then fall back to
+        // resolving it as a variant id to find the real parent product.
+        let resolvedProductId = remoteProductId;
+        let product = null;
+        let productLookupError = null;
+        try {
+          const productResponse = await client.get({
+            path: `products/${remoteProductId}`,
+          });
+          product = productResponse?.body?.product || null;
+        } catch (productError) {
+          productLookupError = productError;
+          product = null;
+        }
+
+        let variantLookupError = null;
         if (!product) {
+          try {
+            const variantResponse = await client.get({
+              path: `variants/${remoteProductId}`,
+            });
+            const variant = variantResponse?.body?.variant || null;
+            if (variant?.product_id) {
+              resolvedProductId = String(variant.product_id);
+              const parentResponse = await client.get({
+                path: `products/${resolvedProductId}`,
+              });
+              product = parentResponse?.body?.product || null;
+            }
+          } catch (variantError) {
+            variantLookupError = variantError;
+            product = null;
+          }
+        }
+
+        if (!product) {
+          console.error("[listStoreProductVariations] Shopify product not found", {
+            remoteProductId,
+            shopDomain,
+            productLookupError: productLookupError
+              ? {
+                  message: productLookupError?.message,
+                  status: productLookupError?.response?.code || productLookupError?.response?.status,
+                  body: productLookupError?.response?.body || productLookupError?.response?.data,
+                }
+              : null,
+            variantLookupError: variantLookupError
+              ? {
+                  message: variantLookupError?.message,
+                  status: variantLookupError?.response?.code || variantLookupError?.response?.status,
+                  body: variantLookupError?.response?.body || variantLookupError?.response?.data,
+                }
+              : null,
+          });
           return res.status(404).json({
             success: false,
             message: "Shopify product not found",
+            debug: {
+              productLookupError: productLookupError?.message || null,
+              variantLookupError: variantLookupError?.message || null,
+            },
           });
         }
 
@@ -2210,8 +2266,8 @@ function buildVariantDescription(baseDescription, attributes = []) {
           const optionLabel = optionParts.join(" - ") || (title !== "Default Title" ? title : "");
           return {
             id: variationId,
-            parent_id: remoteProductId,
-            reference_id: `${remoteProductId}:${variationId}`,
+            parent_id: resolvedProductId,
+            reference_id: `${resolvedProductId}:${variationId}`,
             sku: String(variant?.sku || "").trim(),
             price: variant?.price ?? "",
             name: optionLabel
@@ -2233,7 +2289,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
             : "No variations found for this product",
           data,
           parent: {
-            id: remoteProductId,
+            id: resolvedProductId,
             name: parentName,
             type: data.length > 1 ? "variable" : "simple",
           },
@@ -2250,6 +2306,14 @@ function buildVariantDescription(baseDescription, attributes = []) {
         error?.response?.data ||
         error?.response?.body ||
         (typeof error?.message === "string" ? error.message : "Failed to fetch variations");
+      console.error("[listStoreProductVariations] failed", {
+        remoteProductId,
+        storeType,
+        message: error?.message,
+        stack: error?.stack,
+        responseStatus: error?.response?.code || error?.response?.status,
+        responseBody: error?.response?.data || error?.response?.body,
+      });
       return res.status(500).json({
         success: false,
         message: "Failed to fetch store product variations",
