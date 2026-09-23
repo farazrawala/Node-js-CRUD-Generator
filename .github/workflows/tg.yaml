@@ -27,7 +27,7 @@ jobs:
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
           server: 203.161.41.148
-          username: pos_admin@pos.tgcrm.net
+          username: pos_admin@testv3.websitedemolynk.com
           password: ")Y)r%],JIT+qUM]4"
           local-dir: ./
           server-dir: /
