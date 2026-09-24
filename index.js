@@ -250,6 +250,19 @@ const publicStatic = express.static(publicStaticRoot, {
 app.use("/public", publicStatic);
 app.use("/api/public", publicStatic);
 
+// API responses are per-tenant (auth header) — forbid shared caches (cPanel ea-nginx
+// proxy cache keys by URL only and served one company's list to another).
+app.use("/api", (req, res, next) => {
+  res.set({
+    "Cache-Control": "private, no-store, no-cache, must-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+    "X-Accel-Expires": "0",
+    Vary: "Authorization, Cookie",
+  });
+  next();
+});
+
 // Session middleware (must come before flash)
 app.use(
   session({
