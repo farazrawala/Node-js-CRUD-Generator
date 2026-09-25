@@ -3010,7 +3010,11 @@ async function order_save(req, res) {
                 orderReq.body?.payment_method_accounts_id ??
                 companyDefaultAccountReceivable(orderReq.user),
               type: "debit",
-              amount: lines_subtotal + shipment - discount - remainingAmountDue,
+              // Cash actually settled = saved total − unpaid balance (never negative).
+              amount: Math.max(
+                0,
+                Math.round((totalAmountDue - remainingAmountDue) * 100) / 100,
+              ),
               reference_user_id: record?.customer_id,
               transaction_number,
               description: orderGlDescription(
@@ -3791,7 +3795,11 @@ async function order_update(req, res) {
               updatedOrder?.payment_method_accounts_id ??
               companyDefaultAccountReceivable(req.user),
             type: "debit",
-            amount: lines_subtotal + shipment - discount - remainingAmountDue,
+            // Cash actually settled = saved total − unpaid balance (never negative).
+            amount: Math.max(
+              0,
+              Math.round((totalAmountDue - remainingAmountDue) * 100) / 100,
+            ),
             reference_user_id: updatedOrder?.customer_id,
             transaction_number,
             description: orderGlDescription(
