@@ -68,7 +68,7 @@ jobs:
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
           server: 192.249.118.80
-          username: pos@testv3.websitedemolynk.com
+          username: pos_admin@testv3.websitedemolynk.com
           password: kYw8,ae@!1&]}dMR
           exclude: |
             **/.git*
