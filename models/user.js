@@ -187,7 +187,12 @@ const userSchema = new mongoose.Schema(
     // default fields
     email: {
       type: String,
-      required: true,
+      // Customers may be created with phone only (no placeholder email).
+      required: function () {
+        const role = this && typeof this.get === "function" ? this.get("role") : this?.role;
+        const roles = Array.isArray(role) ? role : [role];
+        return !roles.includes("CUSTOMER");
+      },
     },
     phone: {
       type: String,

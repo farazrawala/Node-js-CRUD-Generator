@@ -179,14 +179,11 @@ function digitsOnlyPhone(phone) {
 }
 
 /**
- * POS customer email: use trimmed input if present; otherwise `{digits}@gmail.com` from phone.
+ * POS customer email: trimmed input, or "" when none was collected
+ * (never generate a placeholder from the phone number).
  */
-function resolvePosCustomerEmail(email, phone) {
-  const trimmed = String(email || "").trim().toLowerCase();
-  if (trimmed) return trimmed;
-  const digits = digitsOnlyPhone(phone);
-  if (digits) return `${digits}@gmail.com`;
-  return `customer_${Date.now()}@gmail.com`;
+function resolvePosCustomerEmail(email) {
+  return String(email || "").trim().toLowerCase();
 }
 
 /** User.phone is a digit string (max 13); never store as Number. */
@@ -400,10 +397,11 @@ async function findOrCreatePosCustomerFromBilling({
 
   const phoneDigits = phoneToStoredValue(phone);
   const phoneCandidates = phoneMatchCandidates(phone);
-  let resolvedEmail = resolvePosCustomerEmail(email, phone);
+  let resolvedEmail = resolvePosCustomerEmail(email);
   const displayName =
     String(name || "").trim() ||
     resolvedEmail.split("@")[0] ||
+    phoneDigits ||
     "Online customer";
   const actor = coalesceObjectId(createdBy);
 
@@ -427,29 +425,9 @@ async function findOrCreatePosCustomerFromBilling({
     if (byPhone?._id) return byPhone._id;
   }
 
-  // 2) Email
-  let existing = await User.findOne({
-    company_id,
-    email: resolvedEmail,
-    deletedAt: null,
-    role: "CUSTOMER",
-  })
-    .select("_id")
-    .lean();
-  if (existing?._id) return existing._id;
-
-  // Email taken by a non-CUSTOMER (e.g. staff) — use a customer-specific address.
-  const emailTaken = await User.findOne({
-    company_id,
-    email: resolvedEmail,
-    deletedAt: null,
-  })
-    .select("_id")
-    .lean();
-  if (emailTaken?._id) {
-    const stamp = phoneDigits || String(Date.now());
-    resolvedEmail = `customer_${stamp}@gmail.com`;
-    existing = await User.findOne({
+  // 2) Email (only when one was collected)
+  if (resolvedEmail) {
+    const existing = await User.findOne({
       company_id,
       email: resolvedEmail,
       deletedAt: null,
@@ -458,18 +436,28 @@ async function findOrCreatePosCustomerFromBilling({
       .select("_id")
       .lean();
     if (existing?._id) return existing._id;
+
+    // Email taken by a non-CUSTOMER (e.g. staff) — create the customer without email.
+    const emailTaken = await User.findOne({
+      company_id,
+      email: resolvedEmail,
+      deletedAt: null,
+    })
+      .select("_id")
+      .lean();
+    if (emailTaken?._id) resolvedEmail = "";
   }
 
   // 3) Create
   try {
     const payload = {
       name: displayName,
-      email: resolvedEmail,
       password: POS_DEFAULT_CUSTOMER_PASSWORD,
       role: ["CUSTOMER"],
       company_id,
       status: "active",
     };
+    if (resolvedEmail) payload.email = resolvedEmail;
     if (phoneDigits) payload.phone = phoneDigits;
     if (actor) payload.created_by = actor;
 
@@ -489,22 +477,22 @@ async function findOrCreatePosCustomerFromBilling({
           .lean();
         if (byPhone?._id) return byPhone._id;
       }
-      const again = await User.findOne({
-        company_id,
-        email: resolvedEmail,
-        deletedAt: null,
-        role: "CUSTOMER",
-      })
-        .select("_id")
-        .lean();
-      if (again?._id) return again._id;
+      if (resolvedEmail) {
+        const again = await User.findOne({
+          company_id,
+          email: resolvedEmail,
+          deletedAt: null,
+          role: "CUSTOMER",
+        })
+          .select("_id")
+          .lean();
+        if (again?._id) return again._id;
+      }
 
-      // Last resort: unique email + create again
+      // Last resort: create again without email (email clash, never a placeholder)
       try {
-        const retryEmail = `customer_${phoneDigits || Date.now()}_${Math.floor(Math.random() * 1e4)}@gmail.com`;
         const created = await User.create({
           name: displayName,
-          email: retryEmail,
           password: POS_DEFAULT_CUSTOMER_PASSWORD,
           role: ["CUSTOMER"],
           company_id,
