@@ -86,7 +86,10 @@ const userAdminCRUD = adminCrudGenerator(
           });
         }
 
-        if (!data.email || !data.email.includes("@")) {
+        const roles = Array.isArray(data.role) ? data.role : [data.role];
+        const emailOptional = roles.includes("CUSTOMER");
+        const email = String(data.email || "").trim();
+        if (email ? !email.includes("@") : !emailOptional) {
           errors.push({ field: "email", message: "Valid email is required" });
         }
 
