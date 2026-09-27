@@ -2199,6 +2199,225 @@ async function logFetchedProductResetSkipped({
   }
 }
 
+/** Fields reported in the me-too reset change log (label shown to users). */
+const RESET_LOG_FIELD_LABELS = {
+  product_name: "Name",
+  product_slug: "Slug",
+  product_image: "Image",
+  product_image_thumbnail_url: "Image thumbnail",
+  multi_images: "Gallery images",
+  multi_image_thumbnails: "Gallery thumbnails",
+  alert_qty: "Alert quantity",
+  origin_qty: "Stock",
+  product_description: "Description",
+  status: "Status",
+  product_code: "Product code",
+  unit: "Unit",
+  weight: "Weight",
+  length: "Length",
+  width: "Width",
+  height: "Height",
+  dimension: "Dimension",
+  price_before_tax: "Price before tax",
+  tax_rate: "Tax rate",
+  sku: "SKU",
+  barcode: "Barcode",
+  product_type: "Product type",
+  product_price: "Price",
+};
+
+const RESET_LOG_VALUE_MAX = 500;
+
+function resetLogComparable(value) {
+  if (value === undefined || value === null || value === "") return null;
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    return String(value);
+  }
+}
+
+function resetLogValue(value) {
+  if (value === undefined) return null;
+  if (typeof value === "string" && value.length > RESET_LOG_VALUE_MAX) {
+    return `${value.slice(0, RESET_LOG_VALUE_MAX)}…`;
+  }
+  return value;
+}
+
+/**
+ * Compare a product row before reset with the `$set` applied to it.
+ * Returns [{ field, label, from, to }] for fields that actually changed.
+ */
+function diffFetchedProductResetSet(before, $set) {
+  const changes = [];
+  for (const [field, label] of Object.entries(RESET_LOG_FIELD_LABELS)) {
+    if (!Object.prototype.hasOwnProperty.call($set, field)) continue;
+    const from = before ? before[field] : undefined;
+    const to = $set[field];
+    if (resetLogComparable(from) === resetLogComparable(to)) continue;
+    changes.push({
+      field,
+      label,
+      from: resetLogValue(from),
+      to: resetLogValue(to),
+    });
+  }
+  return changes;
+}
+
+/**
+ * Origin fields that differ from the copy but were not applied because the
+ * connection toggle is OFF (e.g. name changed on A, "Product name" OFF on B).
+ */
+function listResetFieldsNotSynced(before, source, syncSettings) {
+  const skipped = [];
+  for (const [flag, productFields] of Object.entries(
+    CONNECTION_SYNC_TO_PRODUCT_FIELDS,
+  )) {
+    if (isConnectionSyncEnabled(syncSettings, flag)) continue;
+    for (const field of productFields) {
+      if (source?.[field] === undefined) continue;
+      if (resetLogComparable(before?.[field]) === resetLogComparable(source[field])) {
+        continue;
+      }
+      skipped.push({
+        field,
+        label: RESET_LOG_FIELD_LABELS[field] || field,
+        toggle: flag,
+      });
+    }
+  }
+  return skipped;
+}
+
+function productLogName(row) {
+  return String(row?.product_name || "").trim() || String(row?._id || "");
+}
+
+const RESET_UPDATE_LOG_BASE_TAGS = [
+  "bigcommerce",
+  "bigCommerce product sync",
+  "updated",
+  "product",
+  "me_too_reset",
+];
+
+/**
+ * Write "what changed" logs on both catalogs after a successful me-too reset:
+ * - destination company (B) → tag `destination_product`
+ * - origin company (A) → tag `origin_product`
+ */
+async function logFetchedProductResetApplied({
+  req,
+  actorId,
+  local,
+  origin,
+  parentChanges,
+  parentNotSynced,
+  variantChanges,
+  createdVariants,
+  removedVariants,
+  syncSettings,
+  connectionId,
+}) {
+  const hasChanges =
+    parentChanges.length ||
+    variantChanges.length ||
+    createdVariants.length ||
+    removedVariants.length;
+  if (!hasChanges && !parentNotSynced.length) return;
+
+  const localName = productLogName(local);
+  const originName = productLogName(origin);
+  const localCompanyId = coalesceObjectId(local?.company_id);
+  const originCompanyId = coalesceObjectId(origin?.company_id);
+
+  const changedLabels = [
+    ...new Set([
+      ...parentChanges.map((c) => c.label),
+      ...variantChanges.flatMap((v) => v.changes.map((c) => c.label)),
+    ]),
+  ];
+  const summaryParts = [];
+  if (changedLabels.length) summaryParts.push(changedLabels.join(", "));
+  if (createdVariants.length) {
+    summaryParts.push(`${createdVariants.length} variant(s) added`);
+  }
+  if (removedVariants.length) {
+    summaryParts.push(`${removedVariants.length} variant(s) removed`);
+  }
+  const summary = summaryParts.length
+    ? `Updated: ${summaryParts.join(" · ")}`
+    : `No synced changes (toggle off: ${parentNotSynced.map((f) => f.label).join(", ")})`;
+
+  const url =
+    req?.originalUrl ||
+    `/api/big-commerce/fetched-products/${local?._id}/reset`;
+  const description = {
+    message: summary,
+    destination_product_id: local?._id ? String(local._id) : null,
+    destination_product_name: localName || null,
+    destination_company_id: localCompanyId ? String(localCompanyId) : null,
+    origin_product_id: origin?._id ? String(origin._id) : null,
+    origin_product_name: originName || null,
+    origin_company_id: originCompanyId ? String(originCompanyId) : null,
+    connection_id: connectionId ? String(connectionId) : null,
+    changed_fields: changedLabels,
+    changes: parentChanges,
+    variants: variantChanges,
+    variants_created: createdVariants,
+    variants_removed: removedVariants,
+    fields_not_synced: parentNotSynced,
+    sync_settings: syncSettings,
+  };
+
+  const tags = hasChanges
+    ? [...RESET_UPDATE_LOG_BASE_TAGS, ...parentChanges.map((c) => c.field)]
+    : [...RESET_UPDATE_LOG_BASE_TAGS, "no_changes"];
+
+  const jobs = [];
+  if (localCompanyId && local?._id) {
+    jobs.push(
+      createApplicationLog(
+        req,
+        {
+          action: `BigCommerce product sync :: ${localName} — ${summary}`,
+          url,
+          tags: [...tags, "destination_product"],
+          description,
+          company_id: localCompanyId,
+          created_by: actorId,
+          reference_type: "product",
+          reference_id: local._id,
+        },
+        { silent: true },
+      ),
+    );
+  }
+  if (originCompanyId && origin?._id) {
+    jobs.push(
+      createApplicationLog(
+        req,
+        {
+          action: `BigCommerce product sync :: ${originName || localName} — ${summary}`,
+          url,
+          tags: [...tags, "origin_product"],
+          description,
+          company_id: originCompanyId,
+          created_by: actorId,
+          reference_type: "product",
+          reference_id: origin._id,
+        },
+        { silent: true },
+      ),
+    );
+  }
+  if (jobs.length) {
+    await Promise.all(jobs);
+  }
+}
+
 function skippedFetchedProductReset(local, message, meta = {}) {
   return {
     ok: true,
@@ -2382,6 +2601,14 @@ async function applyFetchedProductReset({
       if (!parentSet.product_type) parentSet.product_type = "Single";
     }
 
+    const localBefore = local.toObject ? local.toObject() : local;
+    const parentChanges = diffFetchedProductResetSet(localBefore, parentSet);
+    const parentNotSynced = listResetFieldsNotSynced(
+      localBefore,
+      origin,
+      syncSettings,
+    );
+
     await Product.updateOne({ _id: local._id }, { $set: parentSet });
 
     const localVariants = await Product.find({
@@ -2400,6 +2627,7 @@ async function applyFetchedProductReset({
     const matchedOriginIds = new Set();
     const updatedVariants = [];
     const createdVariants = [];
+    const variantChanges = [];
 
     for (const originVariant of originVariants) {
       const originVariantId = String(originVariant._id);
@@ -2415,6 +2643,15 @@ async function applyFetchedProductReset({
           { originQty },
         );
         variantSet.parent_product_id = local._id;
+        const changes = diffFetchedProductResetSet(existing, variantSet);
+        if (changes.length) {
+          variantChanges.push({
+            product_id: String(existing._id),
+            product_name: productLogName(existing),
+            origin_product_id: originVariantId,
+            changes,
+          });
+        }
         await Product.updateOne({ _id: existing._id }, { $set: variantSet });
         updatedVariants.push({
           _id: existing._id,
@@ -2459,6 +2696,32 @@ async function applyFetchedProductReset({
       variantsRemoved = result.modifiedCount || 0;
     }
 
+    const orphanIdSet = new Set(orphanIds.map(String));
+    await logFetchedProductResetApplied({
+      req,
+      actorId,
+      local: localBefore,
+      origin,
+      parentChanges,
+      parentNotSynced,
+      variantChanges,
+      createdVariants: createdVariants.map((v) => ({
+        product_id: String(v._id),
+        product_name: productLogName(v),
+        origin_product_id: v.fetch_from_product_id
+          ? String(v.fetch_from_product_id)
+          : null,
+      })),
+      removedVariants: localVariants
+        .filter((v) => orphanIdSet.has(String(v._id)))
+        .map((v) => ({
+          product_id: String(v._id),
+          product_name: productLogName(v),
+        })),
+      syncSettings,
+      connectionId: connection?._id || null,
+    });
+
     const refreshed = await Product.findById(local._id).lean();
     const refreshedVariants = await Product.find({
       parent_product_id: local._id,
@@ -2468,10 +2731,19 @@ async function applyFetchedProductReset({
       .sort({ createdAt: 1 })
       .lean();
 
+    const changedLabels = [
+      ...new Set([
+        ...parentChanges.map((c) => c.label),
+        ...variantChanges.flatMap((v) => v.changes.map((c) => c.label)),
+      ]),
+    ];
+
     return {
       ok: true,
       status: 200,
-      message: "Fetched product reset from origin",
+      message: changedLabels.length
+        ? `Fetched product reset from origin (updated: ${changedLabels.join(", ")})`
+        : "Fetched product reset from origin",
       data: {
         ...refreshed,
         variants: refreshedVariants,
@@ -2484,6 +2756,10 @@ async function applyFetchedProductReset({
         variants_updated: updatedVariants.length,
         variants_created: createdVariants.length,
         variants_removed: variantsRemoved,
+        changed_fields: changedLabels,
+        changes: parentChanges,
+        variant_changes: variantChanges,
+        fields_not_synced: parentNotSynced,
       },
     };
   } catch (error) {
