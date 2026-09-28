@@ -985,13 +985,23 @@ async function resetUnknownWhatsappUsageOnly(req, res) {
 const LAST_CHATS_DEFAULT_LIMIT = 10;
 const LAST_CHATS_MAX_LIMIT = 50;
 
+// "Today" is measured in Pakistan time (UTC+5, no DST), not the server's timezone.
+const TODAY_UTC_OFFSET_MINUTES = 5 * 60;
+
+function startOfTodayUtc(now = new Date()) {
+  const offsetMs = TODAY_UTC_OFFSET_MINUTES * 60 * 1000;
+  const local = new Date(now.getTime() + offsetMs);
+  local.setUTCHours(0, 0, 0, 0);
+  return new Date(local.getTime() - offsetMs);
+}
+
 /**
- * GET /api/chat/last
- * Query: company_id (required), number|phone (optional), type (optional: sent|received),
- *        limit (optional, default 10, max 50)
+ * GET /api/chat/last/:limit   (e.g. /api/chat/last/10)
+ * GET /api/chat/last          (defaults to 10)
+ * Query: company_id (required), number|phone (optional), type (optional: sent|received)
  *
- * Returns the newest chats for the company (newest first), optionally narrowed to
- * one phone number (matches from_user_id OR to_user_id, PK variants).
+ * Returns today's newest chats for the company (newest first, max 50), optionally
+ * narrowed to one phone number (matches from_user_id OR to_user_id, PK variants).
  */
 async function fetchLastChats(req, res) {
   try {
@@ -1000,14 +1010,24 @@ async function fetchLastChats(req, res) {
       return res.status(400).json(companyIdMissingOrInvalidResponse(req));
     }
 
-    const requestedLimit = Number.parseInt(req.query?.limit, 10);
-    const limit =
-      Number.isFinite(requestedLimit) && requestedLimit > 0 ?
-        Math.min(requestedLimit, LAST_CHATS_MAX_LIMIT)
-      : LAST_CHATS_DEFAULT_LIMIT;
+    const rawLimit = req.params?.limit;
+    let limit = LAST_CHATS_DEFAULT_LIMIT;
+    if (rawLimit != null && rawLimit !== "") {
+      const requestedLimit = Number(rawLimit);
+      if (!Number.isInteger(requestedLimit) || requestedLimit <= 0) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          message: "limit in the URL must be a positive whole number (e.g. /chat/last/10)",
+        });
+      }
+      limit = Math.min(requestedLimit, LAST_CHATS_MAX_LIMIT);
+    }
 
+    const since = startOfTodayUtc();
     const filter = {
       company_id: companyId,
+      createdAt: { $gte: since },
       $and: [activeNotDeletedCriteria()],
     };
 
@@ -1051,9 +1071,10 @@ async function fetchLastChats(req, res) {
     return res.status(200).json({
       success: true,
       status: 200,
-      message: chats.length ? "Last chats fetched" : "No chats found",
+      message: chats.length ? "Today's last chats fetched" : "No chats found today",
       count: chats.length,
       limit,
+      since,
       number_variants: variants.length ? variants : undefined,
       data: chats,
     });
