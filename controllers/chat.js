@@ -982,8 +982,94 @@ async function resetUnknownWhatsappUsageOnly(req, res) {
   }
 }
 
+const LAST_CHATS_DEFAULT_LIMIT = 10;
+const LAST_CHATS_MAX_LIMIT = 50;
+
+/**
+ * GET /api/chat/last
+ * Query: company_id (required), number|phone (optional), type (optional: sent|received),
+ *        limit (optional, default 10, max 50)
+ *
+ * Returns the newest chats for the company (newest first), optionally narrowed to
+ * one phone number (matches from_user_id OR to_user_id, PK variants).
+ */
+async function fetchLastChats(req, res) {
+  try {
+    const companyId = resolveCompanyId(req);
+    if (!companyId) {
+      return res.status(400).json(companyIdMissingOrInvalidResponse(req));
+    }
+
+    const requestedLimit = Number.parseInt(req.query?.limit, 10);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0 ?
+        Math.min(requestedLimit, LAST_CHATS_MAX_LIMIT)
+      : LAST_CHATS_DEFAULT_LIMIT;
+
+    const filter = {
+      company_id: companyId,
+      $and: [activeNotDeletedCriteria()],
+    };
+
+    const type = String(req.query?.type || "").trim().toLowerCase();
+    if (type) {
+      if (type !== "sent" && type !== "received") {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          message: "type must be either 'sent' or 'received'",
+        });
+      }
+      filter.type = type;
+    }
+
+    const number = req.query?.number ?? req.query?.phone;
+    let variants = [];
+    if (number != null && String(number).trim() !== "") {
+      variants = phoneMatchVariants(number);
+      if (variants.length === 0) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          message: "number must contain digits",
+        });
+      }
+      filter.$and.push({
+        $or: [
+          { from_user_id: { $in: variants } },
+          { to_user_id: { $in: variants } },
+        ],
+      });
+    }
+
+    const chats = await Chat.find(filter)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit)
+      .populate("whatsapp_message_id")
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: chats.length ? "Last chats fetched" : "No chats found",
+      count: chats.length,
+      limit,
+      number_variants: variants.length ? variants : undefined,
+      data: chats,
+    });
+  } catch (error) {
+    console.error("❌ fetchLastChats:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to fetch last chats",
+    });
+  }
+}
+
 module.exports = {
   chatCreate,
+  fetchLastChats,
   authenticatePosToken,
   fetchRandomChat,
   markChatSent,

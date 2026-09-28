@@ -46,6 +46,7 @@ Authorization: Bearer <token>
 | `GET` / `POST` | `/integration/daraz/refresh-token/:id` | Refresh Daraz PK token for integration |
 | `GET` / `POST` | `/integration/daraz/refresh-tokens-cron` | Cron: refresh all Daraz PK integration tokens |
 | `POST` | `/chat/create/:pos_auth_token` | Insert received WhatsApp chat (POS token in URL) |
+| `GET` | `/chat/last` | Last 10 chats for a company (optional `number`) |
 | `GET` | `/chat/fetch-random` | Next pending outbound chat; claims it as `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | Unknown-contact daily limit check (+ usage bump) |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | Reset `usage` to `0` and `daily_limit += increase_daily` |
@@ -482,6 +483,7 @@ Worker / extension routes. Most are **public** (no Bearer). Scope with `company_
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | `POST` | `/chat/create/:pos_auth_token` | No (POS token in URL) | Create **received** chat message |
+| `GET` | `/chat/last` | No | Newest chats (default 10); optional `number`, `type`, `limit` |
 | `GET` | `/chat/fetch-random` | No | Random pending outbound chat; sets `status` to `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | No | Check if an unknown number can be messaged; may bump usage |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | No | Reset `usage` to `0` and bump `daily_limit += increase_daily` |
@@ -636,6 +638,23 @@ POST /api/chat/create/:pos_auth_token?swap=1
 | `GET /chat/fetch-random?company_id=...` | Claims one `sent` / `not_started` chat → sets `status` (+ `sending_status`) to `inprocess` |
 | `GET /chat/mark-sent/:id?company_id=...` | Marks that chat sent |
 | `GET /chat/mark-not-available/:id?company_id=...` | Marks not available |
+
+### `GET` `/chat/last`
+
+Newest chats for a company, **newest first** (`createdAt` desc), with `whatsapp_message_id` populated.
+
+| Query | Required | Notes |
+| ----- | -------- | ----- |
+| `company_id` | Yes | 24-char ObjectId |
+| `number` / `phone` | No | Matches `from_user_id` or `to_user_id` (PK variants) |
+| `type` | No | `sent` or `received` |
+| `limit` | No | Default `10`, max `50` |
+
+```http
+GET /api/chat/last?company_id=6a60082a3bbbeaaacd9a4d3e&number=923001234567
+```
+
+Response: `{ success, status, message, count, limit, number_variants?, data: [chat, ...] }`. Alias: `/api/chats/last`.
 
 ### `GET` `/chat/get-all?number=...`
 

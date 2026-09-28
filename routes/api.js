@@ -302,6 +302,7 @@ const {
 } = require("../controllers/whatsapp_message");
 const {
   chatCreate,
+  fetchLastChats,
   fetchRandomChat,
   markChatSent,
   markChatNotAvailable,
@@ -655,6 +656,8 @@ router.post("/chat/create/:pos_auth_token/swap", chatCreate);
 router.post("/chats/create/:pos_auth_token/swap", chatCreate);
 
 // Chat worker routes (public, scoped by company_id — same pattern as whatsapp_message)
+router.get("/chat/last", fetchLastChats);
+router.get("/chats/last", fetchLastChats);
 router.get("/chat/fetch-random", fetchRandomChat);
 router.get("/chats/fetch-random", fetchRandomChat);
 router.get("/chat/can-send-unknown", canSendUnknownWhatsapp);

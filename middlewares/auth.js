@@ -230,6 +230,10 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/chats\/create\/[^/]+\/swap$/,
     /^\/api\/chats\/create\/[^/]+\/swap$/,
     // Chat worker routes (public, company_id query)
+    "/chat/last",
+    "/api/chat/last",
+    "/chats/last",
+    "/api/chats/last",
     "/chat/fetch-random",
     "/api/chat/fetch-random",
     "/chats/fetch-random",
