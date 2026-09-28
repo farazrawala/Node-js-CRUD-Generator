@@ -995,12 +995,36 @@ function startOfTodayUtc(now = new Date()) {
   return new Date(local.getTime() - offsetMs);
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
- * GET /api/chat/last/:limit   (e.g. /api/chat/last/10)
+ * `?date=` → { from, to } in UTC for one Pakistan-time day.
+ * Accepts "today" (default), "yesterday", or "YYYY-MM-DD". Returns null when invalid.
+ */
+function resolveChatDayRange(rawDate) {
+  const value = String(rawDate ?? "").trim().toLowerCase();
+  const todayStart = startOfTodayUtc();
+  if (value === "" || value === "today") {
+    return { from: todayStart, to: new Date(todayStart.getTime() + DAY_MS) };
+  }
+  if (value === "yesterday") {
+    return { from: new Date(todayStart.getTime() - DAY_MS), to: todayStart };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const midnightUtc = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(midnightUtc.getTime())) return null;
+  const from = new Date(midnightUtc.getTime() - TODAY_UTC_OFFSET_MINUTES * 60 * 1000);
+  return { from, to: new Date(from.getTime() + DAY_MS) };
+}
+
+/**
+ * GET /api/chat/last/:limit   (e.g. /api/chat/last/10) — public, needs company_id
  * GET /api/chat/last          (defaults to 10)
- * Query: company_id (required), number|phone (optional), type (optional: sent|received)
+ * GET /api/chat/list?date=today&limit=5 — Bearer auth, company from token
+ * Query: company_id, date (today|yesterday|YYYY-MM-DD, default today), limit,
+ *        number|phone (optional), type (optional: sent|received)
  *
- * Returns today's newest chats for the company (newest first, max 50), optionally
+ * Returns that day's newest chats for the company (newest first, max 50), optionally
  * narrowed to one phone number (matches from_user_id OR to_user_id, PK variants).
  */
 async function fetchLastChats(req, res) {
@@ -1010,7 +1034,7 @@ async function fetchLastChats(req, res) {
       return res.status(400).json(companyIdMissingOrInvalidResponse(req));
     }
 
-    const rawLimit = req.params?.limit;
+    const rawLimit = req.params?.limit ?? req.query?.limit;
     let limit = LAST_CHATS_DEFAULT_LIMIT;
     if (rawLimit != null && rawLimit !== "") {
       const requestedLimit = Number(rawLimit);
@@ -1018,16 +1042,24 @@ async function fetchLastChats(req, res) {
         return res.status(400).json({
           success: false,
           status: 400,
-          message: "limit in the URL must be a positive whole number (e.g. /chat/last/10)",
+          message: "limit must be a positive whole number (e.g. /chat/last/10 or ?limit=10)",
         });
       }
       limit = Math.min(requestedLimit, LAST_CHATS_MAX_LIMIT);
     }
 
-    const since = startOfTodayUtc();
+    const range = resolveChatDayRange(req.query?.date);
+    if (!range) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "date must be 'today', 'yesterday' or YYYY-MM-DD",
+      });
+    }
+    const since = range.from;
     const filter = {
       company_id: companyId,
-      createdAt: { $gte: since },
+      createdAt: { $gte: range.from, $lt: range.to },
       $and: [activeNotDeletedCriteria()],
     };
 
@@ -1071,7 +1103,7 @@ async function fetchLastChats(req, res) {
     return res.status(200).json({
       success: true,
       status: 200,
-      message: chats.length ? "Today's last chats fetched" : "No chats found today",
+      message: chats.length ? "Last chats fetched" : "No chats found for this date",
       count: chats.length,
       limit,
       since,

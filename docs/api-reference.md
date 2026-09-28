@@ -483,7 +483,8 @@ Worker / extension routes. Most are **public** (no Bearer). Scope with `company_
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | `POST` | `/chat/create/:pos_auth_token` | No (POS token in URL) | Create **received** chat message |
-| `GET` | `/chat/last/:limit` | No | Today's newest N chats (default 10, max 50); optional `number`, `type` |
+| `GET` | `/chat/last/:limit` | No | Today's newest N chats (default 10, max 50); optional `number`, `type`, `date` |
+| `GET` | `/chat/list?date=today&limit=5` | Yes | Same, company from Bearer token |
 | `GET` | `/chat/fetch-random` | No | Random pending outbound chat; sets `status` to `inprocess` |
 | `GET` / `POST` | `/chat/can-send-unknown` | No | Check if an unknown number can be messaged; may bump usage |
 | `GET` / `POST` | `/chat/reset-unknown-usage` | No | Reset `usage` to `0` and bump `daily_limit += increase_daily` |
@@ -650,6 +651,7 @@ Today's newest chats for a company, **newest first** (`createdAt` desc), with `w
 | `company_id` | Yes | 24-char ObjectId |
 | `number` / `phone` | No | Matches `from_user_id` or `to_user_id` (PK variants) |
 | `type` | No | `sent` or `received` |
+| `date` | No | `today` (default), `yesterday`, or `YYYY-MM-DD` (Pakistan time) |
 
 ```http
 GET /api/chat/last/10?company_id=6a60082a3bbbeaaacd9a4d3e
@@ -657,6 +659,8 @@ GET /api/chat/last/20?company_id=6a60082a3bbbeaaacd9a4d3e&number=923001234567
 ```
 
 Response: `{ success, status, message, count, limit, since, number_variants?, data: [chat, ...] }`. Alias: `/api/chats/last/:limit`.
+
+**Authenticated variant:** `GET /api/chat/list?date=today&limit=5` with `Authorization: Bearer <token>` — same response; `company_id` comes from the token and `limit` is a query param. Alias: `/api/chats/list`.
 
 ### `GET` `/chat/get-all?number=...`
 
