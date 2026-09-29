@@ -202,6 +202,30 @@ async function chatCreate(req, res) {
     if (response && typeof response === "object") {
       response.swapped = swapUsers;
     }
+
+    // New customer message → same as GET /chat/list?date=today&limit=5&number=<sender>
+    if (response?.success && chatType === "received" && response.data?.from_user_id) {
+      try {
+        const autoReply = await autoReplyToNumber(
+          req,
+          companyId,
+          response.data.from_user_id,
+        );
+        if (autoReply) {
+          response.auto_reply = {
+            expected_reply: autoReply.expected_reply,
+            expected_reply_error: autoReply.expected_reply_error,
+            expected_reply_queued: autoReply.expected_reply_queued,
+          };
+        }
+      } catch (autoErr) {
+        console.error("❌ chatCreate → auto reply:", autoErr);
+        response.auto_reply = {
+          expected_reply: null,
+          expected_reply_error: autoErr.message || "Auto reply failed",
+        };
+      }
+    }
     return res.status(response.status).json(response);
   } catch (error) {
     console.error("❌ chatCreate:", error);
@@ -985,6 +1009,7 @@ async function resetUnknownWhatsappUsageOnly(req, res) {
 
 const LAST_CHATS_DEFAULT_LIMIT = 10;
 const LAST_CHATS_MAX_LIMIT = 50;
+const AUTO_REPLY_CHAT_LIMIT = 5;
 
 // "Today" is measured in Pakistan time (UTC+5, no DST), not the server's timezone.
 const TODAY_UTC_OFFSET_MINUTES = 5 * 60;
@@ -1016,6 +1041,98 @@ function resolveChatDayRange(rawDate) {
   if (Number.isNaN(midnightUtc.getTime())) return null;
   const from = new Date(midnightUtc.getTime() - TODAY_UTC_OFFSET_MINUTES * 60 * 1000);
   return { from, to: new Date(from.getTime() + DAY_MS) };
+}
+
+/**
+ * Loads the newest chats for `filter`, asks Groq for the next reply and — when
+ * filtered to one number (`variants`) and the customer spoke last — queues it
+ * as a whatsapp_message. Shared by GET /chat/list and chatCreate (received).
+ */
+async function loadChatsAndQueueReply(req, { companyId, filter, limit, variants }) {
+  const chats = await Chat.find(filter)
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit)
+    .populate("whatsapp_message_id")
+    .lean();
+
+  // Oldest → newest, trimmed to what an AI prompt needs
+  const conversation = chats
+    .slice()
+    .reverse()
+    .map((chat) => ({
+      message: chat.message,
+      whatsapp_time: chat.whatsapp_time || null,
+      type: chat.type,
+      createdAt: chat.createdAt,
+    }));
+
+  // Groq-suggested next message to send; failures never break the chat list
+  const { reply: expected_reply = null, error: expected_reply_error } =
+    conversation.length ? await generateExpectedReply(conversation) : {};
+
+  // Queue the reply to the customer (same as POST /whatsapp_message/create).
+  // Only for one number and only when the customer spoke last — the queued
+  // message adds a "sent" chat, so repeating this request won't send it twice.
+  let expected_reply_queued = null;
+  const newestChat = chats[0];
+  if (expected_reply && variants.length && newestChat?.type === "received") {
+    try {
+      // Lazy require: whatsapp_message.js requires this file
+      const { createWhatsappMessageWithChat } = require("./whatsapp_message");
+      const createReq = Object.create(req);
+      createReq.body = {
+        number: newestChat.from_user_id,
+        message: expected_reply,
+        company_id: companyId,
+      };
+      expected_reply_queued = await createWhatsappMessageWithChat(createReq, {
+        is_ai_resond: true,
+      });
+    } catch (queueErr) {
+      console.error("❌ fetchLastChats → queue expected_reply:", queueErr);
+      expected_reply_queued = {
+        success: false,
+        message: queueErr.message || "Failed to queue expected_reply",
+      };
+    }
+  }
+
+  return {
+    chats,
+    conversation,
+    expected_reply,
+    expected_reply_error,
+    expected_reply_queued,
+  };
+}
+
+/**
+ * Same as GET /chat/list?date=today&limit=5&number=<number>, run after a
+ * received chat is saved so the customer gets an AI reply queued.
+ */
+async function autoReplyToNumber(req, companyId, number) {
+  const variants = phoneMatchVariants(number);
+  if (!companyId || variants.length === 0) return null;
+  const range = resolveChatDayRange("today");
+  const filter = {
+    company_id: companyId,
+    createdAt: { $gte: range.from, $lt: range.to },
+    $and: [
+      activeNotDeletedCriteria(),
+      {
+        $or: [
+          { from_user_id: { $in: variants } },
+          { to_user_id: { $in: variants } },
+        ],
+      },
+    ],
+  };
+  return loadChatsAndQueueReply(req, {
+    companyId,
+    filter,
+    limit: AUTO_REPLY_CHAT_LIMIT,
+    variants,
+  });
 }
 
 /**
@@ -1095,53 +1212,13 @@ async function fetchLastChats(req, res) {
       });
     }
 
-    const chats = await Chat.find(filter)
-      .sort({ createdAt: -1, _id: -1 })
-      .limit(limit)
-      .populate("whatsapp_message_id")
-      .lean();
-
-    // Oldest → newest, trimmed to what an AI prompt needs
-    const conversation = chats
-      .slice()
-      .reverse()
-      .map((chat) => ({
-        message: chat.message,
-        whatsapp_time: chat.whatsapp_time || null,
-        type: chat.type,
-        createdAt: chat.createdAt,
-      }));
-
-    // Groq-suggested next message to send; failures never break the chat list
-    const { reply: expected_reply = null, error: expected_reply_error } =
-      conversation.length ? await generateExpectedReply(conversation) : {};
-
-    // Queue the reply to the customer (same as POST /whatsapp_message/create).
-    // Only for one number and only when the customer spoke last — the queued
-    // message adds a "sent" chat, so repeating this request won't send it twice.
-    let expected_reply_queued = null;
-    const newestChat = chats[0];
-    if (expected_reply && variants.length && newestChat?.type === "received") {
-      try {
-        // Lazy require: whatsapp_message.js requires this file
-        const { createWhatsappMessageWithChat } = require("./whatsapp_message");
-        const createReq = Object.create(req);
-        createReq.body = {
-          number: newestChat.from_user_id,
-          message: expected_reply,
-          company_id: companyId,
-        };
-        expected_reply_queued = await createWhatsappMessageWithChat(createReq, {
-          is_ai_resond: true,
-        });
-      } catch (queueErr) {
-        console.error("❌ fetchLastChats → queue expected_reply:", queueErr);
-        expected_reply_queued = {
-          success: false,
-          message: queueErr.message || "Failed to queue expected_reply",
-        };
-      }
-    }
+    const {
+      chats,
+      conversation,
+      expected_reply,
+      expected_reply_error,
+      expected_reply_queued,
+    } = await loadChatsAndQueueReply(req, { companyId, filter, limit, variants });
 
     return res.status(200).json({
       success: true,
