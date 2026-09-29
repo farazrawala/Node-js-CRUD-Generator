@@ -34,10 +34,7 @@ async function authenticatePosToken(req) {
 
 function resolveCompanyId(req) {
   const raw =
-    req.params?.company_id ||
-    req.query?.company_id ||
-    req.body?.company_id ||
-    req.user?.company_id;
+    req.query?.company_id || req.body?.company_id || req.user?.company_id;
   if (raw == null || raw === "") return null;
 
   const id = coalesceObjectId(raw);
@@ -1023,8 +1020,7 @@ function resolveChatDayRange(rawDate) {
 /**
  * GET /api/chat/last/:limit   (e.g. /api/chat/last/10) — public, needs company_id
  * GET /api/chat/last          (defaults to 10)
- * GET /api/chat/list/:company_id?date=today&limit=5 — public, company_id in URL
- *     (or /api/chat/list?company_id=...&date=today&limit=5)
+ * GET /api/chat/list?date=today&limit=5 — Bearer auth, company from token
  * Query: company_id, date (today|yesterday|YYYY-MM-DD, default today), limit,
  *        number|phone (optional), type (optional: sent|received)
  *
