@@ -660,9 +660,11 @@ router.get("/chat/last", fetchLastChats);
 router.get("/chats/last", fetchLastChats);
 router.get("/chat/last/:limit", fetchLastChats);
 router.get("/chats/last/:limit", fetchLastChats);
-// Bearer auth: company_id comes from the token
+// Public: company_id in the URL (/chat/list/:company_id or ?company_id=)
 router.get("/chat/list", fetchLastChats);
 router.get("/chats/list", fetchLastChats);
+router.get("/chat/list/:company_id", fetchLastChats);
+router.get("/chats/list/:company_id", fetchLastChats);
 router.get("/chat/fetch-random", fetchRandomChat);
 router.get("/chats/fetch-random", fetchRandomChat);
 router.get("/chat/can-send-unknown", canSendUnknownWhatsapp);
