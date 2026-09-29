@@ -1,5 +1,6 @@
 const GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile";
+// Llama models on Groq are Enterprise-only; override with GROQ_MODEL in .env
+const GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b";
 const GROQ_TIMEOUT_MS = 15000;
 
 const SYSTEM_PROMPT =
@@ -26,6 +27,7 @@ async function generateExpectedReply(conversation) {
   if (messages.length === 0) return { error: "No messages to reply to" };
 
   try {
+    const model = process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL;
     const response = await fetch(GROQ_CHAT_URL, {
       method: "POST",
       headers: {
@@ -33,10 +35,12 @@ async function generateExpectedReply(conversation) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL,
+        model,
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
         temperature: 0.5,
-        max_tokens: 300,
+        // gpt-oss models reason before answering; keep it short and leave room for the reply
+        ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
+        max_tokens: 1024,
       }),
       signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
     });
