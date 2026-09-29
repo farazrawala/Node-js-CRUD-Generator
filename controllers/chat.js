@@ -1100,6 +1100,17 @@ async function fetchLastChats(req, res) {
       .populate("whatsapp_message_id")
       .lean();
 
+    // Oldest → newest, trimmed to what an AI prompt needs
+    const conversation = chats
+      .slice()
+      .reverse()
+      .map((chat) => ({
+        message: chat.message,
+        whatsapp_time: chat.whatsapp_time || null,
+        type: chat.type,
+        createdAt: chat.createdAt,
+      }));
+
     return res.status(200).json({
       success: true,
       status: 200,
@@ -1108,6 +1119,7 @@ async function fetchLastChats(req, res) {
       limit,
       since,
       number_variants: variants.length ? variants : undefined,
+      conversation,
       data: chats,
     });
   } catch (error) {

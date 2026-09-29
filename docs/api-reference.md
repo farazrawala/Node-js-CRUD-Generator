@@ -658,7 +658,16 @@ GET /api/chat/last/10?company_id=6a60082a3bbbeaaacd9a4d3e
 GET /api/chat/last/20?company_id=6a60082a3bbbeaaacd9a4d3e&number=923001234567
 ```
 
-Response: `{ success, status, message, count, limit, since, number_variants?, data: [chat, ...] }`. Alias: `/api/chats/last/:limit`.
+Response: `{ success, status, message, count, limit, since, number_variants?, conversation, data: [chat, ...] }`. Alias: `/api/chats/last/:limit`.
+
+`conversation` is the same chats **oldest → newest**, trimmed for AI prompts:
+
+```json
+[
+  { "message": "Hi", "whatsapp_time": "2026-09-29T14:59:00.000Z", "type": "received", "createdAt": "2026-09-29T14:59:56.349Z" },
+  { "message": "Hello", "whatsapp_time": "2026-09-29T14:59:00.000Z", "type": "sent", "createdAt": "2026-09-29T15:00:10.120Z" }
+]
+```
 
 **Authenticated variant:** `GET /api/chat/list?date=today&limit=5` with `Authorization: Bearer <token>` — same response; `company_id` comes from the token and `limit` is a query param. Alias: `/api/chats/list`.
 
