@@ -176,6 +176,17 @@ const modelSchema = new mongoose.Schema(
       field_type: "image",
       field_name: "Gallery Thumbnails",
     },
+    
+    is_featured:{
+      type: Boolean,
+      field_name: "Is Featured",
+      default: false,
+    },
+    is_favourite:{
+      type: Boolean,
+      field_name: "Is Favourite",
+      default: false,
+    },
 
     // Second company BigCommerce Settings //
 
