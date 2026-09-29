@@ -134,21 +134,43 @@ function wantsChatUserSwap(req) {
   return v === "1" || v === "true" || v === "yes" || v === "swap";
 }
 
+/**
+ * POST /chat(s)/create/:pos_auth_token  (optionally .../swap or ?swap=1)
+ *
+ * Saves one WhatsApp chat message and, for incoming customer messages,
+ * triggers the Groq auto-reply.
+ *
+ * Flow:
+ *   Step 1  – Authenticate the POS token (sets req.user).
+ *   Step 2  – Detect swap mode (/swap or ?swap=1|true|yes).
+ *   Step 3  – Default from_user_id to the logged-in POS user if missing.
+ *   Step 4  – In swap mode, swap from_user_id ↔ to_user_id.
+ *   Step 5  – Normalize whatsapp_time to an ISO string.
+ *   Step 6  – Resolve company_id and chat type (swap → "sent", else "received").
+ *   Step 7  – Build a stable message_id hash and skip duplicates.
+ *   Step 8  – Insert the chat through the generic create handler.
+ *   Step 9  – For new "received" messages, generate/queue the Groq auto-reply.
+ *   Step 10 – Send the response (duplicate-key race → 200 skipped).
+ */
 async function chatCreate(req, res) {
   try {
+    // Step 1: Validate :pos_auth_token and load the POS user onto req.user.
+    // Returns an error object (401 etc.) when the token is missing/invalid.
     const authError = await authenticatePosToken(req);
     if (authError) {
       return res.status(authError.status).json(authError);
     }
 
+    // Step 2: Swap mode means the message was SENT by the company (outgoing),
+    // not received from a customer. Triggered by /swap path or ?swap=1.
     const swapUsers = wantsChatUserSwap(req);
 
-    // Default sender to the authenticated POS user when omitted
+    // Step 3: Default sender to the authenticated POS user when omitted
     if (!req.body?.from_user_id && req.user?._id) {
       req.body = { ...req.body, from_user_id: String(req.user._id) };
     }
 
-    // /swap or ?swap=1 → from_user_id ↔ to_user_id (e.g. company phone becomes from)
+    // Step 4: /swap or ?swap=1 → from_user_id ↔ to_user_id (e.g. company phone becomes from)
     if (swapUsers) {
       const from = req.body?.from_user_id;
       const to = req.body?.to_user_id;
@@ -159,14 +181,22 @@ async function chatCreate(req, res) {
       };
     }
 
+    // Step 5: Convert whatsapp_time to ISO format so the same message always
+    // produces the same timestamp string (needed for the dedupe hash below).
+    // Unparseable values are kept as trimmed text.
     const whatsapp_time = normalizeWhatsappTime(req.body?.whatsapp_time);
     if (whatsapp_time) {
       req.body = { ...req.body, whatsapp_time };
     }
 
+    // Step 6: company_id comes from query → body → POS user (invalid ids → null).
+    // Swap mode = outgoing "sent" message; otherwise it's an incoming "received" one.
     const companyId = resolveCompanyId(req);
     const chatType = swapUsers ? "sent" : "received";
 
+    // Step 7: WhatsApp message ids change between syncs, so build our own
+    // stable id = hash(company + from + message + whatsapp_time).
+    // Returns null when message or time is missing (dedupe is skipped then).
     const stableMessageId = buildStableReceivedMessageId({
       companyId,
       fromUserId: req.body?.from_user_id,
@@ -175,8 +205,11 @@ async function chatCreate(req, res) {
     });
 
     if (stableMessageId) {
+      // Store our stable id as message_id instead of WhatsApp's
       req.body = { ...req.body, message_id: stableMessageId };
 
+      // Same message already saved (same company, id, type, not deleted)?
+      // Return the existing row with 200 + skipped: true instead of inserting again.
       const existing = await Chat.findOne({
         company_id: companyId,
         message_id: stableMessageId,
@@ -196,6 +229,8 @@ async function chatCreate(req, res) {
       }
     }
 
+    // Step 8: Save the chat with its type via the shared generic create handler
+    // (validation + insert). Tag the response with whether users were swapped.
     req.body = { ...req.body, type: chatType };
 
     const response = await handleGenericCreate(req, "chat", {});
@@ -203,7 +238,11 @@ async function chatCreate(req, res) {
       response.swapped = swapUsers;
     }
 
-    // New customer message → same as GET /chat/list?date=today&limit=5&number=<sender>
+    // Step 9: New customer message → same as GET /chat/list?date=today&limit=5&number=<sender>
+    // Loads today's conversation with the sender, asks Groq for expected_reply
+    // and queues it as a WhatsApp message. Only for successfully saved
+    // "received" messages. Auto-reply errors are reported in response.auto_reply
+    // but never fail the create itself.
     if (response?.success && chatType === "received" && response.data?.from_user_id) {
       try {
         const autoReply = await autoReplyToNumber(
@@ -226,10 +265,14 @@ async function chatCreate(req, res) {
         };
       }
     }
+
+    // Step 10: Return the create result (with auto_reply details if any)
     return res.status(response.status).json(response);
   } catch (error) {
     console.error("❌ chatCreate:", error);
-    // Race: unique-ish duplicate insert
+    // Race: two identical requests passed the Step 7 check at the same time and
+    // the DB unique index rejected the second insert (Mongo error 11000).
+    // Treat it as a skipped duplicate, not a failure.
     if (error?.code === 11000) {
       return res.status(200).json({
         success: true,
@@ -1087,6 +1130,8 @@ async function loadChatsAndQueueReply(req, { companyId, filter, limit, variants 
       };
       expected_reply_queued = await createWhatsappMessageWithChat(createReq, {
         is_ai_resond: true,
+        // The conversation Groq replied to (oldest → newest), as JSON
+        chat_history: JSON.stringify(conversation),
       });
     } catch (queueErr) {
       console.error("❌ fetchLastChats → queue expected_reply:", queueErr);

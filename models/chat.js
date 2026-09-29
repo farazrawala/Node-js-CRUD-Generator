@@ -27,6 +27,10 @@ const modelSchema = new mongoose.Schema(
       field_name: "Ai Responded",
       default: false,
     },
+    chat_history:{
+      type: String,
+      field_name: "Chat History",
+    },
 
     whatsapp_message_id: {
       type: mongoose.Schema.Types.ObjectId,

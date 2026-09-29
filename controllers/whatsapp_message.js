@@ -67,6 +67,7 @@ async function createChatForWhatsappMessage(whatsappMessage, extras = {}) {
     type: "sent",
     status: whatsappMessage.status || "not_started",
     is_ai_resond: extras.is_ai_resond === true,
+    chat_history: extras.chat_history || undefined,
     company_id: companyId,
     created_by:
       coalesceObjectId(extras.created_by) ||
@@ -117,7 +118,10 @@ async function whatsappMessageCreate(req, res) {
  * Shared by POST /whatsapp_message/create and chat list auto-reply:
  * creates the whatsapp_message from req.body and its linked chat row.
  */
-async function createWhatsappMessageWithChat(req, { is_ai_resond = false } = {}) {
+async function createWhatsappMessageWithChat(
+  req,
+  { is_ai_resond = false, chat_history } = {},
+) {
   const response = await handleGenericCreate(req, "whatsapp_message", {});
   if (response?.success && response?.data) {
     try {
@@ -127,6 +131,7 @@ async function createWhatsappMessageWithChat(req, { is_ai_resond = false } = {})
           created_by: req.user?._id,
           company_id: resolveCompanyId(req),
           is_ai_resond,
+          chat_history,
         },
       );
       if (chat) {
