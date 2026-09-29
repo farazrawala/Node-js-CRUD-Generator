@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const Chat = require("../models/chat");
 const { handleGenericCreate, coalesceObjectId, activeNotDeletedCriteria } = require("../utils/modelHelper");
 const { hydrateUserFromToken } = require("../middlewares/auth");
+const { generateExpectedReply } = require("../utils/groqReply");
 
 /**
  * Resolve and attach req.user from `:pos_auth_token` (JWT).
@@ -1111,6 +1112,10 @@ async function fetchLastChats(req, res) {
         createdAt: chat.createdAt,
       }));
 
+    // Groq-suggested next message to send; failures never break the chat list
+    const { reply: expected_reply = null, error: expected_reply_error } =
+      conversation.length ? await generateExpectedReply(conversation) : {};
+
     return res.status(200).json({
       success: true,
       status: 200,
@@ -1120,6 +1125,8 @@ async function fetchLastChats(req, res) {
       since,
       number_variants: variants.length ? variants : undefined,
       conversation,
+      expected_reply,
+      expected_reply_error,
       data: chats,
     });
   } catch (error) {
