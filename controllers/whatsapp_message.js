@@ -66,6 +66,7 @@ async function createChatForWhatsappMessage(whatsappMessage, extras = {}) {
     whatsapp_message_id: whatsappMessage._id,
     type: "sent",
     status: whatsappMessage.status || "not_started",
+    is_ai_resond: extras.is_ai_resond === true,
     company_id: companyId,
     created_by:
       coalesceObjectId(extras.created_by) ||
@@ -100,30 +101,7 @@ async function createChatForWhatsappMessage(whatsappMessage, extras = {}) {
  */
 async function whatsappMessageCreate(req, res) {
   try {
-    const response = await handleGenericCreate(req, "whatsapp_message", {});
-    if (response?.success && response?.data) {
-      try {
-        const { chat, eligibility } = await createChatForWhatsappMessage(
-          response.data,
-          {
-            created_by: req.user?._id,
-            company_id: resolveCompanyId(req),
-          },
-        );
-        if (chat) {
-          response.chat = chat.toObject ? chat.toObject() : chat;
-        }
-        if (eligibility) {
-          response.eligibility = eligibility;
-        }
-      } catch (chatErr) {
-        console.error(
-          "❌ whatsappMessageCreate → chat insert failed:",
-          chatErr?.message || chatErr,
-        );
-        response.chat_error = chatErr?.message || "Failed to insert chat";
-      }
-    }
+    const response = await createWhatsappMessageWithChat(req);
     return res.status(response.status || 500).json(response);
   } catch (error) {
     console.error("❌ whatsappMessageCreate:", error);
@@ -133,6 +111,39 @@ async function whatsappMessageCreate(req, res) {
       message: error.message || "Failed to create whatsapp message",
     });
   }
+}
+
+/**
+ * Shared by POST /whatsapp_message/create and chat list auto-reply:
+ * creates the whatsapp_message from req.body and its linked chat row.
+ */
+async function createWhatsappMessageWithChat(req, { is_ai_resond = false } = {}) {
+  const response = await handleGenericCreate(req, "whatsapp_message", {});
+  if (response?.success && response?.data) {
+    try {
+      const { chat, eligibility } = await createChatForWhatsappMessage(
+        response.data,
+        {
+          created_by: req.user?._id,
+          company_id: resolveCompanyId(req),
+          is_ai_resond,
+        },
+      );
+      if (chat) {
+        response.chat = chat.toObject ? chat.toObject() : chat;
+      }
+      if (eligibility) {
+        response.eligibility = eligibility;
+      }
+    } catch (chatErr) {
+      console.error(
+        "❌ whatsappMessageCreate → chat insert failed:",
+        chatErr?.message || chatErr,
+      );
+      response.chat_error = chatErr?.message || "Failed to insert chat";
+    }
+  }
+  return response;
 }
 
 function buildPendingMessageFilter(companyId, excludeIds = []) {
@@ -427,6 +438,7 @@ async function markWhatsappMessageNotAvailable(req, res) {
 
 module.exports = {
   whatsappMessageCreate,
+  createWhatsappMessageWithChat,
   createChatForWhatsappMessage,
   fetchRandomWhatsappMessage,
   markWhatsappMessageSent,

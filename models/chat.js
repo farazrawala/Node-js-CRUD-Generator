@@ -22,6 +22,11 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Whatsapp Time",
     },
+    is_ai_resond:{
+      type: Boolean,
+      field_name: "Ai Responded",
+      default: false,
+    },
 
     whatsapp_message_id: {
       type: mongoose.Schema.Types.ObjectId,

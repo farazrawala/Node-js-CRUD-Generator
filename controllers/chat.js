@@ -1116,6 +1116,33 @@ async function fetchLastChats(req, res) {
     const { reply: expected_reply = null, error: expected_reply_error } =
       conversation.length ? await generateExpectedReply(conversation) : {};
 
+    // Queue the reply to the customer (same as POST /whatsapp_message/create).
+    // Only for one number and only when the customer spoke last — the queued
+    // message adds a "sent" chat, so repeating this request won't send it twice.
+    let expected_reply_queued = null;
+    const newestChat = chats[0];
+    if (expected_reply && variants.length && newestChat?.type === "received") {
+      try {
+        // Lazy require: whatsapp_message.js requires this file
+        const { createWhatsappMessageWithChat } = require("./whatsapp_message");
+        const createReq = Object.create(req);
+        createReq.body = {
+          number: newestChat.from_user_id,
+          message: expected_reply,
+          company_id: companyId,
+        };
+        expected_reply_queued = await createWhatsappMessageWithChat(createReq, {
+          is_ai_resond: true,
+        });
+      } catch (queueErr) {
+        console.error("❌ fetchLastChats → queue expected_reply:", queueErr);
+        expected_reply_queued = {
+          success: false,
+          message: queueErr.message || "Failed to queue expected_reply",
+        };
+      }
+    }
+
     return res.status(200).json({
       success: true,
       status: 200,
@@ -1127,6 +1154,7 @@ async function fetchLastChats(req, res) {
       conversation,
       expected_reply,
       expected_reply_error,
+      expected_reply_queued,
       data: chats,
     });
   } catch (error) {
