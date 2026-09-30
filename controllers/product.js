@@ -57,6 +57,7 @@ const {
 const {
   enqueueBigcommerceProductResetJobs,
 } = require("../utils/bigcommerceProductResetQueue");
+const { normalizePosAttributesInBody } = require("../utils/productPosAttributes");
 
 const PRODUCT_LIST_CACHE_MODULE = "product";
 
@@ -1025,6 +1026,7 @@ async function getProductVariationById(req, res) {
  * @returns {Promise<{ status: number, payload: object }>}
  */
 async function runProductUpdateVariationBody(req, session, tracker) {
+  normalizePosAttributesInBody(req.body);
   const txnOpts = session ? { session } : {};
   const parentId = req.params?.id;
 
@@ -1350,6 +1352,7 @@ async function productUpdateVariation(req, res) {
 async function productCreate(req, res) {
   console.log("🔧 Product create - req.body:", req.body);
   console.log("🔧 Product create - req.body keys:", Object.keys(req.body));
+  normalizePosAttributesInBody(req.body);
 
   // Generate unique EAN13 barcode if barcode is empty
   if (!req.body.barcode || req.body.barcode.trim() === "") {
@@ -1879,6 +1882,7 @@ async function performProductUpdate(req, options = {}) {
 }
 
 async function runProductUpdateBody(req, session, tracker) {
+  normalizePosAttributesInBody(req.body);
   const productId = req.params?.id;
   if (!productId) {
     const err = new Error("Product ID is required");

@@ -176,7 +176,7 @@ const modelSchema = new mongoose.Schema(
       field_type: "image",
       field_name: "Gallery Thumbnails",
     },
-    
+
     is_featured:{
       type: Boolean,
       field_name: "Is Featured",
@@ -186,6 +186,37 @@ const modelSchema = new mongoose.Schema(
       type: Boolean,
       field_name: "Is Favourite",
       default: false,
+    },
+
+    // POS attribute picker (restaurant POS): the cashier picks one value per attribute,
+    // e.g. Size: Small 120 / Medium 150, Spice level: Mild / Hot. The first attribute's
+    // prices set the item price; later attributes' prices are added on top. null = no price.
+    show_attributes: {
+      type: Boolean,
+      field_name: "Show Attributes",
+      default: false,
+    },
+    pos_attributes: {
+      type: [
+        {
+          _id: false,
+          name: { type: String, trim: true, required: true },
+          // How many values the cashier may pick: 1 = exactly one, 2–4 = one up to N.
+          max_select: { type: Number, min: 1, max: 4, default: 1 },
+          values: {
+            type: [
+              {
+                _id: false,
+                name: { type: String, trim: true, required: true },
+                price: { type: Number, min: 0, default: null },
+              },
+            ],
+            default: [],
+          },
+        },
+      ],
+      field_name: "POS Attributes",
+      default: [],
     },
 
     // Second company BigCommerce Settings //
