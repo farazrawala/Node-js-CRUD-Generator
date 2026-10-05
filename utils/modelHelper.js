@@ -2935,7 +2935,12 @@ const MIXED_STRING_NUMBER_SEARCH_FIELDS = new Set([
   "product_code",
 ]);
 
-function buildMixedTypeTextSearchClauses(field, searchTerm, escaped) {
+function buildMixedTypeTextSearchClauses(
+  field,
+  searchTerm,
+  escaped,
+  { numericSchema = false } = {},
+) {
   const clauses = [
     {
       $expr: {
@@ -2952,7 +2957,9 @@ function buildMixedTypeTextSearchClauses(field, searchTerm, escaped) {
     },
   ];
   const trimmed = String(searchTerm ?? "").trim();
-  if (trimmed) {
+  // Raw string equality only for String schema fields; on Number fields Mongoose
+  // would try to cast e.g. "shakoor" to a number and fail the whole query.
+  if (trimmed && !numericSchema) {
     clauses.push({ [field]: trimmed });
   }
   if (/^\d+$/.test(trimmed)) {
@@ -3000,7 +3007,9 @@ function buildSearchOrClause(field, searchTerm, escaped, schemaPath) {
     SEARCHABLE_NUMBER_INSTANCES.has(inst) ||
     MIXED_STRING_NUMBER_SEARCH_FIELDS.has(field)
   ) {
-    return buildMixedTypeTextSearchClauses(field, searchTerm, escaped);
+    return buildMixedTypeTextSearchClauses(field, searchTerm, escaped, {
+      numericSchema: SEARCHABLE_NUMBER_INSTANCES.has(inst),
+    });
   }
   return [{ [field]: { $regex: escaped, $options: "i" } }];
 }
