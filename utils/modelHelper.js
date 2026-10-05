@@ -3008,8 +3008,15 @@ function buildSearchOrClause(field, searchTerm, escaped, schemaPath) {
 /**
  * AND-combines an existing filter with a case-insensitive $or across string/number fields.
  * When the search term is a Mongo ObjectId, also matches `_id` (and listed ObjectId fields).
+ * `extraOrClauses` are OR-ed in as well (e.g. `{ customer_id: { $in: ids } }` for related docs).
  */
-function mergeSearchIntoFilter(filter, searchTerm, searchFields, Model = null) {
+function mergeSearchIntoFilter(
+  filter,
+  searchTerm,
+  searchFields,
+  Model = null,
+  extraOrClauses = [],
+) {
   if (!searchTerm || !searchFields.length) {
     return { ...filter };
   }
@@ -3033,6 +3040,9 @@ function mergeSearchIntoFilter(filter, searchTerm, searchFields, Model = null) {
     orClauses.push(
       ...buildSearchOrClause(field, searchTerm, escaped, paths[field]),
     );
+  }
+  if (Array.isArray(extraOrClauses)) {
+    orClauses.push(...extraOrClauses.filter(Boolean));
   }
   if (orClauses.length === 0) {
     return { ...filter };
@@ -3333,6 +3343,8 @@ const handleGenericGetAll = async (
     errorHandlers = {}, // Custom error handlers
     search = null,
     searchFields: searchFieldsOption = null,
+    /** Extra $or clauses applied only when a search term is present. */
+    searchExtraOrClauses = [],
     /** If set, run aggregation: $match → $sort (optional) → $group → $sort → skip/limit. Value is the body of the $group stage (must include _id). */
     group = null,
     /** Sort applied after $group (default { _id: -1 }). */
@@ -3372,7 +3384,13 @@ const handleGenericGetAll = async (
 
     const mongoFilter =
       searchTerm && searchFields.length > 0 ?
-        mergeSearchIntoFilter(filter, searchTerm, searchFields, Model)
+        mergeSearchIntoFilter(
+          filter,
+          searchTerm,
+          searchFields,
+          Model,
+          searchExtraOrClauses,
+        )
       : { ...filter };
 
     // console.log(

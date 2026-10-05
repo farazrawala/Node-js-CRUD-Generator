@@ -2610,6 +2610,25 @@ function buildOrderListSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
  * @param {import("express").Response} res
  * @param {Record<string, unknown>} [extraFilter]
  */
+const ORDER_CUSTOMER_SEARCH_LIMIT = 500;
+
+/** `$or` clauses matching orders whose linked customer (user) name, phone or email contains the term. */
+async function findOrderCustomerSearchClauses(search, companyId) {
+  const term = String(search ?? "").trim();
+  if (term.length < 2) return [];
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = { $regex: escaped, $options: "i" };
+  const customers = await User.find({
+    ...(companyId ? { company_id: coalesceObjectId(companyId) } : {}),
+    $or: [{ name: regex }, { phone: regex }, { email: regex }],
+  })
+    .select("_id")
+    .limit(ORDER_CUSTOMER_SEARCH_LIMIT)
+    .lean();
+  if (customers.length === 0) return [];
+  return [{ customer_id: { $in: customers.map((c) => c._id) } }];
+}
+
 async function getOrdersWithItems(
   req,
   res,
@@ -2642,6 +2661,12 @@ async function getOrdersWithItems(
     deletedOnly ? { deletedAt: -1, createdAt: -1 } : { createdAt: -1 };
   const sort = buildOrderListSortFromQuery(req.query || {}, defaultSort);
 
+  // POS orders often store only `customer_id`, so also match the linked customer's name/phone/email.
+  const searchExtraOrClauses = await findOrderCustomerSearchClauses(
+    req.query?.search,
+    req.user?.company_id,
+  );
+
   const response = await handleGenericGetAll(req, "order", {
     filter,
     excludeFields: [],
@@ -2649,6 +2674,7 @@ async function getOrdersWithItems(
     populate,
     limit: req.query.limit ? parseInt(req.query.limit, 10) : null,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
+    searchExtraOrClauses,
   });
 
   if (!response.success || !Array.isArray(response.data)) {
