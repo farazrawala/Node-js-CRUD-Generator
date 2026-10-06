@@ -4,6 +4,7 @@ const PurchaseOrderItem = require("../models/purchase_order_item");
 const PurchaseReturn = require("../models/purchase_return");
 const Order = require("../models/order");
 const User = require("../models/user");
+const { findUserRefSearchClauses } = require("../utils/userRefSearch");
 const Account = require("../models/account");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const Product = require("../models/product");
@@ -1911,10 +1912,20 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
     filter._id = idParam;
   }
 
+  // Also match the supplier (vendor_id user) by name, phone or email.
+  const searchExtraOrClauses = idParam ?
+      []
+    : await findUserRefSearchClauses(
+        req.query?.search,
+        req.user?.company_id,
+        "vendor_id",
+      );
+
   const response = await handleGenericGetAll(req, "purchase_order", {
     filter,
     excludeFields: [],
     sort: { createdAt: -1 },
+    searchExtraOrClauses,
     // ?populate=vendor_id:name → populated vendor with only `name` (+ _id). Comma-separate paths; use path:fields for projection.
     populate: buildPopulateFromQuery(req.query || {}, "purchase_order"),
 

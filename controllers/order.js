@@ -50,6 +50,7 @@ const {
 } = require("../utils/companyWhatsappSettings");
 const WhatsappMessage = require("../models/whatsapp_message");
 const User = require("../models/user");
+const { findUserRefSearchClauses } = require("../utils/userRefSearch");
 const Account = require("../models/account");
 const {
   resolveReportPeriodRange,
@@ -2610,25 +2611,6 @@ function buildOrderListSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
  * @param {import("express").Response} res
  * @param {Record<string, unknown>} [extraFilter]
  */
-const ORDER_CUSTOMER_SEARCH_LIMIT = 500;
-
-/** `$or` clauses matching orders whose linked customer (user) name, phone or email contains the term. */
-async function findOrderCustomerSearchClauses(search, companyId) {
-  const term = String(search ?? "").trim();
-  if (term.length < 2) return [];
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = { $regex: escaped, $options: "i" };
-  const customers = await User.find({
-    ...(companyId ? { company_id: coalesceObjectId(companyId) } : {}),
-    $or: [{ name: regex }, { phone: regex }, { email: regex }],
-  })
-    .select("_id")
-    .limit(ORDER_CUSTOMER_SEARCH_LIMIT)
-    .lean();
-  if (customers.length === 0) return [];
-  return [{ customer_id: { $in: customers.map((c) => c._id) } }];
-}
-
 async function getOrdersWithItems(
   req,
   res,
@@ -2662,9 +2644,10 @@ async function getOrdersWithItems(
   const sort = buildOrderListSortFromQuery(req.query || {}, defaultSort);
 
   // POS orders often store only `customer_id`, so also match the linked customer's name/phone/email.
-  const searchExtraOrClauses = await findOrderCustomerSearchClauses(
+  const searchExtraOrClauses = await findUserRefSearchClauses(
     req.query?.search,
     req.user?.company_id,
+    "customer_id",
   );
 
   const response = await handleGenericGetAll(req, "order", {
