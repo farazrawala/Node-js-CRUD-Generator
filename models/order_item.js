@@ -24,6 +24,13 @@ const modelSchema = new mongoose.Schema(
       maxlength: 2000,
       default: "",
     },
+    /** Restaurant POS kitchen note for this line, e.g. "well done, sauce on the side". */
+    kitchen_note: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: "",
+    },
     price: {
       type: Number,
       required: true,

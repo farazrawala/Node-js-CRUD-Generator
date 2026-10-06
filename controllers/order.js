@@ -706,6 +706,13 @@ function parseOrderLineItemsFromFlatKeys(body) {
       byIndex.get(i).order_item_description = body[key];
       continue;
     }
+    m = key.match(/^kitchen_note\[(\d+)\]$/);
+    if (m) {
+      const i = parseInt(m[1], 10);
+      if (!byIndex.has(i)) byIndex.set(i, {});
+      byIndex.get(i).kitchen_note = body[key];
+      continue;
+    }
   }
   const sorted = [...byIndex.keys()].sort((a, b) => a - b);
   const lines = [];
@@ -723,6 +730,7 @@ function parseOrderLineItemsFromFlatKeys(body) {
       product_name: row.product_name || row.name,
       warehouse_id: row.warehouse_id,
       order_item_description: row.order_item_description,
+      kitchen_note: row.kitchen_note,
       qtyRaw,
       qty: qtyNum,
       price: priceNum,
@@ -749,6 +757,7 @@ function parseOrderLineItemsFromIndexedContainers(body) {
   const w = body.warehouse_id;
   const pn = body.product_name || body.name;
   const desc = body.order_item_description;
+  const notes = body.kitchen_note;
   const len = Math.max(
     indexedContainerLength(p),
     indexedContainerLength(q),
@@ -766,6 +775,7 @@ function parseOrderLineItemsFromIndexedContainers(body) {
     const warehouse_id = indexedContainerGet(w, i);
     const product_name = indexedContainerGet(pn, i);
     const order_item_description = indexedContainerGet(desc, i);
+    const kitchen_note = indexedContainerGet(notes, i);
     const qtyNum = parseFloat(String(qtyRaw ?? "").trim());
     const priceNum = parseFloat(String(priceRaw ?? "").trim());
     const subtotal =
@@ -777,6 +787,7 @@ function parseOrderLineItemsFromIndexedContainers(body) {
       product_name,
       warehouse_id,
       order_item_description,
+      kitchen_note,
       qtyRaw,
       qty: qtyNum,
       price: priceNum,
@@ -801,7 +812,7 @@ function parseOrderLineItems(body) {
 function stripLineItemKeys(body) {
   const out = {};
   for (const k of Object.keys(body)) {
-    if (/^(product_id|qty|price|warehouse_id|order_item_description)\[\d+\]$/.test(k)) continue;
+    if (/^(product_id|qty|price|warehouse_id|order_item_description|kitchen_note)\[\d+\]$/.test(k)) continue;
     out[k] = body[k];
   }
   if (Array.isArray(out.product_id)) delete out.product_id;
@@ -810,6 +821,9 @@ function stripLineItemKeys(body) {
   if (Array.isArray(out.warehouse_id)) delete out.warehouse_id;
   if (out.order_item_description != null && typeof out.order_item_description === "object") {
     delete out.order_item_description;
+  }
+  if (out.kitchen_note != null && typeof out.kitchen_note === "object") {
+    delete out.kitchen_note;
   }
   return out;
 }
@@ -2268,6 +2282,9 @@ async function buildOrderItemDocuments(orderId, orderSnapshot, lines, req) {
       order_item_description: String(line.order_item_description ?? "")
         .trim()
         .slice(0, 2000),
+      kitchen_note: String(line.kitchen_note ?? "")
+        .trim()
+        .slice(0, 1000),
       qty: String(line.qtyRaw ?? line.qty).trim(),
       price: Number(line.price),
       subtotal: Number(line.subtotal),

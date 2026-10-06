@@ -15,8 +15,11 @@ function toMaxSelect(v) {
   return n >= 1 && n <= 4 ? n : 1;
 }
 
+const isOptional = (g) => g?.optional === true || g?.optional === "true" || g?.optional === 1;
+
 /**
- * @returns {Array<{ name: string, max_select: number, values: Array<{ name: string, price: number|null }> }>|undefined}
+ * `optional: true` = the cashier may skip the attribute or pick one value (max_select is 1).
+ * @returns {Array<{ name: string, max_select: number, optional?: boolean, values: Array<{ name: string, price: number|null }> }>|undefined}
  *   undefined when the field was not sent (leave the stored value unchanged).
  */
 function parsePosAttributes(raw) {
@@ -35,7 +38,8 @@ function parsePosAttributes(raw) {
   return list
     .map((g) => ({
       name: String(g?.name ?? "").trim(),
-      max_select: toMaxSelect(g?.max_select),
+      max_select: isOptional(g) ? 1 : toMaxSelect(g?.max_select),
+      optional: isOptional(g),
       values: (Array.isArray(g?.values) ? g.values : [])
         .map((v) =>
           typeof v === "string" ?

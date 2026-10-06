@@ -203,6 +203,8 @@ const modelSchema = new mongoose.Schema(
           name: { type: String, trim: true, required: true },
           // How many values the cashier may pick: 1 = exactly one, 2–4 = one up to N.
           max_select: { type: Number, min: 1, max: 4, default: 1 },
+          // The cashier may skip this attribute or pick one value.
+          optional: { type: Boolean, default: false },
           values: {
             type: [
               {
