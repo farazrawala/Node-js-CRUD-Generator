@@ -17,6 +17,13 @@ const modelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    /** Per-line options / notes, e.g. restaurant modifiers ("Size: Small", "Spice level: Mild"). */
+    order_item_description: {
+      type: String,
+      trim: true,
+      maxlength: 2000,
+      default: "",
+    },
     price: {
       type: Number,
       required: true,
