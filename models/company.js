@@ -167,6 +167,22 @@ const modelSchema = new mongoose.Schema(
       field_name: "Theme Color",
     },
 
+    /** Pre-filled tax % / discount % for new sales (0–100). */
+    default_tax_percentage: {
+      type: Number,
+      field_name: "Default Tax %",
+      min: 0,
+      max: 100,
+      default: 0,
+    },
+    default_discount_percentage: {
+      type: Number,
+      field_name: "Default Discount %",
+      min: 0,
+      max: 100,
+      default: 0,
+    },
+
     allow_upload_product_image_original: {
       type: Boolean,
       field_name: "Allow Upload Product Image Original",
