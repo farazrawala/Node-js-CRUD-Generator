@@ -335,6 +335,12 @@ const {
 } = require("../controllers/warehouse");
 
 const {
+  restaurantFloorCreate,
+  restaurantFloorUpdate,
+  restaurantTableStatusUpdate,
+} = require("../controllers/restaurant_floors");
+
+const {
   sendConnectionRequest,
   listSentConnections,
   listReceivedConnections,
@@ -1260,6 +1266,22 @@ registerAllModelRoutes(router, {
     attribute: {
       enabled: true,
       excludedRoutes: [],
+    },
+    // Restaurant floor plans: create/update reject duplicate floor names; the POS sets
+    // one table's status (Reserve, Mark clean) through table-status.
+    restaurant_floors: {
+      enabled: true,
+      excludedRoutes: ["create", "update"],
+      customRoutes: [
+        { method: "POST", path: "/restaurant_floors/create", handler: restaurantFloorCreate },
+        { method: "PATCH", path: "/restaurant_floors/update/:id", handler: restaurantFloorUpdate },
+        { method: "POST", path: "/restaurant_floors/update/:id", handler: restaurantFloorUpdate },
+        {
+          method: "PATCH",
+          path: "/restaurant_floors/table-status/:tableId",
+          handler: restaurantTableStatusUpdate,
+        },
+      ],
     },
     process: {
       enabled: true,

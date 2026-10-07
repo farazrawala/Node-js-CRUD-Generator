@@ -715,6 +715,7 @@ These models get the standard create / update / get / get-all / get-all-active /
 | `purchase_order_item` | `/purchase_order_item`, `/purchase_order_items` |
 | `purchase_return` | `/purchase_return`, `/purchase_returns` |
 | `purchase_return_item` | `/purchase_return_item`, `/purchase_return_items` |
+| `restaurant_floors` | `/restaurant_floors` — create/update reject duplicate floor names (409); plus `PATCH /restaurant_floors/table-status/:tableId` `{ status: free \| reserved \| cleaning }` |
 | `sales_return` | `/sales_return`, `/sales_returns` |
 | `sales_return_item` | `/sales_return_item`, `/sales_return_items` |
 | `stock_movement` | `/stock_movement`, `/stock_movements` |

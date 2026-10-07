@@ -392,6 +392,28 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Note",
     },
+    // Restaurant POS dine-in: the table the bill was for. Names are copied so reports and
+    // reprints keep them after a table is renamed. table_id = restaurant_floors.tables._id.
+    table_id: {
+      type: String,
+      trim: true,
+      default: null,
+      field_name: "Table ID",
+    },
+    table_name: {
+      type: String,
+      trim: true,
+      maxlength: 30,
+      default: "",
+      field_name: "Table",
+    },
+    floor_name: {
+      type: String,
+      trim: true,
+      maxlength: 60,
+      default: "",
+      field_name: "Floor",
+    },
     discount: {
       type: Number,
       default: 0,
