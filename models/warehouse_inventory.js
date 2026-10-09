@@ -290,8 +290,25 @@ modelSchema.statics.planOutboundAllocation = async function ({
         ) ?
           String(fallbackWarehouseId).trim()
         : null;
-      const shortfallWarehouseId =
+      let shortfallWarehouseId =
         pref || fallback || (sorted[0] && String(sorted[0].warehouse_id)) || null;
+
+      // Legacy tenants may have no `company.warehouse_id`; a never-stocked product
+      // then has no candidate, so absorb into the company's oldest active warehouse.
+      if (!shortfallWarehouseId) {
+        let whQuery = mongoose
+          .model("warehouse")
+          .findOne({
+            company_id: cid,
+            status: "active",
+            $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+          })
+          .select("_id")
+          .sort({ createdAt: 1 });
+        if (session) whQuery = whQuery.session(session);
+        const wh = await whQuery.lean();
+        if (wh?._id) shortfallWarehouseId = String(wh._id);
+      }
 
       if (!shortfallWarehouseId) {
         const err = new Error(
