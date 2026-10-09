@@ -1807,7 +1807,10 @@ async function applyOrderOutboundLines({
     }
 
     const preferredWarehouseId = resolveOrderLineWarehouseId(line, req);
-    const productLabel = `cart line ${lineNumber}, product id ${productIdStr}`;
+    const productName = lineProductLabel(line, productIdStr);
+    const productLabel = `cart line ${lineNumber}: ${productName}`;
+    const withProductName = (msg) =>
+      String(msg).split(`product ${productIdStr}`).join(productName);
 
     let allocations;
     let stockChanges;
@@ -1839,11 +1842,17 @@ async function applyOrderOutboundLines({
             warehouseResolveErr.clientPayload.product_id || productIdStr,
           line_number: lineNumber,
         };
-        const existingMsg = String(payload.message || payload.error || "");
-        if (existingMsg && !existingMsg.includes(productIdStr)) {
-          payload.message = `${existingMsg} (${productLabel})`;
+        payload.product_name = payload.product_name || productName;
+        const existingMsg = withProductName(
+          payload.message || payload.error || "",
+        );
+        if (existingMsg) {
+          payload.message =
+            existingMsg.includes(productName) ?
+              existingMsg
+            : `${existingMsg} (${productLabel})`;
           payload.details = payload.details
-            ? `${payload.details} (${productLabel})`
+            ? `${withProductName(payload.details)} (cart line ${lineNumber})`
             : payload.message;
         }
         throwOrderCreateFromGenericFailure(
@@ -1851,11 +1860,13 @@ async function applyOrderOutboundLines({
           "No warehouse with sufficient stock for order line",
         );
       }
-      const whMsg = String(
+      const whMsg = withProductName(
         warehouseResolveErr.message || "Warehouse inventory update failed",
       );
       const labeled =
-        whMsg.includes(productIdStr) ? whMsg : `${whMsg} (${productLabel})`;
+        whMsg.includes(productName) ?
+          `${whMsg} (cart line ${lineNumber})`
+        : `${whMsg} (${productLabel})`;
       throwWithClientErrorPayload({
         success: false,
         status: 400,
@@ -1864,6 +1875,7 @@ async function applyOrderOutboundLines({
         details: labeled,
         type: "validation",
         product_id: productIdStr,
+        product_name: productName,
         line_number: lineNumber,
       });
     }
