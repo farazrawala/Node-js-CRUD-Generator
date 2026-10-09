@@ -313,6 +313,7 @@ const {
 
 const supportTicketCtrl = require("../controllers/support_ticket");
 const taskCtrl = require("../controllers/task_management");
+const { whitelistMyIp } = require("../controllers/security");
 
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
 // Uncomment these if you need custom routes
@@ -1008,6 +1009,9 @@ router.post("/test", (req, res) => {
 
 // Admin routes
 router.post("/login/admin", handleAdminLogin);
+
+// Imunify360: admin whitelists the IP they are on (bot-protection blocks API calls)
+router.post("/security/whitelist-my-ip", whitelistMyIp);
 
 // ─── Support Ticket routes ───────────────────────────────────────────
 router.get("/support-ticket/get-all", supportTicketCtrl.getAll);

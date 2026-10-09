@@ -24,6 +24,7 @@ const {
 } = require("../utils/userCompanyPopulate");
 const { getCookiePath, isSecureCookie } = require("../utils/basePath");
 const fileLogger = require("../utils/fileLogger");
+const { whitelistRequestIp } = require("../utils/imunifyWhitelist");
 const {
   logRollbackFailure,
   serializeErrorForLog,
@@ -470,6 +471,10 @@ async function handleUserLogin(req, res) {
       normalizePopulatedCompanyForClient(userWithToken.company_id);
     }
     delete userWithToken.password;
+
+    // Whitelist this shop's IP in Imunify360 so bot-protection doesn't later block
+    // its API calls. Runs in the background; never delays or fails the login.
+    whitelistRequestIp(req, normalizedEmail).catch(() => {});
 
     // Set cookie for regular user login too
     res.cookie("token", userWithToken.token, {

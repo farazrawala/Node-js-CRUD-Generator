@@ -10,12 +10,13 @@ function roundMoney2(n) {
   return Math.round(toMoneyNumber(n, 0) * 100) / 100;
 }
 
-/** Grand total from line subtotal snapshot, discount, and shipping (POS header). */
-function computeTotalAmount(linesSubtotal, discount, shipment) {
+/** Grand total from line subtotal snapshot, discount, shipping and service charges (POS header). */
+function computeTotalAmount(linesSubtotal, discount, shipment, serviceCharges = 0) {
   const lines = roundMoney2(Math.max(0, linesSubtotal));
   const disc = roundMoney2(Math.max(0, discount));
   const ship = roundMoney2(Math.max(0, shipment));
-  return roundMoney2(Math.max(0, lines - disc + ship));
+  const service = roundMoney2(Math.max(0, toMoneyNumber(serviceCharges, 0)));
+  return roundMoney2(Math.max(0, lines - disc + ship + service));
 }
 
 /** Change due to customer: overpay only; never negative (server-derived, not client-trusted). */
@@ -426,6 +427,12 @@ const modelSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    service_charges: {
+      type: Number,
+      field_name: "Service Charges",
+      default: 0,
+      min: 0,
+    },
     amount_received: {
       type: Number,
       field_name: "Amount Received",
@@ -450,7 +457,7 @@ const modelSchema = new mongoose.Schema(
       min: 0,
       field_name: "Lines subtotal",
     },
-    /** lines_subtotal − discount + shipment (stored; derived in pre-validate / update hooks). */
+    /** lines_subtotal − discount + shipment + service_charges (stored; derived in pre-validate / update hooks). */
     total_amount: {
       type: Number,
       default: 0,
@@ -645,10 +652,14 @@ modelSchema.pre("validate", function (next) {
   );
   this.discount = roundMoney2(Math.max(0, toMoneyNumber(this.discount, 0)));
   this.shipment = roundMoney2(Math.max(0, toMoneyNumber(this.shipment, 0)));
+  this.service_charges = roundMoney2(
+    Math.max(0, toMoneyNumber(this.service_charges, 0)),
+  );
   this.total_amount = computeTotalAmount(
     this.lines_subtotal,
     this.discount,
     this.shipment,
+    this.service_charges,
   );
 
   this.amount_received = roundMoney2(
@@ -788,6 +799,7 @@ modelSchema.pre(
         "lines_subtotal",
         "discount",
         "shipment",
+        "service_charges",
         "total_amount",
         "amount_received",
         "change_given",
@@ -799,7 +811,7 @@ modelSchema.pre(
 
       const existing = await this.model
         .findOne(filter)
-        .select("lines_subtotal discount shipment amount_received")
+        .select("lines_subtotal discount shipment service_charges amount_received")
         .lean();
       if (!existing) return next();
 
@@ -827,10 +839,19 @@ modelSchema.pre(
           : toMoneyNumber(existing.shipment, 0),
         ),
       );
+      const service_charges = roundMoney2(
+        Math.max(
+          0,
+          plain.service_charges !== undefined ?
+            toMoneyNumber(plain.service_charges, 0)
+          : toMoneyNumber(existing.service_charges, 0),
+        ),
+      );
       const total_amount = computeTotalAmount(
         lines_subtotal,
         discount,
         shipment,
+        service_charges,
       );
 
       const amount_received = roundMoney2(
@@ -851,6 +872,7 @@ modelSchema.pre(
             lines_subtotal,
             discount,
             shipment,
+            service_charges,
             total_amount,
             amount_received,
             change_given,
@@ -870,6 +892,7 @@ modelSchema.pre(
             lines_subtotal,
             discount,
             shipment,
+            service_charges,
             total_amount,
             amount_received,
             change_given,
@@ -915,7 +938,7 @@ modelSchema.pre("save", async function (next) {
 });
 
 /**
- * Recompute lines_subtotal from persisted order lines and total_amount from discount/shipment.
+ * Recompute lines_subtotal from persisted order lines and total_amount from discount/shipment/service_charges.
  * Call after line inserts/replaces (optionally inside a Mongo session).
  */
 modelSchema.statics.syncHeaderTotalsFromLineItems = async function (
@@ -942,14 +965,22 @@ modelSchema.statics.syncHeaderTotalsFromLineItems = async function (
   const rows = await agg;
   const lines_subtotal = roundMoney2(Math.max(0, Number(rows[0]?.sum) || 0));
 
-  let q = this.findById(oid).select("discount shipment");
+  let q = this.findById(oid).select("discount shipment service_charges");
   if (session) q = q.session(session);
   const ord = await q.lean();
   if (!ord) return null;
 
   const discount = roundMoney2(Math.max(0, toMoneyNumber(ord.discount, 0)));
   const shipment = roundMoney2(Math.max(0, toMoneyNumber(ord.shipment, 0)));
-  const total_amount = computeTotalAmount(lines_subtotal, discount, shipment);
+  const service_charges = roundMoney2(
+    Math.max(0, toMoneyNumber(ord.service_charges, 0)),
+  );
+  const total_amount = computeTotalAmount(
+    lines_subtotal,
+    discount,
+    shipment,
+    service_charges,
+  );
 
   return this.findByIdAndUpdate(
     oid,

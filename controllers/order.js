@@ -1126,6 +1126,27 @@ function orderGlDescription(label, orderNo) {
   return no ? `${label} (${no})` : label;
 }
 
+/** Service charges credit (sales account); no line when the order has none. */
+function orderServiceChargeGlLines(req, record, transaction_number, extra = {}) {
+  const amount = Math.round((Number(record?.service_charges) || 0) * 100) / 100;
+  if (!(amount > 0)) return [];
+  return [
+    {
+      account_id: req.user.company_id.default_sales_account,
+      type: "credit",
+      amount,
+      reference_user_id: record?.customer_id,
+      transaction_number,
+      description: orderGlDescription("Service Charges", record?.order_no),
+      reference_id: {
+        module: "order",
+        ref_id: record._id,
+      },
+      ...extra,
+    },
+  ];
+}
+
 function salesWarehouseInventoryLogContext(orderId, orderNo) {
   return {
     reference_type: "sales",
@@ -1167,7 +1188,8 @@ async function rebuildOrderGlTransactions({
     : Math.round(
         ((Number(orderTotal) || 0) -
           (Number(record?.discount) || 0) +
-          (Number(record?.shipment) || 0)) *
+          (Number(record?.shipment) || 0) +
+          (Number(record?.service_charges) || 0)) *
           100,
       ) / 100;
   const remainingAmountDue = Math.max(
@@ -1204,6 +1226,12 @@ async function rebuildOrderGlTransactions({
         },
         ...(record?.createdAt ? { createdAt: record.createdAt } : {}),
       },
+      ...orderServiceChargeGlLines(
+        orderReq,
+        record,
+        transaction_number,
+        record?.createdAt ? { createdAt: record.createdAt } : {},
+      ),
       {
         account_id: orderReq.user.company_id.default_sales_discount_account,
         type: "debit",
@@ -2126,6 +2154,7 @@ function normalizeOrderNumericFields(obj) {
   for (const key of [
     "discount",
     "shipment",
+    "service_charges",
     "lines_subtotal",
     "amount_received",
     "change_given",
@@ -2168,6 +2197,7 @@ function orderUpdateTouchesFinancialFields(body) {
     "discount",
     "discount_percentage",
     "shipment",
+    "service_charges",
     "lines_subtotal",
     "total_amount",
     "amount_received",
@@ -2995,7 +3025,7 @@ async function order_save(req, res) {
         // `transaction.amount` field is required, so an undefined/empty client
         // `remaining_amount` would abort the whole order transaction. Derive both
         // from the saved record (model already rounds total_amount = subtotal −
-        // discount + shipment and clamps amount_received).
+        // discount + shipment + service_charges and clamps amount_received).
         const receivedAmount = Math.max(
           0,
           Math.round((Number(record?.amount_received) || 0) * 100) / 100,
@@ -3006,7 +3036,8 @@ async function order_save(req, res) {
           : Math.round(
               ((Number(lines_subtotal) || 0) -
                 (Number(discount) || 0) +
-                (Number(shipment) || 0)) *
+                (Number(shipment) || 0) +
+                (Number(record?.service_charges) || 0)) *
                 100,
             ) / 100;
         const remainingAmountDue = Math.max(
@@ -3042,6 +3073,7 @@ async function order_save(req, res) {
                 ref_id: record._id,
               },
             },
+            ...orderServiceChargeGlLines(orderReq, record, transaction_number),
             {
               account_id:
                 orderReq.user.company_id.default_sales_discount_account,
@@ -3483,6 +3515,7 @@ async function orderUpdateAuditSnapshot(req, order, lineItems) {
       discount: Number(order?.discount) || 0,
       discount_percentage: Number(order?.discount_percentage) || 0,
       shipment: Number(order?.shipment) || 0,
+      service_charges: Number(order?.service_charges) || 0,
       total_amount: totalAmount,
       amount_received: amountReceived,
       remaining_amount:
@@ -3786,7 +3819,8 @@ async function order_update(req, res) {
         : Math.round(
             ((Number(lines_subtotal) || 0) -
               (Number(discount) || 0) +
-              (Number(shipment) || 0)) *
+              (Number(shipment) || 0) +
+              (Number(updatedOrder?.service_charges) || 0)) *
               100,
           ) / 100;
       const remainingAmountDue = Math.max(
@@ -3827,6 +3861,7 @@ async function order_update(req, res) {
               ref_id: updatedOrder._id,
             },
           },
+          ...orderServiceChargeGlLines(req, updatedOrder, transaction_number),
           {
             account_id: req.user.company_id.default_sales_discount_account,
             type: "debit",
