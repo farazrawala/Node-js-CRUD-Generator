@@ -222,6 +222,11 @@ const userSchema = new mongoose.Schema(
       default: false,
       field_name: "Make default vendor",
     },
+    mark_as_default_customer: {
+      type: Boolean,
+      default: false,
+      field_name: "Make default customer",
+    },
     role: {
       type: [String],
       required: true,

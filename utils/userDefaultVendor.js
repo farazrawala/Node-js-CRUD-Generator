@@ -31,49 +31,57 @@ function resolveMergedRoles(existingUser, updateData) {
   return userRolesList(existingUser);
 }
 
+/** Per-company "default" flags: only one user per company may hold each. */
+const DEFAULT_USER_FLAGS = [
+  { field: "mark_as_default_vendor", role: "VENDOR", label: "vendor" },
+  { field: "mark_as_default_customer", role: "CUSTOMER", label: "customer" },
+];
+
 /**
- * Validate mark_as_default_vendor on create/update.
+ * Validate mark_as_default_vendor / mark_as_default_customer on create/update.
  * Returns `{ success: false, status, message }` or null when valid.
  */
 function validateDefaultVendorFlag(updateData, existingUser) {
-  const vendorFlag = parseBooleanFlag(updateData?.mark_as_default_vendor);
-  if (vendorFlag !== true) return null;
+  for (const { field, role, label } of DEFAULT_USER_FLAGS) {
+    if (parseBooleanFlag(updateData?.[field]) !== true) continue;
 
-  const roles = resolveMergedRoles(existingUser, updateData);
-  if (!userHasRole(roles, "VENDOR")) {
-    return {
-      success: false,
-      status: 400,
-      error: "Invalid role",
-      message: "Only users with the VENDOR role can be marked as default vendor.",
-    };
+    const roles = resolveMergedRoles(existingUser, updateData);
+    if (!userHasRole(roles, role)) {
+      return {
+        success: false,
+        status: 400,
+        error: "Invalid role",
+        message: `Only users with the ${role} role can be marked as default ${label}.`,
+      };
+    }
   }
 
   return null;
 }
 
 /**
- * When one user is default vendor, clear the flag on all other users in the same company.
+ * When one user is default vendor/customer, clear that flag on all other users in the same company.
  * @param {import("mongoose").ClientSession | null} [session]
  */
 async function syncDefaultVendorFlag(userDoc, session = null) {
   const userId = coalesceObjectId(userDoc?._id);
   const companyId = coalesceObjectId(userDoc?.company_id);
-  if (!userId || !companyId || userDoc.mark_as_default_vendor !== true) {
-    return;
-  }
+  if (!userId || !companyId) return;
 
   const opts = session ? { session } : {};
-  await User.updateMany(
-    {
-      company_id: companyId,
-      _id: { $ne: userId },
-      deletedAt: null,
-      mark_as_default_vendor: true,
-    },
-    { $set: { mark_as_default_vendor: false } },
-    opts,
-  );
+  for (const { field } of DEFAULT_USER_FLAGS) {
+    if (userDoc[field] !== true) continue;
+    await User.updateMany(
+      {
+        company_id: companyId,
+        _id: { $ne: userId },
+        deletedAt: null,
+        [field]: true,
+      },
+      { $set: { [field]: false } },
+      opts,
+    );
+  }
 }
 
 async function findDefaultVendor(companyId) {

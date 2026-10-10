@@ -51,6 +51,7 @@ const userAdminCRUD = adminCrudGenerator(
     "role",
     "show_graphs_on_dashboard",
     "mark_as_default_vendor",
+    "mark_as_default_customer",
     "permissions",
     "profile_image",
     "company_id",
@@ -64,6 +65,7 @@ const userAdminCRUD = adminCrudGenerator(
       "phone",
       "role",
       "mark_as_default_vendor",
+      "mark_as_default_customer",
       "profile_image",
       "company_id",
       "createdAt",
@@ -111,6 +113,7 @@ const userAdminCRUD = adminCrudGenerator(
       role: "multiselect",
       show_graphs_on_dashboard: "multiselect",
       mark_as_default_vendor: "checkbox",
+      mark_as_default_customer: "checkbox",
       profile_image: "file",
       company_id: "select",
       password: "password",
@@ -182,6 +185,7 @@ const userAdminCRUD = adminCrudGenerator(
       permissions: "Permissions",
       show_graphs_on_dashboard: "Show Graphs on Dashboard",
       mark_as_default_vendor: "Make default vendor",
+      mark_as_default_customer: "Make default customer",
     },
 
     middleware: {
