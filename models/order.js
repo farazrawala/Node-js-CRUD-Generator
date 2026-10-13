@@ -454,6 +454,26 @@ const modelSchema = new mongoose.Schema(
       field_name: "Previous Balance",
       default: 0,
     },
+    /**
+     * true = POS sale rung up without internet and uploaded later by the offline queue;
+     * false = saved straight to the server. Set once at create (`order_save`); never changed
+     * by updates. No default on purpose: unset (older orders, shop/integration imports)
+     * means "unknown", so the orders list shows no badge for them.
+     */
+    synced_offline: {
+      type: Boolean,
+      field_name: "Synced Later",
+    },
+    /**
+     * Idempotency key generated on the POS (UUID) when the sale is rung up. A retried
+     * upload with the same key returns the existing order instead of saving a duplicate.
+     */
+    client_order_id: {
+      type: String,
+      trim: true,
+      maxlength: 64,
+      field_name: "Client Order ID",
+    },
     payment_method_accounts_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "account",
@@ -619,6 +639,22 @@ modelSchema.index(
       deletedAt: null,
       integration_id: { $exists: true, $type: "objectId" },
       integration_order_id: { $type: "string", $gt: "" },
+    },
+  },
+);
+
+/**
+ * One order per POS idempotency key per tenant. Not limited to non-deleted rows, so a
+ * late retry of a sale that was since deleted does not bring it back. Rows without a key
+ * (older orders, shop/integration imports) are unaffected.
+ */
+modelSchema.index(
+  { company_id: 1, client_order_id: 1 },
+  {
+    unique: true,
+    name: "company_client_order_id_unique",
+    partialFilterExpression: {
+      client_order_id: { $type: "string", $gt: "" },
     },
   },
 );

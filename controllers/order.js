@@ -2945,6 +2945,42 @@ async function maybeQueueWhatsappOnOrderSave(req, order) {
   }
 }
 
+/** POS idempotency key from the request body (`client_order_id`), or "" when absent/invalid. */
+function pickClientOrderId(body) {
+  const key = String(body?.client_order_id ?? "").trim();
+  return key.length > 0 && key.length <= 64 ? key : "";
+}
+
+/** Order already saved under this POS idempotency key (deleted rows included), or null. */
+async function findOrderByClientOrderId(req, clientOrderId) {
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!clientOrderId || !companyId) return null;
+  return Order.findOne({
+    company_id: companyId,
+    client_order_id: clientOrderId,
+  }).lean();
+}
+
+/** 200 reply for a retried upload: the existing order, nothing written. */
+async function sendExistingClientOrder(res, existing) {
+  const items = await OrderItem.find({
+    order_id: existing._id,
+    status: "active",
+    deletedAt: null,
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: "Order already saved",
+    duplicate: true,
+    data: shapeOrderWithItems(existing, items),
+    product_stock_updates: [],
+    vendor_order: null,
+  });
+}
+
 /**
  * POST /api/order/order_save — create order, GL, line items, outbound inventory, header sync.
  *
@@ -2967,8 +3003,18 @@ async function maybeQueueWhatsappOnOrderSave(req, order) {
  * |    9 | Post-txn success  | order                   | read               | one          | low    | `findById` + `shapeOrderWithItems` for 201 response |
  *
  * L = line count. Requires at least one valid line (step 1 validation).
+ *
+ * Idempotent on `client_order_id` (POS offline queue): a retry of a sale that already
+ * saved returns that order with 200 + `duplicate: true` instead of creating another.
  */
 async function order_save(req, res) {
+  // step 0 — POS retry of an already-saved sale (e.g. response lost on a flaky connection)
+  const clientOrderId = pickClientOrderId(req.body);
+  if (clientOrderId) {
+    const existing = await findOrderByClientOrderId(req, clientOrderId);
+    if (existing) return sendExistingClientOrder(res, existing);
+  }
+
   // step 1 start — parse lines + normalize header for `handleGenericCreate`
   const lines = parseOrderLineItems(req.body);
   if (lines.length === 0) {
@@ -3007,6 +3053,8 @@ async function order_save(req, res) {
   delete req.body._id;
   // Unique per company (partial index). Model pre-save assigns next `ORD-####` when absent.
   delete req.body.order_no;
+  if (clientOrderId) req.body.client_order_id = clientOrderId;
+  else delete req.body.client_order_id;
   req.body.lines_subtotal = sumParsedLinesSubtotal(lines);
 
   // Lifecycle default: placed (stock OUT). Ignore legacy "active" confused with record status.
@@ -3018,6 +3066,11 @@ async function order_save(req, res) {
   const transaction_number = generateTransactionNumber();
   resolveOrderPaymentMethodAccount(req.body, req.user);
   req.body.transaction_number = transaction_number;
+
+  // POS offline queue sends `synced_offline=true` (multipart → string) for sales saved without internet.
+  req.body.synced_offline = ["true", "1"].includes(
+    String(req.body.synced_offline ?? "").trim().toLowerCase(),
+  );
 
   // Snapshot the customer's balance before this sale posts (printed as "Previous Balance").
   try {
@@ -3378,6 +3431,26 @@ async function order_save(req, res) {
   req.body = originalBody;
 
   // step 8 start — failure path (`logs` + client JSON)
+  // Two uploads of the same POS sale racing: the unique index rejected this one, so reply
+  // with the order the other request saved (order insert is the first write; nothing to undo).
+  if (txnError && clientOrderId) {
+    const ownOrderId = response?.data?._id ? String(response.data._id) : "";
+    if (ownOrderId) {
+      // Standalone mode can leave this request's partial order behind; free the key so the
+      // POS retry saves a complete order instead of being handed the partial one.
+      await Order.updateOne(
+        { _id: ownOrderId },
+        { $unset: { client_order_id: 1 } },
+      ).catch(() => {});
+    } else {
+      const existing = await findOrderByClientOrderId(
+        req,
+        clientOrderId,
+      ).catch(() => null);
+      if (existing) return sendExistingClientOrder(res, existing);
+    }
+  }
+
   if (txnError) {
     console.error(
       "[order_save] failure (serializeErrorForLog):\n",
@@ -3677,6 +3750,8 @@ async function order_update(req, res) {
   delete req.body._id;
   // Snapshot taken at create; never rewritten from the client.
   delete req.body.previous_balance;
+  delete req.body.synced_offline;
+  delete req.body.client_order_id;
   // Never blank an existing GL key from the client; generate later if still missing.
   if (!String(req.body.transaction_number ?? "").trim()) {
     delete req.body.transaction_number;
