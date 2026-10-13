@@ -2843,6 +2843,192 @@ async function getOnlineOrders(req, res) {
   return getOrdersWithItems(req, res, { order_type: { $ne: "offline" } });
 }
 
+const DUPLICATE_WINDOW_DEFAULT_SECONDS = 120;
+const DUPLICATE_SCAN_DEFAULT_DAYS = 30;
+const DUPLICATE_SCAN_MAX_DAYS = 93;
+
+/**
+ * GET /api/order/suspected-duplicates — read-only.
+ * Query: `startDate` / `endDate` (YYYY-MM-DD, business timezone; default last 30 days, max 93),
+ * `window_seconds` (5–3600, default 120).
+ *
+ * Groups non-deleted orders that share customer, cashier (`created_by`), total and identical
+ * lines (product + qty + price), each created within `window_seconds` of the previous one.
+ * Typical cause: double-tapped Pay or a save resent after a lost response. A real repeat sale
+ * looks the same, so these are suspects for a person to check, not automatic duplicates.
+ */
+async function getSuspectedDuplicateOrders(req, res) {
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId) {
+    return res.status(400).json({ success: false, status: 400, error: "Company not found for this user" });
+  }
+
+  const dateResolved = resolveReportCreatedAtFilter(req.query || {}, DUPLICATE_SCAN_DEFAULT_DAYS);
+  if (dateResolved.error) {
+    return res.status(dateResolved.error.status).json(dateResolved.error.body);
+  }
+  const range = dateResolved.createdAt || {};
+  const fromMs = range.$gte ? new Date(range.$gte).getTime() : null;
+  const toMs = range.$lte ? new Date(range.$lte).getTime() : Date.now();
+  if (fromMs == null || toMs - fromMs > DUPLICATE_SCAN_MAX_DAYS * 86400000) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: `Pick a date range of at most ${DUPLICATE_SCAN_MAX_DAYS} days`,
+    });
+  }
+
+  const rawWindow = Number(req.query?.window_seconds);
+  const windowSeconds = Number.isFinite(rawWindow)
+    ? Math.min(3600, Math.max(5, Math.round(rawWindow)))
+    : DUPLICATE_WINDOW_DEFAULT_SECONDS;
+
+  try {
+    const orders = await Order.find({
+      company_id: companyId,
+      deletedAt: null,
+      createdAt: range,
+    })
+      .select(
+        "order_no customer_id name phone created_by total_amount amount_received order_status order_type synced_offline createdAt",
+      )
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const orderIds = orders.map((o) => o._id);
+    const items = orderIds.length
+      ? await OrderItem.find({
+          order_id: { $in: orderIds },
+          status: "active",
+          deletedAt: null,
+        })
+          .select("order_id product_id qty price")
+          .lean()
+      : [];
+    const itemsByOrder = new Map();
+    for (const item of items) {
+      const key = String(item.order_id);
+      if (!itemsByOrder.has(key)) itemsByOrder.set(key, []);
+      itemsByOrder.get(key).push(item);
+    }
+
+    const money = (n) => (Number(n) || 0).toFixed(2);
+    const lineSignature = (list) =>
+      list
+        .map((i) => `${String(i.product_id)}:${Number(i.qty) || 0}:${money(i.price)}`)
+        .sort()
+        .join(",");
+
+    // Cluster per (customer, cashier, total, lines): consecutive orders within the window.
+    const lastClusterByKey = new Map();
+    const clusters = [];
+    for (const order of orders) {
+      const lines = itemsByOrder.get(String(order._id)) || [];
+      if (!lines.length) continue;
+      const customerKey = order.customer_id
+        ? String(order.customer_id)
+        : `${String(order.name || "").trim().toLowerCase()}|${String(order.phone || "").trim()}`;
+      const key = [customerKey, String(order.created_by || ""), money(order.total_amount), lineSignature(lines)].join("|");
+      const at = new Date(order.createdAt).getTime();
+      const current = lastClusterByKey.get(key);
+      if (current && at - current.lastAt <= windowSeconds * 1000) {
+        current.orders.push({ order, gapSeconds: Math.round((at - current.lastAt) / 1000) });
+        current.lastAt = at;
+      } else {
+        const next = { orders: [{ order, gapSeconds: null }], lastAt: at };
+        lastClusterByKey.set(key, next);
+        clusters.push(next);
+      }
+    }
+    const suspect = clusters.filter((c) => c.orders.length > 1);
+
+    // Names for display: customers + cashiers (users), products.
+    const userIds = new Set();
+    const productIds = new Set();
+    for (const c of suspect) {
+      for (const { order } of c.orders) {
+        if (order.customer_id) userIds.add(String(order.customer_id));
+        if (order.created_by) userIds.add(String(order.created_by));
+        for (const i of itemsByOrder.get(String(order._id)) || []) productIds.add(String(i.product_id));
+      }
+    }
+    const [users, products] = await Promise.all([
+      userIds.size ? User.find({ _id: { $in: [...userIds] } }).select("name phone").lean() : [],
+      productIds.size ? Product.find({ _id: { $in: [...productIds] } }).select("product_name").lean() : [],
+    ]);
+    const userById = new Map(users.map((u) => [String(u._id), u]));
+    const productById = new Map(products.map((p) => [String(p._id), p]));
+
+    const groups = suspect
+      .map((c) => {
+        const first = c.orders[0].order;
+        const customer = first.customer_id ? userById.get(String(first.customer_id)) : null;
+        const cashier = first.created_by ? userById.get(String(first.created_by)) : null;
+        const lines = (itemsByOrder.get(String(first._id)) || []).map((i) => ({
+          product_id: i.product_id,
+          product_name: productById.get(String(i.product_id))?.product_name || "Unknown product",
+          qty: i.qty,
+          price: i.price,
+        }));
+        const total = Number(first.total_amount) || 0;
+        return {
+          customer: {
+            _id: first.customer_id || null,
+            name: customer?.name || first.name || "",
+            phone: customer?.phone || first.phone || "",
+          },
+          created_by: cashier ? { _id: cashier._id, name: cashier.name } : null,
+          total_amount: total,
+          lines,
+          extra_orders: c.orders.length - 1,
+          extra_amount: Math.round(total * (c.orders.length - 1) * 100) / 100,
+          orders: c.orders.map(({ order, gapSeconds }) => ({
+            _id: order._id,
+            order_no: order.order_no,
+            createdAt: order.createdAt,
+            gap_seconds: gapSeconds,
+            total_amount: order.total_amount,
+            amount_received: order.amount_received,
+            order_status: order.order_status,
+            order_type: order.order_type,
+            synced_offline: order.synced_offline,
+          })),
+        };
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.orders[b.orders.length - 1].createdAt) -
+          new Date(a.orders[a.orders.length - 1].createdAt),
+      );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      data: groups,
+      summary: {
+        groups: groups.length,
+        extra_orders: groups.reduce((s, g) => s + g.extra_orders, 0),
+        extra_amount: Math.round(groups.reduce((s, g) => s + g.extra_amount, 0) * 100) / 100,
+        orders_scanned: orders.length,
+        window_seconds: windowSeconds,
+        from: range.$gte,
+        to: range.$lte || new Date(toMs),
+      },
+    });
+  } catch (error) {
+    await logControllerError(req, error, {
+      action: "ORDER SUSPECTED DUPLICATES",
+      tags: ["order", "duplicates", "error"],
+      fallbackUrl: "/api/order/suspected-duplicates",
+    });
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Could not scan for duplicate orders",
+    });
+  }
+}
+
 /**
  * GET /api/order/get-deleted-order-by-order-item
  * Aliases: /order/get-deleted, /orders/get-deleted
@@ -7785,6 +7971,7 @@ async function order_update_address(req, res) {
 module.exports = {
   // orderCreate,
   // orderUpdate,
+  getSuspectedDuplicateOrders,
   invoiceUpdate,
   getOrderByOrderNo,
   order_save,

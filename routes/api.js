@@ -103,6 +103,7 @@ const {
   order_delete,
   order_merge,
   getOrderByorderItem,
+  getSuspectedDuplicateOrders,
   getOnlineOrders,
   getDeletedOrders,
   getOrderByOrderNo,
@@ -900,6 +901,7 @@ router.post("/order/validate-address", order_validate_address);
 router.post("/order/order_merge", order_merge);
 router.delete("/order/order_delete/:id", order_delete);
 router.get("/order/get-order-by-order-item", getOrderByorderItem);
+router.get("/order/suspected-duplicates", getSuspectedDuplicateOrders);
 router.get("/order/get-online-order-by-order-item", getOnlineOrders);
 router.get("/order/get-deleted-order-by-order-item", getDeletedOrders);
 router.get("/orders/get-deleted-order-by-order-item", getDeletedOrders);
