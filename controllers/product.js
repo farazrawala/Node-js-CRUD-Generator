@@ -3297,8 +3297,95 @@ async function getRecentLineItemProductIds(req, res) {
   }
 }
 
+/**
+ * POST /api/product/move-variant — body `{ variant_id, parent_id }`.
+ * Moves a variant (non-Variable product) under another Variable parent in the same company.
+ * Writes only `parent_product_id` and `updated_by` (+ `updatedAt` via timestamps) on the
+ * variant; uses `updateOne` so model save hooks can't touch any other field. No other
+ * collection is written. Store links (BigCommerce/Shopify/…) are only counted (`store_links`).
+ */
+async function productMoveVariant(req, res) {
+  const fail = (status, error) =>
+    res.status(status).json({ success: false, status, error });
+
+  try {
+    const companyId = coalesceObjectId(req.user?.company_id);
+    const variantId = String(req.body?.variant_id ?? "").trim();
+    const parentId = String(req.body?.parent_id ?? "").trim();
+    if (!companyId) return fail(400, "Company not found for this user");
+    if (
+      !mongoose.Types.ObjectId.isValid(variantId) ||
+      !mongoose.Types.ObjectId.isValid(parentId)
+    ) {
+      return fail(400, "Send a valid variant_id and parent_id");
+    }
+    if (variantId === parentId) {
+      return fail(400, "A product cannot be its own parent");
+    }
+
+    const scope = { company_id: companyId, ...activeNotDeletedCriteria() };
+    const [variant, newParent] = await Promise.all([
+      Product.findOne({ _id: variantId, ...scope })
+        .select("_id product_name product_type parent_product_id")
+        .lean(),
+      Product.findOne({ _id: parentId, ...scope }).select("_id product_name product_type").lean(),
+    ]);
+    if (!variant) return fail(404, "Variant not found");
+    if (!newParent) return fail(404, "Parent product not found");
+    if (isVariableProductRecord(variant)) {
+      return fail(400, "A parent (Variable) product cannot be moved as a variant");
+    }
+    if (!isVariableProductRecord(newParent)) {
+      return fail(400, "The target must be a parent (Variable) product");
+    }
+
+    const oldParentId = variant.parent_product_id ? String(variant.parent_product_id) : "";
+    if (oldParentId === parentId) {
+      return fail(400, "The variant is already under this parent");
+    }
+    const oldParent = oldParentId
+      ? await Product.findById(oldParentId).select("_id product_name").lean()
+      : null;
+
+    const set = { parent_product_id: newParent._id };
+    const uid = coalesceObjectId(req.user?._id || req.user?.id);
+    if (uid) set.updated_by = uid;
+    await Product.updateOne({ _id: variant._id, company_id: companyId }, { $set: set });
+
+    const SyncProduct = require("../models/sync_product");
+    const [updated, storeLinks] = await Promise.all([
+      Product.findById(variant._id).lean(),
+      SyncProduct.countDocuments({ product_id: variant._id, deletedAt: null }),
+    ]);
+
+    await invalidateProductListCache(req);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: "Variant moved",
+      data: {
+        variant: updated,
+        from_parent: oldParent
+          ? { _id: oldParent._id, product_name: oldParent.product_name }
+          : null,
+        to_parent: { _id: newParent._id, product_name: newParent.product_name },
+        store_links: storeLinks,
+      },
+    });
+  } catch (error) {
+    await logControllerError(req, error, {
+      action: "PRODUCT MOVE VARIANT",
+      tags: ["product", "variant", "move", "error"],
+      fallbackUrl: "/api/product/move-variant",
+    });
+    return fail(500, error.message || "Could not move variant");
+  }
+}
+
 module.exports = {
   productCreate,
+  productMoveVariant,
   productImportFromFile,
   productImportFormSchema,
   shopifyProductImportFromFile,

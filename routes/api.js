@@ -69,6 +69,7 @@ const {
   getProductsByWarehouse,
   productCreateVariation,
   productUpdateVariation,
+  productMoveVariant,
   getProductVariationById,
   getAllActiveProductsPOS,
   productDelete,
@@ -853,6 +854,7 @@ router.get("/stock_movement/get-all-active", getAllStockMovementsActive);
 // Category routes - Custom CRUD
 router.post("/product/create-product-variation", productCreateVariation);
 router.patch("/product/update-product-variation/:id", productUpdateVariation);
+router.post("/product/move-variant", productMoveVariant);
 router.get("/product/get-product-variation/:id", getProductVariationById);
 router.get("/product/get-all-active-pos", getAllActiveProductsPOS);
 router.patch("/product/:id/update-default-warehouse", updateWarehouseDefault);
