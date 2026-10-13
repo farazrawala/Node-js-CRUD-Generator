@@ -48,6 +48,7 @@ function resolveReportCompanyFromReq(req) {
 
 /**
  * Build `createdAt` filter from `from`/`to` or `startDate`/`endDate` (YYYY-MM-DD).
+ * Days run midnight → midnight in the business timezone (see `resolveReportTimezone`).
  * @returns {{ createdAt: object } | { error: object }}
  */
 function resolveReportCreatedAtFilter(query = {}, defaultRangeDays = DEFAULT_REPORT_RANGE_DAYS) {
@@ -67,9 +68,10 @@ function resolveReportCreatedAtFilter(query = {}, defaultRangeDays = DEFAULT_REP
     return { createdAt: { $gte: fromDate, $lte: toDate } };
   }
 
+  const timeZone = resolveReportTimezone(query);
   const createdAt = {};
   if (hasFrom) {
-    const fromDate = parseReportDateStart(rawFrom);
+    const fromDate = parseReportDateStart(rawFrom, timeZone);
     if (!fromDate) {
       return {
         error: {
@@ -86,7 +88,7 @@ function resolveReportCreatedAtFilter(query = {}, defaultRangeDays = DEFAULT_REP
     createdAt.$gte = fromDate;
   }
   if (hasTo) {
-    const toDate = parseReportDateEnd(rawTo);
+    const toDate = parseReportDateEnd(rawTo, timeZone);
     if (!toDate) {
       return {
         error: {
@@ -105,30 +107,86 @@ function resolveReportCreatedAtFilter(query = {}, defaultRangeDays = DEFAULT_REP
   return { createdAt };
 }
 
-function parseReportDateStart(raw) {
+const DEFAULT_REPORT_TIMEZONE = "Asia/Karachi";
+
+/**
+ * IANA zone that YYYY-MM-DD report days are measured in: `?timezone=`, else
+ * `SALES_TIMEZONE`, else Asia/Karachi. Never the server's own zone — the live box
+ * runs on US time, which shifted "3 Oct" to 3 Oct 12:00 PM → 4 Oct 11:59 AM PKT.
+ */
+function resolveReportTimezone(query = {}) {
+  const candidates = [
+    query.timezone,
+    process.env.SALES_TIMEZONE,
+    DEFAULT_REPORT_TIMEZONE,
+  ];
+  for (const raw of candidates) {
+    const tz = String(raw ?? "").trim();
+    if (!tz) continue;
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      return tz;
+    } catch (_) {
+      /* invalid zone — try the next one */
+    }
+  }
+  return DEFAULT_REPORT_TIMEZONE;
+}
+
+/** Wall-clock offset of `timeZone` from UTC at instant `ms` (ms; +5h for Karachi). */
+function timezoneOffsetMs(ms, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(ms));
+  const get = (type) => Number(parts.find((p) => p.type === type)?.value);
+  const wallAsUtc = Date.UTC(
+    get("year"),
+    get("month") - 1,
+    get("day"),
+    get("hour"),
+    get("minute"),
+    get("second"),
+  );
+  return wallAsUtc - (ms - (ms % 1000));
+}
+
+/** UTC instant of 00:00 on y-m-d in `timeZone` (second pass settles DST edges). */
+function zonedMidnight(y, m, d, timeZone) {
+  const wall = Date.UTC(y, m - 1, d);
+  const first = wall - timezoneOffsetMs(wall, timeZone);
+  return new Date(wall - timezoneOffsetMs(first, timeZone));
+}
+
+function parseReportDateStart(raw, timeZone = DEFAULT_REPORT_TIMEZONE) {
   const s = String(raw).trim();
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
   if (m) {
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0);
+    const d = zonedMidnight(Number(m[1]), Number(m[2]), Number(m[3]), timeZone);
     if (!Number.isNaN(d.getTime())) return d;
   }
   const d = new Date(s);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function parseReportDateEnd(raw) {
+/** Last millisecond of y-m-d in `timeZone` (next day's midnight − 1 ms). */
+function parseReportDateEnd(raw, timeZone = DEFAULT_REPORT_TIMEZONE) {
   const s = String(raw).trim();
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
   if (m) {
-    const d = new Date(
+    const nextMidnight = zonedMidnight(
       Number(m[1]),
-      Number(m[2]) - 1,
-      Number(m[3]),
-      23,
-      59,
-      59,
-      999,
+      Number(m[2]),
+      Number(m[3]) + 1,
+      timeZone,
     );
+    const d = new Date(nextMidnight.getTime() - 1);
     if (!Number.isNaN(d.getTime())) return d;
   }
   const d = new Date(s);
