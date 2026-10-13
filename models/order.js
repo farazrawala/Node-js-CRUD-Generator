@@ -445,6 +445,15 @@ const modelSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    /**
+     * Customer's A/R balance just before this sale was posted (snapshot at create, so
+     * reprints show the same figure). Negative = customer advance. Server-owned.
+     */
+    previous_balance: {
+      type: Number,
+      field_name: "Previous Balance",
+      default: 0,
+    },
     payment_method_accounts_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "account",

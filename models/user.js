@@ -187,11 +187,11 @@ const userSchema = new mongoose.Schema(
     // default fields
     email: {
       type: String,
-      // Customers may be created with phone only (no placeholder email).
+      // Customers and vendors may be created with phone only (no placeholder email).
       required: function () {
         const role = this && typeof this.get === "function" ? this.get("role") : this?.role;
         const roles = Array.isArray(role) ? role : [role];
-        return !roles.includes("CUSTOMER");
+        return !roles.includes("CUSTOMER") && !roles.includes("VENDOR");
       },
     },
     phone: {
@@ -428,5 +428,55 @@ USER.sanitizeUserPermissions = sanitizeUserPermissions;
 USER.DASHBOARD_GRAPH_KEYS = DASHBOARD_GRAPH_KEYS;
 USER.DASHBOARD_GRAPH_OPTIONS = DASHBOARD_GRAPH_OPTIONS;
 USER.sanitizeShowGraphsOnDashboard = sanitizeShowGraphsOnDashboard;
+
+const EMAIL_NONEMPTY_INDEX = "email_1_nonempty";
+
+/**
+ * Legacy `email_1` (global unique, no filter) treats "" as a value, so only one
+ * customer/vendor could ever be saved without an email ("email already exists").
+ * Replace it with a global unique index on non-empty emails only — login looks
+ * users up by email alone, so real emails stay unique across companies.
+ */
+async function migrateEmailUniqueIndex() {
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return;
+    const coll = db.collection("users");
+    const indexes = await coll.indexes();
+    if (indexes.some((idx) => idx.name === EMAIL_NONEMPTY_INDEX)) return;
+
+    for (const idx of indexes) {
+      const k = idx.key || {};
+      if (
+        idx.unique &&
+        !idx.partialFilterExpression &&
+        Object.keys(k).length === 1 &&
+        k.email === 1
+      ) {
+        await coll.dropIndex(idx.name);
+        console.log("[user] Dropped legacy unique email index:", idx.name);
+      }
+    }
+
+    await coll.createIndex(
+      { email: 1 },
+      {
+        name: EMAIL_NONEMPTY_INDEX,
+        unique: true,
+        // `$gt: ""` matches non-empty strings only (skips "", null and missing).
+        partialFilterExpression: { email: { $gt: "" } },
+      },
+    );
+    console.log("[user] Created index:", EMAIL_NONEMPTY_INDEX);
+  } catch (err) {
+    console.warn("[user] email index migration:", err.message);
+  }
+}
+
+if (mongoose.connection.readyState === 1) {
+  void migrateEmailUniqueIndex();
+} else {
+  mongoose.connection.once("connected", migrateEmailUniqueIndex);
+}
 
 module.exports = USER;

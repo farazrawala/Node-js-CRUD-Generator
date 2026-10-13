@@ -307,10 +307,31 @@ function mongoTransactionsProbablyUnsupported(err, handlerFailureDetails = "") {
 }
 
 /**
+ * Error that aborts the transaction but keeps the handler's own response (status,
+ * readable `message`, field `details`) instead of a 500 with `String(details)`
+ * — an array of field errors stringified to "[object Object]".
+ */
+function handlerFailureError(out, fallbackMessage) {
+  const message =
+    (typeof out?.message === "string" && out.message) ||
+    (typeof out?.details === "string" && out.details) ||
+    (typeof out?.error === "string" && out.error) ||
+    fallbackMessage;
+  const e = new Error(message);
+  e.handlerResponse = { ...out, message };
+  return e;
+}
+
+/**
  * Run `fn(session)` inside a Mongo transaction; if the deployment does not support
  * transactions, retry `fn(null)` once without a session.
+ * Pass `req` so the retry sees the original body: the generic handlers consume keys
+ * (e.g. multiselect `role[0]`), and a retry on the mutated body silently saved
+ * new customers with the default `["USER"]` role.
  */
-async function withTxnFallback(fn) {
+async function withTxnFallback(fn, req = null) {
+  const bodySnapshot =
+    req?.body && typeof req.body === "object" ? { ...req.body } : null;
   try {
     return await mongoose.connection.transaction((session) => fn(session));
   } catch (err) {
@@ -319,6 +340,7 @@ async function withTxnFallback(fn) {
         "[dynamicRoute] Mongo transactions unavailable; retrying without session:",
         err.message,
       );
+      if (bodySnapshot) req.body = { ...bodySnapshot };
       return fn(null);
     }
     throw err;
@@ -497,10 +519,10 @@ function generateControllerFunctions(modelName) {
                 e.retryWithoutSession = true;
                 throw e;
               }
-              throw new Error(det || out.error || "User create failed");
+              throw handlerFailureError(out, "User create failed");
             }
             return out;
-          });
+          }, req);
           return res.status(response.status).json(response);
         }
 
@@ -510,6 +532,11 @@ function generateControllerFunctions(modelName) {
         });
         return res.status(response.status).json(response);
       } catch (err) {
+        if (err.handlerResponse) {
+          return res
+            .status(err.handlerResponse.status || 400)
+            .json(err.handlerResponse);
+        }
         console.error(`❌ ${modelName} create error:`, err.message);
         return res.status(500).json({
           success: false,
@@ -637,10 +664,10 @@ function generateControllerFunctions(modelName) {
                 e.retryWithoutSession = true;
                 throw e;
               }
-              throw new Error(det || out.error || "User update failed");
+              throw handlerFailureError(out, "User update failed");
             }
             return out;
-          });
+          }, req);
           return res.status(response.status).json(response);
         }
 
@@ -651,6 +678,11 @@ function generateControllerFunctions(modelName) {
         );
         return res.status(response.status).json(response);
       } catch (err) {
+        if (err.handlerResponse) {
+          return res
+            .status(err.handlerResponse.status || 400)
+            .json(err.handlerResponse);
+        }
         console.error(`❌ ${modelName} update error:`, err.message);
         return res.status(500).json({
           success: false,

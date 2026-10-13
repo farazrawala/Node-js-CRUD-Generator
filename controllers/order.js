@@ -1039,6 +1039,49 @@ function companyDefaultAccountReceivable(userOrCompany) {
 }
 
 /**
+ * Customer's A/R balance (debit − credit on the company receivable account, same basis as
+ * the receivables report). Called before a sale posts its GL lines → "previous balance".
+ */
+async function customerReceivableBalance(user, customerId) {
+  const customerOid = coalesceObjectId(customerId);
+  const arAccountId = companyDefaultAccountReceivable(user);
+  const companyOid = coalesceObjectId(user?.company_id);
+  if (
+    !(customerOid instanceof mongoose.Types.ObjectId) ||
+    !(arAccountId instanceof mongoose.Types.ObjectId) ||
+    !(companyOid instanceof mongoose.Types.ObjectId)
+  ) {
+    return 0;
+  }
+  const [row] = await Transaction.aggregate([
+    {
+      $match: {
+        company_id: companyOid,
+        account_id: arAccountId,
+        reference_user_id: customerOid,
+        status: "active",
+        deletedAt: null,
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        balance: {
+          $sum: {
+            $cond: [
+              { $eq: ["$type", "debit"] },
+              "$amount",
+              { $multiply: ["$amount", -1] },
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  return roundMoney2(Number(row?.balance) || 0);
+}
+
+/**
  * Resolve Mode-of-Payment account: `posPayMethod` → `payment_method_accounts_id` →
  * company `default_account_receivable_account`. Writes the result onto the body.
  */
@@ -2975,6 +3018,17 @@ async function order_save(req, res) {
   const transaction_number = generateTransactionNumber();
   resolveOrderPaymentMethodAccount(req.body, req.user);
   req.body.transaction_number = transaction_number;
+
+  // Snapshot the customer's balance before this sale posts (printed as "Previous Balance").
+  try {
+    req.body.previous_balance = await customerReceivableBalance(
+      req.user,
+      req.body.customer_id,
+    );
+  } catch (balErr) {
+    console.warn("[order_save] previous_balance lookup failed", balErr?.message);
+    req.body.previous_balance = 0;
+  }
   // step 1 end
 
   // Outer state survives txn attempt / standalone retry (see `orderSaveExecutionMode` in rollback logs).
@@ -3621,6 +3675,8 @@ async function order_update(req, res) {
     normalizeOrderNumericFields(stripLineItemKeys(originalBody)),
   );
   delete req.body._id;
+  // Snapshot taken at create; never rewritten from the client.
+  delete req.body.previous_balance;
   // Never blank an existing GL key from the client; generate later if still missing.
   if (!String(req.body.transaction_number ?? "").trim()) {
     delete req.body.transaction_number;
