@@ -3297,78 +3297,119 @@ async function getRecentLineItemProductIds(req, res) {
   }
 }
 
+const MOVE_VARIANT_MAX_IDS = 200;
+
 /**
- * POST /api/product/move-variant — body `{ variant_id, parent_id }`.
- * Moves a variant (non-Variable product) under another Variable parent in the same company.
- * Writes only `parent_product_id` and `updated_by` (+ `updatedAt` via timestamps) on the
- * variant; uses `updateOne` so model save hooks can't touch any other field. No other
- * collection is written. Store links (BigCommerce/Shopify/…) are only counted (`store_links`).
+ * POST /api/product/move-variant — body `{ variant_ids: [...], parent_id }`
+ * (single `variant_id` still accepted).
+ * Moves variants (non-Variable products) under another Variable parent in the same company.
+ * All-or-nothing validation: if any id is missing, deleted, from another company or a Variable
+ * product, nothing moves. Variants already under the target are skipped and reported.
+ * Writes only `parent_product_id` and `updated_by` (+ `updatedAt` via timestamps) using
+ * `updateMany`, so model save hooks can't touch any other field. No other collection is
+ * written. Store links (BigCommerce/Shopify/…) are only counted (`store_links`).
  */
 async function productMoveVariant(req, res) {
-  const fail = (status, error) =>
-    res.status(status).json({ success: false, status, error });
+  const fail = (status, error, extra = {}) =>
+    res.status(status).json({ success: false, status, error, ...extra });
 
   try {
     const companyId = coalesceObjectId(req.user?.company_id);
-    const variantId = String(req.body?.variant_id ?? "").trim();
     const parentId = String(req.body?.parent_id ?? "").trim();
+    const rawIds = Array.isArray(req.body?.variant_ids)
+      ? req.body.variant_ids
+      : [req.body?.variant_id];
+    const variantIds = [...new Set(rawIds.map((v) => String(v ?? "").trim()).filter(Boolean))];
+
     if (!companyId) return fail(400, "Company not found for this user");
-    if (
-      !mongoose.Types.ObjectId.isValid(variantId) ||
-      !mongoose.Types.ObjectId.isValid(parentId)
-    ) {
-      return fail(400, "Send a valid variant_id and parent_id");
+    if (!mongoose.Types.ObjectId.isValid(parentId)) {
+      return fail(400, "Send a valid parent_id");
     }
-    if (variantId === parentId) {
+    if (!variantIds.length) return fail(400, "Select at least one variant");
+    if (variantIds.length > MOVE_VARIANT_MAX_IDS) {
+      return fail(400, `Move at most ${MOVE_VARIANT_MAX_IDS} variants at a time`);
+    }
+    if (variantIds.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+      return fail(400, "One or more variant ids are invalid");
+    }
+    if (variantIds.includes(parentId)) {
       return fail(400, "A product cannot be its own parent");
     }
 
     const scope = { company_id: companyId, ...activeNotDeletedCriteria() };
-    const [variant, newParent] = await Promise.all([
-      Product.findOne({ _id: variantId, ...scope })
+    const [variants, newParent] = await Promise.all([
+      Product.find({ _id: { $in: variantIds }, ...scope })
         .select("_id product_name product_type parent_product_id")
         .lean(),
       Product.findOne({ _id: parentId, ...scope }).select("_id product_name product_type").lean(),
     ]);
-    if (!variant) return fail(404, "Variant not found");
     if (!newParent) return fail(404, "Parent product not found");
-    if (isVariableProductRecord(variant)) {
-      return fail(400, "A parent (Variable) product cannot be moved as a variant");
-    }
     if (!isVariableProductRecord(newParent)) {
       return fail(400, "The target must be a parent (Variable) product");
     }
-
-    const oldParentId = variant.parent_product_id ? String(variant.parent_product_id) : "";
-    if (oldParentId === parentId) {
-      return fail(400, "The variant is already under this parent");
+    const foundIds = new Set(variants.map((v) => String(v._id)));
+    const missing = variantIds.filter((id) => !foundIds.has(id));
+    if (missing.length) {
+      return fail(404, `${missing.length} variant(s) not found`, { missing_ids: missing });
     }
-    const oldParent = oldParentId
-      ? await Product.findById(oldParentId).select("_id product_name").lean()
-      : null;
+    const variableOnes = variants.filter((v) => isVariableProductRecord(v));
+    if (variableOnes.length) {
+      return fail(
+        400,
+        `Parent (Variable) products cannot be moved as variants: ${variableOnes
+          .map((v) => v.product_name)
+          .join(", ")}`,
+      );
+    }
+
+    const alreadyThere = variants.filter((v) => String(v.parent_product_id || "") === parentId);
+    const toMove = variants.filter((v) => String(v.parent_product_id || "") !== parentId);
+    if (!toMove.length) {
+      return fail(400, "The selected variants are already under this parent");
+    }
+
+    const oldParentIds = [
+      ...new Set(toMove.map((v) => String(v.parent_product_id || "")).filter(Boolean)),
+    ];
+    const oldParents = oldParentIds.length
+      ? await Product.find({ _id: { $in: oldParentIds } }).select("_id product_name").lean()
+      : [];
+    const oldParentById = new Map(oldParents.map((p) => [String(p._id), p]));
 
     const set = { parent_product_id: newParent._id };
     const uid = coalesceObjectId(req.user?._id || req.user?.id);
     if (uid) set.updated_by = uid;
-    await Product.updateOne({ _id: variant._id, company_id: companyId }, { $set: set });
+    const moveIds = toMove.map((v) => v._id);
+    await Product.updateMany({ _id: { $in: moveIds }, company_id: companyId }, { $set: set });
 
     const SyncProduct = require("../models/sync_product");
-    const [updated, storeLinks] = await Promise.all([
-      Product.findById(variant._id).lean(),
-      SyncProduct.countDocuments({ product_id: variant._id, deletedAt: null }),
-    ]);
+    const storeLinks = await SyncProduct.countDocuments({
+      product_id: { $in: moveIds },
+      deletedAt: null,
+    });
 
     await invalidateProductListCache(req);
+
+    const moved = toMove.map((v) => {
+      const from = oldParentById.get(String(v.parent_product_id || ""));
+      return {
+        _id: v._id,
+        product_name: v.product_name,
+        from_parent: from ? { _id: from._id, product_name: from.product_name } : null,
+      };
+    });
 
     return res.status(200).json({
       success: true,
       status: 200,
-      message: "Variant moved",
+      message: `${moved.length} variant(s) moved`,
       data: {
-        variant: updated,
-        from_parent: oldParent
-          ? { _id: oldParent._id, product_name: oldParent.product_name }
-          : null,
+        moved,
+        skipped: alreadyThere.map((v) => ({
+          _id: v._id,
+          product_name: v.product_name,
+          reason: "already_under_parent",
+        })),
         to_parent: { _id: newParent._id, product_name: newParent.product_name },
         store_links: storeLinks,
       },
