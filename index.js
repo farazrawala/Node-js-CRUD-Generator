@@ -112,6 +112,7 @@ const {
   isPublicUploadRequest,
 } = require("./utils/servePublicUploads");
 const { getDeployVersionPayload, getHealthPayload } = require("./utils/buildInfo");
+const { deployRestartHandler } = require("./utils/deployRestart");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
@@ -432,6 +433,8 @@ app.get("/api/version", (req, res) => {
 app.get("/api/health", (req, res) => {
   res.status(200).json(getHealthPayload(BASE_PATH || null));
 });
+/** GitHub Actions deploy hook — token-protected; see utils/deployRestart.js. */
+app.post("/api/deploy/restart", deployRestartHandler);
 
 if (monitoring) {
   registerMetricsRoute(app, monitoring);

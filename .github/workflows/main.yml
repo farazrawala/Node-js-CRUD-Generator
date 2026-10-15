@@ -54,22 +54,12 @@ jobs:
           echo "Build stamp:"
           cat deploy/build-info.json
 
-      - name: Write restart trigger for server cron (FTP upload)
-        run: |
-          {
-            echo "run=${GITHUB_RUN_NUMBER}"
-            echo "commit=${GITHUB_SHA}"
-            echo "deployedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } > deploy/.restart-requested
-          echo "Restart trigger:"
-          cat deploy/.restart-requested
-
-      - name: Sync application files (exclude node_modules — install on server via SSH)
+      - name: Sync application files (exclude node_modules — server runs npm ci on restart)
         uses: SamKirkland/FTP-Deploy-Action@4.3.3
         with:
           server: 192.249.118.80
           username: pos_admin@testv3.websitedemolynk.com
-          password: kYw8,ae@!1&]}dMR
+          password: ${{ secrets.FTP_PASSWORD }}
           exclude: |
             **/.git*
             **/.git*/**
@@ -82,65 +72,46 @@ jobs:
             deploy/github_actions_key.pem
             deploy/github_actions_key.pem.example
 
-      - name: Prepare SSH key for server restart
-        id: ssh_key
+      - name: Restart pos_admin on server (HTTPS deploy hook)
+        id: restart
         env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          API_BASE: ${{ vars.API_BASE_URL || 'https://testv3.websitedemolynk.com/pos_admin' }}
+          DEPLOY_RESTART_TOKEN: ${{ secrets.DEPLOY_RESTART_TOKEN }}
         run: |
-          write_key_from_text() {
-            if echo "$1" | grep -q "BEGIN OPENSSH PRIVATE KEY"; then
-              printf '%s\n' "$1" > key.pem
-            elif echo "$1" | grep -q "BEGIN RSA PRIVATE KEY"; then
-              printf '%s\n' "$1" > key.pem
-            else
-              {
-                echo "-----BEGIN OPENSSH PRIVATE KEY-----"
-                printf '%s\n' "$1"
-                echo "-----END OPENSSH PRIVATE KEY-----"
-              } > key.pem
+          if [ -z "$DEPLOY_RESTART_TOKEN" ]; then
+            echo "::error::Missing repo secret DEPLOY_RESTART_TOKEN (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          echo "requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          CODE=$(curl -sS -m 30 -o resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${DEPLOY_RESTART_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"commit\":\"${GITHUB_SHA}\",\"run\":${GITHUB_RUN_NUMBER}}" \
+            "${API_BASE}/api/deploy/restart" || echo "000")
+          echo "HTTP ${CODE}"; cat resp.json 2>/dev/null; echo
+          case "$CODE" in
+            202) echo "✅ Restart accepted." ;;
+            401) echo "::error::Token rejected — DEPLOY_RESTART_TOKEN in GitHub must match the one in the server .env."; exit 1 ;;
+            404) echo "::error::Deploy hook not active — set DEPLOY_RESTART_TOKEN in the server .env and run 'pm2 restart pos_admin' once."; exit 1 ;;
+            *) echo "::error::Restart call failed (HTTP ${CODE})."; exit 1 ;;
+          esac
+
+      - name: Verify new code is running (/health)
+        env:
+          API_BASE: ${{ vars.API_BASE_URL || 'https://testv3.websitedemolynk.com/pos_admin' }}
+          REQUESTED_AT: ${{ steps.restart.outputs.requestedAt }}
+        run: |
+          # npm ci + pm2 restart usually takes 1–3 minutes.
+          for i in $(seq 1 40); do
+            sleep 15
+            BODY=$(curl -sS -m 20 "${API_BASE}/health" || true)
+            COMMIT=$(echo "$BODY" | jq -r '.version.gitCommit // empty' 2>/dev/null)
+            STARTED=$(echo "$BODY" | jq -r '.version.processStartedAt // empty' 2>/dev/null)
+            echo "[$i] commit=${COMMIT:0:7} processStartedAt=${STARTED}"
+            if [ "$COMMIT" = "$GITHUB_SHA" ] && [ -n "$STARTED" ] && [[ "$STARTED" > "$REQUESTED_AT" ]]; then
+              echo "✅ pos_admin restarted on ${COMMIT:0:7} at ${STARTED}."
+              exit 0
             fi
-          }
-
-          if [ -f deploy/github_actions_key.pem ] && grep -q "BEGIN.*PRIVATE KEY" deploy/github_actions_key.pem; then
-            cp deploy/github_actions_key.pem key.pem
-          elif [ -n "$SSH_KEY" ]; then
-            write_key_from_text "$SSH_KEY"
-          else
-            echo "has_key=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          sed -i 's/\r$//' key.pem
-          chmod 600 key.pem
-          echo "has_key=true" >> "$GITHUB_OUTPUT"
-
-      - name: Restart pos_admin on server (SSH)
-        id: ssh_restart
-        if: steps.ssh_key.outputs.has_key == 'true'
-        continue-on-error: true
-        env:
-          SSH_HOST: ${{ vars.SSH_HOST || '192.249.118.80' }}
-          SSH_PORT: ${{ vars.SSH_PORT || '22' }}
-          SSH_USER: ${{ vars.SSH_USER || 'root' }}
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-
-          ssh -i key.pem -p "$SSH_PORT" -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new \
-            "${SSH_USER}@${SSH_HOST}" \
-            'bash /home/demowebsitv3/public_html/pos_admin/deploy/restart-pos-admin.sh'
-
-          echo "✅ pos_admin restarted via SSH."
-
-      - name: Post-deploy restart status
-        if: always()
-        run: |
-          if [ "${{ steps.ssh_restart.outcome }}" = "success" ]; then
-            echo "Restart: SSH succeeded (immediate)."
-          elif [ "${{ steps.ssh_restart.outcome }}" = "failure" ]; then
-            echo "::warning::SSH restart failed (port 22 often blocked from GitHub Actions on shared hosting)."
-            echo "FTP uploaded deploy/.restart-requested — root cron should restart pos_admin within ~1 minute."
-            echo "One-time setup: deploy/SETUP-GITHUB-SSH.md (cron section)."
-          else
-            echo "Restart: FTP trigger uploaded; waiting for server cron (see deploy/SETUP-GITHUB-SSH.md)."
-          fi
-          echo "Deploy files synced successfully."
+          done
+          echo "::error::pos_admin did not restart on ${GITHUB_SHA:0:7} within 10 minutes — check logs/deploy-restart.log on the server."
+          exit 1
