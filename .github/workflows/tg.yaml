@@ -6,9 +6,11 @@
 name: Deploy live (FTP)
 
 on:
-  push:
-    branches:
-      - main
+  # Push trigger paused (FTP at 203.161.41.148 refuses connections); run manually from
+  # Actions → "Deploy live (FTP)" → Run workflow. Restore the push block to re-enable.
+  # push:
+  #   branches:
+  #     - main
   workflow_dispatch:
 
 concurrency:
