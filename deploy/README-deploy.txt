@@ -106,10 +106,15 @@ FIX — "Cannot find module '../encodings'" (iconv-lite) on POST /user/login:
 
   cPanel alternative: Setup Node.js App → "Run NPM Install" → restart app.
 
-AUTO RESTART AFTER GIT PUSH (recommended):
-  See deploy/SETUP-GITHUB-SSH.md
-  GitHub Actions FTP uploads deploy/.restart-requested; root cron runs watch-restart-trigger.sh (~1 min).
-  Optional SSH_PRIVATE_KEY secret for instant restart if port 22 is open to GitHub Actions.
+AUTO RESTART AFTER GIT PUSH:
+  After the FTP upload, GitHub Actions calls POST /pos_admin/api/deploy/restart over HTTPS
+  (SSH from GitHub is blocked on this host). The API runs deploy/restart-pos-admin.sh
+  detached (npm ci + pm2 restart), then the workflow polls /health until the pushed
+  commit is running — the run fails if it isn't within 10 minutes.
+  One-time setup:
+    - GitHub repo secrets: FTP_PASSWORD, DEPLOY_RESTART_TOKEN
+    - Server .env: DEPLOY_RESTART_TOKEN=<same value>   (no token = hook disabled)
+  Script output: logs/deploy-restart.log
 
   Manual restart (root SSH only — demowebsitv3 cannot restart root's pm2):
     cd /home/demowebsitv3/public_html/pos_admin
