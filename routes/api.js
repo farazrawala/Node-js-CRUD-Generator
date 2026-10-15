@@ -194,6 +194,7 @@ const {
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
+  getPublicPurchaseOrder,
   findPurchaseOrderPurchases,
   findPurchaseOrderPurchasesSummary,
 } = require("../controllers/purchase_order");
@@ -454,6 +455,10 @@ router.get(
 router.get(
   "/purchase_order/get-purchase-order-by-order-no/:id",
   getPurchaseOrderByOrderNo,
+);
+router.get(
+  "/purchase_order/public-get-purchase-order/:id",
+  getPublicPurchaseOrder,
 );
 
 router.post("/purchase_return/purchase_return_create", purchaseReturnCreate);

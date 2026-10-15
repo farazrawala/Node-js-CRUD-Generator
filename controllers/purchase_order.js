@@ -1876,6 +1876,65 @@ async function applyPurchaseOrderDeleteInventoryReverse({
   return { productStockUpdates, reversalMovementsInserted };
 }
 
+/**
+ * Vendor's A/P balance (credit − debit on the company payable account) from ledger rows posted
+ * before this PO, excluding the PO's own rows → printed as "Previous Balance" (POS uses the
+ * receivable equivalent snapshotted on the order).
+ */
+async function vendorPayableBalanceBeforePo(user, po) {
+  const vendorOid = coalesceObjectId(po?.vendor_id);
+  const apAccountId = companyPoGlAccount(user, "default_account_payable_account");
+  const companyOid = coalesceObjectId(user?.company_id);
+  if (
+    !(vendorOid instanceof mongoose.Types.ObjectId) ||
+    !(apAccountId instanceof mongoose.Types.ObjectId) ||
+    !(companyOid instanceof mongoose.Types.ObjectId)
+  ) {
+    return null;
+  }
+  const match = {
+    company_id: companyOid,
+    account_id: apAccountId,
+    reference_user_id: vendorOid,
+    status: "active",
+    deletedAt: null,
+  };
+  if (po?.transaction_number) {
+    match.transaction_number = { $ne: po.transaction_number };
+  }
+  const before = po?.createdAt ? new Date(po.createdAt) : null;
+  if (before && !Number.isNaN(before.getTime())) {
+    match.createdAt = { $lt: before };
+  }
+  const [row] = await Transaction.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: null,
+        balance: {
+          $sum: {
+            $cond: [
+              { $eq: ["$type", "credit"] },
+              "$amount",
+              { $multiply: ["$amount", -1] },
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  return roundPoMoney(Number(row?.balance) || 0);
+}
+
+async function withVendorPreviousBalance(user, po) {
+  try {
+    return { ...po, previous_balance: await vendorPayableBalanceBeforePo(user, po) };
+  } catch (balErr) {
+    console.warn("[purchase_order] previous_balance lookup failed", balErr?.message);
+    return po;
+  }
+}
+
 function shapePurchaseOrderWithItems(poPlain, items) {
   const purchase_order_items_total = items.reduce((sum, item) => {
     const sub = Number(item.subtotal);
@@ -1991,6 +2050,11 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
     };
   });
 
+  // Single-PO fetch (edit page / print) also carries the vendor's previous balance.
+  if (idParam && data.length === 1) {
+    data[0] = await withVendorPreviousBalance(req.user, data[0]);
+  }
+
   return res.status(response.status).json({
     ...response,
     data,
@@ -2047,9 +2111,9 @@ async function getPurchaseOrderByOrderNo(req, res) {
     .sort({ createdAt: 1 })
     .lean();
 
-  const data = shapePurchaseOrderWithItems(
-    po.toObject({ flattenMaps: true }),
-    items,
+  const data = await withVendorPreviousBalance(
+    req.user,
+    shapePurchaseOrderWithItems(po.toObject({ flattenMaps: true }), items),
   );
 
   return res.status(200).json({
@@ -2057,6 +2121,70 @@ async function getPurchaseOrderByOrderNo(req, res) {
     status: 200,
     data,
   });
+}
+
+/** Company fields the public PO page needs (branding + printer settings); nothing else leaks. */
+const PUBLIC_PO_COMPANY_FIELDS =
+  "company_name company_phone company_email company_address company_logo printer_settings theme_color default_account_payable_account";
+
+/**
+ * GET /api/purchase_order/public-get-purchase-order/:id  (no auth)
+ *
+ * Shareable PO view for the vendor. Only the PO `_id` is accepted (never the sequential
+ * `purchase_order_no`) so links cannot be guessed by counting.
+ */
+async function getPublicPurchaseOrder(req, res) {
+  const id = String(req.params.id || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(id) || id.length !== 24) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid purchase order link",
+      type: "invalid_id",
+    });
+  }
+
+  const po = await PurchaseOrder.findOne({
+    _id: id,
+    status: "active",
+    deletedAt: null,
+  })
+    .populate("company_id", PUBLIC_PO_COMPANY_FIELDS)
+    .populate("vendor_id", "name phone email area city state country zip_code")
+    .populate("created_by", "name")
+    .populate("payment_method_accounts_id", "name account_number")
+    .lean();
+
+  if (!po) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Purchase order not found",
+      type: "not_found",
+    });
+  }
+
+  const items = await PurchaseOrderItem.find({
+    purchase_order_id: po._id,
+    status: "active",
+    deletedAt: null,
+  })
+    .select("product_id qty price shipping_per_unit total_shipping subtotal")
+    .populate("product_id", "product_name product_code sku")
+    .sort({ createdAt: 1 })
+    .lean();
+
+  // Ledger lookup reads the payable account off a populated company, the same shape as `req.user`.
+  const data = await withVendorPreviousBalance(
+    { company_id: po.company_id },
+    shapePurchaseOrderWithItems(po, items),
+  );
+  if (data.company_id && typeof data.company_id === "object") {
+    const { default_account_payable_account: _ap, ...company } = data.company_id;
+    data.company_id = company;
+  }
+
+  return res.status(200).json({ success: true, status: 200, data });
 }
 
 /**
@@ -3935,6 +4063,7 @@ module.exports = {
   purchase_order_delete,
   getPurchaseOrderByPurchaseItem,
   getPurchaseOrderByOrderNo,
+  getPublicPurchaseOrder,
   findPurchaseOrderPurchases,
   findPurchaseOrderPurchasesSummary,
   applyWholesalePriceRemoveForPoLines,
