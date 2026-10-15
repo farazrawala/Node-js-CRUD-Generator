@@ -273,6 +273,7 @@ const {
   getTransactionsListWithDebitCreditSummary,
   getDeletedTransactions,
   getMyLedgerTransactions,
+  getPublicUserLedger,
 } = require("../controllers/transaction");
 const {
   accountCreate,
@@ -1000,6 +1001,7 @@ router.get(
   getTransactionsListWithDebitCreditSummary,
 );
 router.get("/transaction/get-my-ledger-transaction", getMyLedgerTransactions);
+router.get("/transaction/public-get-user-ledger/:userId", getPublicUserLedger);
 router.get(
   "/transactions/list-with-summary",
   getTransactionsListWithDebitCreditSummary,

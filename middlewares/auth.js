@@ -164,6 +164,8 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/order\/public-get-order-by-order-no\/.*/, // public order lookup (no auth)
     /^\/purchase_order\/public-get-purchase-order\/.*/, // public PO view (no auth)
     /^\/api\/purchase_order\/public-get-purchase-order\/.*/, // public PO view (no auth)
+    /^\/transaction\/public-get-user-ledger\/.*/, // public user ledger view (no auth)
+    /^\/api\/transaction\/public-get-user-ledger\/.*/, // public user ledger view (no auth)
     "/api/test", // Test route
     "/health",
     "/version",

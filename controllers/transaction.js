@@ -6,6 +6,7 @@ const {
   coalesceObjectId,
 } = require("../utils/modelHelper");
 const Transaction = require("../models/transaction");
+const User = require("../models/user");
 const {
   logRollbackFailure,
   serializeErrorForLog,
@@ -303,6 +304,119 @@ async function getMyLedgerTransactions(req, res) {
     skip: req.query.skip ? parseInt(req.query.skip) : 0, // Support skip from query params
   });
   return res.status(response.status).json(response);
+}
+
+/** Company fields the public ledger page needs (branding only); A/R + A/P ids are stripped before sending. */
+const PUBLIC_LEDGER_COMPANY_FIELDS =
+  "company_name company_phone company_email company_address company_logo theme_color default_account_receivable_account default_account_payable_account";
+
+const PUBLIC_LEDGER_MAX_ROWS = 1000;
+
+/**
+ * Mongoose does not populate the `reference_id.ref_id` refPath, so load the linked documents per
+ * module in one query each and swap in `{ _id, purchase_order_no | order_no | transaction_number }`.
+ */
+async function attachPublicLedgerRefNumbers(rows) {
+  const idsByModule = new Map();
+  rows.forEach((row) => {
+    const ref = row.reference_id;
+    if (!ref?.module || ref.ref_id == null) return;
+    if (!idsByModule.has(ref.module)) idsByModule.set(ref.module, new Set());
+    idsByModule.get(ref.module).add(String(ref.ref_id));
+  });
+
+  const docsById = new Map();
+  await Promise.all(
+    [...idsByModule].map(async ([module, ids]) => {
+      let RefModel;
+      try {
+        RefModel = mongoose.model(module);
+      } catch {
+        return;
+      }
+      const docs = await RefModel.find({ _id: { $in: [...ids] } })
+        .select("purchase_order_no order_no transaction_number")
+        .lean();
+      docs.forEach((doc) => docsById.set(String(doc._id), doc));
+    }),
+  );
+
+  rows.forEach((row) => {
+    const doc = row.reference_id?.ref_id != null && docsById.get(String(row.reference_id.ref_id));
+    if (doc) row.reference_id = { ...row.reference_id, ref_id: doc };
+  });
+}
+
+/**
+ * GET /api/transaction/public-get-user-ledger/:userId  (no auth)
+ *
+ * Shareable customer/vendor ledger: profile, company branding and the same A/R + A/P rows as
+ * `get-my-ledger-transaction`, scoped to the user's own company. The link never expires.
+ */
+async function getPublicUserLedger(req, res) {
+  const userId = String(req.params.userId || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(userId) || userId.length !== 24) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid ledger link",
+      type: "invalid_id",
+    });
+  }
+
+  const user = await User.findOne({ _id: userId, deletedAt: null })
+    .select("name phone email role status initial_balance company_id createdAt updatedAt")
+    .populate("company_id", PUBLIC_LEDGER_COMPANY_FIELDS)
+    .lean();
+
+  const company =
+    user?.company_id && typeof user.company_id === "object" ? user.company_id : null;
+  if (!user || !company?._id) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Ledger not found",
+      type: "not_found",
+    });
+  }
+
+  const accountIds = [
+    company.default_account_receivable_account,
+    company.default_account_payable_account,
+  ].filter(Boolean);
+
+  const filter = {
+    status: "active",
+    deletedAt: null,
+    company_id: company._id,
+    reference_user_id: user._id,
+    amount: { $gt: 0 },
+  };
+  if (accountIds.length > 0) {
+    filter.account_id = { $in: accountIds };
+  }
+
+  const transactions = await Transaction.find(filter)
+    .select("transaction_number account_id type amount reference_id description status createdAt created_by")
+    .populate("account_id", "name")
+    .populate("created_by", "name")
+    .sort({ createdAt: -1 })
+    .limit(PUBLIC_LEDGER_MAX_ROWS)
+    .lean();
+  await attachPublicLedgerRefNumbers(transactions);
+
+  const {
+    default_account_receivable_account: _ar,
+    default_account_payable_account: _ap,
+    ...publicCompany
+  } = company;
+  const { company_id: _company, ...publicUser } = user;
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    data: { user: publicUser, company: publicCompany, transactions },
+  });
 }
 
 /**
@@ -645,4 +759,5 @@ module.exports = {
   getTransactionsListWithDebitCreditSummary,
   getDeletedTransactions,
   getMyLedgerTransactions,
+  getPublicUserLedger,
 };
