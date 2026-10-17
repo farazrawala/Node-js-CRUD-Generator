@@ -2144,7 +2144,11 @@ function isVariableProductRecord(product) {
   );
 }
 
-/** Child variation ids of a Variable parent (by parent_product_id, then name). */
+/**
+ * Child variation ids of a Variable parent (by parent_product_id, then name).
+ * The name match only picks up orphans (no parent_product_id): a variant moved to
+ * another parent keeps its old "Parent [Size]" name but must not be treated as a child.
+ */
 async function findVariableChildIds(parentId, companyId, parentName = "") {
   const oid = coalesceObjectId(parentId);
   if (!oid) return [];
@@ -2157,6 +2161,7 @@ async function findVariableChildIds(parentId, companyId, parentName = "") {
   if (name) {
     or.push({
       product_type: "Single",
+      parent_product_id: null,
       product_name: {
         $regex: `^${escapeRegexLiteral(name)}\\s*[\\(\\[]`,
         $options: "i",
@@ -2284,6 +2289,73 @@ async function productDelete(req, res) {
     }
   }
   return res.status(response.status).json(response);
+}
+
+/**
+ * POST /api/product/restore/:id — undo a soft delete (deletedAt → null, status → active).
+ * A Variable parent also gets back the variants its delete removed: same parent_product_id
+ * and the same deletedAt. Store links (sync_product) are not restored.
+ */
+async function productRestore(req, res) {
+  const fail = (status, error) =>
+    res.status(status).json({ success: false, status, error, message: error });
+
+  try {
+    const companyId = coalesceObjectId(req.user?.company_id);
+    const id = String(req.params?.id ?? "").trim();
+    if (!companyId) return fail(400, "Company not found for this user");
+    if (!mongoose.Types.ObjectId.isValid(id)) return fail(400, "Send a valid product id");
+
+    const product = await Product.findOne({
+      _id: id,
+      company_id: companyId,
+      deletedAt: { $ne: null },
+    })
+      .select("_id product_name product_type deletedAt")
+      .lean();
+    if (!product) return fail(404, "Deleted product not found");
+
+    const set = { deletedAt: null, status: "active" };
+    const uid = coalesceObjectId(req.user?._id || req.user?.id);
+    if (uid) set.updated_by = uid;
+    await Product.updateOne({ _id: product._id, company_id: companyId }, { $set: set });
+
+    let variantsRestored = 0;
+    if (isVariableProductRecord(product)) {
+      const result = await Product.updateMany(
+        {
+          parent_product_id: product._id,
+          company_id: companyId,
+          deletedAt: product.deletedAt,
+        },
+        { $set: set },
+      );
+      variantsRestored = result.modifiedCount || 0;
+    }
+
+    await invalidateProductListCache(req);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message:
+        variantsRestored > 0 ?
+          `Product restored (${variantsRestored} variation${variantsRestored === 1 ? "" : "s"} also restored)`
+        : "Product restored",
+      data: {
+        _id: product._id,
+        product_name: product.product_name,
+        variants_restored: variantsRestored,
+      },
+    });
+  } catch (error) {
+    await logControllerError(req, error, {
+      action: "PRODUCT RESTORE",
+      tags: ["product", "restore", "error"],
+      fallbackUrl: "/api/product/restore",
+    });
+    return fail(500, error.message || "Could not restore product");
+  }
 }
 
 /**
@@ -3446,6 +3518,7 @@ module.exports = {
   productUpdateVariation,
   getProductVariationById,
   productDelete,
+  productRestore,
   productCostUpdate,
   cost_of_goods_available,
   getAllActiveProductsPOS,

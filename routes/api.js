@@ -73,6 +73,7 @@ const {
   getProductVariationById,
   getAllActiveProductsPOS,
   productDelete,
+  productRestore,
   productCostUpdate,
   // cost_of_goods_available,
   updateWarehouseDefault,
@@ -588,6 +589,7 @@ router.get("/inventory_movements/stock-by-product", findStockByProductId);
 // router.get("/product/:id/cost-of-goods-available", cost_of_goods_available);
 
 router.delete("/product/delete/:id", productDelete);
+router.post("/product/restore/:id", productRestore);
 
 // Integration routes
 router.get("/integration/check-active/:id", checkIntegrationActive);
