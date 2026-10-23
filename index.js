@@ -113,7 +113,6 @@ const {
 } = require("./utils/servePublicUploads");
 const { getDeployVersionPayload, getHealthPayload } = require("./utils/buildInfo");
 const { deployRestartHandler } = require("./utils/deployRestart");
-const { lookupShopifyVariant, DEFAULT_STORE } = require("./utils/shopifyVariantLookup");
 
 // Dynamically load all models to ensure they're registered before controllers
 const fs = require("fs");
@@ -434,26 +433,6 @@ app.get("/api/version", (req, res) => {
 app.get("/api/health", (req, res) => {
   res.status(200).json(getHealthPayload(BASE_PATH || null));
 });
-
-/** Public Shopify product/variant lookup by order line name. */
-async function shopifyVariantLookupHandler(req, res) {
-  const name = String(req.query.name || req.body?.name || "").trim();
-  const sku = String(req.query.sku || req.body?.sku || "").trim();
-  if (!name) {
-    return res.status(400).json({
-      found: false,
-      error: "Pass name, for example Women Chocolate Brown Long Fleece Winter Coat - xl",
-    });
-  }
-  try {
-    const result = await lookupShopifyVariant({ name, sku, store: DEFAULT_STORE });
-    return res.status(result.found ? 200 : 404).json(result);
-  } catch (error) {
-    return res.status(500).json({ found: false, error: error?.message || "Lookup failed" });
-  }
-}
-app.get("/api/shopify/lookup", shopifyVariantLookupHandler);
-app.post("/api/shopify/lookup", shopifyVariantLookupHandler);
 /** GitHub Actions deploy hook — token-protected; see utils/deployRestart.js. */
 app.post("/api/deploy/restart", deployRestartHandler);
 

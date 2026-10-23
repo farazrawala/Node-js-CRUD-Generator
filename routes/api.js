@@ -2,6 +2,12 @@ const express = require("express");
 const router = express.Router();
 const { getHealthPayload } = require("../utils/buildInfo");
 const { getBasePath } = require("../utils/basePath");
+const { coalesceObjectId } = require("../utils/modelHelper");
+const {
+  lookupShopifyVariant,
+  storefrontBaseFromUrl,
+} = require("../utils/shopifyVariantLookup");
+const Integration = require("../models/integration");
 
 /** Public deploy / runtime check (same payload as GET /health). */
 router.get("/health", (req, res) => {
@@ -17,6 +23,54 @@ router.get("/version", (req, res) => {
     data: payload.version,
   });
 });
+
+/** Shopify product and variant ids for the company on the Authorization token. */
+async function shopifyVariantLookupHandler(req, res) {
+  const name = String(req.query.name || req.body?.name || "").trim();
+  const sku = String(req.query.sku || req.body?.sku || "").trim();
+  if (!name) {
+    return res.status(400).json({
+      found: false,
+      error: "Pass name, for example Women Chocolate Brown Long Fleece Winter Coat - xl",
+    });
+  }
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId) {
+    return res.status(401).json({
+      found: false,
+      error: "This token is not linked to a company",
+    });
+  }
+  try {
+    const integration = await Integration.findOne({
+      company_id: companyId,
+      store_type: "shopify",
+      status: "active",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+    if (!integration) {
+      return res.status(404).json({
+        found: false,
+        error: "This company has no active Shopify store",
+      });
+    }
+    const store = storefrontBaseFromUrl(integration.url);
+    if (!store) {
+      return res.status(400).json({
+        found: false,
+        error: "Shopify store URL is missing on the company integration",
+      });
+    }
+    const result = await lookupShopifyVariant({ name, sku, store });
+    return res.status(result.found ? 200 : 404).json({ ...result, store });
+  } catch (error) {
+    return res.status(500).json({ found: false, error: error?.message || "Lookup failed" });
+  }
+}
+router.get("/shopify/lookup", shopifyVariantLookupHandler);
+router.post("/shopify/lookup", shopifyVariantLookupHandler);
 
 // Dynamic route generator
 const { registerAllModelRoutes } = require("../utils/dynamicRouteGenerator");

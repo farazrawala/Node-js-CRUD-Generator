@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { matchProduct, remainderAfterTitle } = require("../utils/shopifyVariantLookup");
+const { matchProduct, remainderAfterTitle, storefrontBaseFromUrl } = require("../utils/shopifyVariantLookup");
 
 test("line name splits into product title and size", () => {
   assert.equal(
@@ -22,4 +22,10 @@ test("matching title and size returns the variant id", () => {
   );
   assert.equal(matched.product_id, "8023691165747");
   assert.equal(matched.variant_id, "45130766811187");
+});
+
+test("integration url becomes the storefront address", () => {
+  assert.equal(storefrontBaseFromUrl("nightsuit.pk"), "https://nightsuit.pk");
+  assert.equal(storefrontBaseFromUrl("https://nightsuit-pk.myshopify.com/admin"), "https://nightsuit-pk.myshopify.com");
+  assert.equal(storefrontBaseFromUrl("nightsuit-pk"), "https://nightsuit-pk.myshopify.com");
 });

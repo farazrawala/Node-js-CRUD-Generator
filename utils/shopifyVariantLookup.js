@@ -1,4 +1,17 @@
-const DEFAULT_STORE = "https://nightsuit.pk";
+function storefrontBaseFromUrl(rawUrl) {
+  let raw = String(rawUrl || "").trim();
+  if (!raw) return "";
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+  let host = "";
+  try {
+    host = new URL(raw).host;
+  } catch {
+    return "";
+  }
+  host = host.replace(/\/$/, "");
+  if (!host.includes(".")) host = `${host}.myshopify.com`;
+  return `https://${host}`;
+}
 
 function norm(value) {
   return String(value || "")
@@ -165,8 +178,8 @@ async function lookupShopifyVariant({ name, sku = "", store = DEFAULT_STORE } = 
 }
 
 module.exports = {
-  DEFAULT_STORE,
   lookupShopifyVariant,
   matchProduct,
   remainderAfterTitle,
+  storefrontBaseFromUrl,
 };
