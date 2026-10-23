@@ -22,6 +22,7 @@ test("matching title and size returns the variant id", () => {
   );
   assert.equal(matched.product_id, "8023691165747");
   assert.equal(matched.variant_id, "45130766811187");
+  assert.equal(matched.sku, "10707181");
 });
 
 test("integration url becomes the storefront address", () => {

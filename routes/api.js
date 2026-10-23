@@ -7,6 +7,7 @@ const {
   lookupShopifyVariant,
   storefrontBaseFromUrl,
 } = require("../utils/shopifyVariantLookup");
+const { resolvePosProductForRemoteLine } = require("../utils/processHelpers");
 const Integration = require("../models/integration");
 
 /** Public deploy / runtime check (same payload as GET /health). */
@@ -64,7 +65,24 @@ async function shopifyVariantLookupHandler(req, res) {
       });
     }
     const result = await lookupShopifyVariant({ name, sku, store });
-    return res.status(result.found ? 200 : 404).json({ ...result, store });
+    let posProductId = "";
+    if (result.found) {
+      const posProduct = await resolvePosProductForRemoteLine({
+        integrationId: integration._id,
+        companyId,
+        remoteProductId: result.product_id,
+        remoteVariantId: result.variant_id,
+        sku: result.sku,
+        name: result.title || "",
+        store: "shopify",
+      });
+      if (posProduct?._id) posProductId = String(posProduct._id);
+    }
+    return res.status(result.found ? 200 : 404).json({
+      ...result,
+      pos_product_id: posProductId,
+      store,
+    });
   } catch (error) {
     return res.status(500).json({ found: false, error: error?.message || "Lookup failed" });
   }

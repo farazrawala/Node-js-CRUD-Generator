@@ -87,7 +87,7 @@ function matchProduct(lineName, sku, product, hintedId) {
   return {
     found: true,
     name: lineName,
-    sku,
+    sku: sku || String(variant.sku || ""),
     product_id: String(product.id),
     variant_id: String(variant.id),
     title: String(product.title),
