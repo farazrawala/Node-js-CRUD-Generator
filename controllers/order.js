@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 const Order = require("../models/order");
-const Integration = require("../models/integration");
 const OrderItem = require("../models/order_item");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
@@ -3194,28 +3193,6 @@ async function sendExistingClientOrder(res, existing) {
  * Idempotent on `client_order_id` (POS offline queue): a retry of a sale that already
  * saved returns that order with 200 + `duplicate: true` instead of creating another.
  */
-/** Website inserts name the store by the company's active Shopify integration. */
-async function attachCompanyShopifyIntegration(req) {
-  if (coalesceObjectId(req.body?.integration_id)) return;
-  const orderType = String(req.body?.order_type || "").trim().toLowerCase();
-  const storeOrderNo = String(req.body?.integration_order_id || "").trim();
-  if (orderType !== "website" && !storeOrderNo) return;
-  const companyId = coalesceObjectId(req.user?.company_id);
-  if (!companyId) return;
-  const integration = await Integration.findOne({
-    company_id: companyId,
-    store_type: "shopify",
-    status: "active",
-    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-  })
-    .sort({ updatedAt: -1 })
-    .select("_id")
-    .lean();
-  if (integration?._id) {
-    req.body.integration_id = integration._id;
-  }
-}
-
 async function order_save(req, res) {
   // step 0 — POS retry of an already-saved sale (e.g. response lost on a flaky connection)
   const clientOrderId = pickClientOrderId(req.body);
@@ -3291,7 +3268,6 @@ async function order_save(req, res) {
     console.warn("[order_save] previous_balance lookup failed", balErr?.message);
     req.body.previous_balance = 0;
   }
-  await attachCompanyShopifyIntegration(req);
   // step 1 end
 
   // Outer state survives txn attempt / standalone retry (see `orderSaveExecutionMode` in rollback logs).
