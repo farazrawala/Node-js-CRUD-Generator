@@ -7750,17 +7750,39 @@ async function order_update_tags(req, res) {
   });
 }
 
-const CONFIRM_BY_SMS_TAG = "confirmed_by_sms";
+const ORDER_CONFIRM_CHANNELS = {
+  sms: {
+    tag: "confirmed_by_sms",
+    label: "SMS",
+    defaultNote: "Confirmed by SMS link",
+  },
+  email: {
+    tag: "confirmed_by_email",
+    label: "email",
+    defaultNote: "Confirmed by email",
+  },
+  whatsapp: {
+    tag: "confirmed_by_whatsapp",
+    label: "WhatsApp",
+    defaultNote: "Confirmed by WhatsApp",
+  },
+};
 
 /**
- * POST|PATCH /api/order/confirm-by-sms/:id
- * OMS "Confirmed by SMS": $addToSet tag `confirmed_by_sms` and insert an order note.
- *
- * Body (optional):
- * - note: custom note text (default includes "Confirmed by SMS link")
- * - confirm_link: appended to the note when provided
+ * Shared OMS confirm-by-channel: $addToSet confirmation tag + order note.
+ * Body (optional): note, confirm_link
  */
-async function order_confirm_by_sms(req, res) {
+async function order_confirm_by_channel(req, res, channelKey) {
+  const channel = ORDER_CONFIRM_CHANNELS[channelKey];
+  if (!channel) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Unsupported confirmation channel",
+      type: "validation",
+    });
+  }
+
   try {
     const orderId = String(req.params?.id || "").trim();
     if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
@@ -7806,13 +7828,13 @@ async function order_confirm_by_sms(req, res) {
     const customNote = String(req.body?.note || "").trim();
     let noteText =
       customNote ||
-      `Confirmed by SMS link${existingOrder.order_no ? ` (${existingOrder.order_no})` : ""}`;
+      `${channel.defaultNote}${existingOrder.order_no ? ` (${existingOrder.order_no})` : ""}`;
     if (confirmLink && !noteText.includes(confirmLink)) {
       noteText = `${noteText}: ${confirmLink}`;
     }
 
     const alreadyTagged = (existingOrder.tags || []).some(
-      (t) => String(t).trim() === CONFIRM_BY_SMS_TAG,
+      (t) => String(t).trim() === channel.tag,
     );
 
     const $set = {};
@@ -7826,7 +7848,7 @@ async function order_confirm_by_sms(req, res) {
         deletedAt: null,
       },
       {
-        $addToSet: { tags: CONFIRM_BY_SMS_TAG },
+        $addToSet: { tags: channel.tag },
         ...(Object.keys($set).length ? { $set } : {}),
       },
       { new: true, runValidators: true },
@@ -7859,11 +7881,11 @@ async function order_confirm_by_sms(req, res) {
       success: true,
       status: 200,
       message: alreadyTagged
-        ? "Order already tagged confirmed_by_sms; note added"
-        : "Order confirmed by SMS",
+        ? `Order already tagged ${channel.tag}; note added`
+        : `Order confirmed by ${channel.label}`,
       data: {
         order: updatedOrder,
-        tag: CONFIRM_BY_SMS_TAG,
+        tag: channel.tag,
         tags: updatedOrder.tags || [],
         note: {
           _id: noteRow._id,
@@ -7874,15 +7896,33 @@ async function order_confirm_by_sms(req, res) {
       },
     });
   } catch (error) {
-    console.error("[order_confirm_by_sms] failed:", error);
+    console.error(`[order_confirm_by_${channelKey}] failed:`, error);
     return res.status(500).json({
       success: false,
       status: 500,
-      error: "Failed to confirm order by SMS",
+      error: `Failed to confirm order by ${channel.label}`,
       details: error?.message || String(error),
       type: "server_error",
     });
   }
+}
+
+/** POST|PATCH /api/order/confirm-by-sms/:id */
+async function order_confirm_by_sms(req, res) {
+  return order_confirm_by_channel(req, res, "sms");
+}
+
+/**
+ * POST|PATCH /api/order/confirm-by-email/:id
+ * OMS "Confirmed by email": tag `confirmed_by_email` + order note.
+ */
+async function order_confirm_by_email(req, res) {
+  return order_confirm_by_channel(req, res, "email");
+}
+
+/** POST|PATCH /api/order/confirm-by-whatsapp/:id */
+async function order_confirm_by_whatsapp(req, res) {
+  return order_confirm_by_channel(req, res, "whatsapp");
 }
 
 /**
@@ -8220,6 +8260,8 @@ module.exports = {
   order_update_status,
   order_update_tags,
   order_confirm_by_sms,
+  order_confirm_by_email,
+  order_confirm_by_whatsapp,
   order_update_address,
   order_validate_address,
   order_merge,

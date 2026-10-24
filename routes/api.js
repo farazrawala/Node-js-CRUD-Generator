@@ -172,6 +172,8 @@ const {
   order_update_status,
   order_update_tags,
   order_confirm_by_sms,
+  order_confirm_by_email,
+  order_confirm_by_whatsapp,
   order_update_address,
   order_validate_address,
   order_delete,
@@ -1032,6 +1034,10 @@ router.patch("/order/update-tags/:id", order_update_tags);
 router.post("/order/update-tags/:id", order_update_tags);
 router.patch("/order/confirm-by-sms/:id", order_confirm_by_sms);
 router.post("/order/confirm-by-sms/:id", order_confirm_by_sms);
+router.patch("/order/confirm-by-email/:id", order_confirm_by_email);
+router.post("/order/confirm-by-email/:id", order_confirm_by_email);
+router.patch("/order/confirm-by-whatsapp/:id", order_confirm_by_whatsapp);
+router.post("/order/confirm-by-whatsapp/:id", order_confirm_by_whatsapp);
 router.patch("/order/update-address/:id", order_update_address);
 router.post("/order/update-address/:id", order_update_address);
 router.post("/order/validate-address", order_validate_address);
