@@ -46,6 +46,11 @@ const modelSchema = new mongoose.Schema(
       required: true,
       field_name: "Secret/client_secret",
     },
+    webhook_secret: {
+      type: String,
+      field_name: "Shopify webhook signing secret",
+      // Admin Notifications webhooks sign with this (not the app Client Secret).
+    },
     token: {
       type: String,
       // required: true,

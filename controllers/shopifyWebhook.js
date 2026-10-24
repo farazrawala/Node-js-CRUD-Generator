@@ -88,7 +88,7 @@ function timingSafeEqualBase64(a, b) {
   }
 }
 
-function verifyShopifyHmac(req, secret) {
+function verifyShopifyHmacWithSecret(req, secret) {
   const hmac = headerValue(req, "x-shopify-hmac-sha256");
   const secretKey = String(secret || "").trim();
   if (!hmac || !secretKey) {
@@ -127,7 +127,59 @@ function verifyShopifyHmac(req, secret) {
   };
 }
 
-async function findShopifyIntegration(req) {
+/**
+ * Shopify Admin → Notifications webhooks sign with the shop "Signing secret".
+ * Custom app webhooks sign with the app Client Secret (`integration.secret`).
+ * Prefer `webhook_secret` when set so API credentials stay untouched.
+ */
+function verifyShopifyHmac(req, integrationOrSecret) {
+  const secrets = [];
+  if (integrationOrSecret && typeof integrationOrSecret === "object") {
+    const webhookSecret = String(integrationOrSecret.webhook_secret || "").trim();
+    const clientSecret = String(integrationOrSecret.secret || "").trim();
+    if (webhookSecret) secrets.push({ source: "webhook_secret", value: webhookSecret });
+    if (clientSecret && clientSecret !== webhookSecret) {
+      secrets.push({ source: "secret", value: clientSecret });
+    } else if (clientSecret && !webhookSecret) {
+      secrets.push({ source: "secret", value: clientSecret });
+    }
+  } else if (integrationOrSecret) {
+    secrets.push({ source: "secret", value: String(integrationOrSecret).trim() });
+  }
+
+  if (!headerValue(req, "x-shopify-hmac-sha256")) {
+    return { ok: false, reason: "missing_hmac_or_secret" };
+  }
+  if (!secrets.length) {
+    return { ok: false, reason: "missing_hmac_or_secret" };
+  }
+
+  let last = { ok: false, reason: "hmac_mismatch" };
+  for (const entry of secrets) {
+    const result = verifyShopifyHmacWithSecret(req, entry.value);
+    last = { ...result, source: entry.source };
+    if (result.ok) return last;
+  }
+  return last;
+}
+
+function integrationMatchesShop(row, shopDomain) {
+  if (!shopDomain) return false;
+  const urlDomain = normalizeShopDomain(row?.url);
+  return (
+    urlDomain === shopDomain ||
+    urlDomain.endsWith(`.${shopDomain}`) ||
+    shopDomain.endsWith(urlDomain) ||
+    String(row?.url || "").toLowerCase().includes(shopDomain)
+  );
+}
+
+/**
+ * Return active Shopify integrations that could own this webhook.
+ * Prefer explicit :integrationId, else all rows matching shop domain
+ * (newest first — multiple POS companies can share one Shopify store URL).
+ */
+async function findShopifyIntegrations(req) {
   const paramId = coalesceObjectId(req.params?.integrationId || req.params?.id);
   if (paramId) {
     const byId = await Integration.findOne({
@@ -136,7 +188,7 @@ async function findShopifyIntegration(req) {
       status: "active",
       $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     }).lean();
-    if (byId) return byId;
+    if (byId) return [byId];
   }
 
   const shopDomain = normalizeShopDomain(
@@ -144,27 +196,36 @@ async function findShopifyIntegration(req) {
       req.query?.shop ||
       req.body?.shop_domain,
   );
-  if (!shopDomain) return null;
+  if (!shopDomain) return [];
 
   const candidates = await Integration.find({
     store_type: "shopify",
     status: "active",
     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
   })
-    .select("+secret")
+    .sort({ updatedAt: -1, createdAt: -1 })
     .lean();
 
-  return (
-    candidates.find((row) => {
-      const urlDomain = normalizeShopDomain(row.url);
-      return (
-        urlDomain === shopDomain ||
-        urlDomain.endsWith(`.${shopDomain}`) ||
-        shopDomain.endsWith(urlDomain) ||
-        String(row.url || "").toLowerCase().includes(shopDomain)
-      );
-    }) || null
-  );
+  return candidates.filter((row) => integrationMatchesShop(row, shopDomain));
+}
+
+/**
+ * Pick the integration whose webhook_secret / client secret verifies HMAC.
+ */
+function resolveIntegrationByHmac(req, candidates) {
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return { integration: null, hmac: { ok: false, reason: "missing_integration" } };
+  }
+
+  let lastHmac = { ok: false, reason: "hmac_mismatch" };
+  for (const row of candidates) {
+    const hmac = verifyShopifyHmac(req, row);
+    lastHmac = hmac;
+    if (hmac.ok) {
+      return { integration: row, hmac };
+    }
+  }
+  return { integration: candidates[0], hmac: lastHmac };
 }
 
 async function resolveWebhookActor(integration) {
@@ -235,8 +296,8 @@ async function shopifyOrdersWebhook(req, res) {
       });
     }
 
-    const integration = await findShopifyIntegration(req);
-    if (!integration) {
+    const candidates = await findShopifyIntegrations(req);
+    if (!candidates.length) {
       webhookConsole("warn", "integration not found", {
         topic,
         shop: shopHeader,
@@ -250,26 +311,34 @@ async function shopifyOrdersWebhook(req, res) {
       });
     }
 
-    const companyId = coalesceObjectId(integration.company_id);
-    const hmac = verifyShopifyHmac(req, integration.secret);
-    if (!hmac.ok) {
+    const { integration, hmac } = resolveIntegrationByHmac(req, candidates);
+    const companyId = coalesceObjectId(integration?.company_id);
+    if (!hmac.ok || !integration) {
       webhookConsole("warn", "HMAC failed", {
         reason: hmac.reason,
         mode: hmac.mode || null,
+        source: hmac.source || null,
         shop: shopHeader,
-        integration_id: String(integration._id),
+        tried: candidates.map((c) => String(c._id)),
+        integration_id: integration ? String(integration._id) : null,
+        has_webhook_secret: Boolean(
+          String(integration?.webhook_secret || "").trim(),
+        ),
       });
       logWebhookEvent(req, {
         action: "Shopify webhook HMAC failed",
         company_id: companyId,
-        created_by: integration.created_by,
+        created_by: integration?.created_by,
         extraTags: ["hmac_failed"],
         description: {
           topic: topic || null,
           shop: shopHeader || null,
-          integration_id: String(integration._id),
+          integration_id: integration ? String(integration._id) : null,
+          tried_integration_ids: candidates.map((c) => String(c._id)),
           reason: hmac.reason,
           mode: hmac.mode || null,
+          hint:
+            "Paste Shopify Admin → Notifications → Webhooks → Signing secret into this integration's webhook_secret field (do not overwrite Client Secret). Or set webhook URL to /shopify/webhook/orders/<integrationId>.",
         },
       });
       return res.status(401).json({
@@ -279,6 +348,13 @@ async function shopifyOrdersWebhook(req, res) {
         reason: hmac.reason,
       });
     }
+
+    webhookConsole("log", "HMAC ok", {
+      integration_id: String(integration._id),
+      company_id: String(companyId || ""),
+      source: hmac.source || null,
+      candidates: candidates.length,
+    });
 
     const remoteOrder = extractOrderPayload(req.body);
     if (!remoteOrder?.id) {
