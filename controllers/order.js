@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Order = require("../models/order");
 const OrderItem = require("../models/order_item");
+const OrderNotes = require("../models/order_notes");
 const Product = require("../models/product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const InventoryMovements = require("../models/inventory_movements");
@@ -7749,6 +7750,141 @@ async function order_update_tags(req, res) {
   });
 }
 
+const CONFIRM_BY_SMS_TAG = "confirmed_by_sms";
+
+/**
+ * POST|PATCH /api/order/confirm-by-sms/:id
+ * OMS "Confirmed by SMS": $addToSet tag `confirmed_by_sms` and insert an order note.
+ *
+ * Body (optional):
+ * - note: custom note text (default includes "Confirmed by SMS link")
+ * - confirm_link: appended to the note when provided
+ */
+async function order_confirm_by_sms(req, res) {
+  try {
+    const orderId = String(req.params?.id || "").trim();
+    if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid id",
+        details: "id must be a valid order ObjectId",
+        type: "invalid_id",
+      });
+    }
+
+    const companyId = coalesceObjectId(req.user?.company_id);
+    if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "company_id is required",
+        details: "Authenticated user must have company_id",
+        type: "validation",
+      });
+    }
+
+    const existingOrder = await Order.findOne({
+      _id: orderId,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    }).lean();
+
+    if (!existingOrder) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Record not found",
+        details: `order with id "${orderId}" not found`,
+        type: "not_found",
+      });
+    }
+
+    const actorUserId = coalesceObjectId(req.user?._id);
+    const confirmLink = String(req.body?.confirm_link || "").trim();
+    const customNote = String(req.body?.note || "").trim();
+    let noteText =
+      customNote ||
+      `Confirmed by SMS link${existingOrder.order_no ? ` (${existingOrder.order_no})` : ""}`;
+    if (confirmLink && !noteText.includes(confirmLink)) {
+      noteText = `${noteText}: ${confirmLink}`;
+    }
+
+    const alreadyTagged = (existingOrder.tags || []).some(
+      (t) => String(t).trim() === CONFIRM_BY_SMS_TAG,
+    );
+
+    const $set = {};
+    if (actorUserId) $set.updated_by = actorUserId;
+
+    const updatedOrder = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        company_id: companyId,
+        status: "active",
+        deletedAt: null,
+      },
+      {
+        $addToSet: { tags: CONFIRM_BY_SMS_TAG },
+        ...(Object.keys($set).length ? { $set } : {}),
+      },
+      { new: true, runValidators: true },
+    ).lean();
+
+    if (!updatedOrder) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Record not found",
+        type: "not_found",
+      });
+    }
+
+    const noteDoc = {
+      order_id: updatedOrder._id,
+      type: "notes",
+      note: noteText,
+      company_id: companyId,
+      status: "active",
+      deletedAt: null,
+    };
+    if (actorUserId) {
+      noteDoc.created_by = actorUserId;
+      noteDoc.updated_by = actorUserId;
+    }
+    const noteRow = await OrderNotes.create(noteDoc);
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: alreadyTagged
+        ? "Order already tagged confirmed_by_sms; note added"
+        : "Order confirmed by SMS",
+      data: {
+        order: updatedOrder,
+        tag: CONFIRM_BY_SMS_TAG,
+        tags: updatedOrder.tags || [],
+        note: {
+          _id: noteRow._id,
+          note: noteRow.note,
+          type: noteRow.type,
+          createdAt: noteRow.createdAt,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("[order_confirm_by_sms] failed:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: "Failed to confirm order by SMS",
+      details: error?.message || String(error),
+      type: "server_error",
+    });
+  }
+}
+
 /**
  * POST /api/order/validate-address
  * Body (any one):
@@ -8083,6 +8219,7 @@ module.exports = {
   order_update,
   order_update_status,
   order_update_tags,
+  order_confirm_by_sms,
   order_update_address,
   order_validate_address,
   order_merge,
