@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const Integration = require("../models/integration");
 const User = require("../models/user");
 const { coalesceObjectId } = require("../utils/modelHelper");
+const { createApplicationLog } = require("../utils/applicationLogs");
 const { createFetchOrderStats } = require("../utils/processHelpers");
 const {
   buildShopifyClient,
@@ -16,6 +17,46 @@ const ORDER_TOPICS = new Set([
   "orders/fulfilled",
   "orders/partially_fulfilled",
 ]);
+
+const WEBHOOK_LOG_TAGS = ["webhook", "shopify"];
+
+function webhookConsole(level, message, extra) {
+  const prefix = "[webhook]";
+  const payload = extra != null ? extra : "";
+  if (level === "error") console.error(prefix, message, payload);
+  else if (level === "warn") console.warn(prefix, message, payload);
+  else console.log(prefix, message, payload);
+}
+
+/**
+ * Persist a POS `logs` row tagged `webhook` (filterable via ?tag=webhook).
+ * Skips silently when company_id is missing (early reject before integration resolve).
+ */
+function logWebhookEvent(req, {
+  action,
+  description,
+  company_id,
+  created_by,
+  reference_id,
+  extraTags = [],
+}) {
+  const companyId = coalesceObjectId(company_id);
+  if (!companyId) return;
+  void createApplicationLog(
+    req,
+    {
+      action: String(action || "Shopify webhook").trim(),
+      url: req?.originalUrl || req?.url || "/api/shopify/webhook/orders",
+      tags: [...WEBHOOK_LOG_TAGS, ...extraTags],
+      description,
+      company_id: companyId,
+      created_by: coalesceObjectId(created_by) || undefined,
+      reference_type: reference_id ? "order" : "shopify_webhook",
+      reference_id: reference_id || undefined,
+    },
+    { silent: true },
+  );
+}
 
 function headerValue(req, name) {
   const key = String(name || "").toLowerCase();
@@ -169,9 +210,23 @@ function extractOrderPayload(body) {
  * via importShopifyOrderToPos (same path as fetch_order).
  */
 async function shopifyOrdersWebhook(req, res) {
+  const shopHeader = headerValue(req, "x-shopify-shop-domain");
+  const topic = String(headerValue(req, "x-shopify-topic") || "").trim();
+  const paramIntegrationId = String(
+    req.params?.integrationId || req.params?.id || "",
+  ).trim();
+
+  webhookConsole("log", "received", {
+    topic: topic || null,
+    shop: shopHeader || null,
+    integrationId: paramIntegrationId || null,
+    hasHmac: Boolean(headerValue(req, "x-shopify-hmac-sha256")),
+    hasRawBody: Boolean(req.rawBody && req.rawBody.length),
+  });
+
   try {
-    const topic = String(headerValue(req, "x-shopify-topic") || "").trim();
     if (topic && !ORDER_TOPICS.has(topic)) {
+      webhookConsole("warn", "ignored topic", { topic, shop: shopHeader });
       return res.status(200).json({
         success: true,
         status: 200,
@@ -182,6 +237,11 @@ async function shopifyOrdersWebhook(req, res) {
 
     const integration = await findShopifyIntegration(req);
     if (!integration) {
+      webhookConsole("warn", "integration not found", {
+        topic,
+        shop: shopHeader,
+        integrationId: paramIntegrationId || null,
+      });
       return res.status(404).json({
         success: false,
         status: 404,
@@ -190,14 +250,28 @@ async function shopifyOrdersWebhook(req, res) {
       });
     }
 
+    const companyId = coalesceObjectId(integration.company_id);
     const hmac = verifyShopifyHmac(req, integration.secret);
     if (!hmac.ok) {
-      console.warn(
-        "[shopify webhook] HMAC failed:",
-        hmac.reason,
-        "shop:",
-        headerValue(req, "x-shopify-shop-domain"),
-      );
+      webhookConsole("warn", "HMAC failed", {
+        reason: hmac.reason,
+        mode: hmac.mode || null,
+        shop: shopHeader,
+        integration_id: String(integration._id),
+      });
+      logWebhookEvent(req, {
+        action: "Shopify webhook HMAC failed",
+        company_id: companyId,
+        created_by: integration.created_by,
+        extraTags: ["hmac_failed"],
+        description: {
+          topic: topic || null,
+          shop: shopHeader || null,
+          integration_id: String(integration._id),
+          reason: hmac.reason,
+          mode: hmac.mode || null,
+        },
+      });
       return res.status(401).json({
         success: false,
         status: 401,
@@ -208,6 +282,22 @@ async function shopifyOrdersWebhook(req, res) {
 
     const remoteOrder = extractOrderPayload(req.body);
     if (!remoteOrder?.id) {
+      webhookConsole("warn", "missing order payload", {
+        shop: shopHeader,
+        integration_id: String(integration._id),
+        bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body).slice(0, 20) : [],
+      });
+      logWebhookEvent(req, {
+        action: "Shopify webhook missing order payload",
+        company_id: companyId,
+        created_by: integration.created_by,
+        extraTags: ["bad_payload"],
+        description: {
+          topic: topic || null,
+          shop: shopHeader || null,
+          integration_id: String(integration._id),
+        },
+      });
       return res.status(400).json({
         success: false,
         status: 400,
@@ -215,8 +305,10 @@ async function shopifyOrdersWebhook(req, res) {
       });
     }
 
-    const companyId = coalesceObjectId(integration.company_id);
     if (!companyId) {
+      webhookConsole("warn", "integration missing company_id", {
+        integration_id: String(integration._id),
+      });
       return res.status(400).json({
         success: false,
         status: 400,
@@ -249,15 +341,23 @@ async function shopifyOrdersWebhook(req, res) {
           client = built.client;
           graphql = built.graphql;
         } else {
-          console.warn("[shopify webhook] enrich skipped:", built.error);
+          webhookConsole("warn", "enrich skipped", built.error);
         }
       } catch (err) {
-        console.warn(
-          "[shopify webhook] client init skipped:",
-          err?.message || err,
-        );
+        webhookConsole("warn", "client init skipped", err?.message || err);
       }
     }
+
+    webhookConsole("log", "importing order", {
+      shopify_order_id: remoteOrder.id,
+      order_number: remoteOrder.order_number ?? null,
+      integration_id: String(integration._id),
+      company_id: String(companyId),
+      enrich: wantEnrich && !!client,
+      line_items: Array.isArray(remoteOrder.line_items)
+        ? remoteOrder.line_items.length
+        : 0,
+    });
 
     const stats = {
       ...createFetchOrderStats(),
@@ -284,26 +384,42 @@ async function shopifyOrdersWebhook(req, res) {
       : skipped ? "skipped"
       : "processed";
 
+    const resultData = {
+      outcome,
+      topic: topic || null,
+      shop: shopHeader || null,
+      shopify_order_id: remoteOrder.id,
+      shopify_order_number: remoteOrder.order_number ?? null,
+      integration_id: String(integration._id),
+      company_id: String(companyId),
+      inserted: stats.inserted,
+      updated: stats.updated || 0,
+      lines_inserted: stats.lines_inserted,
+      lines_skipped: stats.lines_skipped,
+      skipped,
+    };
+
+    webhookConsole("log", `outcome ${outcome}`, resultData);
+    logWebhookEvent(req, {
+      action: `Shopify webhook ${outcome} :: #${remoteOrder.order_number ?? remoteOrder.id}`,
+      company_id: companyId,
+      created_by: actorId || integration.created_by,
+      extraTags: [outcome],
+      description: resultData,
+    });
+
     return res.status(200).json({
       success: true,
       status: 200,
       message: `Shopify order webhook ${outcome}`,
-      data: {
-        outcome,
-        topic: topic || null,
-        shop: headerValue(req, "x-shopify-shop-domain") || null,
-        shopify_order_id: remoteOrder.id,
-        shopify_order_number: remoteOrder.order_number ?? null,
-        integration_id: String(integration._id),
-        company_id: String(companyId),
-        inserted: stats.inserted,
-        updated: stats.updated || 0,
-        lines_inserted: stats.lines_inserted,
-        lines_skipped: stats.lines_skipped,
-        skipped,
-      },
+      data: resultData,
     });
   } catch (error) {
+    webhookConsole("error", "failed", {
+      message: error?.message || String(error),
+      shop: shopHeader || null,
+      topic: topic || null,
+    });
     console.error("❌ shopifyOrdersWebhook:", error);
     return res.status(500).json({
       success: false,

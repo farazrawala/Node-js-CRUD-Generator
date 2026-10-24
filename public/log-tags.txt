@@ -119,6 +119,7 @@ user_company
 wac_replay
 warehouse
 warehouse_inventory
+webhook
 whatsapp
 whatsapp_message
 wholesale_price
