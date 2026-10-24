@@ -713,19 +713,34 @@ class FlagshipCourier extends BaseCourier {
   async healthCheck() {
     try {
       this.getApiKey();
-      const url = this.endpoint("api/statuses/");
-      const res = await httpRequest(url, {
-        method: "GET",
-        provider: this.providerName,
-        headers: this.authHeaders(),
-      });
-      if (res.status >= 400 || res.data?.success === false) {
-        return {
-          ok: false,
-          message: this.extractErrorMessage(res, "Flaship auth failed"),
-        };
+      // Prefer company_list (primary booking endpoint); fall back to statuses.
+      const paths = ["company_list/", "api/statuses/"];
+      let lastMessage = "Flaship auth failed";
+      for (const path of paths) {
+        const url = this.endpoint(path);
+        const res = await httpRequest(url, {
+          method: "GET",
+          provider: this.providerName,
+          headers: this.authHeaders(),
+        });
+        if (res.status < 400 && res.data?.success !== false) {
+          return { ok: true, message: "Flaship auth OK" };
+        }
+        lastMessage = this.extractErrorMessage(res, "Flaship auth failed");
+        const body = typeof res.data === "string" ? res.data : "";
+        if (
+          res.status === 404 ||
+          /this page could not be found/i.test(body) ||
+          /<!DOCTYPE html/i.test(body)
+        ) {
+          return {
+            ok: false,
+            message:
+              "Flaship API returned 404 at partners.flaship.pk/mr/… — merchant API routes are not reachable (site serves HTML 404). Confirm your X-API-KEY is active and ask Flaship (support@flaship.pk) for the current API base URL.",
+          };
+        }
       }
-      return { ok: true, message: "Flaship auth OK" };
+      return { ok: false, message: lastMessage };
     } catch (err) {
       return { ok: false, message: err.message };
     }
