@@ -98,6 +98,7 @@ skipped
 skipped_bigcommerce
 skipped_shopify
 skipped_woocommerce
+sms_message
 soft_delete
 stock
 stock_alert

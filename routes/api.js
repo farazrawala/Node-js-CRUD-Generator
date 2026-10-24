@@ -378,6 +378,11 @@ const {
   markWhatsappMessageNotAvailable,
 } = require("../controllers/whatsapp_message");
 const {
+  listOnHoldSmsMessages,
+  fetchRandomSmsMessage,
+  markSmsMessageSent,
+} = require("../controllers/sms_message");
+const {
   chatCreate,
   fetchLastChats,
   fetchChatConversations,
@@ -739,6 +744,20 @@ router.get("/whatsapp_message/fetch-random", fetchRandomWhatsappMessage);
 router.get("/whatsapp_messages/fetch-random", fetchRandomWhatsappMessage);
 router.get("/whatsapp_message/mark-sent/:id", markWhatsappMessageSent);
 router.get("/whatsapp_messages/mark-sent/:id", markWhatsappMessageSent);
+
+// SMS message worker routes (on_hold → processing → sent)
+router.get("/sms_message/on-hold", listOnHoldSmsMessages);
+router.get("/sms_messages/on-hold", listOnHoldSmsMessages);
+router.get("/sms_message/list-on-hold", listOnHoldSmsMessages);
+router.get("/sms_messages/list-on-hold", listOnHoldSmsMessages);
+router.get("/sms_message/fetch-random", fetchRandomSmsMessage);
+router.get("/sms_messages/fetch-random", fetchRandomSmsMessage);
+router.get("/sms_message/mark-sent/:id", markSmsMessageSent);
+router.post("/sms_message/mark-sent/:id", markSmsMessageSent);
+router.patch("/sms_message/mark-sent/:id", markSmsMessageSent);
+router.get("/sms_messages/mark-sent/:id", markSmsMessageSent);
+router.post("/sms_messages/mark-sent/:id", markSmsMessageSent);
+router.patch("/sms_messages/mark-sent/:id", markSmsMessageSent);
 
 // Chat insert via POS auth token in URL (no Authorization header required)
 router.post("/chat/create/:pos_auth_token", chatCreate);

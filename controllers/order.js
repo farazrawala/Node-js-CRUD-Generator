@@ -48,8 +48,15 @@ const {
   shouldQueueWhatsappForOrder,
   buildWhatsappOrderMessage,
 } = require("../utils/companyWhatsappSettings");
+const {
+  parseSmsLocalSettings,
+  shouldQueueSmsForOrder,
+  buildSmsOrderMessage,
+} = require("../utils/companySmsSettings");
 const WhatsappMessage = require("../models/whatsapp_message");
+const SmsMessage = require("../models/sms_message");
 const User = require("../models/user");
+const Company = require("../models/company");
 const { findUserRefSearchClauses } = require("../utils/userRefSearch");
 const Account = require("../models/account");
 const {
@@ -3040,6 +3047,105 @@ async function getDeletedOrders(req, res) {
 }
 
 /**
+ * Resolve company doc for messaging settings.
+ * Prefer a fresh DB load so PATCH company settings apply without re-login.
+ */
+async function resolveCompanyForOrderMessaging(req, order) {
+  const companyId =
+    coalesceObjectId(order?.company_id) ||
+    coalesceObjectId(req.user?.company_id);
+  if (companyId) {
+    const fresh = await Company.findById(companyId).lean();
+    if (fresh) return fresh;
+  }
+  return req.user?.company_id && typeof req.user.company_id === "object" ?
+      req.user.company_id
+    : null;
+}
+
+/**
+ * When company SMS settings allow it, queue an `sms_message`
+ * for the order phone (status: on_hold).
+ *
+ * Uses `sms_local_settings` (`send_sms_on_order_message` and optional
+ * `send_sms_greater_than` / `send_sms_greater_than_amount`).
+ * Errors are logged and do not fail order_save.
+ */
+async function maybeQueueSmsOnOrderSave(req, order) {
+  try {
+    const company = await resolveCompanyForOrderMessaging(req, order);
+    if (!shouldQueueSmsForOrder(company, order)) {
+      return null;
+    }
+
+    let phone = order?.phone != null ? String(order.phone).trim() : "";
+    if (!phone && order?.customer_id) {
+      const customer = await User.findById(order.customer_id)
+        .select("phone")
+        .lean();
+      phone = customer?.phone != null ? String(customer.phone).trim() : "";
+    }
+
+    if (!phone) {
+      console.warn(
+        "[order_save] sms skipped: no phone on order/customer",
+        order?._id,
+      );
+      return null;
+    }
+
+    const settings = parseSmsLocalSettings(company);
+    const message = buildSmsOrderMessage(settings, order);
+    if (!String(message || "").trim()) {
+      console.warn(
+        "[order_save] sms skipped: empty message template",
+        order?._id,
+      );
+      return null;
+    }
+
+    const companyId =
+      coalesceObjectId(order?.company_id) ||
+      coalesceObjectId(req.user?.company_id);
+
+    const row = await SmsMessage.create({
+      number: phone,
+      message,
+      status: "on_hold",
+      company_id: companyId,
+      created_by: coalesceObjectId(req.user?._id),
+    });
+
+    console.log(
+      "[order_save] sms_message queued:",
+      row._id,
+      "number:",
+      row.number,
+    );
+    return row;
+  } catch (err) {
+    console.error(
+      "[order_save] sms_message insert failed:",
+      err?.message || err,
+    );
+    try {
+      await logControllerError(
+        req,
+        `sms_message insert failed after order_save: ${err?.message || err} (order_id=${order?._id || ""})`,
+        {
+          action: "SMS QUEUE ERROR",
+          tags: ["api", "error", "sms"],
+          fallbackUrl: "/api/order/order_save",
+        },
+      );
+    } catch (_) {
+      /* ignore */
+    }
+    return null;
+  }
+}
+
+/**
  * When company whatsapp_local_settings allow it, queue a `whatsapp_message`
  * for the order phone (status: not_started).
  *
@@ -3049,10 +3155,7 @@ async function getDeletedOrders(req, res) {
  */
 async function maybeQueueWhatsappOnOrderSave(req, order) {
   try {
-    const company =
-      req.user?.company_id && typeof req.user.company_id === "object" ?
-        req.user.company_id
-      : null;
+    const company = await resolveCompanyForOrderMessaging(req, order);
 
     if (!shouldQueueWhatsappForOrder(company, order)) {
       return null;
@@ -3725,8 +3828,10 @@ async function order_save(req, res) {
     insertedItemsPlain,
   );
 
-  // Queue WhatsApp without blocking the Payment 201 response.
-  void maybeQueueWhatsappOnOrderSave(req, orderFresh || response.data);
+  // Queue SMS / WhatsApp without blocking the Payment 201 response.
+  const orderForMessage = orderFresh || response.data;
+  void maybeQueueSmsOnOrderSave(req, orderForMessage);
+  void maybeQueueWhatsappOnOrderSave(req, orderForMessage);
 
   let vendorOrder = null;
   try {

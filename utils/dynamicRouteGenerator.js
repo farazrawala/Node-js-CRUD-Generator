@@ -770,6 +770,8 @@ function generateControllerFunctions(modelName) {
             if (!includeInactive) {
               filter.status = { $ne: "inactive" };
             }
+          } else if (modelName === "sms_message" || modelName === "whatsapp_message") {
+            // Queue `status` is on_hold / processing / sent — not active/inactive.
           } else {
             filter.status = "active";
           }

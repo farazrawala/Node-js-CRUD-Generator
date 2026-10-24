@@ -317,6 +317,45 @@ const modelSchema = new mongoose.Schema(
     },
 
     /**
+     * Local SMS alert settings (POS saves this as JSON string), same role as
+     * `whatsapp_local_settings`. Shape:
+     * {
+     *   "send_sms_on_order": true,
+     *   "send_sms_on_order_message": "Hi {name}, ...",
+     *   "send_sms_greater_than": false,
+     *   "send_sms_greater_than_amount": 0
+     * }
+     */
+    local_sms: {
+      type: String,
+      field_name: "Local SMS Settings",
+    },
+    /** @deprecated Prefer `local_sms` (POS). Kept for older payloads. */
+    sms_local_settings: {
+      type: String,
+      field_name: "SMS Local Settings",
+    },
+    send_sms_on_order: {
+      type: Boolean,
+      default: false,
+      field_name: "Send SMS On Order",
+    },
+    send_sms_on_order_message: {
+      type: String,
+      field_name: "SMS On Order Message",
+    },
+    send_sms_greater_than: {
+      type: Boolean,
+      default: false,
+      field_name: "SMS Only Above Amount",
+    },
+    send_sms_greater_than_amount: {
+      type: Number,
+      default: 0,
+      field_name: "SMS Minimum Order Amount",
+    },
+
+    /**
      * Preferred courier for CourierService / CourierFactory.
      * Values: TCS | Leopard | BlueEX | M&P | Call Courier | Trax
      */
