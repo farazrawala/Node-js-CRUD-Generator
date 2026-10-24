@@ -224,6 +224,15 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/whatsapp_message\/mark-not-available\/.*/,
     /^\/whatsapp_messages\/mark-not-available\/.*/,
     /^\/api\/whatsapp_messages\/mark-not-available\/.*/,
+    // Shopify order webhooks (HMAC verified in controller)
+    "/shopify/webhook/orders",
+    "/api/shopify/webhook/orders",
+    "/shopify/webhooks/orders",
+    "/api/shopify/webhooks/orders",
+    /^\/shopify\/webhook\/orders\/.*/,
+    /^\/api\/shopify\/webhook\/orders\/.*/,
+    /^\/shopify\/webhooks\/orders\/.*/,
+    /^\/api\/shopify\/webhooks\/orders\/.*/,
     // SMS worker routes (public, company_id query — same pattern as whatsapp_message)
     "/sms_message/on-hold",
     "/api/sms_message/on-hold",

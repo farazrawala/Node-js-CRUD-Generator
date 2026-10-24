@@ -327,7 +327,16 @@ app.use(
 
 // Middleware to handle different content types AFTER file upload
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(
+  express.json({
+    // Keep raw bytes for Shopify webhook HMAC (X-Shopify-Hmac-Sha256).
+    verify: (req, _res, buf) => {
+      if (buf?.length) {
+        req.rawBody = Buffer.from(buf);
+      }
+    },
+  }),
+);
 
 // Debug middleware to log request details
 app.use((req, res, next) => {

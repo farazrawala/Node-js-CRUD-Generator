@@ -4066,10 +4066,14 @@ async function resolveMissingShopifyOrderLineProduct(line, resolvedProduct, ctx)
 }
 
 async function importShopifyOrderToPos(remoteOrder, orderCtx) {
+  const allowRemoteProductCreate = orderCtx?.allowRemoteProductCreate !== false;
   const ctx = {
     ...orderCtx,
-    resolveMissingLineProduct: (line, product) =>
-      resolveMissingShopifyOrderLineProduct(line, product, orderCtx),
+    resolveMissingLineProduct:
+      allowRemoteProductCreate ?
+        (line, product) =>
+          resolveMissingShopifyOrderLineProduct(line, product, orderCtx)
+      : async () => null,
   };
   await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client);
   await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
@@ -6485,4 +6489,5 @@ module.exports = {
   sync_product,
   sync_category,
   sync_brand,
+  importShopifyOrderToPos,
 };

@@ -382,6 +382,13 @@ const {
   fetchRandomSmsMessage,
   markSmsMessageSent,
 } = require("../controllers/sms_message");
+const { shopifyOrdersWebhook } = require("../controllers/shopifyWebhook");
+
+// Shopify order webhooks (public — HMAC verified with integration.secret)
+router.post("/shopify/webhook/orders", shopifyOrdersWebhook);
+router.post("/shopify/webhook/orders/:integrationId", shopifyOrdersWebhook);
+router.post("/shopify/webhooks/orders", shopifyOrdersWebhook);
+router.post("/shopify/webhooks/orders/:integrationId", shopifyOrdersWebhook);
 const {
   chatCreate,
   fetchLastChats,
