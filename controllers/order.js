@@ -3096,7 +3096,7 @@ async function maybeQueueSmsOnOrderSave(req, order) {
     }
 
     const settings = parseSmsLocalSettings(company);
-    const message = buildSmsOrderMessage(settings, order);
+    const message = buildSmsOrderMessage(settings, order, { req });
     if (!String(message || "").trim()) {
       console.warn(
         "[order_save] sms skipped: empty message template",
@@ -3179,7 +3179,7 @@ async function maybeQueueWhatsappOnOrderSave(req, order) {
     }
 
     const settings = parseWhatsappLocalSettings(company);
-    const message = buildWhatsappOrderMessage(settings, order);
+    const message = buildWhatsappOrderMessage(settings, order, { req });
 
     const companyId =
       coalesceObjectId(order?.company_id) ||
@@ -7824,7 +7824,12 @@ async function order_confirm_by_channel(req, res, channelKey) {
     }
 
     const actorUserId = coalesceObjectId(req.user?._id);
-    const confirmLink = String(req.body?.confirm_link || "").trim();
+    const { buildOrderIntegrationUrl } = require("../utils/orderConfirmUrl");
+    const confirmLink = String(
+      req.body?.confirm_link ||
+        buildOrderIntegrationUrl(existingOrder, { req }) ||
+        "",
+    ).trim();
     const customNote = String(req.body?.note || "").trim();
     let noteText =
       customNote ||

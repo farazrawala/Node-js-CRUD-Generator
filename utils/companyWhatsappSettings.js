@@ -85,10 +85,15 @@ function shouldQueueWhatsappForOrder(company, order) {
 
 /**
  * Build text from `send_whatsapp_on_order_message`.
- * Placeholders: {name}, {phone}, {email}, {total_amount}, {transaction_number}, {createdAt}
- * Also supports {order_no} as a convenience.
+ * Placeholders: {name}, {phone}, {email}, {total_amount}, {transaction_number},
+ * {createdAt}, {order_no}, {integration_url}, {confirm_url}, {thank_you_url}
+ *
+ * @param {object} settings
+ * @param {object} order
+ * @param {{ req?: import("express").Request, baseUrl?: string }} [options]
  */
-function buildWhatsappOrderMessage(settings, order) {
+function buildWhatsappOrderMessage(settings, order, options = {}) {
+  const { buildOrderIntegrationUrl } = require("./orderConfirmUrl");
   const template =
     (settings &&
       (settings.send_whatsapp_on_order_message ||
@@ -96,6 +101,16 @@ function buildWhatsappOrderMessage(settings, order) {
         settings.order_message ||
         settings.template)) ||
     "Hi {name},\n\nThank you for your order.\nPhone: {phone}\nEmail: {email}\nAmount: {total_amount}\nTransaction #: {transaction_number}\nDate: {createdAt}";
+
+  const integrationUrl = buildOrderIntegrationUrl(order, {
+    req: options.req,
+    baseUrl:
+      options.baseUrl ||
+      settings?.integration_url ||
+      settings?.pos_url ||
+      settings?.app_url ||
+      "",
+  });
 
   const replacements = {
     name:
@@ -110,6 +125,9 @@ function buildWhatsappOrderMessage(settings, order) {
       order?.transaction_number != null ? String(order.transaction_number) : "",
     createdAt: formatWhatsappDate(order?.createdAt),
     order_no: order?.order_no != null ? String(order.order_no) : "",
+    integration_url: integrationUrl,
+    confirm_url: integrationUrl,
+    thank_you_url: integrationUrl,
   };
 
   return String(template).replace(/\{(\w+)\}/g, (_, key) =>
