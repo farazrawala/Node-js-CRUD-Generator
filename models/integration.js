@@ -101,6 +101,11 @@ const modelSchema = new mongoose.Schema(
       field_name: "SMTP 2FA Password",
     },
 
+    webhook_order_secret: {
+      type: String,
+      field_name: "Webhook Order Secret",
+    },
+
     sync_product_name: {
       type: String,
       enum: ["yes", "no"],
