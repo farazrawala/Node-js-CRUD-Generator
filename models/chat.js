@@ -37,6 +37,28 @@ const modelSchema = new mongoose.Schema(
       ref: "whatsapp_message",
       field_name: "Whatsapp Message ID",
     },
+    /** WhatsApp's own id for a received message (from the extension), to tell repeats apart. */
+    wa_message_key: {
+      type: String,
+    },
+
+    /** "automation" = queued by a WhatsApp automation flow (sent first, oldest first). */
+    source: {
+      type: String,
+      enum: ["automation"],
+      field_name: "Source",
+    },
+    automation_session_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "wa_automation_session",
+      field_name: "Automation Session",
+    },
+    /** Not handed to the extension before this time (flow "Delay" steps). */
+    send_after: {
+      type: Date,
+      default: null,
+      field_name: "Send After",
+    },
 
     type: {
       type: String,
@@ -110,6 +132,9 @@ modelSchema.index(
     },
   },
 );
+
+// fetch-random: oldest due automation reply first
+modelSchema.index({ company_id: 1, source: 1, status: 1, createdAt: 1 });
 
 const MODEL = mongoose.model("chat", modelSchema);
 

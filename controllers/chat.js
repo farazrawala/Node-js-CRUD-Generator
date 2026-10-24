@@ -69,6 +69,8 @@ function buildPendingChatFilter(companyId, excludeIds = []) {
   const filter = {
     status: "not_started",
     type: "sent",
+    // Automation replies are served first and in order by claimNextAutomationReply
+    source: { $ne: "automation" },
     $and: [activeNotDeletedCriteria()],
   };
   if (companyId) {
@@ -113,6 +115,18 @@ function buildStableReceivedMessageId({
 }
 
 /**
+ * The stable part of the extension's WhatsApp message id ("false_92300…@c.us_3EB0…"
+ * → "3EB0…"; the chat part can switch between @c.us and @lid). "" for the
+ * extension's dom_ fallback ids, which are not WhatsApp's.
+ */
+function whatsappMessageKey(rawId) {
+  const id = String(rawId || "").trim();
+  if (!id || id.startsWith("dom_")) return "";
+  const legacy = id.match(/^(?:true|false)_[^_]+_([^_]+)/);
+  return legacy ? legacy[1] : id;
+}
+
+/**
  * POST /api/chat/create/:pos_auth_token
  * POST /api/chat/create/:pos_auth_token/swap  (or ?swap=1)
  * Receive a chat message and insert into the chat collection.
@@ -149,7 +163,8 @@ function wantsChatUserSwap(req) {
  *   Step 6  – Resolve company_id and chat type (swap → "sent", else "received").
  *   Step 7  – Build a stable message_id hash and skip duplicates.
  *   Step 8  – Insert the chat through the generic create handler.
- *   Step 9  – For new "received" messages, generate/queue the Groq auto-reply.
+ *   Step 9  – For new "received" messages, run WhatsApp automation flows; when no
+ *             flow takes the message, generate/queue the Groq auto-reply.
  *   Step 10 – Send the response (duplicate-key race → 200 skipped).
  */
 async function chatCreate(req, res) {
@@ -205,18 +220,25 @@ async function chatCreate(req, res) {
     });
 
     if (stableMessageId) {
+      const findSaved = (messageId) =>
+        Chat.findOne({ company_id: companyId, message_id: messageId, type: chatType, deletedAt: null }).lean();
+
+      // WhatsApp times are whole minutes, so a customer sending "2" twice in one
+      // minute gives the same fingerprint. Two different WhatsApp ids mean two
+      // messages: the second one gets its own id instead of being skipped.
+      const waMessageKey = whatsappMessageKey(req.body?.message_id);
+      let messageId = stableMessageId;
+      let existing = await findSaved(messageId);
+      if (existing && waMessageKey && existing.wa_message_key && existing.wa_message_key !== waMessageKey) {
+        messageId = crypto.createHash("sha256").update(`${stableMessageId}|${waMessageKey}`, "utf8").digest("hex");
+        existing = await findSaved(messageId);
+      }
+
       // Store our stable id as message_id instead of WhatsApp's
-      req.body = { ...req.body, message_id: stableMessageId };
+      req.body = { ...req.body, message_id: messageId, ...(waMessageKey ? { wa_message_key: waMessageKey } : {}) };
 
       // Same message already saved (same company, id, type, not deleted)?
       // Return the existing row with 200 + skipped: true instead of inserting again.
-      const existing = await Chat.findOne({
-        company_id: companyId,
-        message_id: stableMessageId,
-        type: chatType,
-        deletedAt: null,
-      }).lean();
-
       if (existing) {
         return res.status(200).json({
           success: true,
@@ -238,12 +260,32 @@ async function chatCreate(req, res) {
       response.swapped = swapUsers;
     }
 
-    // Step 9: New customer message → same as GET /chat/list?date=today&limit=5&number=<sender>
+    // Step 9a: WhatsApp automation flows answer first (keyword / new conversation /
+    // customer mid-flow / handed to the team). Errors never fail the create.
+    let automation = null;
+    if (response?.success && chatType === "received" && response.data?.from_user_id) {
+      try {
+        const { handleInboundMessage } = require("../utils/waAutomation/inbound");
+        automation = await handleInboundMessage({ companyId, chat: response.data });
+        response.automation = automation;
+      } catch (automationErr) {
+        console.error("❌ chatCreate → automation:", automationErr);
+        response.automation = { handled: false, error: automationErr.message || "Automation failed" };
+      }
+    }
+
+    // Step 9b: New customer message → same as GET /chat/list?date=today&limit=5&number=<sender>
     // Loads today's conversation with the sender, asks Groq for expected_reply
     // and queues it as a WhatsApp message. Only for successfully saved
-    // "received" messages. Auto-reply errors are reported in response.auto_reply
-    // but never fail the create itself.
-    if (response?.success && chatType === "received" && response.data?.from_user_id) {
+    // "received" messages no automation flow handled. Auto-reply errors are
+    // reported in response.auto_reply but never fail the create itself.
+    if (
+      response?.success &&
+      chatType === "received" &&
+      response.data?.from_user_id &&
+      !automation?.handled &&
+      !automation?.suppress_ai
+    ) {
       try {
         const autoReply = await autoReplyToNumber(
           req,
@@ -263,6 +305,22 @@ async function chatCreate(req, res) {
           expected_reply: null,
           expected_reply_error: autoErr.message || "Auto reply failed",
         };
+      }
+
+      // Step 9c: the flow handed a question (not a menu choice) to the AI. Note the
+      // AI's answer in the conversation, or let the bot reply when the AI couldn't.
+      if (automation?.reason === "ask_ai") {
+        try {
+          const inbound = require("../utils/waAutomation/inbound");
+          const reply = response.auto_reply?.expected_reply;
+          if (reply && response.auto_reply?.expected_reply_queued?.success) {
+            await inbound.recordAiAnswer({ sessionId: automation.session_id, text: response.data.message, reply });
+          } else {
+            response.automation = await inbound.handleInboundMessage({ companyId, chat: response.data, allowAi: false });
+          }
+        } catch (automationErr) {
+          console.error("❌ chatCreate → automation after AI:", automationErr);
+        }
       }
     }
 
@@ -289,18 +347,66 @@ async function chatCreate(req, res) {
   }
 }
 
+/** The extension sends a fetched message within ~30s; a claim older than this was dropped (reload, Stop). */
+const AUTOMATION_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
+/** Dropped replies are handed out again only while still fresh (matches the runtime's 10-minute "on its way"). */
+const AUTOMATION_RESEND_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Oldest due WhatsApp-automation reply, claimed (status → inprocess).
+ * Customers wrote first, so the unknown-number daily limit does not apply, and
+ * oldest-first keeps one customer's messages in order. A reply the extension
+ * claimed but never marked sent or failed is handed out again.
+ */
+async function claimNextAutomationReply(companyId) {
+  const now = Date.now();
+  return Chat.findOneAndUpdate(
+    {
+      company_id: companyId,
+      source: "automation",
+      type: "sent",
+      deletedAt: null,
+      $and: [
+        { $or: [{ send_after: null }, { send_after: { $lte: new Date(now) } }] },
+        {
+          $or: [
+            { status: "not_started" },
+            {
+              status: "inprocess",
+              updatedAt: { $lt: new Date(now - AUTOMATION_CLAIM_TIMEOUT_MS) },
+              createdAt: { $gte: new Date(now - AUTOMATION_RESEND_WINDOW_MS) },
+            },
+          ],
+        },
+      ],
+    },
+    { $set: { status: "inprocess", sending_status: "inprocess" } },
+    { sort: { createdAt: 1, _id: 1 }, new: true },
+  ).lean();
+}
+
 /**
  * GET /api/chat/fetch-random?company_id=...
  * Returns one random pending chat (status: not_started, type: sent) whose
  * to_user_id passes can-send-unknown (can_send: true). Claims it by setting
  * status to inprocess. If can_send is false, skips that number and samples
- * another pending chat.
+ * another pending chat. WhatsApp-automation replies always go first.
  */
 async function fetchRandomChat(req, res) {
   try {
     const companyId = resolveCompanyId(req);
     if (!companyId) {
       return res.status(400).json(companyIdMissingOrInvalidResponse(req));
+    }
+
+    const automationReply = await claimNextAutomationReply(companyId);
+    if (automationReply) {
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        message: "Pending automation reply fetched",
+        data: automationReply,
+      });
     }
 
     const skippedIds = [];
@@ -1289,9 +1395,175 @@ async function fetchLastChats(req, res) {
   }
 }
 
+const CONVERSATIONS_DEFAULT_LIMIT = 50;
+const CONVERSATIONS_MAX_LIMIT = 200;
+
+/** Company from the Bearer token only — never a company_id from the query. */
+function tokenCompanyId(req) {
+  const raw = req.user?.company_id;
+  const id = coalesceObjectId(raw?._id || raw);
+  const mongoose = require("mongoose");
+  return id instanceof mongoose.Types.ObjectId ? id : null;
+}
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Normalized phones whose POS user or automation customer name contains `text`. */
+async function phonesMatchingName(companyId, text) {
+  const User = require("../models/user");
+  const Session = require("../models/wa_automation_session");
+  const rx = new RegExp(escapeRegex(text), "i");
+  const [users, sessionPhones] = await Promise.all([
+    User.find({ company_id: companyId, deletedAt: null, name: rx, phone: { $nin: [null, ""] } })
+      .select("phone")
+      .limit(500)
+      .lean(),
+    Session.distinct("phone", { company_id: companyId, deletedAt: null, customer_name: rx }),
+  ]);
+  return new Set(
+    [...users.map((u) => u.phone), ...sessionPhones].map(normalizePkWhatsappDigits).filter(Boolean),
+  );
+}
+
+/** normalized phone → name: the POS user first, else the automation session's customer name. */
+async function conversationNames(companyId, phones) {
+  const names = new Map();
+  if (!phones.length) return names;
+  const User = require("../models/user");
+  const Session = require("../models/wa_automation_session");
+  const variants = [...new Set(phones.flatMap(phoneMatchVariants))];
+  const [users, sessions] = await Promise.all([
+    User.find({ company_id: companyId, deletedAt: null, phone: { $in: variants } }).select("name phone").lean(),
+    Session.find({ company_id: companyId, deletedAt: null, phone: { $in: phones }, customer_name: { $nin: [null, ""] } })
+      .sort({ last_activity_at: -1 })
+      .select("phone customer_name")
+      .lean(),
+  ]);
+  for (const user of users) {
+    const phone = normalizePkWhatsappDigits(user.phone);
+    const name = String(user.name || "").trim();
+    if (phone && name && !names.has(phone)) names.set(phone, name);
+  }
+  for (const session of sessions) {
+    const phone = normalizePkWhatsappDigits(session.phone);
+    if (phone && !names.has(phone)) names.set(phone, String(session.customer_name).trim());
+  }
+  return names;
+}
+
+/**
+ * GET /api/chat/conversations?search=&limit=&skip= — Bearer auth, company from the token.
+ *
+ * One row per customer number in `chat` (their messages plus automation, AI and
+ * POS replies), latest conversation first, with the last message and a name from
+ * POS users or WhatsApp automation sessions. `search` matches a name or part of
+ * a number.
+ */
+async function fetchChatConversations(req, res) {
+  try {
+    const companyId = tokenCompanyId(req);
+    if (!companyId) {
+      return res.status(400).json({ success: false, status: 400, message: "company_id is required" });
+    }
+
+    const limit = Math.min(
+      Math.max(parseInt(req.query?.limit, 10) || CONVERSATIONS_DEFAULT_LIMIT, 1),
+      CONVERSATIONS_MAX_LIMIT,
+    );
+    const skip = Math.max(parseInt(req.query?.skip, 10) || 0, 0);
+    const search = String(req.query?.search || "").trim();
+
+    const Company = require("../models/company");
+    const [company, groups] = await Promise.all([
+      Company.findById(companyId).select("whatsapp_number").lean(),
+      // The customer is the sender of received rows and the recipient of sent ones.
+      Chat.aggregate([
+        { $match: { company_id: companyId, deletedAt: null } },
+        {
+          $group: {
+            _id: { $cond: [{ $eq: ["$type", "received"] }, "$from_user_id", "$to_user_id"] },
+            count: { $sum: 1 },
+            last: {
+              $top: {
+                sortBy: { createdAt: -1, _id: -1 },
+                output: {
+                  message: "$message",
+                  type: "$type",
+                  source: "$source",
+                  is_ai_resond: "$is_ai_resond",
+                  sending_status: "$sending_status",
+                  at: "$createdAt",
+                },
+              },
+            },
+          },
+        },
+      ]).allowDiskUse(true),
+    ]);
+
+    // 0300…, 300… and 92300… are one customer
+    const ownNumber = normalizePkWhatsappDigits(company?.whatsapp_number);
+    const byPhone = new Map();
+    for (const group of groups) {
+      const phone = normalizePkWhatsappDigits(group._id);
+      // "unknown", the company's own number and other non-numbers are not a conversation
+      if (!/^\d{10,15}$/.test(phone) || phone === ownNumber) continue;
+      const row = byPhone.get(phone);
+      if (!row) {
+        byPhone.set(phone, { phone, count: group.count, last: group.last });
+      } else {
+        row.count += group.count;
+        if (new Date(group.last.at) > new Date(row.last.at)) row.last = group.last;
+      }
+    }
+    let rows = [...byPhone.values()];
+
+    if (search) {
+      const digits = search.replace(/\D/g, "").replace(/^0+/, "");
+      const namePhones = await phonesMatchingName(companyId, search);
+      rows = rows.filter((r) => (digits.length >= 3 && r.phone.includes(digits)) || namePhones.has(r.phone));
+    }
+
+    rows.sort((a, b) => new Date(b.last.at) - new Date(a.last.at));
+    const page = rows.slice(skip, skip + limit);
+    const names = await conversationNames(
+      companyId,
+      page.map((r) => r.phone),
+    );
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: page.length ? "Conversations fetched" : "No conversations found",
+      total: rows.length,
+      limit,
+      skip,
+      hasMore: skip + page.length < rows.length,
+      data: page.map((r) => ({
+        phone: r.phone,
+        name: names.get(r.phone) || "",
+        messages_count: r.count,
+        last_message: r.last.message || "",
+        last_type: r.last.type,
+        last_source: r.last.source === "automation" ? "automation" : r.last.is_ai_resond ? "ai" : "",
+        last_sending_status: r.last.sending_status || "",
+        last_message_at: r.last.at,
+      })),
+    });
+  } catch (error) {
+    console.error("❌ fetchChatConversations:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to fetch conversations",
+    });
+  }
+}
+
 module.exports = {
   chatCreate,
   fetchLastChats,
+  fetchChatConversations,
   authenticatePosToken,
   fetchRandomChat,
   markChatSent,

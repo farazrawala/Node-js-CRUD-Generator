@@ -81,6 +81,9 @@ deploy/.restart-requested
 # Uploads directory (contains user-uploaded files)
 uploads/
 
+# Shopify ID job cache / exports
+data/shopify_id_jobs/
+
 # Logs
 logs
 *.log

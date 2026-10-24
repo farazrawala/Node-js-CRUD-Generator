@@ -1,6 +1,7 @@
 const {
   isQueueEnabled,
   getProcessQueueRemaining,
+  processDueCriteria,
   PROCESS_MODULE,
 } = require("./processQueue");
 const {
@@ -561,7 +562,7 @@ async function discoverCompaniesNeedingWork() {
         $match: {
           progress: { $in: ["not_started", "started"] },
           status: { $in: ["active", "pending"] },
-          $and: [activeNotDeletedCriteria()],
+          $and: [activeNotDeletedCriteria(), processDueCriteria()],
         },
       },
       { $group: { _id: "$company_id" } },
@@ -613,10 +614,11 @@ async function getWorkerStatus(options = {}) {
     } = require("./modelHelper");
     const companyId = coalesceObjectId(options.companyId);
 
+    // A job waiting for next_run_at is not backlog; counting it shows a false "queue empty" warning.
     const dbMatch = {
       progress: { $in: ["not_started", "started"] },
       status: { $in: ["active", "pending"] },
-      $and: [activeNotDeletedCriteria()],
+      $and: [activeNotDeletedCriteria(), processDueCriteria()],
     };
     if (companyId) {
       dbMatch.$and.push({
@@ -887,7 +889,9 @@ async function drainCompanyLane(companyId, options = {}) {
             data.status === "completed" ||
             data.status === "failed" ||
             data.progress === "completed" ||
-            data.progress === "failed"
+            data.progress === "failed" ||
+            // Repeating jobs never complete; they wait for next_run_at instead.
+            data.next_run_at
           ) {
             break;
           }

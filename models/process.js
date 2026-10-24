@@ -90,6 +90,12 @@ const modelSchema = new mongoose.Schema(
       field_name: "Hits",
       default: 0,
     },
+    // Repeating jobs (fetch_latest_order): the queue worker skips the row until this time.
+    next_run_at: {
+      type: Date,
+      default: null,
+      field_name: "Next Run At",
+    },
     progress: {
       type: String,
       required: true,

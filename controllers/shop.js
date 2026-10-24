@@ -806,6 +806,16 @@ async function getShopProducts(req, res) {
     );
     if (brandId) filter.brand_id = brandId;
 
+    // One product, for links that open it directly (e.g. from WhatsApp).
+    const rawProductId = req.query.product_id ?? req.query.productId;
+    if (rawProductId != null && String(rawProductId).trim() !== "") {
+      const productOid = coalesceObjectId(rawProductId);
+      if (!productOid || !isValidObjectId(productOid)) {
+        return jsonError(res, 400, "product_id must be a valid ObjectId");
+      }
+      filter._id = productOid;
+    }
+
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const skip =

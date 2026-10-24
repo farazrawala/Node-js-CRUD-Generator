@@ -36,6 +36,7 @@ const {
 const {
   runCachedListHandler,
   invalidateModuleListCachesForReq,
+  invalidateModuleListCaches,
 } = require("../utils/redisCache");
 const {
   importProductsFromText,
@@ -2201,6 +2202,7 @@ async function softDeleteSyncMappingsForProducts(
     const uid = coalesceObjectId(updatedBy);
     if (uid) set.updated_by = uid;
     await SyncProduct.updateMany(filter, { $set: set });
+    await invalidateModuleListCaches(companyOid, "sync_product");
   } catch (err) {
     console.warn(
       "Failed to unlink sync mappings after product delete:",

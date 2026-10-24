@@ -16,6 +16,7 @@ const SyncCategory = require("../models/sync_category");
 const SyncBrand = require("../models/sync_brand");
 const SyncProduct = require("../models/sync_product");
 const { coalesceObjectId } = require("./modelHelper");
+const { invalidateModuleListCaches } = require("./redisCache");
 const { recordOrderStatusUpdate } = require("./orderStatusHistory");
 const { releaseProcessFromQueue } = require("./processQueue");
 const {
@@ -379,10 +380,79 @@ function remoteOrderCustomerNote(remoteOrder, store) {
 }
 
 /**
+ * Customer name, email and phone from a Shopify order. Draft orders often have
+ * no billing/shipping address, so fall back to the customer record and its
+ * default address.
+ */
+function shopifyOrderContact(remoteOrder) {
+  const billing = remoteOrder?.billing_address || {};
+  const shipping = remoteOrder?.shipping_address || {};
+  const customer = remoteOrder?.customer || {};
+  const defaultAddress = customer.default_address || {};
+  const firstFilled = (...values) => {
+    for (const value of values) {
+      const text = String(value ?? "").trim();
+      if (text) return text;
+    }
+    return "";
+  };
+  const fullName = (row) =>
+    firstFilled(
+      [row.first_name, row.last_name].filter(Boolean).join(" "),
+      row.name,
+    );
+
+  return {
+    name: firstFilled(
+      fullName(billing),
+      fullName(shipping),
+      fullName(customer),
+      fullName(defaultAddress),
+    ),
+    email: firstFilled(
+      remoteOrder?.email,
+      remoteOrder?.contact_email,
+      customer.email,
+      billing.email,
+      shipping.email,
+    ),
+    phone: firstFilled(
+      billing.phone,
+      shipping.phone,
+      customer.phone,
+      remoteOrder?.phone,
+      defaultAddress.phone,
+    ),
+  };
+}
+
+async function findPosCustomerByPhone(company_id, phone) {
+  const phoneCandidates = phoneMatchCandidates(phone);
+  if (!phoneCandidates.length) return null;
+
+  const last10 = digitsOnlyPhone(phone).slice(-10);
+  const phoneOr = [{ phone: { $in: phoneCandidates } }];
+  if (last10.length >= 7) {
+    phoneOr.push({
+      phone: { $regex: `${escapeRegex(last10)}$` },
+    });
+  }
+  return User.findOne({
+    company_id,
+    deletedAt: null,
+    role: "CUSTOMER",
+    $or: phoneOr,
+  })
+    .select("_id")
+    .lean();
+}
+
+/**
  * Find or create a POS customer for an imported online order.
- * 1) Match by phone (CUSTOMER) — preferred
- * 2) Match by email (CUSTOMER)
- * 3) Create new CUSTOMER
+ * 1) Order has a phone: match a CUSTOMER by phone, else create a new one.
+ *    Email is not used to match here; a shared address (info@...) would
+ *    attach the order to someone else.
+ * 2) No phone: match a CUSTOMER by email, else create a new one.
  * Returns user `_id` or null (order import continues without customer_id).
  */
 async function findOrCreatePosCustomerFromBilling({
@@ -405,28 +475,10 @@ async function findOrCreatePosCustomerFromBilling({
     "Online customer";
   const actor = coalesceObjectId(createdBy);
 
-  // 1) Phone first
   if (phoneCandidates.length) {
-    const last10 = digitsOnlyPhone(phone).slice(-10);
-    const phoneOr = [{ phone: { $in: phoneCandidates } }];
-    if (last10.length >= 7) {
-      phoneOr.push({
-        phone: { $regex: `${escapeRegex(last10)}$` },
-      });
-    }
-    const byPhone = await User.findOne({
-      company_id,
-      deletedAt: null,
-      role: "CUSTOMER",
-      $or: phoneOr,
-    })
-      .select("_id")
-      .lean();
+    const byPhone = await findPosCustomerByPhone(company_id, phone);
     if (byPhone?._id) return byPhone._id;
-  }
-
-  // 2) Email (only when one was collected)
-  if (resolvedEmail) {
+  } else if (resolvedEmail) {
     const existing = await User.findOne({
       company_id,
       email: resolvedEmail,
@@ -436,13 +488,12 @@ async function findOrCreatePosCustomerFromBilling({
       .select("_id")
       .lean();
     if (existing?._id) return existing._id;
+  }
 
-    // Email taken by a non-CUSTOMER (e.g. staff) — create the customer without email.
-    const emailTaken = await User.findOne({
-      company_id,
-      email: resolvedEmail,
-      deletedAt: null,
-    })
+  // Emails are unique across all users (deleted ones too): when another
+  // account has it, create the customer without email.
+  if (resolvedEmail) {
+    const emailTaken = await User.findOne({ email: resolvedEmail })
       .select("_id")
       .lean();
     if (emailTaken?._id) resolvedEmail = "";
@@ -465,19 +516,11 @@ async function findOrCreatePosCustomerFromBilling({
     return created._id;
   } catch (err) {
     if (err?.code === 11000) {
-      // Race: prefer phone match, then email
+      // Race: same rule as above — phone when there is one, else email
       if (phoneCandidates.length) {
-        const byPhone = await User.findOne({
-          company_id,
-          deletedAt: null,
-          role: "CUSTOMER",
-          phone: { $in: phoneCandidates },
-        })
-          .select("_id")
-          .lean();
+        const byPhone = await findPosCustomerByPhone(company_id, phone);
         if (byPhone?._id) return byPhone._id;
-      }
-      if (resolvedEmail) {
+      } else if (resolvedEmail) {
         const again = await User.findOne({
           company_id,
           email: resolvedEmail,
@@ -727,7 +770,7 @@ async function upsertSyncProductMapping({
     ) {
       return existing;
     }
-    return SyncProduct.findByIdAndUpdate(
+    const updated = await SyncProduct.findByIdAndUpdate(
       existing._id,
       {
         refference_id,
@@ -737,9 +780,11 @@ async function upsertSyncProductMapping({
       },
       { new: true },
     ).lean();
+    await invalidateModuleListCaches(company_id, "sync_product");
+    return updated;
   }
 
-  return SyncProduct.create({
+  const created = await SyncProduct.create({
     product_id,
     integration_id,
     company_id,
@@ -748,6 +793,10 @@ async function upsertSyncProductMapping({
     status: "active",
     created_by: actor,
   });
+  // Worker writes bypass the generic controller, so clear the cached
+  // sync_product/get-all responses here or the product list stays stale.
+  await invalidateModuleListCaches(company_id, "sync_product");
+  return created;
 }
 
 /**
@@ -1195,7 +1244,7 @@ async function buildPosOrderLineItemsFromRemote(remoteOrder, store, ctx) {
     }
     remoteBillableLines += 1;
 
-    const product = await resolvePosProductForRemoteLine({
+    let product = await resolvePosProductForRemoteLine({
       integrationId,
       companyId,
       remoteProductId: line?.product_id,
@@ -1204,6 +1253,15 @@ async function buildPosOrderLineItemsFromRemote(remoteOrder, store, ctx) {
       name: line?.name,
       store: storeKey,
     });
+
+    // Store-specific fallback, e.g. Shopify creates the POS variation when the
+    // line only matched its variable parent.
+    if (typeof ctx.resolveMissingLineProduct === "function") {
+      const replacement = await ctx.resolveMissingLineProduct(line, product);
+      if (replacement?._id) {
+        product = replacement;
+      }
+    }
 
     if (!product?._id) {
       linesSkipped += 1;
@@ -1642,29 +1700,10 @@ function buildPosOrderHeaderFromRemote(remoteOrder, store, ctx) {
   let customerPhone = "";
 
   if (storeKey === "shopify") {
-    const billing = remoteOrder?.billing_address || {};
-    const shipping = remoteOrder?.shipping_address || {};
-    const customer = remoteOrder?.customer || {};
-    const customerName = [billing.first_name, billing.last_name]
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-    const shippingName = [shipping.first_name, shipping.last_name]
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-    resolvedName =
-      customerName ||
-      shippingName ||
-      [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim();
-    customerEmail =
-      remoteOrder?.email ||
-      customer.email ||
-      billing.email ||
-      shipping.email ||
-      "";
-    customerPhone =
-      billing.phone || shipping.phone || customer.phone || "";
+    const contact = shopifyOrderContact(remoteOrder);
+    resolvedName = contact.name;
+    customerEmail = contact.email;
+    customerPhone = contact.phone;
   } else {
     const billing = remoteOrder?.billing || {};
     const shipping = remoteOrder?.shipping || {};
@@ -2095,13 +2134,15 @@ async function upsertImportedCourierShipmentFromTracking({
     normalizeProviderKey,
   } = require("../src/couriers/constants");
 
+  // Stores report whatever courier they used (Smart Lane, Stallion, Pak Post,
+  // Other…). Only couriers POS integrates get a shipment row; the order keeps
+  // the tracking number either way. An unknown name used to fail the enum
+  // check and abort the order import before its lines were saved.
+  const normalizedCourier = normalizeProviderKey(tracking.courier_name);
   const courier =
-    normalizeProviderKey(tracking.courier_name) ||
-    (String(tracking.courier_name || "")
-      .toLowerCase()
-      .includes("post") ?
-      PROVIDERS.POSTEX
-    : null);
+    Object.values(PROVIDERS).includes(normalizedCourier) ?
+      normalizedCourier
+    : null;
   if (!courier) return null;
 
   const statusKey = String(tracking.tracking_status || "")
@@ -2501,6 +2542,53 @@ function isFetchOrderInventoryInsufficientError(err) {
   );
 }
 
+/** Order kept, stock not deducted: tag it `stock_awaiting` and log why. */
+async function markFetchOrderStockAwaiting({
+  req,
+  process,
+  companyId,
+  order,
+  store,
+  stats,
+  reason,
+  error,
+}) {
+  await Order.updateOne(
+    { _id: order._id },
+    { $addToSet: { tags: "stock_awaiting" } },
+  );
+
+  if (stats) {
+    stats.inventory_stock_awaiting = (stats.inventory_stock_awaiting || 0) + 1;
+  }
+
+  if (req) {
+    void createApplicationLog(
+      req,
+      {
+        action: `Fetch order inventory skipped :: ${order.order_no || order._id}`,
+        url: fetchOrderLogUrl(req),
+        tags: fetchOrderStoreTags(store, "inventory_skipped"),
+        description: {
+          process_id: process?._id ? String(process._id) : null,
+          store: store ?? null,
+          pos_order_id: String(order._id),
+          pos_order_no: order.order_no ?? null,
+          error,
+          message: `Order imported but stock not deducted (${order.order_no || order._id}): ${error}`,
+        },
+        reference_id: order._id,
+        reference_type: "order",
+        company_id: companyId,
+        created_by: process?.created_by?._id || process?.created_by,
+      },
+      { silent: true },
+    );
+  }
+
+  return { applied: false, reason, error };
+}
+
 /**
  * Deduct warehouse stock + insert outbound inventory_movements for a fetched website order.
  * Mirrors `order_save` step 5 via `applyOrderOutboundLines`.
@@ -2521,6 +2609,31 @@ async function applyFetchOrderOutboundInventory({
   const company = await resolveCompanyForFetchOrderInventory(companyId);
   if (!company) {
     return { applied: false, reason: "no_company" };
+  }
+
+  // Products the import created start inactive, and stock can't move for an
+  // inactive product (applyOrderOutboundLines rejects it).
+  const lineProductIds = [
+    ...new Set(lines.map((line) => coalesceObjectId(line.product_id)).filter(Boolean)),
+  ];
+  const inactiveProducts = await Product.find({
+    _id: { $in: lineProductIds },
+    status: { $ne: "active" },
+  })
+    .select("product_name")
+    .lean();
+  if (inactiveProducts.length) {
+    const names = inactiveProducts.map((row) => row.product_name).join(", ");
+    return markFetchOrderStockAwaiting({
+      req,
+      process,
+      companyId,
+      order,
+      store,
+      stats,
+      reason: "inactive_product",
+      error: `Inactive product(s): ${names}`,
+    });
   }
 
   const inventoryReq = buildFetchOrderInventoryReq(req, company, process);
@@ -2556,46 +2669,16 @@ async function applyFetchOrderOutboundInventory({
       throw err;
     }
 
-    await Order.updateOne(
-      { _id: order._id },
-      { $addToSet: { tags: "stock_awaiting" } },
-    );
-
-    if (stats) {
-      stats.inventory_stock_awaiting =
-        (stats.inventory_stock_awaiting || 0) + 1;
-    }
-
-    if (req) {
-      void createApplicationLog(
-        req,
-        {
-          action: `Fetch order inventory skipped :: ${order.order_no || order._id}`,
-          url: fetchOrderLogUrl(req),
-          tags: fetchOrderStoreTags(store, "inventory_skipped"),
-          description: {
-            process_id: process?._id ? String(process._id) : null,
-            store: store ?? null,
-            pos_order_id: String(order._id),
-            pos_order_no: order.order_no ?? null,
-            error: err?.message || String(err),
-            message:
-              `Order imported but stock not deducted (${order.order_no || order._id}): ${err?.message || err}`,
-          },
-          reference_id: order._id,
-          reference_type: "order",
-          company_id: companyId,
-          created_by: process?.created_by?._id || process?.created_by,
-        },
-        { silent: true },
-      );
-    }
-
-    return {
-      applied: false,
+    return markFetchOrderStockAwaiting({
+      req,
+      process,
+      companyId,
+      order,
+      store,
+      stats,
       reason: "insufficient_stock",
       error: err?.message || String(err),
-    };
+    });
   }
 }
 
@@ -2984,6 +3067,12 @@ function resolveLatestOrderBatchLimit(process) {
     FETCH_LATEST_ORDER_DEFAULT_LIMIT,
     Math.min(limit, 100),
   );
+}
+
+/** Wait between `fetch_latest_order` runs: FETCH_LATEST_ORDER_INTERVAL_MS, default 2 minutes. */
+function resolveLatestOrderIntervalMs() {
+  const raw = Number(process.env.FETCH_LATEST_ORDER_INTERVAL_MS);
+  return raw > 0 ? raw : 2 * 60 * 1000;
 }
 
 function normalizeProcessStoreType(storeType) {
@@ -3461,6 +3550,7 @@ async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
 
   const newHits = hits + 1;
   const newCount = count + inserted;
+  const nextRunAt = new Date(Date.now() + resolveLatestOrderIntervalMs());
 
   await ProcessModel.findByIdAndUpdate(process._id, {
     hits: newHits,
@@ -3468,8 +3558,12 @@ async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
     page: 1,
     progress: "not_started",
     status: "active",
+    next_run_at: nextRunAt,
     remarks,
   });
+  // Still active, so left in the queue the worker would rerun it straight away.
+  // It is picked up from the database again once next_run_at passes.
+  await releaseProcessFromQueue(process);
 
   return res.status(200).json({
     success: true,
@@ -3481,6 +3575,7 @@ async function finishFetchLatestOrderBatch(req, res, process, batchResult) {
       count: newCount,
       progress: "not_started",
       status: "active",
+      next_run_at: nextRunAt,
       batch: {
         fetched,
         inserted,
@@ -3796,6 +3891,7 @@ module.exports = {
   attachProcessFailureHooks,
   coalesceObjectId,
   findOrCreatePosCustomerFromBilling,
+  shopifyOrderContact,
   mapRemoteOrderAddressFields,
   isIncompleteOrderAddress,
   applyIncompleteAddressTagIfNeeded,

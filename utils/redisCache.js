@@ -51,6 +51,7 @@ const LIST_CACHE_BYPASS_MODULES = new Set([
   "logs",
   "process",
   "order_status_updates",
+  "order_notes",
 ]);
 
 /** List endpoints that share the same invalidation on create/update/delete. */

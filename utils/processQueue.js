@@ -92,6 +92,11 @@ async function releaseProcessFromQueue(processOrCompanyId, processId) {
   return removeJob(companyId, PROCESS_MODULE, String(jobId));
 }
 
+/** Mongo criteria for rows that may run now: no next_run_at, or it has passed. */
+function processDueCriteria(now = new Date()) {
+  return { $or: [{ next_run_at: null }, { next_run_at: { $lte: now } }] };
+}
+
 async function peekNextProcessJob(companyId) {
   return peekNextJob(PROCESS_MODULE, { companyId: companyId || undefined });
 }
@@ -147,6 +152,7 @@ module.exports = {
   isQueueEnabled,
   enqueueProcess,
   releaseProcessFromQueue,
+  processDueCriteria,
   peekNextProcessJob,
   getProcessQueueRemaining,
   syncProcessQueueOnSave,

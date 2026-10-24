@@ -30,9 +30,6 @@ Return only the message text, nothing else.`;
  * Returns { reply } on success or { error } — never throws.
  */
 async function generateExpectedReply(conversation) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return { error: "GROQ_API_KEY is not configured" };
-
   const messages = (conversation || [])
     .filter((c) => c && typeof c.message === "string" && c.message.trim() !== "")
     .map((c) => ({
@@ -41,6 +38,24 @@ async function generateExpectedReply(conversation) {
     }));
   if (messages.length === 0) return { error: "No messages to reply to" };
 
+  const { content, error } = await groqChat({
+    messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+    temperature: 0.5,
+    // gpt-oss models reason before answering; keep it short and leave room for the reply
+    reasoningEffort: "low",
+    maxTokens: 1024,
+  });
+  if (error) return { error };
+  return content ? { reply: content } : { error: "Groq returned an empty reply" };
+}
+
+/**
+ * One Groq chat completion. `json: true` asks for a JSON object back.
+ * Returns { content } or { error } — never throws.
+ */
+async function groqChat({ messages, temperature = 0.5, maxTokens = 1024, reasoningEffort = "low", json = false, timeoutMs = GROQ_TIMEOUT_MS }) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return { error: "GROQ_API_KEY is not configured" };
   try {
     const model = process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL;
     const response = await fetch(GROQ_CHAT_URL, {
@@ -51,26 +66,28 @@ async function generateExpectedReply(conversation) {
       },
       body: JSON.stringify({
         model,
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
-        temperature: 0.5,
-        // gpt-oss models reason before answering; keep it short and leave room for the reply
-        ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
-        max_tokens: 1024,
+        messages,
+        temperature,
+        ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: reasoningEffort } : {}),
+        ...(json ? { response_format: { type: "json_object" } } : {}),
+        max_tokens: maxTokens,
       }),
-      signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
-    const json = await response.json().catch(() => null);
+    const body = await response.json().catch(() => null);
     if (!response.ok) {
       return {
-        error: json?.error?.message || `Groq request failed (${response.status})`,
+        error: body?.error?.message || `Groq request failed (${response.status})`,
       };
     }
-    const reply = json?.choices?.[0]?.message?.content?.trim();
-    return reply ? { reply } : { error: "Groq returned an empty reply" };
+    return { content: body?.choices?.[0]?.message?.content?.trim() || "" };
   } catch (error) {
     return { error: error.message || "Groq request failed" };
   }
 }
 
-module.exports = { generateExpectedReply };
+/** Can the AI auto-reply answer at all (a Groq key is set)? */
+const isAiReplyConfigured = () => Boolean(process.env.GROQ_API_KEY);
+
+module.exports = { generateExpectedReply, groqChat, isAiReplyConfigured };

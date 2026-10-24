@@ -380,6 +380,7 @@ const {
 const {
   chatCreate,
   fetchLastChats,
+  fetchChatConversations,
   fetchRandomChat,
   markChatSent,
   markChatNotAvailable,
@@ -390,6 +391,7 @@ const {
 
 const supportTicketCtrl = require("../controllers/support_ticket");
 const taskCtrl = require("../controllers/task_management");
+const waAutomationCtrl = require("../controllers/wa_automation");
 const { whitelistMyIp } = require("../controllers/security");
 
 // Note: Blog routes are now handled dynamically by registerAllModelRoutes
@@ -752,6 +754,9 @@ router.get("/chats/last/:limit", fetchLastChats);
 // Bearer auth: company_id comes from the token
 router.get("/chat/list", fetchLastChats);
 router.get("/chats/list", fetchLastChats);
+// WhatsApp Chat page: one row per customer number, latest first
+router.get("/chat/conversations", fetchChatConversations);
+router.get("/chats/conversations", fetchChatConversations);
 router.get("/chat/fetch-random", fetchRandomChat);
 router.get("/chats/fetch-random", fetchRandomChat);
 router.get("/chat/can-send-unknown", canSendUnknownWhatsapp);
@@ -774,6 +779,29 @@ router.get("/chat/mark-not-available/:id", markChatNotAvailable);
 router.post("/chat/mark-not-available/:id", markChatNotAvailable);
 router.get("/chats/mark-not-available/:id", markChatNotAvailable);
 router.post("/chats/mark-not-available/:id", markChatNotAvailable);
+
+// WhatsApp Automation (flow builder, logs, settings) — company from the Bearer token
+router.get("/wa-automation/flows", waAutomationCtrl.listFlows);
+router.post("/wa-automation/flows", waAutomationCtrl.createFlow);
+router.post("/wa-automation/generate-flow", waAutomationCtrl.generateFlow);
+router.get("/wa-automation/flows/:id", waAutomationCtrl.getFlow);
+router.patch("/wa-automation/flows/:id", waAutomationCtrl.updateFlowDetails);
+router.delete("/wa-automation/flows/:id", waAutomationCtrl.deleteFlow);
+router.put("/wa-automation/flows/:id/nodes", waAutomationCtrl.saveFlowNodes);
+router.post("/wa-automation/flows/:id/status", waAutomationCtrl.setFlowStatus);
+router.post("/wa-automation/flows/:id/duplicate", waAutomationCtrl.duplicateFlow);
+router.get("/wa-automation/templates", waAutomationCtrl.listTemplates);
+router.post("/wa-automation/templates", waAutomationCtrl.createTemplate);
+router.patch("/wa-automation/templates/:id", waAutomationCtrl.updateTemplate);
+router.delete("/wa-automation/templates/:id", waAutomationCtrl.deleteTemplate);
+router.get("/wa-automation/settings", waAutomationCtrl.getSettings);
+router.put("/wa-automation/settings", waAutomationCtrl.saveSettings);
+router.get("/wa-automation/sessions", waAutomationCtrl.listSessions);
+router.get("/wa-automation/sessions/:id", waAutomationCtrl.getSession);
+router.post("/wa-automation/sessions/:id/end", waAutomationCtrl.endSession);
+router.get("/wa-automation/dashboard", waAutomationCtrl.dashboard);
+router.post("/wa-automation/test-chat", waAutomationCtrl.testChat);
+router.post("/wa-automation/test-api", waAutomationCtrl.testApi);
 
 router.get(
   "/whatsapp_message/mark-not-available/:id",
@@ -1221,6 +1249,9 @@ router.get("/tasks/activity/:id", taskCtrl.getActivity);
 router.post("/task/seed-demo", taskCtrl.seedDemo);
 router.post("/tasks/seed-demo", taskCtrl.seedDemo);
 
+// OMS list: newest note per order (order_notes CRUD itself is dynamic)
+router.get("/order_notes/latest", require("../controllers/order_notes").getLatestOrderNotes);
+
 // Register dynamic CRUD routes for all models
 // This automatically creates routes like: /{model}/create, /{model}/update/:id, /{model}/get/:id, etc.
 registerAllModelRoutes(router, {
@@ -1247,6 +1278,11 @@ registerAllModelRoutes(router, {
     "task_comment",
     "task_activity",
     "task_counter",
+    // WhatsApp Automation uses custom company-scoped routes (/wa-automation/*)
+    "wa_automation_flow",
+    "wa_automation_session",
+    "wa_automation_template",
+    "wa_automation_settings",
   ],
   modelConfigs: {
     // You can configure specific models here if needed

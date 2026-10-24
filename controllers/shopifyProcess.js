@@ -18,6 +18,7 @@ const SyncCategory = require("../models/sync_category");
 const SyncProduct = require("../models/sync_product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
+const { invalidateModuleListCaches } = require("../utils/redisCache");
 require("@shopify/shopify-api/adapters/node");
 const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
 const {
@@ -71,6 +72,7 @@ const {
   logFetchOrderBatchFailed,
   fallbackRemoteOrderLinesSubtotal,
   findOrCreatePosCustomerFromBilling,
+  shopifyOrderContact,
   mapRemoteOrderAddressFields,
   isIncompleteOrderAddress,
   applyIncompleteAddressTagIfNeeded,
@@ -1633,6 +1635,7 @@ async function upsertShopifyProductRow({
   isVariation = false,
   warehouseId = null,
   client = null,
+  createStatus = "active",
 }) {
   const trimmedName = String(name || "").trim();
   if (!trimmedName) {
@@ -1693,7 +1696,7 @@ async function upsertShopifyProductRow({
       ...payload,
       unit: "Piece",
       company_id: companyId,
-      status: "active",
+      status: createStatus,
       created_by: coalesceObjectId(
         process.created_by?._id || process.created_by,
       ),
@@ -1751,6 +1754,7 @@ async function importShopifyVariableProductToPos(
     categoryIds = [],
     warehouseId = null,
     client = null,
+    createStatus = "active",
   },
 ) {
   const shopifyProductId = Number(remoteProduct?.id);
@@ -1794,6 +1798,7 @@ async function importShopifyVariableProductToPos(
     isVariation: false,
     warehouseId: null,
     client,
+    createStatus,
   });
 
   if (!parentPosId) {
@@ -1830,6 +1835,7 @@ async function importShopifyVariableProductToPos(
       isVariation: true,
       warehouseId,
       client,
+      createStatus,
     });
   }
 
@@ -1846,6 +1852,7 @@ async function importShopifyProductToPos(
     categoryIds = [],
     warehouseId = null,
     client = null,
+    createStatus = "active",
   },
 ) {
   const shopifyId = Number(remoteProduct?.id);
@@ -1863,6 +1870,7 @@ async function importShopifyProductToPos(
       categoryIds,
       warehouseId,
       client,
+      createStatus,
     });
   }
 
@@ -1890,6 +1898,7 @@ async function importShopifyProductToPos(
     isVariation: false,
     warehouseId,
     client,
+    createStatus,
   });
 }
 
@@ -3483,7 +3492,585 @@ async function enrichShopifyOrderFulfillments(remoteOrder, client) {
   return remoteOrder;
 }
 
-async function importShopifyOrderToPos(remoteOrder, ctx) {
+/** Products the order import creates wait in POS until someone activates them. */
+const ORDER_IMPORT_PRODUCT_STATUS = "inactive";
+
+/** Shopify ids on an order line: `productId:variantId`, or whichever id is present. */
+function shopifyOrderLineReferenceId(line) {
+  const productId = String(line?.product_id ?? "").trim();
+  const variantId = String(line?.variant_id ?? "").trim();
+  const productNumeric = /^\d+$/.test(productId) ? productId : "";
+  const variantNumeric = /^\d+$/.test(variantId) ? variantId : "";
+  if (productNumeric && variantNumeric) return `${productNumeric}:${variantNumeric}`;
+  if (productNumeric) return productNumeric;
+  if (variantNumeric) return variantNumeric;
+  return "";
+}
+
+/** Products already saved from an earlier fetch: attach Shopify ids if still missing. */
+async function linkExistingShopifyOrderLineProducts(remoteOrder, ctx) {
+  const lines = Array.isArray(remoteOrder?.line_items) ? remoteOrder.line_items : [];
+  for (const line of lines) {
+    if (!shopifyOrderLineReferenceId(line) || !(Number(line?.quantity) > 0)) {
+      continue;
+    }
+    let product = await resolvePosProductForRemoteLine({
+      integrationId: resolveIntegrationId(ctx?.process),
+      companyId: ctx?.companyId,
+      remoteProductId: line?.product_id,
+      remoteVariantId: line?.variant_id,
+      sku: line?.sku,
+      name: line?.name,
+      store: "shopify",
+    });
+    if (!product?._id || isPosVariableProduct(product)) {
+      const created = await resolveMissingShopifyOrderLineProduct(
+        line,
+        product,
+        ctx,
+      );
+      if (created?._id) product = created;
+    }
+    if (product?._id) {
+      await ensureShopifyOrderLineWebsiteId(product, line, ctx);
+    }
+  }
+}
+
+/**
+ * A product created (or matched) while importing an order still needs its
+ * Shopify product and variant ids on sync_product. Variable parents keep the
+ * product id written when they were imported; this fills a missing link only.
+ */
+/** Variable parent keeps the Shopify product id, separate from each variant id. */
+async function ensureShopifyParentWebsiteId(parent, shopifyProductId, ctx) {
+  if (!parent?._id || !ctx?.process || !shopifyProductId) {
+    return;
+  }
+  const integrationId = resolveIntegrationId(ctx.process);
+  const companyId = ctx.companyId;
+  if (!integrationId || !companyId) {
+    return;
+  }
+  const mapped = await SyncProduct.findOne({
+    product_id: parent._id,
+    integration_id: integrationId,
+    company_id: companyId,
+    deletedAt: null,
+  })
+    .select("refference_id")
+    .lean();
+  if (String(mapped?.refference_id || "").trim()) {
+    return;
+  }
+  await recordShopifyProductSyncMapping(
+    ctx.process,
+    companyId,
+    parent._id,
+    String(shopifyProductId),
+    ctx.stats,
+  );
+}
+
+async function ensureShopifyOrderLineWebsiteId(posProduct, line, ctx) {
+  if (!posProduct?._id || !ctx?.process || isPosVariableProduct(posProduct)) {
+    return;
+  }
+  const referenceId = shopifyOrderLineReferenceId(line);
+  const integrationId = resolveIntegrationId(ctx.process);
+  const companyId = ctx.companyId;
+  if (!referenceId || !integrationId || !companyId) {
+    return;
+  }
+  const mapped = await SyncProduct.findOne({
+    product_id: posProduct._id,
+    integration_id: integrationId,
+    company_id: companyId,
+    deletedAt: null,
+  })
+    .select("refference_id")
+    .lean();
+  if (String(mapped?.refference_id || "").trim()) {
+    return;
+  }
+  await recordShopifyProductSyncMapping(
+    ctx.process,
+    companyId,
+    posProduct._id,
+    referenceId,
+    ctx.stats,
+  );
+}
+
+/**
+ * When the order was placed on Shopify. `processed_at` is the date Shopify
+ * admin shows; it only differs from `created_at` for orders imported into
+ * Shopify with an earlier date.
+ */
+function shopifyOrderPlacedAt(remoteOrder) {
+  for (const value of [remoteOrder?.processed_at, remoteOrder?.created_at]) {
+    const date = value ? new Date(value) : null;
+    if (date && !Number.isNaN(date.getTime())) {
+      return date;
+    }
+  }
+  return null;
+}
+
+/** Give an already-imported order (and its lines) Shopify's order date. */
+async function syncShopifyOrderPlacedAt(existing, remoteOrder) {
+  const placedAt = shopifyOrderPlacedAt(remoteOrder);
+  if (!placedAt || !existing?._id) {
+    return false;
+  }
+  if (
+    existing.createdAt &&
+    new Date(existing.createdAt).getTime() === placedAt.getTime()
+  ) {
+    return false;
+  }
+  // Mongoose treats timestamps.createdAt as immutable on updates.
+  await Order.collection.updateOne(
+    { _id: existing._id },
+    { $set: { createdAt: placedAt } },
+  );
+  await OrderItem.collection.updateMany(
+    { order_id: existing._id },
+    { $set: { createdAt: placedAt } },
+  );
+  return true;
+}
+
+function isPosVariableProduct(product) {
+  return String(product?.product_type || "").trim().toLowerCase() === "variable";
+}
+
+/**
+ * Shopify product for an order line, or null when Shopify has none (404).
+ * Any other failure throws with `shopifyLookupFailed`, so the order import
+ * fails and is retried instead of adding a product with no store link.
+ */
+async function fetchShopifyProductForOrderLine(client, shopifyProductId) {
+  if (!client || !shopifyProductId) {
+    return null;
+  }
+  try {
+    const response = await client.get({
+      path: `products/${shopifyProductId}`,
+      // The client waits and retries 429 / 503 responses.
+      tries: 4,
+    });
+    return response?.body?.product || null;
+  } catch (error) {
+    const status = Number(error?.response?.code ?? error?.response?.statusCode);
+    if (status === 404) {
+      return null;
+    }
+    error.shopifyLookupFailed = true;
+    throw error;
+  }
+}
+
+async function findShopifyProductIdByExactTitle(graphql, title) {
+  const trimmed = String(title || "").trim();
+  if (!graphql || !trimmed) return null;
+  const escaped = trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  try {
+    const result = await graphql.request(
+      `query ProductsByTitle($query: String!) {
+        products(first: 10, query: $query) {
+          nodes { id legacyResourceId title }
+        }
+      }`,
+      { variables: { query: `title:"${escaped}"` } },
+    );
+    const nodes = shopifyGraphqlData(result)?.products?.nodes || [];
+    const wanted = trimmed.toLowerCase();
+    const matches = nodes.filter(
+      (row) => String(row?.title || "").trim().toLowerCase() === wanted,
+    );
+    // Several products share the title: no way to tell which was ordered.
+    if (matches.length !== 1) return null;
+    return (
+      shopifyGidNumericId(matches[0].legacyResourceId) ||
+      shopifyGidNumericId(matches[0].id)
+    );
+  } catch (err) {
+    if (isShopifyAuthError(err)) throw err;
+    console.warn(
+      `Shopify GraphQL title lookup failed for "${trimmed}":`,
+      describeShopifyError(err),
+    );
+    return null;
+  }
+}
+
+/**
+ * Order lines carry no product_id for custom items and for products deleted
+ * (or deleted and re-created) on Shopify. Find the product by the line's SKU,
+ * then by its exact title, and the variant by SKU or variant title.
+ */
+async function locateShopifyVariantForUnlinkedLine(line, { client, graphql }) {
+  const sku = String(line?.sku || "").trim();
+  const title = String(line?.title || "").trim();
+  const variantTitle = String(line?.variant_title || "").trim();
+
+  const productId =
+    (sku && (await findShopifyProductIdByExactSku(graphql, sku))) ||
+    (title && (await findShopifyProductIdByExactTitle(graphql, title))) ||
+    null;
+  if (!productId) {
+    return null;
+  }
+
+  const remoteProduct = await fetchShopifyProductForOrderLine(
+    client,
+    Number(productId),
+  );
+  const variants =
+    Array.isArray(remoteProduct?.variants) ? remoteProduct.variants : [];
+  const same = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+  const variant =
+    (sku && variants.find((row) => same(row?.sku, sku))) ||
+    (variantTitle && variants.find((row) => same(row?.title, variantTitle))) ||
+    (!variantTitle && variants.length === 1 ? variants[0] : null);
+  if (!variant?.id) {
+    return null;
+  }
+  return { productId: Number(productId), variantId: Number(variant.id) };
+}
+
+/**
+ * POS variable parent for a Shopify product: the line's resolved product when
+ * it is the parent, else the parent of any variation already mapped to it.
+ */
+async function resolveShopifyOrderLineParent(
+  resolvedProduct,
+  shopifyProductId,
+  { companyId, process },
+) {
+  if (resolvedProduct) {
+    return isPosVariableProduct(resolvedProduct) ? resolvedProduct : null;
+  }
+
+  const integrationId = resolveIntegrationId(process);
+  if (!integrationId) {
+    return null;
+  }
+  const sibling = await SyncProduct.findOne({
+    integration_id: integrationId,
+    company_id: companyId,
+    refference_id: { $regex: `^${shopifyProductId}:` },
+    status: "active",
+    deletedAt: null,
+  }).lean();
+  if (!sibling?.product_id) {
+    return null;
+  }
+
+  const child = await Product.findOne({
+    _id: coalesceObjectId(sibling.product_id),
+    deletedAt: null,
+  })
+    .select("parent_product_id")
+    .lean();
+  const parentId = coalesceObjectId(child?.parent_product_id);
+  if (!parentId) {
+    return null;
+  }
+  const parent = await Product.findOne({
+    _id: parentId,
+    company_id: companyId,
+    deletedAt: null,
+  }).lean();
+  return isPosVariableProduct(parent) ? parent : null;
+}
+
+/**
+ * A Shopify order line for a variant POS doesn't have yet only matches the
+ * variable parent (by Shopify product id), or nothing. Add the variation under
+ * that parent and map it, so the order line, stock and later orders use it.
+ */
+async function ensureShopifyOrderLineVariation(line, resolvedProduct, ctx) {
+  const shopifyProductId = Number(line?.product_id);
+  const variantId = Number(line?.variant_id);
+  if (!shopifyProductId || !variantId || !ctx?.process) {
+    return null;
+  }
+  const { companyId, process, client, stats } = ctx;
+
+  const parent = await resolveShopifyOrderLineParent(
+    resolvedProduct,
+    shopifyProductId,
+    ctx,
+  );
+  if (!parent) {
+    return null;
+  }
+  await ensureShopifyParentWebsiteId(parent, shopifyProductId, ctx);
+
+  const remoteProduct = await fetchShopifyProductForOrderLine(
+    client,
+    shopifyProductId,
+  );
+
+  const parentName =
+    String(parent.product_name || "").trim() ||
+    String(remoteProduct?.title || "").trim();
+  const remoteVariants =
+    Array.isArray(remoteProduct?.variants) ? remoteProduct.variants : [];
+  // Product deleted on Shopify: build the variant from the order line.
+  const variant = remoteVariants.find((row) => Number(row?.id) === variantId) || {
+    id: variantId,
+    option1: line?.variant_title,
+    sku: line?.sku,
+    price: line?.price,
+  };
+  if (!parentName || !formatShopifyVariantLabel(variant)) {
+    return null;
+  }
+
+  const shopifyReferenceId = `${shopifyProductId}:${variantId}`;
+  const variationName = buildShopifyVariationProductName(parentName, variant);
+  const remoteSku = String(variant?.sku || "").trim();
+
+  // Variation already in POS: map it to this variant unless it is already
+  // mapped to another one on this store.
+  const existing =
+    (remoteSku && (await findExistingProductBySku(remoteSku, companyId))) ||
+    (await findExistingProductByName(variationName, companyId));
+  if (existing?._id) {
+    if (isPosVariableProduct(existing)) {
+      return null;
+    }
+    const mapped = await SyncProduct.findOne({
+      product_id: existing._id,
+      integration_id: resolveIntegrationId(process),
+      company_id: companyId,
+      deletedAt: null,
+    }).lean();
+    if (!mapped) {
+      await recordShopifyProductSyncMapping(
+        process,
+        companyId,
+        existing._id,
+        shopifyReferenceId,
+        null,
+      );
+    }
+    return existing;
+  }
+
+  const parentSku =
+    String(parent.sku || "").trim() || `shopify-${shopifyProductId}`;
+  const variationPrice = mapShopifyVariantPrice(variant);
+  const posId = await upsertShopifyProductRow({
+    remoteProduct: remoteProduct || {
+      title: parentName,
+      body_html: parent.product_description || "",
+    },
+    variant,
+    name: variationName,
+    sku:
+      remoteSku ||
+      buildShopifyVariationSku(parentSku, shopifyProductId, variantId),
+    productType: "Single",
+    productPrice:
+      variationPrice > 0 ? variationPrice : Number(parent.product_price) || 0,
+    categoryIds: Array.isArray(parent.category_id) ? parent.category_id : [],
+    parentProductId: parent._id,
+    companyId,
+    process,
+    stats: {},
+    shopifyReferenceId,
+    isVariation: true,
+    warehouseId: null,
+    client,
+    createStatus: ORDER_IMPORT_PRODUCT_STATUS,
+  });
+  if (!posId) {
+    return null;
+  }
+
+  if (stats) {
+    stats.variations_created = (stats.variations_created || 0) + 1;
+  }
+  await invalidateModuleListCaches(companyId, "product");
+  return Product.findById(posId).lean();
+}
+
+/**
+ * Nothing in POS matches the order line: import the Shopify product the same
+ * way Fetch products does, then use it for the line. When Shopify has no
+ * product for the line (custom item, or deleted since), create one from the
+ * line itself.
+ */
+async function importShopifyOrderLineProduct(line, ctx) {
+  if (!ctx?.process) {
+    return null;
+  }
+  const { companyId, process, client, stats } = ctx;
+  const importStats = { inserted: 0, updated: 0 };
+
+  const remoteProduct = await fetchShopifyProductForOrderLine(
+    client,
+    Number(line?.product_id),
+  );
+  if (remoteProduct?.id) {
+    const categoryIds = await resolvePosCategoryIdsFromShopifyProduct(
+      remoteProduct,
+      client,
+      { companyId, process, stats: {} },
+    );
+    const variants =
+      Array.isArray(remoteProduct.variants) ? remoteProduct.variants : [];
+    await importShopifyProductToPos(remoteProduct, {
+      companyId,
+      process,
+      stats: importStats,
+      productPrice: mapShopifyVariantPrice(variants[0]),
+      categoryIds,
+      warehouseId: null,
+      client,
+      createStatus: ORDER_IMPORT_PRODUCT_STATUS,
+    });
+  } else {
+    const name = String(line?.name || line?.title || "").trim();
+    if (!name) {
+      return null;
+    }
+    const lineReferenceId = shopifyOrderLineReferenceId(line);
+    console.warn(
+      `[fetch_order] Shopify has no product body for line "${name}" (product_id ${line?.product_id ?? "none"}, variant_id ${line?.variant_id ?? "none"}, sku ${line?.sku || "none"}); adding it to POS${lineReferenceId ? ` linked as ${lineReferenceId}` : " without a store link"}`,
+    );
+    await upsertShopifyProductRow({
+      remoteProduct: { title: name },
+      variant: line?.variant_id
+        ? {
+            id: line.variant_id,
+            option1: line?.variant_title,
+            sku: line?.sku,
+            price: line?.price,
+          }
+        : null,
+      name,
+      sku: String(line?.sku || "").trim(),
+      productType: "Single",
+      productPrice: Number(line?.price) || 0,
+      categoryIds: [],
+      parentProductId: null,
+      companyId,
+      process,
+      stats: importStats,
+      shopifyReferenceId: lineReferenceId,
+      isVariation: false,
+      warehouseId: null,
+      client,
+      createStatus: ORDER_IMPORT_PRODUCT_STATUS,
+    });
+  }
+
+  const created =
+    (importStats.inserted || 0) + (importStats.variations_inserted || 0);
+  if (stats && created) {
+    stats.products_created = (stats.products_created || 0) + created;
+  }
+  await invalidateModuleListCaches(companyId, "product");
+
+  return resolvePosProductForRemoteLine({
+    integrationId: resolveIntegrationId(process),
+    companyId,
+    remoteProductId: line?.product_id,
+    remoteVariantId: line?.variant_id,
+    sku: line?.sku,
+    name: line?.name,
+    store: "shopify",
+  });
+}
+
+/**
+ * Order line hook for buildPosOrderLineItemsFromRemote: add what POS is
+ * missing — the variation when only the variable parent matched, or the whole
+ * product when nothing did. A failure here only skips the line, as before.
+ */
+async function resolveMissingShopifyOrderLineProduct(line, resolvedProduct, ctx) {
+  if (resolvedProduct && !isPosVariableProduct(resolvedProduct)) {
+    await ensureShopifyOrderLineWebsiteId(resolvedProduct, line, ctx);
+    return null;
+  }
+  let orderLine = line;
+  try {
+    let posProduct = resolvedProduct;
+    if (!Number(line?.product_id)) {
+      const located = await locateShopifyVariantForUnlinkedLine(line, ctx);
+      if (located) {
+        orderLine = {
+          ...line,
+          product_id: located.productId,
+          variant_id: located.variantId,
+        };
+        posProduct = await resolvePosProductForRemoteLine({
+          integrationId: resolveIntegrationId(ctx.process),
+          companyId: ctx.companyId,
+          remoteProductId: located.productId,
+          remoteVariantId: located.variantId,
+          store: "shopify",
+        });
+        if (posProduct && !isPosVariableProduct(posProduct)) {
+          await ensureShopifyOrderLineWebsiteId(posProduct, orderLine, ctx);
+          return posProduct;
+        }
+      }
+    }
+
+    const variation = await ensureShopifyOrderLineVariation(
+      orderLine,
+      posProduct,
+      ctx,
+    );
+    if (variation || posProduct) {
+      const linked =
+        variation ||
+        (posProduct && !isPosVariableProduct(posProduct) ? posProduct : null);
+      if (linked?._id) {
+        await ensureShopifyOrderLineWebsiteId(linked, orderLine, ctx);
+      }
+      return variation || posProduct;
+    }
+    let created = await importShopifyOrderLineProduct(orderLine, ctx);
+    if (created && isPosVariableProduct(created)) {
+      const variation = await ensureShopifyOrderLineVariation(
+        orderLine,
+        created,
+        ctx,
+      );
+      if (variation?._id) {
+        created = variation;
+      }
+    }
+    if (created?._id && !isPosVariableProduct(created)) {
+      await ensureShopifyOrderLineWebsiteId(created, orderLine, ctx);
+    }
+    return created;
+  } catch (error) {
+    if (error?.shopifyLookupFailed || isShopifyAuthError(error)) {
+      throw error;
+    }
+    console.warn(
+      `[fetch_order] Could not add POS product for Shopify line ${line?.id} (${line?.name}):`,
+      error?.message || error,
+    );
+    return null;
+  }
+}
+
+async function importShopifyOrderToPos(remoteOrder, orderCtx) {
+  const ctx = {
+    ...orderCtx,
+    resolveMissingLineProduct: (line, product) =>
+      resolveMissingShopifyOrderLineProduct(line, product, orderCtx),
+  };
   await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client);
   await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
   const { companyId, process, stats, req } = ctx;
@@ -3519,41 +4106,11 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
   });
   if (existing) {
     if (!existing.customer_id) {
-      const billing = remoteOrder?.billing_address || {};
-      const shipping = remoteOrder?.shipping_address || {};
-      const customer = remoteOrder?.customer || {};
-      const customerName = [billing.first_name, billing.last_name]
-        .filter(Boolean)
-        .join(" ")
-        .trim();
-      const shippingName = [shipping.first_name, shipping.last_name]
-        .filter(Boolean)
-        .join(" ")
-        .trim();
-      const resolvedName =
-        customerName ||
-        shippingName ||
-        [customer.first_name, customer.last_name]
-          .filter(Boolean)
-          .join(" ")
-          .trim() ||
-        existing.name ||
-        "";
+      const contact = shopifyOrderContact(remoteOrder);
       const backfillCustomerId = await findOrCreatePosCustomerFromBilling({
-        name: resolvedName,
-        email:
-          remoteOrder?.email ||
-          customer.email ||
-          billing.email ||
-          shipping.email ||
-          existing.email ||
-          "",
-        phone:
-          billing.phone ||
-          shipping.phone ||
-          customer.phone ||
-          existing.phone ||
-          "",
+        name: contact.name || existing.name || "",
+        email: contact.email || existing.email || "",
+        phone: contact.phone || existing.phone || "",
         companyId,
         createdBy: process.created_by?._id || process.created_by,
       });
@@ -3591,7 +4148,9 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
       "shopify",
       ctx,
     );
-    if (backfill?.backfilled || trackingOrStatusChanged) {
+    await linkExistingShopifyOrderLineProducts(remoteOrder, ctx);
+    const dateFixed = await syncShopifyOrderPlacedAt(existing, remoteOrder);
+    if (backfill?.backfilled || trackingOrStatusChanged || dateFixed) {
       stats.updated = (stats.updated || 0) + 1;
       return;
     }
@@ -3619,28 +4178,11 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     remoteBillableLines,
   } = await buildPosOrderLineItemsFromRemote(remoteOrder, "shopify", ctx);
 
-  const billing = remoteOrder?.billing_address || {};
-  const shipping = remoteOrder?.shipping_address || {};
-  const customer = remoteOrder?.customer || {};
-  const customerName = [billing.first_name, billing.last_name]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-  const shippingName = [shipping.first_name, shipping.last_name]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-  const resolvedName =
-    customerName ||
-    shippingName ||
-    [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim();
-  const customerEmail =
-    remoteOrder?.email ||
-    customer.email ||
-    billing.email ||
-    shipping.email ||
-    "";
-  const customerPhone = billing.phone || shipping.phone || customer.phone || "";
+  const {
+    name: resolvedName,
+    email: customerEmail,
+    phone: customerPhone,
+  } = shopifyOrderContact(remoteOrder);
 
   const discount = Number(remoteOrder?.total_discounts) || 0;
   const shipment =
@@ -3689,6 +4231,10 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
     created_by: coalesceObjectId(process.created_by?._id || process.created_by),
     status: "active",
   };
+  const placedAt = shopifyOrderPlacedAt(remoteOrder);
+  if (placedAt) {
+    orderPayload.createdAt = placedAt;
+  }
   const incompleteAddress = isIncompleteOrderAddress(addressFields);
   if (incompleteAddress) {
     orderPayload.tags = ["incomplete_address"];
@@ -3748,7 +4294,11 @@ async function importShopifyOrderToPos(remoteOrder, ctx) {
   });
 
   for (const item of orderItemsPayload) {
-    await OrderItem.create({ ...item, order_id: order._id });
+    await OrderItem.create({
+      ...item,
+      order_id: order._id,
+      createdAt: order.createdAt,
+    });
     stats.lines_inserted += 1;
   }
 
@@ -3861,6 +4411,7 @@ async function pullShopifyOrderToPos(remoteOrder, ctx) {
       process,
       integrationId,
     });
+    await syncShopifyOrderPlacedAt(existing, remoteOrder);
     stats.updated += 1;
     return;
   }
@@ -3981,7 +4532,8 @@ async function pull_order(req, res, process) {
         query.since_id = offset;
       }
 
-      const listResponse = await client.get({ path: "orders", query });
+      // tries: the client retries dropped connections and 429 / 503 answers.
+      const listResponse = await client.get({ path: "orders", query, tries: 3 });
       const remoteOrders =
         Array.isArray(listResponse?.body?.orders) ?
           listResponse.body.orders
@@ -5538,7 +6090,8 @@ async function fetch_order(req, res, process) {
         query.since_id = offset;
       }
 
-      const listResponse = await client.get({ path: "orders", query });
+      // tries: the client retries dropped connections and 429 / 503 answers.
+      const listResponse = await client.get({ path: "orders", query, tries: 3 });
       const remoteOrders =
         Array.isArray(listResponse?.body?.orders) ?
           listResponse.body.orders
@@ -5652,6 +6205,8 @@ async function fetch_latest_order(req, res, process) {
           status: "any",
           order: "id desc",
         },
+        // The client retries dropped connections and 429 / 503 answers.
+        tries: 3,
       });
       const remoteOrders =
         Array.isArray(listResponse?.body?.orders) ?

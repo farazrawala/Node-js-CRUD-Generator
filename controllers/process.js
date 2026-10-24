@@ -37,6 +37,7 @@ const {
   isQueueEnabled,
   enqueueProcess,
   releaseProcessFromQueue,
+  processDueCriteria,
   peekNextProcessJob,
   shouldQueueProcess,
 } = require("../utils/processQueue");
@@ -93,6 +94,9 @@ function buildActiveProcessFilter(req) {
     filter._id = coalesceObjectId(req.params.id);
   } else if (req.query.process_id) {
     filter._id = coalesceObjectId(req.query.process_id);
+  } else {
+    // A named process is a manual run; otherwise skip jobs waiting for next_run_at.
+    filter.$and.push(processDueCriteria());
   }
 
   return { filter };
@@ -598,7 +602,7 @@ function buildProcessEnqueueAllFilter({
   const filter = {
     status: { $in: [...RUNNABLE_PROCESS_STATUSES] },
     progress: { $nin: ["completed", "failed"] },
-    $and: [activeNotDeletedCriteria()],
+    $and: [activeNotDeletedCriteria(), processDueCriteria()],
   };
   if (companyCriteria) {
     filter.$and.push(companyCriteria);
@@ -1264,6 +1268,7 @@ async function restartProcessDocument(existing, req, { remarks = "" } = {}) {
         offset: 0,
         count: 0,
         hits: 0,
+        next_run_at: null,
         remarks,
         ...(req.user?._id ?
           { updated_by: coalesceObjectId(req.user._id) }

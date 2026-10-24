@@ -55,12 +55,15 @@ inventory
 inventory_movement
 Inventory_movement
 inventory_movements
+inventory_skipped_shopify
 label
 list-cache
 mapping
 movement
 not_found
 order
+order_note_shortcuts
+order_notes
 order_status_updates
 out
 outer
@@ -103,6 +106,7 @@ stock_transfer
 sync
 sync_category
 sync_product
+test
 tracking
 transaction
 unexpected
