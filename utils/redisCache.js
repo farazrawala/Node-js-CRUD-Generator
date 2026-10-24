@@ -52,6 +52,8 @@ const LIST_CACHE_BYPASS_MODULES = new Set([
   "process",
   "order_status_updates",
   "order_notes",
+  "sms_message",
+  "whatsapp_message",
 ]);
 
 /** List endpoints that share the same invalidation on create/update/delete. */
