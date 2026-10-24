@@ -3064,6 +3064,29 @@ async function resolveCompanyForOrderMessaging(req, order) {
     : null;
 }
 
+/** Resolve store/integration display name for SMS/WhatsApp `{integration_name}`. */
+async function resolveIntegrationNameForOrder(order) {
+  if (order?.integration_name != null && String(order.integration_name).trim()) {
+    return String(order.integration_name).trim();
+  }
+  if (
+    order?.integration_id &&
+    typeof order.integration_id === "object" &&
+    order.integration_id.name
+  ) {
+    return String(order.integration_id.name).trim();
+  }
+  const integrationId = coalesceObjectId(order?.integration_id);
+  if (!integrationId) return "";
+  try {
+    const Integration = require("../models/integration");
+    const row = await Integration.findById(integrationId).select("name").lean();
+    return row?.name != null ? String(row.name).trim() : "";
+  } catch (_) {
+    return "";
+  }
+}
+
 /**
  * When company SMS settings allow it, queue an `sms_message`
  * for the order phone (status: on_hold).
@@ -3096,7 +3119,11 @@ async function maybeQueueSmsOnOrderSave(req, order) {
     }
 
     const settings = parseSmsLocalSettings(company);
-    const message = buildSmsOrderMessage(settings, order, { req });
+    const integration_name = await resolveIntegrationNameForOrder(order);
+    const message = buildSmsOrderMessage(settings, order, {
+      req,
+      integration_name,
+    });
     if (!String(message || "").trim()) {
       console.warn(
         "[order_save] sms skipped: empty message template",
@@ -3179,7 +3206,11 @@ async function maybeQueueWhatsappOnOrderSave(req, order) {
     }
 
     const settings = parseWhatsappLocalSettings(company);
-    const message = buildWhatsappOrderMessage(settings, order, { req });
+    const integration_name = await resolveIntegrationNameForOrder(order);
+    const message = buildWhatsappOrderMessage(settings, order, {
+      req,
+      integration_name,
+    });
 
     const companyId =
       coalesceObjectId(order?.company_id) ||

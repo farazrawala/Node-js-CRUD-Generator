@@ -125,12 +125,12 @@ function shouldQueueSmsForOrder(company, order) {
 /**
  * Build text from `send_sms_on_order_message`.
  * Placeholders: {name}, {phone}, {email}, {total_amount}, {transaction_number},
- * {createdAt}, {order_no}, {integration_url} (thank-you confirm link),
- * {confirm_url}, {thank_you_url}
+ * {createdAt}, {order_no}, {integration_name} (store/integration name),
+ * {integration_url} (thank-you confirm link), {confirm_url}, {thank_you_url}
  *
  * @param {object} settings
  * @param {object} order
- * @param {{ req?: import("express").Request, baseUrl?: string }} [options]
+ * @param {{ req?: import("express").Request, baseUrl?: string, integration_name?: string }} [options]
  */
 function buildSmsOrderMessage(settings, order, options = {}) {
   const { buildOrderIntegrationUrl } = require("./orderConfirmUrl");
@@ -152,6 +152,16 @@ function buildSmsOrderMessage(settings, order, options = {}) {
       "",
   });
 
+  const integrationName = String(
+    options.integration_name ||
+      options.integrationName ||
+      order?.integration_name ||
+      (order?.integration_id &&
+      typeof order.integration_id === "object" &&
+      order.integration_id.name) ||
+      "",
+  ).trim();
+
   const replacements = {
     name:
       order?.name != null ? String(order.name)
@@ -165,6 +175,7 @@ function buildSmsOrderMessage(settings, order, options = {}) {
       order?.transaction_number != null ? String(order.transaction_number) : "",
     createdAt: formatSmsDate(order?.createdAt),
     order_no: order?.order_no != null ? String(order.order_no) : "",
+    integration_name: integrationName,
     integration_url: integrationUrl,
     confirm_url: integrationUrl,
     thank_you_url: integrationUrl,
