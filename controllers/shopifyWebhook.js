@@ -130,17 +130,24 @@ function verifyShopifyHmacWithSecret(req, secret) {
 /**
  * Shopify Admin → Notifications webhooks sign with the shop "Signing secret".
  * Custom app webhooks sign with the app Client Secret (`integration.secret`).
- * Prefer `webhook_secret` when set so API credentials stay untouched.
+ * Prefer `webhook_order_secret` (Shopify Admin signing secret) when set
+ * so API Client Secret stays untouched.
  */
 function verifyShopifyHmac(req, integrationOrSecret) {
   const secrets = [];
   if (integrationOrSecret && typeof integrationOrSecret === "object") {
-    const webhookSecret = String(integrationOrSecret.webhook_secret || "").trim();
+    const orderSecret = String(
+      integrationOrSecret.webhook_order_secret ||
+        integrationOrSecret.webhook_secret ||
+        "",
+    ).trim();
     const clientSecret = String(integrationOrSecret.secret || "").trim();
-    if (webhookSecret) secrets.push({ source: "webhook_secret", value: webhookSecret });
-    if (clientSecret && clientSecret !== webhookSecret) {
+    if (orderSecret) {
+      secrets.push({ source: "webhook_order_secret", value: orderSecret });
+    }
+    if (clientSecret && clientSecret !== orderSecret) {
       secrets.push({ source: "secret", value: clientSecret });
-    } else if (clientSecret && !webhookSecret) {
+    } else if (clientSecret && !orderSecret) {
       secrets.push({ source: "secret", value: clientSecret });
     }
   } else if (integrationOrSecret) {
@@ -210,7 +217,7 @@ async function findShopifyIntegrations(req) {
 }
 
 /**
- * Pick the integration whose webhook_secret / client secret verifies HMAC.
+ * Pick the integration whose webhook_order_secret / client secret verifies HMAC.
  */
 function resolveIntegrationByHmac(req, candidates) {
   if (!Array.isArray(candidates) || !candidates.length) {
@@ -321,8 +328,12 @@ async function shopifyOrdersWebhook(req, res) {
         shop: shopHeader,
         tried: candidates.map((c) => String(c._id)),
         integration_id: integration ? String(integration._id) : null,
-        has_webhook_secret: Boolean(
-          String(integration?.webhook_secret || "").trim(),
+        has_webhook_order_secret: Boolean(
+          String(
+            integration?.webhook_order_secret ||
+              integration?.webhook_secret ||
+              "",
+          ).trim(),
         ),
       });
       logWebhookEvent(req, {
@@ -338,7 +349,7 @@ async function shopifyOrdersWebhook(req, res) {
           reason: hmac.reason,
           mode: hmac.mode || null,
           hint:
-            "Paste Shopify Admin → Notifications → Webhooks → Signing secret into this integration's webhook_secret field (do not overwrite Client Secret). Or set webhook URL to /shopify/webhook/orders/<integrationId>.",
+            "Paste Shopify Admin → Notifications → Webhooks → Signing secret into Webhook Order Secret (webhook_order_secret). Or set webhook URL to /shopify/webhook/orders/<integrationId>.",
         },
       });
       return res.status(401).json({
