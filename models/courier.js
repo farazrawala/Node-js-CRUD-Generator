@@ -48,7 +48,7 @@ const COURIER_TYPE_META = {
   },
   flagship: {
     label: "Flagship (Flaship)",
-    logo: "/public/couriers/flagship.svg",
+    logo: "/public/couriers/flagship.jpg",
   },
 };
 
