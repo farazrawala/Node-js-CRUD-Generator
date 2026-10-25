@@ -1,7 +1,8 @@
 /**
- * Flaship / Flagship merchant API driver.
+ * Flaship / Flagship merchant Integration API driver.
  * Auth: header `X-API-KEY`.
- * Docs: docs/Courier/Flaship_API_Documentation.pdf
+ * Base: https://partners.flaship.pk/api/integration/
+ * Docs: docs/Courier/Flaship — Logistics Management.pdf (Oct 2026)
  * @module src/couriers/FlagshipCourier
  */
 
@@ -19,17 +20,19 @@ const courierLogger = require("../utils/courierLogger");
 const { courierRemarksText } = require("../utils/orderContextLoader");
 
 const DEFAULT_HOST = "https://partners.flaship.pk";
+const API_PREFIX = "/api/integration";
 
 function resolveFlashipOrigin(config = {}) {
   let raw = String(config.base_url || config.url || DEFAULT_HOST).trim();
   raw = raw.replace(/\/+$/, "");
+  // Strip legacy /mr or new /api/integration suffixes so origin is host only.
   raw = raw.replace(/\/mr(\/api)?$/i, "");
+  raw = raw.replace(/\/api\/integration$/i, "");
   if (!raw) return DEFAULT_HOST;
 
   try {
     const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
     const host = String(parsed.hostname || "").toLowerCase();
-    // Common mix-up: public brand domain flagship.pk does not host the API.
     if (!host || host === "flagship.pk" || host === "www.flagship.pk") {
       return DEFAULT_HOST;
     }
@@ -50,15 +53,14 @@ class FlagshipCourier extends BaseCourier {
     this.providerName = PROVIDERS.FLAGSHIP;
   }
 
-  /**
-   * Origin host; paths are under `/mr/...`.
-   */
+  /** Origin host only (no path). */
   get origin() {
     return resolveFlashipOrigin(this.config);
   }
 
+  /** Integration API root: …/api/integration */
   get baseUrl() {
-    return `${this.origin}/mr`;
+    return `${this.origin}${API_PREFIX}`;
   }
 
   endpoint(path) {
@@ -67,7 +69,7 @@ class FlagshipCourier extends BaseCourier {
   }
 
   /**
-   * Merchant API key from Courier Integration → Token (or ID / API Key).
+   * Merchant API key from Courier Integration → Token (or password / login).
    */
   getApiKey() {
     const key = String(
@@ -101,6 +103,13 @@ class FlagshipCourier extends BaseCourier {
     const httpStatus = Number(res?.status) || 0;
 
     if (data && typeof data === "object") {
+      const fieldErrors = data.field_errors || data.errors;
+      if (fieldErrors && typeof fieldErrors === "object") {
+        const parts = Object.entries(fieldErrors).map(
+          ([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`,
+        );
+        if (parts.length) return parts.join("; ");
+      }
       const msg =
         data.error ||
         data.message ||
@@ -118,31 +127,21 @@ class FlagshipCourier extends BaseCourier {
         return httpStatus ? `HTTP ${httpStatus}: ${t}` : t;
       }
       const plain = data.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      if (plain) {
-        return httpStatus
-          ? `HTTP ${httpStatus}: ${plain.slice(0, 200)}`
-          : plain.slice(0, 200);
-      }
+      if (plain && plain.length < 300) return plain;
     }
 
-    if (httpStatus >= 400) return `HTTP ${httpStatus}: ${fallback}`;
-    return fallback;
+    return httpStatus ? `HTTP ${httpStatus}: ${fallback}` : fallback;
   }
 
   isSuccess(data) {
     if (data == null) return false;
-    if (typeof data !== "object") return false;
-    if (data.success === true || data.status === true) return true;
-    if (data.success === false || data.status === false) return false;
-    return Boolean(data.trackingId || data.tracking_number || data.orderNo);
+    if (typeof data === "object" && data.success === true) return true;
+    if (typeof data === "object" && data.status === true) return true;
+    return false;
   }
 
   normalizePkMobile(raw, fallback = "03000000000") {
-    const text = String(raw ?? "").trim();
-    if (!text || /^n\/?a$/i.test(text) || /^null$/i.test(text) || text === "-") {
-      return fallback;
-    }
-    let digits = text.replace(/\D/g, "");
+    let digits = String(raw || "").replace(/\D/g, "");
     if (digits.startsWith("92") && digits.length >= 12) {
       digits = `0${digits.slice(2)}`;
     }
@@ -155,13 +154,13 @@ class FlagshipCourier extends BaseCourier {
   }
 
   /**
-   * Fetch pickup addresses + assigned courier companies (cached).
+   * GET /api/integration/catalog/
    */
-  async getCompanyList() {
-    if (this._companyList?.expiresAt > Date.now()) {
-      return this._companyList.data;
+  async getCatalog() {
+    if (this._catalog?.expiresAt > Date.now()) {
+      return this._catalog.data;
     }
-    const url = this.endpoint("company_list/");
+    const url = this.endpoint("catalog/");
     const res = await httpRequest(url, {
       method: "GET",
       provider: this.providerName,
@@ -169,7 +168,7 @@ class FlagshipCourier extends BaseCourier {
     });
     if (res.status >= 400 || res.data?.success === false) {
       throw fromProviderMessage(
-        this.extractErrorMessage(res, "Flaship company list failed"),
+        this.extractErrorMessage(res, "Flaship catalog failed"),
         {
           provider: this.providerName,
           details: { httpStatus: res.status, url, response: res.data },
@@ -177,11 +176,16 @@ class FlagshipCourier extends BaseCourier {
         },
       );
     }
-    this._companyList = {
+    this._catalog = {
       data: res.data || {},
       expiresAt: Date.now() + 10 * 60 * 1000,
     };
-    return this._companyList.data;
+    return this._catalog.data;
+  }
+
+  /** @deprecated alias — old /mr/company_list */
+  async getCompanyList() {
+    return this.getCatalog();
   }
 
   bookingChoice(order = {}) {
@@ -190,21 +194,42 @@ class FlagshipCourier extends BaseCourier {
       : {};
   }
 
+  courierDisplayName(row) {
+    return String(row?.display_name || row?.name || row?.code || "").trim();
+  }
+
   /**
-   * UI picker payload from GET /mr/company_list/.
+   * UI picker payload from GET /api/integration/catalog/
+   * Keeps display names for the OMS dropdown; rate_cards keyed by name + code.
    */
   async getBookingOptions() {
-    const list = await this.getCompanyList();
-    const companies = Array.isArray(list.companies)
-      ? list.companies.map((c) => String(c).trim()).filter(Boolean)
-      : [];
-    const rateCards =
-      list.rateCards && typeof list.rateCards === "object" ? list.rateCards : {};
-    const pickupAddresses = (
-      Array.isArray(list.pickupAddress) ? list.pickupAddress : []
-    ).map((a) => ({
+    const catalog = await this.getCatalog();
+    const courierRows = Array.isArray(catalog.couriers) ? catalog.couriers : [];
+    const companies = courierRows
+      .map((c) => this.courierDisplayName(c))
+      .filter(Boolean);
+
+    const rawCards =
+      catalog.rate_cards && typeof catalog.rate_cards === "object"
+        ? catalog.rate_cards
+        : {};
+    const rateCards = {};
+    for (const row of courierRows) {
+      const code = String(row.code || "").trim();
+      const label = this.courierDisplayName(row);
+      const services = Array.isArray(rawCards[code])
+        ? rawCards[code].map((s) => String(s).trim().toLowerCase())
+        : [];
+      if (label) rateCards[label] = services;
+      if (code) rateCards[code] = services;
+    }
+
+    const pickups = Array.isArray(catalog.pickups) ? catalog.pickups : [];
+    const pickupAddresses = pickups.map((a) => ({
       id: a?.id,
-      address: a?.address || "",
+      address: a?.address || a?.name || "",
+      name: a?.name || "",
+      city: a?.city || "",
       is_default: Boolean(a?.is_default),
     }));
 
@@ -212,39 +237,61 @@ class FlagshipCourier extends BaseCourier {
       requires_company: true,
       prompt: "Which company would you like to book?",
       companies,
+      couriers: courierRows,
       rate_cards: rateCards,
       pickup_addresses: pickupAddresses,
+      service_types: Array.isArray(catalog.service_types)
+        ? catalog.service_types
+        : [],
     };
   }
 
-  matchCompanyName(chosen, companies) {
+  resolveCourierCode(chosen, courierRows) {
     const key = String(chosen || "").trim().toLowerCase();
     if (!key) return "";
-    const exact = companies.find((c) => String(c).toLowerCase() === key);
-    return exact || "";
+    for (const row of courierRows) {
+      const code = String(row.code || "").trim().toLowerCase();
+      const name = String(row.name || "").trim().toLowerCase();
+      const display = String(row.display_name || "").trim().toLowerCase();
+      if (key === code || key === name || key === display) {
+        return String(row.code).trim();
+      }
+      // "TCS" ≈ "tcs_cross", "M&P" ≈ "mnp"
+      if (display.includes(key) || name.includes(key) || key.includes(code)) {
+        return String(row.code).trim();
+      }
+    }
+    return "";
   }
 
-  async resolveCourierCompany(order) {
+  async resolveCourierCodeForOrder(order) {
     const booking = this.bookingChoice(order);
     const chosen = String(
-      booking.courierCompany || booking.courier_company || "",
+      booking.courier_code ||
+        booking.courierCode ||
+        booking.courierCompany ||
+        booking.courier_company ||
+        "",
     ).trim();
 
     const options = await this.getBookingOptions();
-    const companies = options.companies || [];
-    const matched = this.matchCompanyName(chosen, companies);
+    const rows = options.couriers || [];
+    const code = this.resolveCourierCode(chosen, rows);
 
-    if (matched) return matched;
-    if (chosen && !companies.length) return chosen;
+    if (code) return code;
+    if (chosen && !rows.length) {
+      // Allow raw code when catalog empty
+      return chosen.toLowerCase().replace(/\s+/g, "_");
+    }
 
     throw new CourierError(
-      "Select a courier company to book with (TCS, Leopard, Trax, MNP, …).",
+      "Select a courier company to book with (Leopard, Trax, M&P, …).",
       {
         code: "COURIER_COMPANY_REQUIRED",
         httpStatus: 400,
         details: {
           prompt: options.prompt,
-          companies,
+          companies: options.companies,
           rate_cards: options.rate_cards,
           pickup_addresses: options.pickup_addresses,
         },
@@ -252,55 +299,55 @@ class FlagshipCourier extends BaseCourier {
     );
   }
 
-  async resolvePickupLocationId(order) {
+  async resolvePickupId(order) {
     const booking = this.bookingChoice(order);
     const settings = this.config.settings || {};
     const configured = String(
-      booking.pickuplocation ||
+      booking.pickup_id ||
+        booking.pickupId ||
+        booking.pickuplocation ||
         booking.pickup_location ||
+        settings.pickup_id ||
         settings.pickuplocation ||
         settings.pickup_location ||
         this.config.pickup_location ||
         this.config.account_no ||
         "",
     ).trim();
-    if (configured) return configured;
+    if (configured && /^\d+$/.test(configured)) return Number(configured);
 
-    const list = await this.getCompanyList();
-    const addresses = Array.isArray(list.pickupAddress)
-      ? list.pickupAddress
-      : [];
-    const def = addresses.find((a) => a?.is_default) || addresses[0];
-    if (def?.id != null) return String(def.id);
+    const catalog = await this.getCatalog();
+    const pickups = Array.isArray(catalog.pickups) ? catalog.pickups : [];
+    const def = pickups.find((a) => a?.is_default) || pickups[0];
+    if (def?.id != null) return Number(def.id);
 
-    const url = this.endpoint("api/pickup-locations/");
+    const url = this.endpoint("pickups/");
     const res = await httpRequest(url, {
       method: "GET",
       provider: this.providerName,
       headers: this.authHeaders(),
     });
-    const locs = Array.isArray(res.data?.pickup_locations)
-      ? res.data.pickup_locations
-      : [];
+    const locs = Array.isArray(res.data?.pickups) ? res.data.pickups : [];
     const pick = locs.find((a) => a?.is_default) || locs[0];
-    if (pick?.id != null) return String(pick.id);
+    if (pick?.id != null) return Number(pick.id);
 
     throw fromProviderMessage(
-      "Flaship pickuplocation is required. Set Cost Center or settings.pickuplocation to a pickup location ID.",
+      "Flaship pickup_id is required. Create a pickup in Flaship or set Cost Center to a pickup location ID.",
       { provider: this.providerName, httpStatus: 400 },
     );
   }
 
-  resolveServiceOption(order, courierCompany) {
+  resolveServiceType(order, courierCode) {
     const booking = this.bookingChoice(order);
     const settings = this.config.settings || {};
     const raw = String(
-      booking.courierOption ||
+      booking.service_type ||
+        booking.serviceType ||
+        booking.courierOption ||
         booking.courier_option ||
         settings.courier_option ||
-        settings.courierOption ||
-        this.config.service_type ||
         settings.service_type ||
+        this.config.service_type ||
         "",
     )
       .trim()
@@ -309,10 +356,10 @@ class FlagshipCourier extends BaseCourier {
     if (raw.includes("detain")) return "detain";
     if (raw.includes("overnight")) return "overnight";
 
-    const cards = this._companyList?.data?.rateCards || {};
-    const forCompany = cards[courierCompany];
-    if (Array.isArray(forCompany) && forCompany.length) {
-      return String(forCompany[0]).trim().toLowerCase();
+    const cards = this._catalog?.data?.rate_cards || {};
+    const forCode = cards[courierCode];
+    if (Array.isArray(forCode) && forCode.length) {
+      return String(forCode[0]).trim().toLowerCase();
     }
     return "overnight";
   }
@@ -323,55 +370,54 @@ class FlagshipCourier extends BaseCourier {
   async buildCreateOrderPayload(order) {
     const shipping = order.shippingAddress || {};
     const customer = order.customer || {};
-    const cityName =
-      shipping.city || order.city || customer.city || "";
+    const cityName = shipping.city || order.city || customer.city || "";
     if (!cityName) throw invalidCity(cityName);
 
     const pieces = Math.max(1, Math.round(Number(order.pieces) || 1));
     const weight = Number(order.weightKg);
-    const productWeight = Number.isFinite(weight) && weight > 0 ? weight : 0.5;
-    const codAmount = Math.max(0, Math.round(Number(order.codAmount) || 0));
+    const netWeight = Number.isFinite(weight) && weight > 0 ? weight : 0.5;
+    const codAmount = Math.max(0, Number(order.codAmount) || 0);
 
-    const courierCompany = await this.resolveCourierCompany(order);
-    const pickuplocation = await this.resolvePickupLocationId(order);
-    const courierOption = this.resolveServiceOption(order, courierCompany);
+    const courierCode = await this.resolveCourierCodeForOrder(order);
+    const pickupId = await this.resolvePickupId(order);
+    const serviceType = this.resolveServiceType(order, courierCode);
 
     return {
-      consigneeName: String(
-        shipping.name || customer.name || order.name || "Customer",
-      ).trim(),
-      consigneePhone1: this.normalizePkMobile(
-        shipping.phone || order.phone || customer.phone,
-      ),
-      consigneePhone2: "",
-      consigneeAddress: String(
-        shipping.address || order.address || "Address",
-      ).trim(),
-      destinationCity: String(cityName).trim(),
-      codAmount: String(codAmount),
-      productName: String(
+      pickup_id: pickupId,
+      courier_code: courierCode,
+      service_type: serviceType,
+      product_name: String(
         order.contentDesc || order.description || "Goods",
       ).slice(0, 200),
-      productWeight: String(productWeight),
-      productPieces: String(pieces),
-      courierCompany,
-      courierOption,
-      pickuplocation,
-      specialInstructions: courierRemarksText(order),
-      externalref: String(order.order_no || order._id || "").slice(0, 50),
+      net_weight: Number(netWeight).toFixed(3),
+      pieces,
+      cod_amount: Number(codAmount).toFixed(2),
+      consignee_name: String(
+        shipping.name || customer.name || order.name || "Customer",
+      ).trim(),
+      consignee_phone_primary: this.normalizePkMobile(
+        shipping.phone || order.phone || customer.phone,
+      ),
+      consignee_phone_secondary: "",
+      consignee_address: String(
+        shipping.address || order.address || "Address",
+      ).trim(),
+      consignee_city: String(cityName).trim(),
+      special_instruction: courierRemarksText(order),
+      external_ref_no: String(order.order_no || order._id || "").slice(0, 50),
     };
   }
 
   async createShipment(order) {
     const payload = await this.buildCreateOrderPayload(order);
-    const url = this.endpoint("api/packet_booking");
+    const url = this.endpoint("bookings/");
 
     courierLogger.shipmentRequest({
       provider: this.providerName,
       orderId: String(order._id),
       orderNo: order.order_no || null,
       url,
-      city: payload.destinationCity,
+      city: payload.consignee_city,
       request: payload,
     });
 
@@ -391,9 +437,9 @@ class FlagshipCourier extends BaseCourier {
     });
 
     const tracking =
+      res.data?.tracking_number ||
       res.data?.trackingId ||
       res.data?.tracking_id ||
-      res.data?.tracking_number ||
       res.data?.cn ||
       null;
 
@@ -416,7 +462,7 @@ class FlagshipCourier extends BaseCourier {
           url,
           response: res.data,
         },
-        city: payload.destinationCity,
+        city: payload.consignee_city,
         httpStatus: res.status >= 400 ? res.status : 502,
       });
     }
@@ -424,12 +470,14 @@ class FlagshipCourier extends BaseCourier {
     return this.buildShipmentResult({
       success: true,
       trackingNumber: String(tracking),
-      bookingReference: String(res.data?.orderNo || payload.externalref || ""),
-      status: UNIFIED_STATUSES.BOOKED,
-      statusCode: "Booked",
-      codAmount: Number(payload.codAmount) || 0,
-      weight: Number(payload.productWeight) || null,
-      pieces: Number(payload.productPieces) || 1,
+      bookingReference: String(
+        res.data?.id || payload.external_ref_no || "",
+      ),
+      status: mapFlashipStatus({ status: res.data?.status || "BOOKED" }),
+      statusCode: String(res.data?.status || "BOOKED"),
+      codAmount: Number(payload.cod_amount) || 0,
+      weight: Number(payload.net_weight) || null,
+      pieces: Number(payload.pieces) || 1,
       request: payload,
       response: res.data,
       message: String(res.data?.message || "SUCCESS"),
@@ -446,18 +494,18 @@ class FlagshipCourier extends BaseCourier {
       });
     }
 
-    const url = this.endpoint("api/cancel_order/");
+    const url = this.endpoint(`orders/${encodeURIComponent(cn)}/cancel/`);
     const res = await httpRequest(url, {
       method: "POST",
       provider: this.providerName,
       headers: this.authHeaders({ "Content-Type": "application/json" }),
-      body: { cn },
+      body: {},
     });
 
     const ok =
       res.status < 400 &&
       (this.isSuccess(res.data) ||
-        /cancelled/i.test(String(res.data?.message || "")));
+        /cancel/i.test(String(res.data?.message || "")));
     if (!ok) {
       throw fromProviderMessage(
         this.extractErrorMessage(res, "Flaship cancel failed"),
@@ -473,9 +521,7 @@ class FlagshipCourier extends BaseCourier {
 
   async getTracking(trackingNo) {
     const cn = String(trackingNo || "").trim();
-    const url = this.endpoint(
-      `api/order_tracking/${encodeURIComponent(cn)}/`,
-    );
+    const url = this.endpoint(`orders/${encodeURIComponent(cn)}/tracking/`);
 
     courierLogger.trackingRequest({
       provider: this.providerName,
@@ -500,13 +546,9 @@ class FlagshipCourier extends BaseCourier {
       res.status >= 400 ||
       res.data?.status === false ||
       res.data?.success === false;
-    const history = Array.isArray(res.data?.tracking)
-      ? res.data.tracking
-      : Array.isArray(res.data?.trackDetail)
-        ? res.data.trackDetail
-        : [];
+    const history = Array.isArray(res.data?.tracking) ? res.data.tracking : [];
 
-    if (bodyFailed && !history.length && !res.data?.order_status) {
+    if (bodyFailed && !history.length && !res.data?.status) {
       throw fromProviderMessage(
         this.extractErrorMessage(res, "Flaship tracking failed"),
         {
@@ -526,7 +568,9 @@ class FlagshipCourier extends BaseCourier {
       status: mapFlashipStatus(ev),
       description: ev.status || ev.description || ev.message || "",
       location: ev.station || ev.location || ev.city || null,
-      eventTime: parseLooseDate(ev.time || ev.dateTime || ev.datetime || ev.createdAt),
+      eventTime: parseLooseDate(
+        ev.time || ev.dateTime || ev.datetime || ev.createdAt,
+      ),
       raw: ev,
     }));
 
@@ -537,10 +581,11 @@ class FlagshipCourier extends BaseCourier {
     });
 
     const lastStatus =
-      res.data?.order_status ||
+      res.data?.status ||
+      res.data?.live_courier_status ||
       events[0]?.description ||
       events[0]?.status ||
-      "Booked";
+      "BOOKED";
 
     if (!events.length) {
       events.push({
@@ -564,7 +609,8 @@ class FlagshipCourier extends BaseCourier {
   }
 
   /**
-   * POST /mr/generate_label  { cns: [trackingNumber] } → PDF
+   * Prefer GET /labels/download/?tracking_numbers=CN → PDF
+   * Fallback POST /labels/ then follow url.
    */
   async printLabel(shipment) {
     const cn = String(
@@ -576,22 +622,20 @@ class FlagshipCourier extends BaseCourier {
       });
     }
 
-    const url = this.endpoint("generate_label");
+    const downloadUrl = `${this.endpoint("labels/download/")}?tracking_numbers=${encodeURIComponent(cn)}&paper=a4&per_page=2`;
     courierLogger.log("info", "flaship_label", {
       provider: this.providerName,
       trackingNo: cn,
-      url,
+      url: downloadUrl,
     });
 
-    const res = await httpRequest(url, {
-      method: "POST",
+    const res = await httpRequest(downloadUrl, {
+      method: "GET",
       provider: this.providerName,
       responseType: "buffer",
       headers: this.authHeaders({
-        "Content-Type": "application/json",
         Accept: "application/pdf, application/json, */*",
       }),
-      body: { cns: [cn] },
     });
 
     if (Buffer.isBuffer(res.data)) {
@@ -641,15 +685,23 @@ class FlagshipCourier extends BaseCourier {
       });
     }
 
-    if (res.data && typeof res.data === "object" && res.data.url) {
-      const labelUrl = String(res.data.url).startsWith("http")
-        ? String(res.data.url)
-        : `${this.origin}${res.data.url}`;
+    // Fallback: POST /labels/
+    const genUrl = this.endpoint("labels/");
+    const genRes = await httpRequest(genUrl, {
+      method: "POST",
+      provider: this.providerName,
+      headers: this.authHeaders({ "Content-Type": "application/json" }),
+      body: { tracking_numbers: [cn], paper: "a4", per_page: 2 },
+    });
+    if (genRes.data && typeof genRes.data === "object" && genRes.data.url) {
+      const labelUrl = String(genRes.data.url).startsWith("http")
+        ? String(genRes.data.url)
+        : `${this.origin}${genRes.data.url}`;
       return {
         labelUrl,
         labelBase64: null,
         contentType: "application/pdf",
-        raw: res.data,
+        raw: genRes.data,
       };
     }
 
@@ -682,12 +734,33 @@ class FlagshipCourier extends BaseCourier {
       return this._citiesCache.data;
     }
 
-    const list = await this.getCompanyList();
-    const buckets =
-      list.operatioons_cities ||
-      list.operations_cities ||
-      list.operational_cities ||
-      {};
+    // Prefer normalized /cities/ endpoint; fall back to catalog operational_cities.
+    try {
+      const url = this.endpoint("cities/");
+      const res = await httpRequest(url, {
+        method: "GET",
+        provider: this.providerName,
+        headers: this.authHeaders(),
+      });
+      if (res.status < 400 && Array.isArray(res.data?.cities)) {
+        const cities = res.data.cities
+          .map((c) => ({
+            name: String(c.name || "").trim(),
+            code: String(c.normalized_name || c.name || "").trim(),
+          }))
+          .filter((c) => c.name);
+        this._citiesCache = {
+          data: cities,
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        };
+        return cities;
+      }
+    } catch (_) {
+      /* fall through */
+    }
+
+    const catalog = await this.getCatalog();
+    const buckets = catalog.operational_cities || {};
     const names = new Set();
     if (buckets && typeof buckets === "object") {
       for (const value of Object.values(buckets)) {
@@ -713,8 +786,7 @@ class FlagshipCourier extends BaseCourier {
   async healthCheck() {
     try {
       this.getApiKey();
-      // Prefer company_list (primary booking endpoint); fall back to statuses.
-      const paths = ["company_list/", "api/statuses/"];
+      const paths = ["catalog/", "statuses/"];
       let lastMessage = "Flaship auth failed";
       for (const path of paths) {
         const url = this.endpoint(path);
@@ -727,18 +799,6 @@ class FlagshipCourier extends BaseCourier {
           return { ok: true, message: "Flaship auth OK" };
         }
         lastMessage = this.extractErrorMessage(res, "Flaship auth failed");
-        const body = typeof res.data === "string" ? res.data : "";
-        if (
-          res.status === 404 ||
-          /this page could not be found/i.test(body) ||
-          /<!DOCTYPE html/i.test(body)
-        ) {
-          return {
-            ok: false,
-            message:
-              "Flaship API returned 404 at partners.flaship.pk/mr/… — merchant API routes are not reachable (site serves HTML 404). Confirm your X-API-KEY is active and ask Flaship (support@flaship.pk) for the current API base URL.",
-          };
-        }
       }
       return { ok: false, message: lastMessage };
     } catch (err) {
@@ -758,6 +818,14 @@ function parseLooseDate(value) {
   if (!value) return null;
   const d = new Date(value);
   if (!Number.isNaN(d.getTime())) return d;
+  // "YYYY-MM-DD HH:MM:SS" (Asia/Karachi per docs)
+  const m = String(value).match(
+    /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/,
+  );
+  if (m) {
+    const parsed = new Date(`${m[1]}T${m[2]}+05:00`);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
   return null;
 }
 
