@@ -1,125 +1,139 @@
 const mongoose = require("mongoose");
+const Schema = mongoose.Schema;
 
-const modelSchema = new mongoose.Schema(
+/** Canonical courier type keys (used by enum + logo map). */
+const COURIER_TYPE_VALUES = [
+  "tcs",
+  "leopard",
+  "blueex",
+  "mnp",
+  "call_courier",
+  "trax",
+  "postex",
+  "flagship",
+];
+
+/**
+ * Display meta per type. Logos are served from /public/couriers/.
+ * logo is a path relative to the API public root (e.g. /public/couriers/tcs.svg).
+ */
+const COURIER_TYPE_META = {
+  tcs: {
+    label: "TCS",
+    logo: "/public/couriers/tcs.svg",
+  },
+  leopard: {
+    label: "Leopard",
+    logo: "/public/couriers/leopard.svg",
+  },
+  blueex: {
+    label: "BlueEx",
+    logo: "/public/couriers/blueex.svg",
+  },
+  mnp: {
+    label: "M&P",
+    logo: "/public/couriers/mnp.svg",
+  },
+  call_courier: {
+    label: "Call Courier",
+    logo: "/public/couriers/call_courier.svg",
+  },
+  trax: {
+    label: "Trax",
+    logo: "/public/couriers/trax.svg",
+  },
+  postex: {
+    label: "PostEx",
+    logo: "/public/couriers/postex.svg",
+  },
+  flagship: {
+    label: "Flagship (Flaship)",
+    logo: "/public/couriers/flagship.svg",
+  },
+};
+
+function getCourierTypeMeta(type) {
+  return COURIER_TYPE_META[type] || null;
+}
+
+function listCourierTypes() {
+  return COURIER_TYPE_VALUES.map((value) => ({
+    value,
+    label: COURIER_TYPE_META[value]?.label || value,
+    logo: COURIER_TYPE_META[value]?.logo || null,
+  }));
+}
+
+var courier = new Schema(
   {
     type: {
       type: String,
+      enum: COURIER_TYPE_VALUES,
       required: true,
-      enum: [
-        "tcs",
-        "leopard",
-        "blueex",
-        "mnp",
-        "call_courier",
-        "trax",
-        "postex",
-        "flagship",
-      ],
-      default: "tcs",
-      field_name: "Courier",
-      field_type: "select",
     },
     name: {
       type: String,
       required: true,
-      field_name: "Name",
     },
-    url: {
+    email: {
       type: String,
-      required: true,
-      field_name: "API URL",
-    },
-    login: {
-      type: String,
-      required: true,
-      field_name: "ID",
+      required: false,
     },
     password: {
       type: String,
-      required: true,
-      field_name: "Password",
-      field_type: "password",
+      required: false,
     },
-    token: {
+    api_key: {
       type: String,
-      field_name: "Token",
-      field_type: "password",
+      required: false,
     },
-    pickup_address: {
+    api_password: {
       type: String,
-      field_name: "Pickup Address",
+      required: false,
     },
-    return_address: {
+    cost_center_code: {
       type: String,
-      field_name: "Return Address",
+      required: false,
     },
-    /** TCS OAuth client id — used to auto-refresh bearer Token when missing/expired. */
-    client_id: {
+    origin_city: {
       type: String,
-      field_name: "Client ID",
+      required: false,
     },
-    /** TCS OAuth client secret — used to auto-refresh bearer Token when missing/expired. */
-    client_secret: {
-      type: String,
-      field_name: "Client Secret",
-      field_type: "password",
-    },
-    /**
-     * Optional rich fields used by the Provider module (src/).
-     * Prefer `courier_provider` collection for full multi-provider config;
-     * this model remains available for admin CRUD and legacy fallback.
-     */
-    account_no: {
-      type: String,
-      field_name: "Account No",
-    },
-    /** TCS cost center code (shipmentinfo.costcentercode). */
-    cost_center: {
-      type: String,
-      field_name: "Cost Center",
-    },
-    sandbox: {
+    is_active: {
       type: Boolean,
-      default: true,
-      field_name: "Sandbox",
+      default: false,
     },
-    settings: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
-      field_name: "Settings",
-    },
-    // default fields
     company_id: {
-      type: mongoose.Schema.Types.ObjectId,
+      type: Schema.Types.ObjectId,
       ref: "company",
-      required: true,
-      field_name: "Company",
-    },
-    created_by: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "user",
-      field_name: "Created By",
-    },
-    updated_by: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "user",
-      field_name: "Updated By",
-    },
-    status: {
-      type: String,
-      required: true,
-      enum: ["active", "inactive"],
-      default: "active",
-    },
-    deletedAt: {
-      type: Date,
+      required: false,
       default: null,
-      field_name: "Deleted At",
+    },
+    created_user: {
+      type: Schema.Types.ObjectId,
+      ref: "user",
+      required: false,
+      default: null,
     },
   },
-  { timestamps: true },
+  {
+    timestamps: { createdAt: "created_at", updatedAt: "updated_at" },
+    collection: "courier",
+    autoCreate: true,
+  }
 );
 
-const MODEL = mongoose.model("courier", modelSchema);
+courier.virtual("logo").get(function () {
+  return COURIER_TYPE_META[this.type]?.logo || null;
+});
 
-module.exports = MODEL;
+courier.set("toJSON", { virtuals: true });
+courier.set("toObject", { virtuals: true });
+
+const Courier = mongoose.model("courier", courier);
+
+module.exports = Courier;
+module.exports.COURIER_TYPE_VALUES = COURIER_TYPE_VALUES;
+module.exports.COURIER_TYPE_META = COURIER_TYPE_META;
+module.exports.getCourierTypeMeta = getCourierTypeMeta;
+module.exports.listCourierTypes = listCourierTypes;

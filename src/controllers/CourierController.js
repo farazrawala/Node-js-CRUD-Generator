@@ -8,6 +8,7 @@ const { CourierError } = require("../couriers/errors");
 const { logControllerError } = require("../../utils/logControllerError");
 const CourierFactory = require("../couriers/CourierFactory");
 const courierLogger = require("../utils/courierLogger");
+const { listCourierTypes } = require("../../models/courier");
 
 function companyIdFromReq(req) {
   return (
@@ -237,6 +238,16 @@ async function listProviders(req, res) {
 }
 
 /**
+ * GET /courier/types — enum values with labels + logo paths
+ */
+async function listTypes(req, res) {
+  return res.status(200).json({
+    success: true,
+    types: listCourierTypes(),
+  });
+}
+
+/**
  * POST /courier/sync — manual sync trigger (admin)
  */
 async function syncTracking(req, res) {
@@ -312,6 +323,7 @@ module.exports = {
   cancelShipment,
   printLabel,
   listProviders,
+  listTypes,
   syncTracking,
   testCredentials,
   getBookingOptions,
