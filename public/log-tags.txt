@@ -12,6 +12,7 @@ bigcommerce
 BigCommerce origin sync
 bigCommerce product sync
 booking_failed
+booking_options
 brands
 bulk
 bulk-create
@@ -119,7 +120,6 @@ user_company
 wac_replay
 warehouse
 warehouse_inventory
-webhook
 whatsapp
 whatsapp_message
 wholesale_price

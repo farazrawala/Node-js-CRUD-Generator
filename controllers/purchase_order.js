@@ -29,7 +29,10 @@ const {
   isMongoTransactionUnsupportedError,
 } = require("../utils/mongoTransactionSupport");
 const { createApplicationLog } = require("../utils/applicationLogs");
-const { sumHeaderTotalAmount } = require("../utils/reportHeaderTotals");
+const {
+  sumHeaderTotalAmount,
+  resolveReportCreatedAtFilter,
+} = require("../utils/reportHeaderTotals");
 const {
   resolveReportPeriodRange,
   periodResponse,
@@ -1962,10 +1965,20 @@ async function getPurchaseOrderByPurchaseItem(req, res) {
     });
   }
 
+  // List query: startDate / endDate (or from / to) on createdAt. Same day bounds as sales orders.
+  // A single-id fetch ignores the range so edit/print still load that purchase order.
+  const dateResolved = idParam
+    ? {}
+    : resolveReportCreatedAtFilter(req.query || {}, false);
+  if (dateResolved.error) {
+    return res.status(dateResolved.error.status).json(dateResolved.error.body);
+  }
+
   const filter = {
     status: "active",
     deletedAt: null,
     company_id: req.user.company_id,
+    ...(dateResolved.createdAt ? { createdAt: dateResolved.createdAt } : {}),
   };
   if (idParam) {
     filter._id = idParam;
