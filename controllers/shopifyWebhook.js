@@ -412,8 +412,9 @@ async function shopifyOrdersWebhook(req, res) {
       type: "shopify_webhook",
     };
 
-    // Default: import from the webhook payload only (SKU / sync_product mapping).
-    // Pass ?enrich=1 to also call Shopify Admin API for missing products / notes.
+    // Import from the webhook payload. A line whose product is not in POS is
+    // added to the products table from that line (name, SKU, price, Shopify ids).
+    // Pass ?enrich=1 to also call Shopify Admin API for images, stock, and notes.
     const wantEnrich =
       req.query?.enrich === "1" ||
       req.query?.enrich === "true" ||
@@ -459,8 +460,9 @@ async function shopifyOrdersWebhook(req, res) {
       client,
       graphql,
       integration,
-      // Webhook payload import: match existing POS products only unless enrich=1.
-      allowRemoteProductCreate: wantEnrich && !!client,
+      // Create the POS product from the line when the catalog has no match.
+      // enrich=1 (client set above) loads the full Shopify product instead.
+      allowRemoteProductCreate: true,
     });
 
     const skipped = stats.skipped_orders?.[0] || null;
