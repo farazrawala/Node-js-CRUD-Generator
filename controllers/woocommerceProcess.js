@@ -2986,49 +2986,11 @@ async function importWooOrderToPos(remoteOrder, ctx) {
 /**
  * Pull one WooCommerce order into POS — update if already imported, else insert.
  */
+/**
+ * Pull one Woo order into POS — same path as import so empty orders get
+ * line-item backfill on re-pull.
+ */
 async function pullWooOrderToPos(remoteOrder, ctx) {
-  const { companyId, process, stats, req } = ctx;
-  const logCtx = { req, process, companyId };
-  const integrationId = resolveIntegrationId(process);
-  const remoteId = remoteOrder?.id;
-  const externalRef = orderExternalRef("woocommerce", remoteId);
-  const integrationOrderId = resolveIntegrationOrderId(
-    "woocommerce",
-    remoteOrder,
-    remoteId,
-  );
-
-  if (!externalRef) {
-    recordOrderSkip(
-      stats,
-      {
-        store: "woocommerce",
-        remote_id: remoteId,
-        order_number: remoteOrder?.number,
-        reason: "missing_remote_id",
-        detail: "WooCommerce order has no id",
-      },
-      logCtx,
-    );
-    return;
-  }
-
-  const existing = await findExistingImportedOrder(companyId, {
-    externalRef,
-    integrationId,
-    integrationOrderId,
-  });
-
-  if (existing) {
-    await updatePosOrderFromRemote(existing, remoteOrder, "woocommerce", {
-      companyId,
-      process,
-      integrationId,
-    });
-    stats.updated += 1;
-    return;
-  }
-
   await importWooOrderToPos(remoteOrder, ctx);
 }
 

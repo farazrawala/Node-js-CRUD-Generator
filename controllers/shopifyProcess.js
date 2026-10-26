@@ -4257,6 +4257,27 @@ async function importShopifyOrderToPos(remoteOrder, orderCtx) {
 
   const createdResult = await createImportedPosOrderOrGetExisting(orderPayload);
   if (!createdResult.created) {
+    // Race: another request inserted the header first. Still backfill lines.
+    const raced = createdResult.order;
+    if (raced?._id) {
+      await updatePosOrderFromRemote(raced, remoteOrder, "shopify", {
+        companyId,
+        process,
+        integrationId,
+      });
+      const backfill = await backfillPosOrderLinesIfEmpty(
+        raced,
+        remoteOrder,
+        "shopify",
+        ctx,
+      );
+      await linkExistingShopifyOrderLineProducts(remoteOrder, ctx);
+      await syncShopifyOrderPlacedAt(raced, remoteOrder);
+      if (backfill?.backfilled) {
+        stats.updated = (stats.updated || 0) + 1;
+        return;
+      }
+    }
     recordOrderSkip(
       stats,
       {
@@ -4265,9 +4286,9 @@ async function importShopifyOrderToPos(remoteOrder, orderCtx) {
         order_number: remoteOrder?.order_number,
         reason: "already_imported",
         detail:
-          createdResult.order?.order_no ?
-            `POS ${createdResult.order.order_no} (duplicate key)`
-          : `POS order ${createdResult.order?._id} (duplicate key)`,
+          raced?.order_no ?
+            `POS ${raced.order_no} (duplicate key)`
+          : `POS order ${raced?._id} (duplicate key)`,
       },
       logCtx,
     );
@@ -4372,55 +4393,14 @@ async function fetchShopifyRemoteOrder(client, remoteId) {
 }
 
 /**
- * Pull one Shopify order into POS — update if already imported, else insert.
+ * Pull one Shopify order into POS — same path as webhook import so existing
+ * empty orders get line-item backfill (create products when missing).
  */
 async function pullShopifyOrderToPos(remoteOrder, ctx) {
-  await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client);
-  await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
-  const { companyId, process, stats, req } = ctx;
-  const logCtx = { req, process, companyId };
-  const integrationId = resolveIntegrationId(process);
-  const remoteId = remoteOrder?.id;
-  const externalRef = orderExternalRef("shopify", remoteId);
-  const integrationOrderId = resolveIntegrationOrderId(
-    "shopify",
-    remoteOrder,
-    remoteId,
-  );
-
-  if (!externalRef) {
-    recordOrderSkip(
-      stats,
-      {
-        store: "shopify",
-        remote_id: remoteId,
-        order_number: remoteOrder?.order_number,
-        reason: "missing_remote_id",
-        detail: "Shopify order has no id",
-      },
-      logCtx,
-    );
-    return;
-  }
-
-  const existing = await findExistingImportedOrder(companyId, {
-    externalRef,
-    integrationId,
-    integrationOrderId,
+  await importShopifyOrderToPos(remoteOrder, {
+    ...ctx,
+    allowRemoteProductCreate: ctx?.allowRemoteProductCreate !== false,
   });
-
-  if (existing) {
-    await updatePosOrderFromRemote(existing, remoteOrder, "shopify", {
-      companyId,
-      process,
-      integrationId,
-    });
-    await syncShopifyOrderPlacedAt(existing, remoteOrder);
-    stats.updated += 1;
-    return;
-  }
-
-  await importShopifyOrderToPos(remoteOrder, ctx);
 }
 
 /**

@@ -2096,21 +2096,8 @@ async function importDarazOrderToPos(remoteOrder, ctx) {
   stats.inserted += 1;
 }
 
+/** Pull one Daraz order — same as import so empty orders get line backfill. */
 async function pullDarazOrderToPos(remoteOrder, ctx) {
-  const { companyId, process } = ctx;
-  const integrationId = resolveIntegrationId(process);
-  const remoteId = remoteOrder?.id || remoteOrder?.order_id;
-  const externalRef = orderExternalRef("daraz", remoteId);
-  const existing = await findExistingImportedOrder(companyId, {
-    externalRef,
-    integrationId,
-    integrationOrderId: resolveIntegrationOrderId("daraz", remoteOrder, remoteId),
-  });
-  if (existing) {
-    await updatePosOrderFromRemote(existing, remoteOrder, "daraz", ctx);
-    ctx.stats.updated = (ctx.stats.updated || 0) + 1;
-    return;
-  }
   return importDarazOrderToPos(remoteOrder, ctx);
 }
 
