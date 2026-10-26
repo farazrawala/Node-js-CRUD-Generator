@@ -18,6 +18,7 @@ const PurchaseOrderItem = require("../models/purchase_order_item");
 const SalesReturnItem = require("../models/sales_return_item");
 const PurchaseReturnItem = require("../models/purchase_return_item");
 const Integration = require("../models/integration");
+const SyncProduct = require("../models/sync_product");
 const WarehouseInventory = require("../models/warehouse_inventory");
 const Logs = require("../models/logs");
 const Warehouse = require("../models/warehouse");
@@ -121,6 +122,82 @@ function applyPosProductStatusFilter(filter, query = {}) {
   // Default and status=active
   filter.status = "active";
   return filter;
+}
+
+/** Active sync rows, plus variations of those products (they show the parent store). */
+async function linkedProductIdsForMatch(match, companyId) {
+  const linkedIds = await SyncProduct.distinct("product_id", match);
+  const linked = linkedIds.filter(Boolean);
+  if (!linked.length) return [];
+  const childIds = await Product.distinct("_id", {
+    parent_product_id: { $in: linked },
+    ...(companyId ? { company_id: companyId } : {}),
+  });
+  return [...linked, ...childIds.filter(Boolean)];
+}
+
+/**
+ * POS / deleted product lists: `?integration_id=<id>` keeps products with an
+ * active sync_product row for that store. `integration_id=none` keeps products
+ * that are not actively linked to any store.
+ * Mutates `filter`. Returns a 400 payload when the id is invalid, otherwise null.
+ */
+async function applyIntegrationSyncFilter(filter, query = {}, companyId) {
+  const raw = String(query.integration_id ?? query.integrationId ?? "").trim();
+  if (!raw || raw.toLowerCase() === "all") return null;
+
+  const notDeleted = {
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+  const baseMatch = {
+    status: "active",
+    ...notDeleted,
+    ...(companyId ? { company_id: companyId } : {}),
+  };
+
+  if (raw.toLowerCase() === "none" || raw.toLowerCase() === "unlinked") {
+    const linked = await linkedProductIdsForMatch(baseMatch, companyId);
+    if (filter._id && Array.isArray(filter._id.$in)) {
+      const linkedSet = new Set(linked.map((id) => String(id)));
+      filter._id = {
+        $in: filter._id.$in.filter((id) => !linkedSet.has(String(id))),
+      };
+    } else {
+      filter._id = {
+        ...(filter._id && typeof filter._id === "object" ? filter._id : {}),
+        $nin: linked,
+      };
+    }
+    return null;
+  }
+
+  const integrationOid = coalesceObjectId(raw);
+  if (
+    !integrationOid ||
+    !mongoose.Types.ObjectId.isValid(String(integrationOid))
+  ) {
+    return {
+      success: false,
+      status: 400,
+      error: "Invalid integration_id",
+      message: "integration_id must be a valid 24-character ObjectId",
+    };
+  }
+
+  const linked = await linkedProductIdsForMatch(
+    { ...baseMatch, integration_id: integrationOid },
+    companyId,
+  );
+
+  if (filter._id && Array.isArray(filter._id.$in)) {
+    const allowed = new Set(linked.map((id) => String(id)));
+    filter._id = {
+      $in: filter._id.$in.filter((id) => allowed.has(String(id))),
+    };
+  } else {
+    filter._id = { $in: linked };
+  }
+  return null;
 }
 
 function mergeProductListPopulate(req) {
@@ -2042,12 +2119,18 @@ async function getDeletedProducts(req, res) {
   return runCachedListHandler(req, res, {
     module: PRODUCT_LIST_CACHE_MODULE,
     action: "get-deleted",
-    fetch: () =>
-      fetchParentProductList(
-        req,
-        buildParentProductListFilter(req, { deletedOnly: true }),
-        { sort: { deletedAt: -1, createdAt: -1 } },
-      ),
+    fetch: async () => {
+      const filter = buildParentProductListFilter(req, { deletedOnly: true });
+      const integrationFilterError = await applyIntegrationSyncFilter(
+        filter,
+        req.query || {},
+        coalesceObjectId(req.user?.company_id),
+      );
+      if (integrationFilterError) return integrationFilterError;
+      return fetchParentProductList(req, filter, {
+        sort: { deletedAt: -1, createdAt: -1 },
+      });
+    },
   });
 }
 
@@ -2744,6 +2827,15 @@ async function getAllActiveProductsPOS(req, res) {
   applyProductTypeFilter(filter, query);
   applyPosProductStatusFilter(filter, query);
   filter = applyIncludeExcludeIdQueryFilter(filter, query);
+
+  const integrationFilterError = await applyIntegrationSyncFilter(
+    filter,
+    query,
+    tenantCo,
+  );
+  if (integrationFilterError) {
+    return res.status(integrationFilterError.status).json(integrationFilterError);
+  }
 
   const warehouseInventoryMatch = {
     status: "active",
