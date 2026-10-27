@@ -14,7 +14,9 @@ const {
   buildDarazProductCreatePayload,
   buildDarazProductCreateXml,
   buildDarazAttributeXml,
+  parsePosVariationParts,
   migrateDarazImages,
+  createDarazListing,
   buildDarazProductUpdateXml,
   buildDarazPlaceholderImageBuffer,
 } = require("../controllers/darazProcess");
@@ -300,5 +302,128 @@ describe("darazProcess create payload", () => {
     assert.equal(meta.width, 800);
     assert.equal(meta.height, 800);
     assert.ok(buffer.length > 1000);
+  });
+});
+
+describe("darazProcess variable product create", () => {
+  const product = {
+    _id: "p1",
+    product_name: "Kids Matching Set | Polo - Yellow",
+    sku: "KMS-POLO-YELLOW",
+  };
+  const variationSkus = [
+    {
+      sellerSku: "C007",
+      price: 1500,
+      quantity: 2,
+      variationName: "Kids Matching Set | Polo - Yellow [Size: S]",
+    },
+    {
+      sellerSku: "C008",
+      price: 1500,
+      quantity: 3,
+      variationName: "Kids Matching Set | Polo - Yellow [Size: M]",
+    },
+  ];
+
+  function fakeDarazClient(attributes) {
+    const calls = [];
+    return {
+      calls,
+      call: async (path, params) => {
+        calls.push({ path, params });
+        if (path === "/brands/get") return { brands: [{ name: "No Brand" }] };
+        if (path === "/category/attributes/get") return attributes;
+        if (path === "/product/create") return { item_id: "900", sku_list: [] };
+        throw new Error(`unexpected Daraz call ${path}`);
+      },
+    };
+  }
+
+  function createListing(client, overrides = {}) {
+    return createDarazListing({
+      client,
+      integration: {},
+      product,
+      companyId: "c1",
+      integrationId: "i1",
+      process: null,
+      primaryCategoryId: "123",
+      skus: variationSkus,
+      ...overrides,
+    });
+  }
+
+  it("reads attribute values from a POS variation name", () => {
+    assert.deepEqual(parsePosVariationParts("Shirt [Size: 2 - 3Y - Color: Red]"), [
+      { name: "Size", value: "2 - 3Y" },
+      { name: "Color", value: "Red" },
+    ]);
+    assert.deepEqual(parsePosVariationParts("Shirt [Red - XL]"), [
+      { name: "", value: "Red" },
+      { name: "", value: "XL" },
+    ]);
+    assert.deepEqual(parsePosVariationParts("Kids Matching Set | Polo - Yellow"), []);
+  });
+
+  it("gives each variation SKU its own sale prop values", async () => {
+    const client = fakeDarazClient([
+      {
+        name: "color_family",
+        label: "Color Family",
+        is_sale_prop: 1,
+        attribute_type: "sku",
+        input_type: "singleSelect",
+        options: [{ name: "Black" }, { name: "Yellow" }],
+      },
+      {
+        name: "size",
+        label: "Size",
+        is_sale_prop: 1,
+        attribute_type: "sku",
+        input_type: "singleSelect",
+        options: [{ name: "S" }, { name: "M" }, { name: "L" }],
+      },
+    ]);
+    await createListing(client);
+    const create = client.calls.find((row) => row.path === "/product/create");
+    const skuBlocks = create.params.payload.split("<Sku>").slice(1);
+    assert.equal(skuBlocks.length, 2);
+    assert.match(skuBlocks[0], /<SellerSku>C007<\/SellerSku>/);
+    assert.match(skuBlocks[0], /<size>S<\/size>/);
+    assert.match(skuBlocks[1], /<SellerSku>C008<\/SellerSku>/);
+    assert.match(skuBlocks[1], /<size>M<\/size>/);
+    for (const block of skuBlocks) {
+      assert.match(block, /<color_family>Yellow<\/color_family>/);
+    }
+  });
+
+  it("stops before Daraz when two variations would carry the same sale props", async () => {
+    const client = fakeDarazClient([
+      {
+        name: "lens_color",
+        label: "Lens Color",
+        is_sale_prop: 1,
+        attribute_type: "sku",
+        input_type: "singleSelect",
+        options: [{ name: "Red" }, { name: "Yellow" }],
+      },
+    ]);
+    await assert.rejects(createListing(client), (err) => {
+      assert.equal(err.statusCode, 400);
+      assert.match(err.message, /C007 and C008/);
+      assert.match(err.message, /Lens Color: Yellow/);
+      return true;
+    });
+    assert.ok(!client.calls.some((row) => row.path === "/product/create"));
+  });
+
+  it("does not borrow another category's mapping for an uncategorized product", async () => {
+    const client = fakeDarazClient([]);
+    await assert.rejects(
+      createListing(client, { primaryCategoryId: undefined }),
+      /without a category/,
+    );
+    assert.deepEqual(client.calls, []);
   });
 });

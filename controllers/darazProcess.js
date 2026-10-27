@@ -583,6 +583,94 @@ function chosenDarazSalePropNames(attrs, ctx) {
   return new Set([...best.values()].map((row) => row.name));
 }
 
+function darazLooseKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** POS variation names end in "[Size: M - Color: Red]" (ai-pos productVariationUtils). */
+function parsePosVariationParts(name) {
+  const match = String(name || "").match(/\[([^\]]*)\]\s*$/);
+  const inner = String(match?.[1] || "").trim();
+  if (!inner) return [];
+  const pieces = /:\s/.test(inner)
+    ? inner.split(/\s-\s(?=(?:(?!\s-\s)[^:])+:\s)/)
+    : inner.split(" - ");
+  return pieces
+    .map((piece) => {
+      const at = piece.indexOf(":");
+      if (at === -1) return { name: "", value: piece.trim() };
+      return { name: piece.slice(0, at).trim(), value: piece.slice(at + 1).trim() };
+    })
+    .filter((part) => part.value);
+}
+
+function darazOptionForValue(attr, value) {
+  const want = darazLooseKey(value);
+  if (!want) return "";
+  return darazOptionNames(attr).find((opt) => darazLooseKey(opt) === want) || "";
+}
+
+function posVariationPartForSaleProp(attr, parts) {
+  const group = darazSalePropGroup(attr);
+  const keys = [darazAttrName(attr), attr?.label, attr?.feed_name, attr?.feedName]
+    .map(darazLooseKey)
+    .filter(Boolean);
+  return parts.find((part) => {
+    const key = darazLooseKey(part.name);
+    if (!key) return false;
+    if (keys.includes(key)) return true;
+    if (group === "color") return /colou?r|shade/.test(key);
+    if (group === "size") return key.includes("size");
+    return false;
+  });
+}
+
+/** This SKU's own value for a sale prop, read from its POS variation name; "" when the name does not say. */
+function saleValueFromPosVariation(attr, parts) {
+  if (!parts?.length) return "";
+  const part = posVariationPartForSaleProp(attr, parts);
+  if (part) return darazOptionForValue(attr, part.value) || part.value;
+  for (const row of parts) {
+    if (row.name) continue;
+    const hit = darazOptionForValue(attr, row.value);
+    if (hit) return hit;
+  }
+  return "";
+}
+
+/** Daraz rejects the whole create (4112) when two SKUs carry the same sale-prop values. */
+function assertDistinctDarazSaleProps(skus, attrs, saleProps) {
+  if (!Array.isArray(skus) || skus.length < 2) return;
+  const props = (attrs || []).filter((attr) => saleProps?.has(darazAttrName(attr)));
+  if (!props.length) {
+    const err = new Error(
+      `This Daraz category has no sale properties (such as colour or size), so it cannot hold ${skus.length} variations. Map the POS category to a Daraz category that has them, then sync again.`,
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  const labels = props.map((attr) => String(attr?.label || darazAttrName(attr)).trim());
+  const seen = new Map();
+  for (const sku of skus) {
+    const values = props.map((attr) =>
+      String(sku.attributes?.[darazAttrName(attr)] ?? "").trim(),
+    );
+    const key = values.map((value) => value.toLowerCase()).join("\u0000");
+    const first = seen.get(key);
+    if (first) {
+      const shown = labels
+        .map((label, i) => `${label}: ${values[i] || "(empty)"}`)
+        .join(", ");
+      const err = new Error(
+        `Daraz needs every variation to differ in ${labels.join(" / ")}, but SKUs ${first.sellerSku} and ${sku.sellerSku} would both be sent as ${shown}. Give each variation its own ${labels.join(" or ")} value, or map the POS category to a Daraz category whose sale properties match these variations (for example Size), then sync again.`,
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+    seen.set(key, sku);
+  }
+}
+
 function isDarazSkuAttribute(attr) {
   const type = String(attr?.attribute_type || attr?.attributeType || "").toLowerCase();
   return (
@@ -688,7 +776,9 @@ function valueForDarazAttribute(attr, ctx) {
 
 function buildDarazAttributeObject(attrs, ctx, skuLevel) {
   const out = {};
-  const saleProps = skuLevel ? chosenDarazSalePropNames(attrs, ctx) : null;
+  const saleProps = skuLevel
+    ? ctx?.saleProps || chosenDarazSalePropNames(attrs, ctx)
+    : null;
   for (const attr of attrs || []) {
     const name = darazAttrName(attr);
     if (!name || !isValidDarazAttrKey(name)) continue;
@@ -706,18 +796,26 @@ function buildDarazAttributeObject(attrs, ctx, skuLevel) {
     if (skuLevel && isDarazSaleProp(attr)) {
       const known = ctx?.known?.[name] ?? ctx?.known?.[key];
       const hasKnown = known != null && String(known).trim() !== "";
-      if (!hasKnown) value = preferredSaleValueFromName(attr, ctx) || value;
+      if (!hasKnown) {
+        value =
+          saleValueFromPosVariation(attr, ctx?.variationParts) ||
+          preferredSaleValueFromName(attr, ctx) ||
+          value;
+      }
     }
     if (value) out[name] = value;
   }
   return out;
 }
 
-function buildDarazAttributeXml(attrs, ctx, skuLevel) {
-  const obj = buildDarazAttributeObject(attrs, ctx, skuLevel);
-  return Object.entries(obj)
+function darazAttributeObjectXml(obj) {
+  return Object.entries(obj || {})
     .map(([name, value]) => `        <${name}>${xmlEscape(value)}</${name}>`)
     .join("\n");
+}
+
+function buildDarazAttributeXml(attrs, ctx, skuLevel) {
+  return darazAttributeObjectXml(buildDarazAttributeObject(attrs, ctx, skuLevel));
 }
 
 function buildDarazProductCreatePayload({
@@ -746,6 +844,7 @@ function buildDarazProductCreatePayload({
       package_weight: "1",
       package_content: String(sku.packageContent || sellerSku),
       ...(extraSkuAttributes || {}),
+      ...(sku.attributes || {}),
       Images: { Image: imageList },
     };
   });
@@ -782,6 +881,9 @@ function buildDarazSkuXml(sku, extraSkuXml = "", images = []) {
   const imageXml = (images || [])
     .map((url) => `            <Image>${xmlEscape(url)}</Image>`)
     .join("\n");
+  const attributeXml = [extraSkuXml, darazAttributeObjectXml(sku.attributes)]
+    .filter(Boolean)
+    .join("\n");
   return `        <Sku>
           <SellerSku>${xmlEscape(sku.sellerSku)}</SellerSku>
           <quantity>${xmlEscape(Number.isFinite(quantity) && quantity >= 0 ? quantity : 0)}</quantity>
@@ -791,7 +893,7 @@ function buildDarazSkuXml(sku, extraSkuXml = "", images = []) {
           <package_width>10</package_width>
           <package_weight>1</package_weight>
           <package_content>${xmlEscape(sku.packageContent || sku.sellerSku)}</package_content>
-${extraSkuXml}
+${attributeXml}
           <Images>
 ${imageXml}
           </Images>
@@ -1113,44 +1215,8 @@ async function resolveDarazPrimaryCategoryId(
     }
   }
 
-  if (client) {
-    try {
-      const mapped = await SyncCategory.findOne({
-        integration_id: integrationId,
-        company_id: companyId,
-        status: "active",
-        deletedAt: null,
-        refference_id: { $nin: [null, ""] },
-      })
-        .sort({ updatedAt: -1 })
-        .lean();
-      const mappedRef = String(mapped?.refference_id || "")
-        .replace(/^daraz-/i, "")
-        .trim();
-      if (isDarazCategoryId(mappedRef)) return mappedRef;
-    } catch (err) {
-      console.warn(
-        "Daraz uncategorized product mapping lookup failed:",
-        err?.message || err,
-      );
-    }
-
-    try {
-      const tree = await loadDarazCategoryTree(client);
-      const fromName = findDarazLeafForName(tree, product?.product_name);
-      const fromNameId = String(fromName?.category_id || "").trim();
-      if (isDarazCategoryId(fromNameId)) return fromNameId;
-      const pet = findDarazLeafForName(tree, "Pet Supplies");
-      const petId = String(pet?.category_id || "").trim();
-      if (isDarazCategoryId(petId)) return petId;
-    } catch (err) {
-      console.warn(
-        "Daraz uncategorized product tree lookup failed:",
-        err?.message || err,
-      );
-    }
-  }
-
+  // No guessing past this point: another category's mapping or a product-name match
+  // put products in unrelated Daraz categories. createDarazListing reports the gap.
   return "";
 }
 
@@ -1585,16 +1651,31 @@ async function createDarazListing({
     },
   };
   const extraAttributes = buildDarazAttributeObject(attributes, ctx, false);
-  const extraSkuAttributes = buildDarazAttributeObject(attributes, ctx, true);
+  // One set of sale props for the item; each SKU fills them from its own variation.
+  const saleProps = chosenDarazSalePropNames(attributes, ctx);
+  const skusWithAttributes = skus.map((sku) => ({
+    ...sku,
+    attributes: buildDarazAttributeObject(
+      attributes,
+      {
+        ...ctx,
+        name: sku.variationName || ctx.name,
+        saleProps,
+        variationParts: parsePosVariationParts(sku.variationName),
+      },
+      true,
+    ),
+  }));
+  assertDistinctDarazSaleProps(skusWithAttributes, attributes, saleProps);
+
   const payloadXml = buildDarazProductCreateXml({
     primaryCategory,
     name: product.product_name || skus[0]?.sellerSku,
     description: posProductDescription(product) || product.product_name,
     brand: brandName,
-    extraAttributeXml: buildDarazAttributeXml(attributes, ctx, false),
-    extraSkuXml: buildDarazAttributeXml(attributes, ctx, true),
+    extraAttributeXml: darazAttributeObjectXml(extraAttributes),
     images,
-    skus,
+    skus: skusWithAttributes,
   });
   const payloadObj = buildDarazProductCreatePayload({
     primaryCategory,
@@ -1602,9 +1683,8 @@ async function createDarazListing({
     description: posProductDescription(product) || product.product_name,
     brand: brandName,
     extraAttributes,
-    extraSkuAttributes,
     images,
-    skus,
+    skus: skusWithAttributes,
   });
 
   try {
@@ -2801,6 +2881,7 @@ async function syncDarazVariableProductToStore({
       price: plan.price,
       quantity: plan.quantity,
       packageContent: plan.child.product_name || plan.sellerSku,
+      variationName: plan.child.product_name,
     })),
   });
   const createdItemId = darazCreatedItemId(created);
@@ -3477,6 +3558,7 @@ module.exports = {
   buildDarazProductCreatePayload,
   buildDarazProductCreateXml,
   buildDarazAttributeXml,
+  parsePosVariationParts,
   migrateDarazImages,
   createDarazListing,
   buildDarazProductUpdateXml,
