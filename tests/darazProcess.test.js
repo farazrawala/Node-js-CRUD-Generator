@@ -113,36 +113,12 @@ describe("darazProcess create payload", () => {
     assert.doesNotMatch(xml, /color_family/);
   });
 
-  it("does not repeat the same sale-prop value on one SKU", () => {
+  it("sends only one color sale prop on a SKU", () => {
     const xml = buildDarazAttributeXml(
       [
         {
           name: "frame_color",
-          is_sale_prop: 1,
-          attribute_type: "sku",
-          input_type: "singleSelect",
-          options: [{ name: "Red" }, { name: "Yellow" }, { name: "Blue" }],
-        },
-        {
-          name: "lens_color",
-          is_sale_prop: 1,
-          attribute_type: "sku",
-          input_type: "singleSelect",
-          options: [{ name: "Red" }, { name: "Green" }],
-        },
-      ],
-      { known: {}, name: "Kids Matching Set | Polo - Yellow" },
-      true,
-    );
-    assert.match(xml, /<frame_color>Yellow<\/frame_color>/);
-    assert.match(xml, /<lens_color>Red<\/lens_color>/);
-  });
-
-  it("picks the next option when two sale props would both default to Red", () => {
-    const xml = buildDarazAttributeXml(
-      [
-        {
-          name: "frame_color",
+          label: "Frame Color",
           is_sale_prop: 1,
           attribute_type: "sku",
           input_type: "singleSelect",
@@ -150,17 +126,52 @@ describe("darazProcess create payload", () => {
         },
         {
           name: "lens_color",
+          label: "Lens Color",
           is_sale_prop: 1,
           attribute_type: "sku",
           input_type: "singleSelect",
-          options: [{ name: "Red" }, { name: "Green" }],
+          options: [{ name: "Red" }, { name: "Yellow" }],
         },
       ],
-      { known: {}, name: "Kids Matching Set" },
+      { known: {}, name: "Kids Matching Set | Polo - Yellow" },
       true,
     );
-    assert.match(xml, /<frame_color>Red<\/frame_color>/);
-    assert.match(xml, /<lens_color>Green<\/lens_color>/);
+    assert.match(xml, /<lens_color>Yellow<\/lens_color>/);
+    assert.doesNotMatch(xml, /frame_color/);
+  });
+
+  it("keeps color and size as separate sale props", () => {
+    const xml = buildDarazAttributeXml(
+      [
+        {
+          name: "color_family",
+          is_sale_prop: 1,
+          attribute_type: "sku",
+          input_type: "singleSelect",
+          options: [{ name: "Red" }, { name: "Yellow" }],
+        },
+        {
+          name: "size",
+          is_sale_prop: 1,
+          attribute_type: "sku",
+          input_type: "singleSelect",
+          options: [{ name: "M" }, { name: "L" }],
+        },
+        {
+          name: "frame_color",
+          label: "Frame Color",
+          is_sale_prop: 1,
+          attribute_type: "sku",
+          input_type: "singleSelect",
+          options: [{ name: "Red" }],
+        },
+      ],
+      { known: {}, name: "Kids Matching Set | Polo - Yellow" },
+      true,
+    );
+    assert.match(xml, /<color_family>Yellow<\/color_family>/);
+    assert.match(xml, /<size>M<\/size>/);
+    assert.doesNotMatch(xml, /frame_color/);
   });
 
   it("puts sale props on the SKU, not the product attributes", () => {

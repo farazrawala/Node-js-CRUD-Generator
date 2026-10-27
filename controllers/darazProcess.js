@@ -537,16 +537,6 @@ function pickDarazEnumValue(attr, preferred) {
   return hit || options[0];
 }
 
-/** Daraz C008 rejects two sale props on one SKU that share a value (Frame Color:Red, Lens Color:Red). */
-function pickUniqueDarazSaleValue(attr, preferred, usedValues) {
-  const used = usedValues || new Set();
-  const isUsed = (value) => used.has(String(value || "").trim().toLowerCase());
-  const preferredText = String(preferred || "").trim();
-  if (preferredText && !isUsed(preferredText)) return preferredText;
-  const unused = darazOptionNames(attr).find((name) => !isUsed(name));
-  return unused || "";
-}
-
 function preferredSaleValueFromName(attr, ctx) {
   const haystack = String(ctx?.name || "").toLowerCase();
   if (!haystack) return "";
@@ -556,6 +546,41 @@ function preferredSaleValueFromName(attr, ctx) {
   });
   hits.sort((a, b) => b.length - a.length);
   return hits[0] || "";
+}
+
+function isDarazSaleProp(attr) {
+  return isDarazAttrOn(attr?.is_sale_prop) || isDarazAttrOn(attr?.isSaleProp);
+}
+
+/** Frame Color and Lens Color are one variation theme. Daraz C008 rejects two of them on a single SKU. */
+function darazSalePropGroup(attr) {
+  const label = String(attr?.label || attr?.feed_name || attr?.feedName || "").toLowerCase();
+  const name = `${darazAttrName(attr)} ${label}`.toLowerCase();
+  if (/color|colour|frame|lens|shade/.test(name)) return "color";
+  if (/size/.test(name)) return "size";
+  return `attr:${darazAttrName(attr).toLowerCase()}`;
+}
+
+function darazSalePropScore(attr, ctx) {
+  const name = darazAttrName(attr).toLowerCase();
+  let score = 0;
+  if (name === "color_family") score += 100;
+  if (preferredSaleValueFromName(attr, ctx)) score += 50;
+  if (isDarazAttrOn(attr?.is_mandatory) || isDarazAttrOn(attr?.isMandatory)) score += 10;
+  return score;
+}
+
+function chosenDarazSalePropNames(attrs, ctx) {
+  const best = new Map();
+  for (const attr of attrs || []) {
+    const name = darazAttrName(attr);
+    if (!name || !isValidDarazAttrKey(name) || !isDarazSaleProp(attr)) continue;
+    const group = darazSalePropGroup(attr);
+    const score = darazSalePropScore(attr, ctx);
+    const current = best.get(group);
+    if (!current || score > current.score) best.set(group, { name, score });
+  }
+  return new Set([...best.values()].map((row) => row.name));
 }
 
 function isDarazSkuAttribute(attr) {
@@ -663,7 +688,7 @@ function valueForDarazAttribute(attr, ctx) {
 
 function buildDarazAttributeObject(attrs, ctx, skuLevel) {
   const out = {};
-  const usedSaleValues = new Set();
+  const saleProps = skuLevel ? chosenDarazSalePropNames(attrs, ctx) : null;
   for (const attr of attrs || []) {
     const name = darazAttrName(attr);
     if (!name || !isValidDarazAttrKey(name)) continue;
@@ -671,18 +696,17 @@ function buildDarazAttributeObject(attrs, ctx, skuLevel) {
     if (skuLevel) {
       if (DARAZ_SKU_STRUCTURAL_ATTRS.has(key)) continue;
       if (!(isDarazSkuAttribute(attr) && isDarazMandatoryAttribute(attr))) continue;
+      if (isDarazSaleProp(attr) && !saleProps.has(name)) continue;
     } else {
       if (isDarazSkuAttribute(attr)) continue;
       if (DARAZ_PRODUCT_STRUCTURAL_ATTRS.has(key)) continue;
       if (!isDarazMandatoryAttribute(attr)) continue;
     }
     let value = valueForDarazAttribute(attr, ctx);
-    if (skuLevel && isDarazSkuAttribute(attr)) {
+    if (skuLevel && isDarazSaleProp(attr)) {
       const known = ctx?.known?.[name] ?? ctx?.known?.[key];
       const hasKnown = known != null && String(known).trim() !== "";
-      const preferred = hasKnown ? value : preferredSaleValueFromName(attr, ctx) || value;
-      value = pickUniqueDarazSaleValue(attr, preferred, usedSaleValues);
-      if (value) usedSaleValues.add(String(value).trim().toLowerCase());
+      if (!hasKnown) value = preferredSaleValueFromName(attr, ctx) || value;
     }
     if (value) out[name] = value;
   }
