@@ -436,7 +436,7 @@ describe("darazProcess variable product create", () => {
         is_sale_prop: 1,
         attribute_type: "sku",
         input_type: "singleSelect",
-        options: [{ name: "1-2 Years" }, { name: "3-4 Years" }],
+        options: [{ name: "1-2 Years" }, { name: "3-4 Years" }, { name: "5-6 Years" }],
       },
     ]);
     await createListing(client, {
@@ -446,6 +446,12 @@ describe("darazProcess variable product create", () => {
           price: 1500,
           quantity: 2,
           variationName: "Kids Matching Set | Polo - Yellow [1 - 2 Years]",
+        },
+        {
+          sellerSku: "10759093",
+          price: 1500,
+          quantity: 1,
+          variationName: "Kids Matching Set | Polo - Yellow [5-6-years-1]",
         },
         {
           sellerSku: "10759092",
@@ -458,6 +464,7 @@ describe("darazProcess variable product create", () => {
     const create = client.calls.find((row) => row.path === "/product/create");
     assert.match(create.params.payload, /<size_baby_clothing>1-2 Years<\/size_baby_clothing>/);
     assert.match(create.params.payload, /<size_baby_clothing>3-4 Years<\/size_baby_clothing>/);
+    assert.match(create.params.payload, /<size_baby_clothing>5-6 Years<\/size_baby_clothing>/);
     assert.match(create.params.payload, /<color_family>Yellow<\/color_family>/);
   });
 

@@ -208,35 +208,36 @@ function scoreDarazCategoryName(candidateName, targetName) {
   return overlap.reduce((sum, token) => sum + token.length, 0);
 }
 
-function findDarazLeafForName(nodes, name) {
+function findDarazLeafCandidates(nodes, name) {
   const target = normalizeDarazCategoryName(name);
-  if (!target || !nodes?.length) return null;
+  if (!target || !nodes?.length) return [];
 
   const exactLeaf = nodes.find(
     (node) =>
       node.leaf && normalizeDarazCategoryName(node.name) === target,
   );
-  if (exactLeaf) return exactLeaf;
+  if (exactLeaf) return [exactLeaf];
 
   const exact = nodes.find(
     (node) => normalizeDarazCategoryName(node.name) === target,
   );
   if (exact) {
-    if (exact.leaf) return exact;
-    return firstDarazLeafUnder(nodes, exact.category_id);
+    if (exact.leaf) return [exact];
+    const under = firstDarazLeafUnder(nodes, exact.category_id);
+    return under ? [under] : [];
   }
 
-  let best = null;
-  let bestScore = 0;
-  for (const node of nodes) {
-    if (!node.leaf) continue;
-    const score = scoreDarazCategoryName(node.name, name);
-    if (score > bestScore) {
-      best = node;
-      bestScore = score;
-    }
-  }
-  return best;
+  return (nodes || [])
+    .filter((node) => node.leaf)
+    .map((node) => ({ node, score: scoreDarazCategoryName(node.name, name) }))
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map((row) => row.node);
+}
+
+function findDarazLeafForName(nodes, name) {
+  return findDarazLeafCandidates(nodes, name)[0] || null;
 }
 
 async function loadDarazCategoryTree(client) {
@@ -633,7 +634,8 @@ function parsePosVariationParts(name) {
 }
 
 function darazOptionForValue(attr, value) {
-  const want = darazLooseKey(value);
+  const raw = String(value || "").trim().replace(/-\d+$/, "");
+  const want = darazLooseKey(raw);
   if (!want) return "";
   return darazOptionNames(attr).find((opt) => darazLooseKey(opt) === want) || "";
 }
@@ -723,11 +725,16 @@ function assignDarazSkuSaleProps(attributes, skus, ctx) {
 }
 
 async function posCategoryLabels(product) {
-  const cats = Array.isArray(product?.category_id)
+  let cats = Array.isArray(product?.category_id)
     ? product.category_id
     : product?.category_id
       ? [product.category_id]
       : [];
+  const productId = String(product?._id || "");
+  if (!cats.length && /^[a-f0-9]{24}$/i.test(productId)) {
+    const row = await Product.findById(productId).select("category_id").lean();
+    cats = Array.isArray(row?.category_id) ? row.category_id : [];
+  }
   const names = [];
   const ids = [];
   for (const cat of cats) {
@@ -1728,10 +1735,16 @@ async function createDarazListing({
     const labels = await posCategoryLabels(product);
     if (labels.names.length) try {
       const tree = await loadDarazCategoryTree(client);
-      for (const label of labels.names) {
-        const node = findDarazLeafForName(tree, label);
+      const candidates = labels.names.flatMap((label) =>
+        findDarazLeafCandidates(tree, label),
+      );
+      const seenIds = new Set();
+      for (const node of candidates) {
         const nextId = String(node?.category_id || "").trim();
-        if (!isDarazCategoryId(nextId) || nextId === String(primaryCategory)) continue;
+        if (!isDarazCategoryId(nextId) || nextId === String(primaryCategory) || seenIds.has(nextId)) {
+          continue;
+        }
+        seenIds.add(nextId);
         const nextAttributes = await fetchDarazCategoryAttributes(client, nextId);
         const nextBuilt = assignDarazSkuSaleProps(nextAttributes, skus, ctx);
         if (nextBuilt.duplicate) continue;
@@ -1754,7 +1767,9 @@ async function createDarazListing({
     }
   }
   if (built.duplicate) {
-    const err = new Error(built.duplicate);
+    const err = new Error(
+      `${built.duplicate} Daraz category ${primaryCategory} was used.`,
+    );
     err.statusCode = 400;
     throw err;
   }
