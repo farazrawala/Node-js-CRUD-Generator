@@ -200,6 +200,70 @@ async function applyIntegrationSyncFilter(filter, query = {}, companyId) {
   return null;
 }
 
+/**
+ * POS product lists: `?warehouse_id=<id>` keeps products that have stock in that
+ * warehouse. Variation stock counts for the parent row shown on the list.
+ */
+async function applyWarehouseInventoryFilter(filter, query = {}, companyId) {
+  const raw = String(query.warehouse_id ?? query.warehouseId ?? "").trim();
+  if (!raw || raw.toLowerCase() === "all") return null;
+
+  const warehouseOid = coalesceObjectId(raw);
+  if (
+    !warehouseOid ||
+    !mongoose.Types.ObjectId.isValid(String(warehouseOid))
+  ) {
+    return {
+      success: false,
+      status: 400,
+      error: "Invalid warehouse_id",
+      message: "warehouse_id must be a valid 24-character ObjectId",
+    };
+  }
+
+  const rows = await WarehouseInventory.find({
+    warehouse_id: warehouseOid,
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    ...(companyId ? { company_id: companyId } : {}),
+  })
+    .select("product_id")
+    .lean();
+
+  const productIds = rows.map((row) => row.product_id).filter(Boolean);
+  const parents = productIds.length
+    ? await Product.find({
+        _id: { $in: productIds },
+        parent_product_id: { $exists: true, $ne: null },
+      })
+        .select("parent_product_id")
+        .lean()
+    : [];
+
+  const ids = new Set(productIds.map((id) => String(id)));
+  for (const row of parents) {
+    if (row.parent_product_id) ids.add(String(row.parent_product_id));
+  }
+  const allowed = [...ids]
+    .map((id) => coalesceObjectId(id))
+    .filter(Boolean);
+
+  if (filter._id && Array.isArray(filter._id.$in)) {
+    const allowSet = new Set(allowed.map((id) => String(id)));
+    filter._id = {
+      $in: filter._id.$in.filter((id) => allowSet.has(String(id))),
+    };
+  } else if (filter._id && Array.isArray(filter._id.$nin)) {
+    const blocked = new Set(filter._id.$nin.map((id) => String(id)));
+    filter._id = {
+      $in: allowed.filter((id) => !blocked.has(String(id))),
+    };
+  } else {
+    filter._id = { $in: allowed };
+  }
+  return null;
+}
+
 function mergeProductListPopulate(req) {
   const fromQuery = buildPopulateFromQuery(req.query || {}, "product");
   if (!fromQuery || fromQuery.length === 0) {
@@ -2121,12 +2185,19 @@ async function getDeletedProducts(req, res) {
     action: "get-deleted",
     fetch: async () => {
       const filter = buildParentProductListFilter(req, { deletedOnly: true });
+      const companyId = coalesceObjectId(req.user?.company_id);
       const integrationFilterError = await applyIntegrationSyncFilter(
         filter,
         req.query || {},
-        coalesceObjectId(req.user?.company_id),
+        companyId,
       );
       if (integrationFilterError) return integrationFilterError;
+      const warehouseFilterError = await applyWarehouseInventoryFilter(
+        filter,
+        req.query || {},
+        companyId,
+      );
+      if (warehouseFilterError) return warehouseFilterError;
       return fetchParentProductList(req, filter, {
         sort: { deletedAt: -1, createdAt: -1 },
       });
@@ -2835,6 +2906,15 @@ async function getAllActiveProductsPOS(req, res) {
   );
   if (integrationFilterError) {
     return res.status(integrationFilterError.status).json(integrationFilterError);
+  }
+
+  const warehouseFilterError = await applyWarehouseInventoryFilter(
+    filter,
+    query,
+    tenantCo,
+  );
+  if (warehouseFilterError) {
+    return res.status(warehouseFilterError.status).json(warehouseFilterError);
   }
 
   const warehouseInventoryMatch = {
