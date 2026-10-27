@@ -1359,6 +1359,36 @@ async function stockTransfer(req, res) {
       };
       const inResult = await runInventoryMovementTxnBody(req, session);
 
+      const userId = req.user?._id || null;
+      const sourceOnHand = await WarehouseInventory.findOne(
+        WarehouseInventory.activeRowFilter(productId, fromWarehouseId, companyId),
+      )
+        .select("quantity")
+        .session(session);
+      if (sourceOnHand && Number(sourceOnHand.quantity) >= transferQty) {
+        const logContext = { source: "stock_transfer", reference_id: transferReferenceId };
+        await WarehouseInventory.applyQuantityDelta({
+          productId,
+          warehouseId: fromWarehouseId,
+          companyId,
+          qtyDelta: -transferQty,
+          userId,
+          session,
+          req,
+          logContext,
+        });
+        await WarehouseInventory.applyQuantityDelta({
+          productId,
+          warehouseId: toWarehouseId,
+          companyId,
+          qtyDelta: transferQty,
+          userId,
+          session,
+          req,
+          logContext,
+        });
+      }
+
       req.body = bodyBefore;
       if (paramsIdBefore !== undefined) req.params.id = paramsIdBefore;
       else delete req.params.id;
@@ -1455,6 +1485,7 @@ async function stockTransfer(req, res) {
       req,
       INVENTORY_MOVEMENTS_LIST_CACHE_MODULE,
     );
+    await invalidateModuleListCachesForReq(req, "product");
 
     return res.status(201).json({
       success: true,
