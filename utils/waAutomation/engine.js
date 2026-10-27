@@ -16,9 +16,11 @@ const {
   composeMenuText,
   evaluateCondition,
   formatOptionList,
+  formatProductList,
   interpolate,
   isClosingReply,
   matchOption,
+  presentMenu,
   normalizeOrderNumber,
   normalizePhoneInput,
 } = require("./messageFormat");
@@ -133,7 +135,7 @@ async function runFrom(nodes, startId, session, ctx, items) {
       case "api": {
         let result;
         try {
-          result = await ctx.runApi(apiSource(d), d, s.vars);
+          result = await ctx.runApi(apiSource(d), d, s.vars, s.products);
         } catch (err) {
           result = { ok: false, summary: err?.message || "Request failed" };
         }
@@ -143,7 +145,7 @@ async function runFrom(nodes, startId, session, ctx, items) {
         s = {
           ...s,
           vars: { ...s.vars, ...(result.vars || {}) },
-          products: result.products || (result.ok ? s.products : []),
+          products: Array.isArray(result.products) ? result.products : s.products,
         };
         currentId = result.ok ? d.successNext : d.failureNext;
         break;
@@ -248,12 +250,15 @@ async function reply(nodes, session, text, ctx) {
   const d = node.data || {};
 
   if (waiting.type === "options") {
-    const option = matchOption(d.options, text);
+    const presented = presentMenu(d, session.products);
+    const option = matchOption(presented.choices, text);
     if (!option) {
       if (isClosingReply(text)) return closeWithThanks(session, ctx, items);
       const fallback = String(ctx.settings?.fallback_message || DEFAULT_FALLBACK).trim();
-      const list = formatOptionList(d.options, { style: d.listStyle, vars: session.vars });
-      return invalidReply(node, session, ctx, items, `${fallback}\n\n${list}`);
+      const list = formatOptionList(presented.shown, { style: d.listStyle, vars: session.vars });
+      const productText = presented.numberProducts ? formatProductList(session.products) : "";
+      const again = [productText, list].filter(Boolean).join("\n\n");
+      return invalidReply(node, session, ctx, items, `${fallback}\n\n${again}`);
     }
     const next = { ...session, invalid_count: 0, vars: { ...session.vars, last_choice: option.title || "" } };
     const result = await runFrom(nodes, option.next, next, ctx, items);

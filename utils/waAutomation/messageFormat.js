@@ -124,11 +124,24 @@ function formatOptionList(options = [], { style = "emoji", vars = {}, keepUnknow
     .join("\n");
 }
 
-/** Products from a product search as text (WhatsApp Web cannot send cards). */
-function formatProductList(products = []) {
+/** "Product 1" is a slot for a search result, not a label the customer needs to see. */
+function isProductSlot(option) {
+  return /^product\s+\d+$/i.test(String(option?.title || "").trim());
+}
+
+function serialBullet(n) {
+  return n >= 0 && n <= 10 ? KEYCAPS[n] : `${n}.`;
+}
+
+/**
+ * Products from a product search as text (WhatsApp Web cannot send cards).
+ * `numbered` puts 1️⃣, 2️⃣, … on each name so the customer can reply with that number.
+ */
+function formatProductList(products = [], { numbered = true } = {}) {
   return (products || [])
-    .map((p) => {
-      const lines = [`*${p.name}*`];
+    .map((p, i) => {
+      const name = `*${p.name}*`;
+      const lines = [numbered ? `${serialBullet(i + 1)} ${name}` : name];
       const meta = [p.price, p.stock].filter(Boolean).join(" · ");
       if (meta) lines.push(meta);
       if (p.sku) lines.push(`SKU ${p.sku}`);
@@ -136,6 +149,27 @@ function formatProductList(products = []) {
       return lines.join("\n");
     })
     .join("\n\n");
+}
+
+/**
+ * What a product menu offers. Result slots ("Product 1") stay selectable by the
+ * serial on the product line and are not drawn again. The other options continue
+ * after the results (one product → Search again is 2). Menus without those slots
+ * are unchanged.
+ */
+function presentMenu(data = {}, products = []) {
+  const options = Array.isArray(data.options) ? data.options : [];
+  const count = data.showProducts && Array.isArray(products) ? products.length : 0;
+  const hasSlots = count > 0 && options.some(isProductSlot);
+  if (!hasSlots) return { choices: options, shown: options, numberProducts: false };
+  const slots = options.filter((opt) => {
+    if (!isProductSlot(opt)) return false;
+    const n = Number(String(opt.title).match(/(\d+)/)[1]);
+    return n >= 1 && n <= count;
+  });
+  let next = count;
+  const shown = options.filter((opt) => !isProductSlot(opt)).map((opt) => ({ ...opt, value: String(++next) }));
+  return { choices: [...slots, ...shown], shown, numberProducts: true };
 }
 
 function tidy(text) {
@@ -151,8 +185,9 @@ function tidy(text) {
  * Product results (when `showProducts`) go just before the option list.
  */
 function composeMenuText(data = {}, vars = {}, products = [], { keepUnknown = false } = {}) {
-  const list = formatOptionList(data.options, { style: data.listStyle, vars, keepUnknown });
-  const productText = data.showProducts && products?.length ? formatProductList(products) : "";
+  const presented = presentMenu(data, products);
+  const list = formatOptionList(presented.shown, { style: data.listStyle, vars, keepUnknown });
+  const productText = data.showProducts && products?.length ? formatProductList(products, { numbered: presented.numberProducts }) : "";
   const raw = String(data.text ?? "");
   const hasPlaceholder = OPTIONS_PLACEHOLDER.test(raw);
   OPTIONS_PLACEHOLDER.lastIndex = 0;
@@ -370,6 +405,7 @@ module.exports = {
   optionKey,
   formatOptionList,
   formatProductList,
+  presentMenu,
   composeMenuText,
   matchOption,
   normalizeOrderNumber,

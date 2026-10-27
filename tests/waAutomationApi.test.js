@@ -222,10 +222,15 @@ describe("WhatsApp Automation API", () => {
       status: "agent",
       outcome: "handed_over",
       transcript: [{ from: "customer", text: "hi" }],
+      vars: { order_number: "ORD-1002", cart_lines: [{ secret: true }] },
     });
     const list = await call(api.listSessions, { query: { q: "1234" } });
     assert.equal(list.body.total, 1);
     assert.equal(list.body.data[0].transcript, undefined, "list rows leave out the transcript");
+    assert.equal(list.body.data[0].order_number, "ORD-1002");
+    assert.equal(list.body.data[0].vars, undefined, "list rows leave out the cart");
+    const byOrder = await call(api.listSessions, { query: { q: "ORD-1002" } });
+    assert.equal(byOrder.body.total, 1);
 
     const ended = await call(api.endSession, { params: { id: String(s._id) } });
     assert.equal(ended.body.data.status, "ended");

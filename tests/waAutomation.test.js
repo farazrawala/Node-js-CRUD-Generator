@@ -105,6 +105,41 @@ describe("messageFormat", () => {
     assert.equal(text, "Results:\n\n*Hoodie*\nPKR 1,850 · In stock (15)\nSKU KH-1\n\n1️⃣ Search again");
   });
 
+  it("numbers each product and continues the other options after them", () => {
+    const data = {
+      text: "Pick the product you want.\n\n{{options}}",
+      showProducts: true,
+      options: [
+        opt("a", "Product 1", "1"),
+        opt("b", "Product 2", "2"),
+        opt("c", "Product 3", "3"),
+        opt("d", "Search again", "4"),
+        opt("e", "Main menu", "5"),
+      ],
+    };
+    const products = [{ name: "Sugar", price: "PKR 20", stock: "Out of stock" }];
+    assert.equal(
+      fmt.composeMenuText(data, {}, products),
+      "Pick the product you want.\n\n1️⃣ *Sugar*\nPKR 20 · Out of stock\n\n2️⃣ Search again\n3️⃣ Main menu",
+    );
+    const { choices } = fmt.presentMenu(data, products);
+    assert.equal(fmt.matchOption(choices, "1").title, "Product 1");
+    assert.equal(fmt.matchOption(choices, "2").title, "Search again");
+    assert.equal(fmt.matchOption(choices, "3").title, "Main menu");
+  });
+
+  it("keeps option 11 after ten products", () => {
+    const options = [
+      ...Array.from({ length: 10 }, (_, i) => ({ id: `p${i}`, title: `Product ${i + 1}`, value: String(i + 1) })),
+      { id: "more", title: "More or search by name", value: "11" },
+    ];
+    const products = Array.from({ length: 10 }, (_, i) => ({ name: `Item ${i + 1}`, price: "Rs. 10.00", stock: "In stock (1)" }));
+    const choices = fmt.presentMenu({ showProducts: true, options }, products).choices;
+    assert.equal(fmt.matchOption(choices, "1").title, "Product 1");
+    assert.equal(fmt.matchOption(choices, "10").title, "Product 10");
+    assert.equal(fmt.matchOption(choices, "11").title, "More or search by name");
+  });
+
   it("normalizes order numbers and phone numbers", () => {
     assert.equal(fmt.normalizeOrderNumber("1001"), "ORD-1001");
     assert.equal(fmt.normalizeOrderNumber(" #ord1002 "), "ORD-1002");

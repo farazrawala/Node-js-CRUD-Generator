@@ -109,8 +109,8 @@ function buildContext({ companyId, phone, settings, templates, test }) {
     settings,
     templates: (templates || []).map((t) => ({ id: String(t._id), content: t.content })),
     isOpen: () => isWithinBusinessHours(new Date(), settings.business_hours),
-    runApi: (source, data, vars) =>
-      runApi(source, data, vars, { companyId, phone, test: Boolean(test), appUrl: settings.app_url }),
+    runApi: (source, data, vars, products) =>
+      runApi(source, data, vars, { companyId, phone, test: Boolean(test), appUrl: settings.app_url, products }),
   };
 }
 

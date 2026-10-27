@@ -469,8 +469,8 @@ describe("WhatsApp automation inbound runtime", () => {
     assert.deepEqual(
       found.products.map((p) => [p.name, p.price, p.stock, p.sku]),
       [
-        ["Two Color Kidwear", "PKR 700 – 850", "In stock (4)", ""],
-        ["Two Color Socks", "PKR 150", "Out of stock", "SOCK-2"],
+        ["Two Color Kidwear", "Rs. 700.00 – 850.00", "In stock (4)", ""],
+        ["Two Color Socks", "Rs. 150.00", "Out of stock", "SOCK-2"],
       ],
     );
 

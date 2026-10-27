@@ -485,6 +485,13 @@ const saveSettingsRoute = handler(async (req, res, companyId) => {
 const SESSION_LIST_FIELDS =
   "phone customer_name flow_id flow_name status outcome last_step started_at last_activity_at ended_at messages_count";
 
+/** List rows only need the order number, not the cart and the rest of the chat variables. */
+function sessionListRow(row) {
+  const orderNumber = String(row?.vars?.order_number || "").trim();
+  const { vars, ...rest } = row;
+  return orderNumber ? { ...rest, order_number: orderNumber } : rest;
+}
+
 const listSessions = handler(async (req, res, companyId) => {
   const q = req.query || {};
   const limit = Math.min(500, Math.max(1, parseInt(q.limit, 10) || 25));
@@ -503,7 +510,7 @@ const listSessions = handler(async (req, res, companyId) => {
   if (search) {
     const rx = { $regex: escapeRegex(search), $options: "i" };
     const digits = search.replace(/\D/g, "");
-    filter.$or = [{ customer_name: rx }, { last_step: rx }, { flow_name: rx }];
+    filter.$or = [{ customer_name: rx }, { last_step: rx }, { flow_name: rx }, { "vars.order_number": rx }];
     if (digits.length >= 3) filter.$or.push({ phone: { $regex: escapeRegex(digits) } });
   }
   const [rows, total] = await Promise.all([
@@ -511,11 +518,11 @@ const listSessions = handler(async (req, res, companyId) => {
       .sort({ started_at: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
-      .select(SESSION_LIST_FIELDS)
+      .select(`${SESSION_LIST_FIELDS} vars.order_number`)
       .lean(),
     Session.countDocuments(filter),
   ]);
-  return ok(res, rows, { total, page, limit });
+  return ok(res, rows.map(sessionListRow), { total, page, limit });
 });
 
 const getSessionRoute = handler(async (req, res, companyId) => {

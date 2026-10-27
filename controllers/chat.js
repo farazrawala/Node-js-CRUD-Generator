@@ -1215,15 +1215,34 @@ async function loadChatsAndQueueReply(req, { companyId, filter, limit, variants 
       createdAt: chat.createdAt,
     }));
 
-  // Groq-suggested next message to send; failures never break the chat list
-  const { reply: expected_reply = null, error: expected_reply_error } =
-    conversation.length ? await generateExpectedReply(conversation) : {};
+  // A product name is answered from the catalog in this same message. The AI has
+  // no second turn, so "let me check, give me a sec" would be all the customer gets.
+  let expected_reply = null;
+  let expected_reply_error = null;
+  const newestChat = chats[0];
+  const previousBot = chats.slice(1).find((chat) => chat.type === "sent");
+  if (newestChat?.type === "received" && companyId) {
+    try {
+      const { catalogReplyForMessage } = require("../utils/waAutomation/catalogReply");
+      expected_reply = await catalogReplyForMessage({
+        companyId,
+        message: newestChat.message,
+        previousBotText: previousBot?.message || "",
+      });
+    } catch (catalogErr) {
+      console.error("❌ fetchLastChats → catalog reply:", catalogErr);
+    }
+  }
+  if (!expected_reply && conversation.length) {
+    const generated = await generateExpectedReply(conversation);
+    expected_reply = generated.reply || null;
+    expected_reply_error = generated.error;
+  }
 
   // Queue the reply to the customer (same as POST /whatsapp_message/create).
   // Only for one number and only when the customer spoke last — the queued
   // message adds a "sent" chat, so repeating this request won't send it twice.
   let expected_reply_queued = null;
-  const newestChat = chats[0];
   if (expected_reply && variants.length && newestChat?.type === "received") {
     try {
       // Lazy require: whatsapp_message.js requires this file
