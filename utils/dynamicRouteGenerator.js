@@ -40,6 +40,7 @@ const RESERVED_QUERY_KEYS = new Set([
   "page",
   "deleted",
   "include_inactive",
+  "include_deleted",
   "role",
   "tag",
   ...INCLUDE_EXCLUDE_ID_QUERY_KEYS,
@@ -762,17 +763,31 @@ function generateControllerFunctions(modelName) {
         fetch: async () => {
           // `user`: "active" = not soft-deleted and not explicitly `inactive` (legacy docs may omit `status`).
           // Pass `?include_inactive=true` to list every non-deleted user for the tenant (admin-style directory).
-          let filter = { deletedAt: null };
-          if (modelName === "user") {
+          // Integrations list passes `?include_deleted=1` so soft-deleted stores stay on the page.
+          const includeDeleted =
+            modelName === "integration" &&
+            (req.query.include_deleted === "true" || req.query.include_deleted === "1");
+          let filter = includeDeleted
+            ? {
+                $or: [
+                  { deletedAt: null, status: "active" },
+                  { deletedAt: { $ne: null } },
+                ],
+              }
+            : { deletedAt: null };
+          if (!includeDeleted && modelName === "user") {
             const includeInactive =
               req.query.include_inactive === "true" ||
               req.query.include_inactive === "1";
             if (!includeInactive) {
               filter.status = { $ne: "inactive" };
             }
-          } else if (modelName === "sms_message" || modelName === "whatsapp_message") {
-            // Queue `status` is on_hold / processing / sent — not active/inactive.
-          } else {
+          } else if (
+            !includeDeleted &&
+            modelName !== "user" &&
+            modelName !== "sms_message" &&
+            modelName !== "whatsapp_message"
+          ) {
             filter.status = "active";
           }
 
