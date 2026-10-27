@@ -188,6 +188,26 @@ function firstDarazLeafUnder(nodes, parentId) {
   return null;
 }
 
+function darazCategoryTokens(name) {
+  return normalizeDarazCategoryName(name)
+    .replace(/\bpajamas?\b/g, "pyjama")
+    .replace(/\bpyjamas?\b/g, "pyjama")
+    .replace(/\bsets\b/g, "set")
+    .split(" ")
+    .filter((token) => token.length >= 3);
+}
+
+/** Score a Daraz leaf against a POS category. A short name such as "Kids" must not beat "Pyjama sets". */
+function scoreDarazCategoryName(candidateName, targetName) {
+  const targetTokens = darazCategoryTokens(targetName);
+  const candTokens = darazCategoryTokens(candidateName);
+  if (!targetTokens.length || !candTokens.length) return 0;
+  const overlap = candTokens.filter((token) => targetTokens.includes(token));
+  if (!overlap.length) return 0;
+  if (overlap.length === 1 && overlap[0].length < 6) return 0;
+  return overlap.reduce((sum, token) => sum + token.length, 0);
+}
+
 function findDarazLeafForName(nodes, name) {
   const target = normalizeDarazCategoryName(name);
   if (!target || !nodes?.length) return null;
@@ -206,18 +226,17 @@ function findDarazLeafForName(nodes, name) {
     return firstDarazLeafUnder(nodes, exact.category_id);
   }
 
-  if (target.length < 4) return null;
-  const partial = nodes.filter((node) => {
-    const nname = normalizeDarazCategoryName(node.name);
-    return nname.includes(target) || target.includes(nname);
-  });
-  const partialLeaf = partial.find((node) => node.leaf);
-  if (partialLeaf) return partialLeaf;
-  if (partial[0]) {
-    if (partial[0].leaf) return partial[0];
-    return firstDarazLeafUnder(nodes, partial[0].category_id);
+  let best = null;
+  let bestScore = 0;
+  for (const node of nodes) {
+    if (!node.leaf) continue;
+    const score = scoreDarazCategoryName(node.name, name);
+    if (score > bestScore) {
+      best = node;
+      bestScore = score;
+    }
   }
-  return null;
+  return best;
 }
 
 async function loadDarazCategoryTree(client) {
@@ -584,7 +603,12 @@ function chosenDarazSalePropNames(attrs, ctx) {
 }
 
 function darazLooseKey(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return String(value || "")
+    .toLowerCase()
+    .replace(/years?/g, "yr")
+    .replace(/yrs?/g, "yr")
+    .replace(/months?/g, "mo")
+    .replace(/[^a-z0-9]+/g, "");
 }
 
 /** POS variation names end in "[Size: M - Color: Red]" (ai-pos productVariationUtils). */
@@ -592,6 +616,10 @@ function parsePosVariationParts(name) {
   const match = String(name || "").match(/\[([^\]]*)\]\s*$/);
   const inner = String(match?.[1] || "").trim();
   if (!inner) return [];
+  // "1 - 2 Years" is one size, not two variation parts.
+  if (!/:\s/.test(inner) && /^\d+\s*-\s*\d+/.test(inner)) {
+    return [{ name: "", value: inner }];
+  }
   const pieces = /:\s/.test(inner)
     ? inner.split(/\s-\s(?=(?:(?!\s-\s)[^:])+:\s)/)
     : inner.split(" - ");
@@ -639,15 +667,11 @@ function saleValueFromPosVariation(attr, parts) {
 }
 
 /** Daraz rejects the whole create (4112) when two SKUs carry the same sale-prop values. */
-function assertDistinctDarazSaleProps(skus, attrs, saleProps) {
-  if (!Array.isArray(skus) || skus.length < 2) return;
+function duplicateDarazSalePropMessage(skus, attrs, saleProps) {
+  if (!Array.isArray(skus) || skus.length < 2) return "";
   const props = (attrs || []).filter((attr) => saleProps?.has(darazAttrName(attr)));
   if (!props.length) {
-    const err = new Error(
-      `This Daraz category has no sale properties (such as colour or size), so it cannot hold ${skus.length} variations. Map the POS category to a Daraz category that has them, then sync again.`,
-    );
-    err.statusCode = 400;
-    throw err;
+    return `This Daraz category has no sale properties (such as colour or size), so it cannot hold ${skus.length} variations. Map the POS category to a Daraz category that has them, then sync again.`;
   }
   const labels = props.map((attr) => String(attr?.label || darazAttrName(attr)).trim());
   const seen = new Map();
@@ -661,14 +685,63 @@ function assertDistinctDarazSaleProps(skus, attrs, saleProps) {
       const shown = labels
         .map((label, i) => `${label}: ${values[i] || "(empty)"}`)
         .join(", ");
-      const err = new Error(
-        `Daraz needs every variation to differ in ${labels.join(" / ")}, but SKUs ${first.sellerSku} and ${sku.sellerSku} would both be sent as ${shown}. Give each variation its own ${labels.join(" or ")} value, or map the POS category to a Daraz category whose sale properties match these variations (for example Size), then sync again.`,
-      );
-      err.statusCode = 400;
-      throw err;
+      return `Daraz needs every variation to differ in ${labels.join(" / ")}, but SKUs ${first.sellerSku} and ${sku.sellerSku} would both be sent as ${shown}. Give each variation its own ${labels.join(" or ")} value, or map the POS category to a Daraz category whose sale properties match these variations (for example Size), then sync again.`;
     }
     seen.set(key, sku);
   }
+  return "";
+}
+
+function assertDistinctDarazSaleProps(skus, attrs, saleProps) {
+  const message = duplicateDarazSalePropMessage(skus, attrs, saleProps);
+  if (!message) return;
+  const err = new Error(message);
+  err.statusCode = 400;
+  throw err;
+}
+
+function assignDarazSkuSaleProps(attributes, skus, ctx) {
+  const saleProps = chosenDarazSalePropNames(attributes, ctx);
+  const skusWithAttributes = skus.map((sku) => ({
+    ...sku,
+    attributes: buildDarazAttributeObject(
+      attributes,
+      {
+        ...ctx,
+        name: sku.variationName || ctx.name,
+        saleProps,
+        variationParts: parsePosVariationParts(sku.variationName),
+      },
+      true,
+    ),
+  }));
+  return {
+    saleProps,
+    skusWithAttributes,
+    duplicate: duplicateDarazSalePropMessage(skusWithAttributes, attributes, saleProps),
+  };
+}
+
+async function posCategoryLabels(product) {
+  const cats = Array.isArray(product?.category_id)
+    ? product.category_id
+    : product?.category_id
+      ? [product.category_id]
+      : [];
+  const names = [];
+  const ids = [];
+  for (const cat of cats) {
+    if (cat && typeof cat === "object" && cat.name) names.push(String(cat.name));
+    const id = coalesceObjectId(cat?._id || cat);
+    if (id) ids.push(id);
+  }
+  if (!names.length && ids.length) {
+    const rows = await Category.find({ _id: { $in: ids }, deletedAt: null })
+      .select("name")
+      .lean();
+    names.push(...rows.map((row) => row.name).filter(Boolean));
+  }
+  return { names, categoryId: ids[0] || null };
 }
 
 function isDarazSkuAttribute(attr) {
@@ -1555,7 +1628,7 @@ async function createDarazListing({
   process,
   primaryCategoryId,
 }) {
-  const primaryCategory =
+  let primaryCategory =
     (isDarazCategoryId(primaryCategoryId) && String(primaryCategoryId).trim()) ||
     (await resolveDarazPrimaryCategoryId(
       product,
@@ -1650,23 +1723,43 @@ async function createDarazListing({
       model: resolvePosProductSku(product),
     },
   };
+  let built = assignDarazSkuSaleProps(attributes, skus, ctx);
+  if (built.duplicate && skus.length > 1 && client) {
+    const labels = await posCategoryLabels(product);
+    if (labels.names.length) try {
+      const tree = await loadDarazCategoryTree(client);
+      for (const label of labels.names) {
+        const node = findDarazLeafForName(tree, label);
+        const nextId = String(node?.category_id || "").trim();
+        if (!isDarazCategoryId(nextId) || nextId === String(primaryCategory)) continue;
+        const nextAttributes = await fetchDarazCategoryAttributes(client, nextId);
+        const nextBuilt = assignDarazSkuSaleProps(nextAttributes, skus, ctx);
+        if (nextBuilt.duplicate) continue;
+        primaryCategory = nextId;
+        attributes = nextAttributes;
+        built = nextBuilt;
+        await rememberDarazCategoryMapping(
+          process,
+          companyId,
+          labels.categoryId,
+          nextId,
+        );
+        break;
+      }
+    } catch (err) {
+      console.warn(
+        "Daraz category retry failed:",
+        err?.message || err,
+      );
+    }
+  }
+  if (built.duplicate) {
+    const err = new Error(built.duplicate);
+    err.statusCode = 400;
+    throw err;
+  }
+  const skusWithAttributes = built.skusWithAttributes;
   const extraAttributes = buildDarazAttributeObject(attributes, ctx, false);
-  // One set of sale props for the item; each SKU fills them from its own variation.
-  const saleProps = chosenDarazSalePropNames(attributes, ctx);
-  const skusWithAttributes = skus.map((sku) => ({
-    ...sku,
-    attributes: buildDarazAttributeObject(
-      attributes,
-      {
-        ...ctx,
-        name: sku.variationName || ctx.name,
-        saleProps,
-        variationParts: parsePosVariationParts(sku.variationName),
-      },
-      true,
-    ),
-  }));
-  assertDistinctDarazSaleProps(skusWithAttributes, attributes, saleProps);
 
   const payloadXml = buildDarazProductCreateXml({
     primaryCategory,

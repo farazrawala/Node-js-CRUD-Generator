@@ -60,6 +60,24 @@ describe("darazProcess category matching", () => {
     assert.equal(leaf.category_id, "12");
   });
 
+  it("does not map Kids Pajama Set onto an eyewear leaf named Kids", () => {
+    const nodes = flattenDarazCategoryTree([
+      {
+        category_id: 10001252,
+        name: "Kids",
+        leaf: true,
+      },
+      {
+        category_id: 9043,
+        name: "Pyjama sets",
+        leaf: true,
+      },
+    ]);
+    const leaf = findDarazLeafForName(nodes, "Kids Pajama Set");
+    assert.equal(leaf.category_id, "9043");
+    assert.equal(leaf.name, "Pyjama sets");
+  });
+
   it("accepts numeric Daraz category ids only", () => {
     assert.equal(isDarazCategoryId("12345"), true);
     assert.equal(isDarazCategoryId("pets"), false);
@@ -364,6 +382,10 @@ describe("darazProcess variable product create", () => {
       { name: "", value: "XL" },
     ]);
     assert.deepEqual(parsePosVariationParts("Kids Matching Set | Polo - Yellow"), []);
+    assert.deepEqual(
+      parsePosVariationParts("Kids Matching Set | Polo - Yellow [1 - 2 Years]"),
+      [{ name: "", value: "1 - 2 Years" }],
+    );
   });
 
   it("gives each variation SKU its own sale prop values", async () => {
@@ -396,6 +418,123 @@ describe("darazProcess variable product create", () => {
     for (const block of skuBlocks) {
       assert.match(block, /<color_family>Yellow<\/color_family>/);
     }
+  });
+
+  it("sends each age range as its own size", async () => {
+    const client = fakeDarazClient([
+      {
+        name: "color_family",
+        label: "Color Family",
+        is_sale_prop: 1,
+        attribute_type: "sku",
+        input_type: "singleSelect",
+        options: [{ name: "Yellow" }, { name: "Red" }],
+      },
+      {
+        name: "size_baby_clothing",
+        label: "Size Baby Clothing",
+        is_sale_prop: 1,
+        attribute_type: "sku",
+        input_type: "singleSelect",
+        options: [{ name: "1-2 Years" }, { name: "3-4 Years" }],
+      },
+    ]);
+    await createListing(client, {
+      skus: [
+        {
+          sellerSku: "10759091",
+          price: 1500,
+          quantity: 2,
+          variationName: "Kids Matching Set | Polo - Yellow [1 - 2 Years]",
+        },
+        {
+          sellerSku: "10759092",
+          price: 1500,
+          quantity: 3,
+          variationName: "Kids Matching Set | Polo - Yellow [3 - 4 Years]",
+        },
+      ],
+    });
+    const create = client.calls.find((row) => row.path === "/product/create");
+    assert.match(create.params.payload, /<size_baby_clothing>1-2 Years<\/size_baby_clothing>/);
+    assert.match(create.params.payload, /<size_baby_clothing>3-4 Years<\/size_baby_clothing>/);
+    assert.match(create.params.payload, /<color_family>Yellow<\/color_family>/);
+  });
+
+  it("leaves the eyewear Kids category when the sizes would collide", async () => {
+    const calls = [];
+    const client = {
+      calls,
+      call: async (path, params) => {
+        calls.push({ path, params });
+        if (path === "/brands/get") return { brands: [{ name: "No Brand" }] };
+        if (path === "/category/tree/get") {
+          return {
+            category_list: [
+              { category_id: 10001252, name: "Kids", leaf: true },
+              { category_id: 9043, name: "Pyjama sets", leaf: true },
+            ],
+          };
+        }
+        if (path === "/category/attributes/get" && params.primary_category_id === "10001252") {
+          return [{
+            name: "lens_color",
+            label: "Lens Color",
+            is_sale_prop: 1,
+            attribute_type: "sku",
+            input_type: "singleSelect",
+            options: [{ name: "Yellow" }, { name: "Red" }],
+          }];
+        }
+        if (path === "/category/attributes/get" && params.primary_category_id === "9043") {
+          return [
+            {
+              name: "color_family",
+              label: "Color Family",
+              is_sale_prop: 1,
+              attribute_type: "sku",
+              input_type: "singleSelect",
+              options: [{ name: "Yellow" }, { name: "Red" }],
+            },
+            {
+              name: "size_baby_clothing",
+              label: "Size Baby Clothing",
+              is_sale_prop: 1,
+              attribute_type: "sku",
+              input_type: "singleSelect",
+              options: [{ name: "1-2 Years" }, { name: "3-4 Years" }],
+            },
+          ];
+        }
+        if (path === "/product/create") return { item_id: "900", sku_list: [] };
+        throw new Error(`unexpected Daraz call ${path}`);
+      },
+    };
+    await createListing(client, {
+      primaryCategoryId: "10001252",
+      product: {
+        ...product,
+        category_id: [{ _id: "cat1", name: "Kids Pajama Set" }],
+      },
+      skus: [
+        {
+          sellerSku: "10759091",
+          price: 1500,
+          quantity: 2,
+          variationName: "Kids Matching Set | Polo - Yellow [1 - 2 Years]",
+        },
+        {
+          sellerSku: "10759092",
+          price: 1500,
+          quantity: 3,
+          variationName: "Kids Matching Set | Polo - Yellow [3 - 4 Years]",
+        },
+      ],
+    });
+    const create = calls.find((row) => row.path === "/product/create");
+    assert.match(create.params.payload, /<PrimaryCategory>9043<\/PrimaryCategory>/);
+    assert.match(create.params.payload, /<size_baby_clothing>1-2 Years<\/size_baby_clothing>/);
+    assert.match(create.params.payload, /<size_baby_clothing>3-4 Years<\/size_baby_clothing>/);
   });
 
   it("stops before Daraz when two variations would carry the same sale props", async () => {
