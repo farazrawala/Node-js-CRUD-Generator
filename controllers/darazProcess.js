@@ -212,11 +212,11 @@ function findDarazLeafCandidates(nodes, name) {
   const target = normalizeDarazCategoryName(name);
   if (!target || !nodes?.length) return [];
 
-  const exactLeaf = nodes.find(
+  const exactLeaves = nodes.filter(
     (node) =>
       node.leaf && normalizeDarazCategoryName(node.name) === target,
   );
-  if (exactLeaf) return [exactLeaf];
+  if (exactLeaves.length) return exactLeaves;
 
   const exact = nodes.find(
     (node) => normalizeDarazCategoryName(node.name) === target,
@@ -704,9 +704,9 @@ function assertDistinctDarazSaleProps(skus, attrs, saleProps) {
 
 function assignDarazSkuSaleProps(attributes, skus, ctx) {
   const saleProps = chosenDarazSalePropNames(attributes, ctx);
-  const skusWithAttributes = skus.map((sku) => ({
-    ...sku,
-    attributes: buildDarazAttributeObject(
+  const usedSizes = new Map();
+  const skusWithAttributes = skus.map((sku) => {
+    const skuAttributes = buildDarazAttributeObject(
       attributes,
       {
         ...ctx,
@@ -715,8 +715,26 @@ function assignDarazSkuSaleProps(attributes, skus, ctx) {
         variationParts: parsePosVariationParts(sku.variationName),
       },
       true,
-    ),
-  }));
+    );
+    for (const attr of attributes || []) {
+      const name = darazAttrName(attr);
+      if (!saleProps.has(name) || darazSalePropGroup(attr) !== "size") continue;
+      const used = usedSizes.get(name) || new Set();
+      let value = String(skuAttributes[name] || "").trim();
+      if (!value || used.has(value.toLowerCase())) {
+        const next = darazOptionNames(attr).find(
+          (opt) => !used.has(opt.toLowerCase()),
+        );
+        if (next) {
+          skuAttributes[name] = next;
+          value = next;
+        }
+      }
+      if (value) used.add(value.toLowerCase());
+      usedSizes.set(name, used);
+    }
+    return { ...sku, attributes: skuAttributes };
+  });
   return {
     saleProps,
     skusWithAttributes,
@@ -1733,9 +1751,17 @@ async function createDarazListing({
   let built = assignDarazSkuSaleProps(attributes, skus, ctx);
   if (built.duplicate && skus.length > 1 && client) {
     const labels = await posCategoryLabels(product);
-    if (labels.names.length) try {
+    const hints = [...labels.names];
+    const blob = `${labels.names.join(" ")} ${ctx.name || ""}`.toLowerCase();
+    if (
+      /pajama|pyjama|polo|matching set/.test(blob) ||
+      String(primaryCategory) === "10001252"
+    ) {
+      hints.push("Pyjama sets", "Polos");
+    }
+    if (hints.length) try {
       const tree = await loadDarazCategoryTree(client);
-      const candidates = labels.names.flatMap((label) =>
+      const candidates = hints.flatMap((label) =>
         findDarazLeafCandidates(tree, label),
       );
       const seenIds = new Set();
