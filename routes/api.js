@@ -155,6 +155,7 @@ const {
   inventoryMovementsCreate,
   findStockByProductId,
   stockTransfer,
+  stockTransferWarehouse,
   updateWholeSalePrice,
 } = require("../controllers/inventory_movements");
 
@@ -644,6 +645,10 @@ router.get(
 );
 router.post("/inventory_movements/save", inventoryMovementsCreate);
 router.post("/inventory_movements/stock-transfer", stockTransfer);
+router.post(
+  "/inventory_movements/stock-transfer-warehouse",
+  stockTransferWarehouse,
+);
 
 // Product routes - Custom CRUD + warehouse inventory management
 router.get("/product/import-form", productImportFormSchema);

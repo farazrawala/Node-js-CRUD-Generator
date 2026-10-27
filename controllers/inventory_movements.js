@@ -12,6 +12,7 @@ const {
 const InventoryMovements = require("../models/inventory_movements");
 const Product = require("../models/product");
 const Warehouse = require("../models/warehouse");
+const WarehouseInventory = require("../models/warehouse_inventory");
 const { invalidateModuleListCachesForReq } = require("../utils/redisCache");
 const {
   computeWeightedAverageCost,
@@ -1476,8 +1477,323 @@ async function stockTransfer(req, res) {
   }
 }
 
-// purchase_return/purchase_order_item_id/product_id
-// purchase create
+function roundTransferQty(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 1000) / 1000;
+}
+
+async function postStockTransferMovement(req, session, body) {
+  const bodyBefore = req.body;
+  req.body = body;
+  try {
+    return await insertInventoryMovementRecord(req, session, { skipLog: true });
+  } finally {
+    req.body = bodyBefore;
+  }
+}
+
+/**
+ * Move one product's on-hand `warehouse_inventory` qty, and post matching
+ * ledger rows. If the ledger is short of that qty, an opening `in` at the
+ * source keeps the source ledger from going negative.
+ */
+async function transferProductOnHand({
+  req,
+  companyId,
+  product,
+  fromWarehouseId,
+  toWarehouseId,
+  qty,
+  fromLabel,
+  toLabel,
+  userId,
+}) {
+  const transferQty = roundTransferQty(qty);
+  if (transferQty <= 0) return null;
+
+  const productId = product._id;
+  const unitCost = toFiniteNumber(product.wholesale_price);
+  const transferReferenceId = new mongoose.Types.ObjectId();
+  const referenceName = `Stock Transfer ${fromLabel} to ${toLabel}`;
+
+  const run = async (session) => {
+    const ledgerQty = Math.max(
+      0,
+      await getLedgerNetQtyForWarehouse(
+        productId,
+        companyId,
+        fromWarehouseId,
+        session,
+      ),
+    );
+    const shortfall = roundTransferQty(Math.max(0, transferQty - ledgerQty));
+
+    await WarehouseInventory.applyQuantityDelta({
+      productId,
+      warehouseId: fromWarehouseId,
+      companyId,
+      qtyDelta: -transferQty,
+      userId,
+      session,
+      req,
+      logContext: { source: "stock_transfer", reference_id: transferReferenceId },
+    });
+    await WarehouseInventory.applyQuantityDelta({
+      productId,
+      warehouseId: toWarehouseId,
+      companyId,
+      qtyDelta: transferQty,
+      userId,
+      session,
+      req,
+      logContext: { source: "stock_transfer", reference_id: transferReferenceId },
+    });
+
+    const movementBase = {
+      product_id: String(productId),
+      unit_cost: unitCost,
+      reference_type: "stock_transfer",
+      reference_id: transferReferenceId,
+      reference_name: referenceName,
+      company_id: companyId,
+      status: "active",
+    };
+
+    if (shortfall > 0) {
+      await postStockTransferMovement(req, session, {
+        ...movementBase,
+        warehouse_id: String(fromWarehouseId),
+        movement_type: "in",
+        quantity: shortfall,
+        total_cost: Math.round(shortfall * unitCost * 100) / 100,
+      });
+    }
+
+    await postStockTransferMovement(req, session, {
+      ...movementBase,
+      warehouse_id: String(fromWarehouseId),
+      movement_type: "out",
+      quantity: transferQty,
+      total_cost: Math.round(transferQty * unitCost * 100) / 100,
+    });
+    await postStockTransferMovement(req, session, {
+      ...movementBase,
+      warehouse_id: String(toWarehouseId),
+      movement_type: "in",
+      quantity: transferQty,
+      total_cost: Math.round(transferQty * unitCost * 100) / 100,
+    });
+
+    return transferReferenceId;
+  };
+
+  let clientSession = null;
+  try {
+    clientSession = await mongoose.startSession();
+    await clientSession.withTransaction(async () => {
+      await run(clientSession);
+    });
+  } catch (transactionStartError) {
+    if (!isMongoTransactionUnsupportedError(transactionStartError)) throw transactionStartError;
+    if (clientSession) {
+      try {
+        clientSession.endSession();
+      } catch {
+        /* ignore */
+      }
+      clientSession = null;
+    }
+    await run(null);
+  } finally {
+    if (clientSession) {
+      try {
+        clientSession.endSession();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  return {
+    product_id: String(productId),
+    product_name: product.product_name || "",
+    qty: transferQty,
+    reference_id: String(transferReferenceId),
+  };
+}
+
+/**
+ * POST /api/inventory_movements/stock-transfer-warehouse
+ * Move every on-hand unit from one warehouse into another.
+ * Body: from_warehouse_id, to_warehouse_id
+ */
+async function stockTransferWarehouse(req, res) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const fromWarehouseIdStr = String(
+      body.from_warehouse_id ?? body.fromWarehouseId ?? "",
+    ).trim();
+    const toWarehouseIdStr = String(
+      body.to_warehouse_id ?? body.toWarehouseId ?? "",
+    ).trim();
+
+    const errors = [];
+    if (!fromWarehouseIdStr || !mongoose.Types.ObjectId.isValid(fromWarehouseIdStr)) {
+      errors.push("valid from_warehouse_id is required");
+    }
+    if (!toWarehouseIdStr || !mongoose.Types.ObjectId.isValid(toWarehouseIdStr)) {
+      errors.push("valid to_warehouse_id is required");
+    }
+    if (
+      fromWarehouseIdStr &&
+      toWarehouseIdStr &&
+      fromWarehouseIdStr === toWarehouseIdStr
+    ) {
+      errors.push("from_warehouse_id and to_warehouse_id must be different");
+    }
+
+    const companyObjectId = resolveRequestCompanyId(req);
+    if (
+      !companyObjectId ||
+      !mongoose.Types.ObjectId.isValid(String(companyObjectId))
+    ) {
+      errors.push("company_id is required (authenticate with a company user)");
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        errors,
+        message: errors.join("; "),
+      });
+    }
+
+    const companyId = new mongoose.Types.ObjectId(String(companyObjectId));
+    const fromWarehouseId = new mongoose.Types.ObjectId(fromWarehouseIdStr);
+    const toWarehouseId = new mongoose.Types.ObjectId(toWarehouseIdStr);
+    const companyFilter = {
+      company_id: companyId,
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+
+    const [fromWarehouse, toWarehouse] = await Promise.all([
+      Warehouse.findOne({ _id: fromWarehouseId, ...companyFilter, status: "active" })
+        .select("name code")
+        .lean(),
+      Warehouse.findOne({ _id: toWarehouseId, ...companyFilter, status: "active" })
+        .select("name code")
+        .lean(),
+    ]);
+
+    if (!fromWarehouse) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Source warehouse not found or inactive",
+      });
+    }
+    if (!toWarehouse) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message: "Destination warehouse not found or inactive",
+      });
+    }
+
+    const fromLabel = fromWarehouse.name || fromWarehouseIdStr;
+    const toLabel = toWarehouse.name || toWarehouseIdStr;
+
+    const rows = await WarehouseInventory.find({
+      warehouse_id: fromWarehouseId,
+      company_id: companyId,
+      status: "active",
+      quantity: { $gt: 0 },
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    })
+      .select("product_id quantity")
+      .lean();
+
+    const productIds = [
+      ...new Set(rows.map((row) => String(row.product_id || "")).filter(Boolean)),
+    ];
+    const products = productIds.length
+      ? await Product.find({ _id: { $in: productIds }, ...companyFilter })
+          .select("product_name wholesale_price")
+          .lean()
+      : [];
+    const productById = new Map(products.map((product) => [String(product._id), product]));
+    const userId = req.user?._id || null;
+
+    const moved = [];
+    const failed = [];
+    for (const row of rows) {
+      const product = productById.get(String(row.product_id));
+      const qty = roundTransferQty(row.quantity);
+      if (!product || qty <= 0) {
+        failed.push({
+          product_id: String(row.product_id || ""),
+          message: product ? "Quantity is not positive" : "Product not found",
+        });
+        continue;
+      }
+      try {
+        const result = await transferProductOnHand({
+          req,
+          companyId,
+          product,
+          fromWarehouseId,
+          toWarehouseId,
+          qty,
+          fromLabel,
+          toLabel,
+          userId,
+        });
+        if (result) moved.push(result);
+      } catch (error) {
+        failed.push({
+          product_id: String(row.product_id),
+          product_name: product.product_name || "",
+          message: error.message || "Transfer failed",
+        });
+      }
+    }
+
+    const totalQty = moved.reduce((sum, row) => sum + row.qty, 0);
+    await invalidateModuleListCachesForReq(req, INVENTORY_MOVEMENTS_LIST_CACHE_MODULE);
+    await invalidateModuleListCachesForReq(req, "product");
+
+    const message =
+      moved.length > 0
+        ? `Transferred ${moved.length} product(s) (${totalQty} units) from ${fromLabel} to ${toLabel}`
+        : `No stock to move from ${fromLabel}`;
+
+    return res.status(200).json({
+      success: failed.length === 0,
+      status: 200,
+      message,
+      data: {
+        from_warehouse_id: fromWarehouseIdStr,
+        to_warehouse_id: toWarehouseIdStr,
+        from_warehouse: fromLabel,
+        to_warehouse: toLabel,
+        moved_count: moved.length,
+        failed_count: failed.length,
+        total_qty: totalQty,
+        products: moved,
+        failed,
+      },
+    });
+  } catch (error) {
+    console.error("❌ stockTransferWarehouse:", error);
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      error: error.message || "Internal server error",
+    });
+  }
+}
 
 async function updateWholeSalePrice(req, res) {}
 {
@@ -1495,5 +1811,6 @@ module.exports = {
   syncProductStockFromMovementLedger,
   findStockByProductId,
   stockTransfer,
+  stockTransferWarehouse,
   updateWholeSalePrice,
 };
