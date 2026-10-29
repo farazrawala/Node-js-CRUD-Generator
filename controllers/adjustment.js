@@ -269,6 +269,39 @@ async function resolveDefaultWarehouseId(companyId, session = null) {
   return pickObjectId(wh?._id);
 }
 
+/** Ensure request/company warehouse exists, belongs to company, and is active. */
+async function assertActiveCompanyWarehouse(
+  companyId,
+  warehouseId,
+  session = null,
+) {
+  const cid = toMongoObjectId(companyId);
+  const wid = toMongoObjectId(warehouseId);
+  if (!cid || !wid) return null;
+
+  let q = Warehouse.findOne({
+    _id: wid,
+    company_id: cid,
+    status: "active",
+    ...activeNotDeletedCriteria(),
+  }).select("_id");
+  if (session) q = q.session(session);
+  const wh = await q.lean();
+  if (!wh) {
+    const err = new Error(
+      "warehouse_id must be an active warehouse for this company",
+    );
+    err.statusCode = 400;
+    err.responseType = "validation";
+    err.details = {
+      warehouse_id: String(wid),
+      company_id: String(cid),
+    };
+    throw err;
+  }
+  return wid;
+}
+
 /** Legacy tenants: signup may have created warehouse but never set `company.warehouse_id`. */
 async function maybeHealCompanyDefaults(
   companyId,
@@ -341,9 +374,9 @@ async function loadCompanyDefaults(adjustmentReq, session = null) {
   const populated = companyObjFromReq(adjustmentReq);
   let adjustmentAccountId = pickObjectId(populated?.default_adjustment_account);
   let equityAccountId = pickObjectId(populated?.default_equity_account_id);
+  const bodyWarehouseId = pickObjectId(adjustmentReq.body?.warehouse_id);
   let warehouseId =
-    pickObjectId(adjustmentReq.body?.warehouse_id) ??
-    pickObjectId(populated?.warehouse_id);
+    bodyWarehouseId ?? pickObjectId(populated?.warehouse_id);
 
   const companyId =
     pickObjectId(adjustmentReq.body?.company_id) ??
@@ -406,6 +439,29 @@ async function loadCompanyDefaults(adjustmentReq, session = null) {
   }
   if (!warehouseId) {
     warehouseId = await resolveDefaultWarehouseId(companyId, session);
+  }
+
+  if (warehouseId) {
+    try {
+      warehouseId = await assertActiveCompanyWarehouse(
+        companyId,
+        warehouseId,
+        session,
+      );
+    } catch (warehouseErr) {
+      // Explicit body warehouse must fail; inactive company default falls back.
+      if (bodyWarehouseId) throw warehouseErr;
+      warehouseId = await resolveDefaultWarehouseId(companyId, session);
+      if (warehouseId) {
+        warehouseId = await assertActiveCompanyWarehouse(
+          companyId,
+          warehouseId,
+          session,
+        );
+      } else {
+        throw warehouseErr;
+      }
+    }
   }
 
   if (adjustmentAccountId || equityAccountId || warehouseId) {

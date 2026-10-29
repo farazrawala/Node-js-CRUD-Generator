@@ -8,6 +8,12 @@ const modelSchema = new mongoose.Schema(
       required: true,
       field_name: "Product",
     },
+    warehouse_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "warehouse",
+      // required for new saves (posted via body); older rows may omit it
+      field_name: "Warehouse",
+    },
 
     transaction_number: {
       type: String,
