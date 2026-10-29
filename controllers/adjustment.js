@@ -25,7 +25,10 @@ const {
 const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
-const { runInventoryMovementTxnBody } = require("./inventory_movements");
+const {
+  runInventoryMovementTxnBody,
+  getLedgerNetQtyForWarehouse,
+} = require("./inventory_movements");
 
 function pickObjectId(value) {
   if (value && typeof value === "object" && value._id) return value._id;
@@ -686,9 +689,17 @@ async function postAdjustmentInventoryMovement(
   { warehouseId, unitCost, qty, amount },
   session = null,
 ) {
-  const adjType = String(record?.type || "")
+  // Prefer saved record; fall back to request body if create omitted type on the doc.
+  const adjType = String(
+    record?.type || adjustmentReq.body?.type || "",
+  )
     .trim()
     .toLowerCase();
+  if (adjType !== "add" && adjType !== "remove") {
+    const err = new Error('Adjustment type must be "add" or "remove"');
+    err.statusCode = 400;
+    throw err;
+  }
   const movement_type = adjType === "add" ? "in" : "out";
   const companyId =
     pickObjectId(record?.company_id) ??
@@ -718,21 +729,44 @@ async function postAdjustmentInventoryMovement(
 
   const qtyDelta = movement_type === "in" ? qty : -qty;
   let whChange = null;
+  const userId = pickObjectId(adjustmentReq.user?._id);
+  const logContext = {
+    reference_type: "adjustment",
+    reference_id: record._id,
+    reference_no: record.adjustment_no || record.transaction_number || null,
+  };
 
   try {
+    // Movement ledger is source of truth for on-hand display. WI can drift
+    // (e.g. ledger -1, WI 0). Align first so Add/Remove land on the same balance.
+    const ledgerNet = await getLedgerNetQtyForWarehouse(
+      record.product_id,
+      companyId,
+      warehouseId,
+      session,
+    );
+    await WarehouseInventory.alignQuantityAbsolute({
+      productId: record.product_id,
+      warehouseId,
+      companyId,
+      quantity: ledgerNet,
+      userId,
+      session,
+      req: adjustmentReq,
+      logContext: { ...logContext, align_to_ledger: true },
+    });
+
     whChange = await WarehouseInventory.applyQuantityDelta({
       productId: record.product_id,
       warehouseId,
       companyId,
       qtyDelta,
-      userId: pickObjectId(adjustmentReq.user?._id),
+      userId,
       session,
       req: adjustmentReq,
-      logContext: {
-        reference_type: "adjustment",
-        reference_id: record._id,
-        reference_no: record.adjustment_no || record.transaction_number || null,
-      },
+      logContext,
+      // After ledger align, Add into a still-negative WI must be allowed.
+      allowNegative: movement_type === "in",
     });
 
     await runInventoryMovementTxnBody(adjustmentReq, session);

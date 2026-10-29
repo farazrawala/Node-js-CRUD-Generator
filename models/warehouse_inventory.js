@@ -211,6 +211,88 @@ modelSchema.statics.applyQuantityDelta = async function ({
 };
 
 /**
+ * Set on-hand to an absolute quantity (may be negative) so WI matches movement ledger
+ * before an adjustment delta is applied. No-op when already aligned.
+ *
+ * @returns {Promise<object|null>} Change audit object, or null when unchanged / skipped
+ */
+modelSchema.statics.alignQuantityAbsolute = async function ({
+  productId,
+  warehouseId,
+  companyId,
+  quantity,
+  userId = null,
+  session = null,
+  req = null,
+  logContext = null,
+} = {}) {
+  const target = roundQty(quantity);
+  if (!Number.isFinite(target)) return null;
+
+  const filter = this.activeRowFilter(productId, warehouseId, companyId);
+  if (!filter) {
+    throw new Error(
+      "Valid product_id, warehouse_id, and company_id are required for warehouse inventory",
+    );
+  }
+
+  let rowQuery = this.findOne(filter);
+  if (session) rowQuery = rowQuery.session(session);
+  let row = await rowQuery;
+
+  if (row) {
+    const previousQty = Number(row.quantity) || 0;
+    if (roundQty(previousQty) === target) return null;
+    row.quantity = target;
+    if (userId) row.updated_by = userId;
+    await row.save(session ? { session } : {});
+    const change = {
+      product_id: String(filter.product_id),
+      warehouse_id: String(filter.warehouse_id),
+      previous_quantity: previousQty,
+      quantity: target,
+      qty_delta: roundQty(target - previousQty),
+      warehouse_inventory_id: row._id,
+      aligned_absolute: true,
+    };
+    await logWarehouseInventoryChange(req, change, filter.company_id, logContext, session);
+    return change;
+  }
+
+  // No row yet — only create when target is non-zero (avoid empty placeholder rows).
+  if (target === 0) return null;
+
+  const doc = {
+    product_id: filter.product_id,
+    warehouse_id: filter.warehouse_id,
+    company_id: filter.company_id,
+    quantity: target,
+    status: "active",
+    deletedAt: null,
+    ...(userId ? { created_by: userId, updated_by: userId } : {}),
+  };
+
+  if (session) {
+    const [created] = await this.create([doc], { session });
+    row = created;
+  } else {
+    row = await this.create(doc);
+  }
+
+  const change = {
+    product_id: String(filter.product_id),
+    warehouse_id: String(filter.warehouse_id),
+    previous_quantity: 0,
+    quantity: target,
+    qty_delta: target,
+    warehouse_inventory_id: row._id,
+    aligned_absolute: true,
+  };
+  await logWarehouseInventoryChange(req, change, filter.company_id, logContext, session);
+  return change;
+};
+
+/**
  * Plan outbound qty across one or more warehouses (preferred first, then highest on-hand).
  * @returns {Promise<Array<{ warehouse_id: string, quantity: number }>>}
  */
