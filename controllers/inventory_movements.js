@@ -117,8 +117,8 @@ async function aggregateNetQtyByWarehouse(
   return agg;
 }
 
-/** One query for warehouse display names (avoids N× findById in stock APIs). */
-async function loadWarehouseNamesById(warehouseIds) {
+/** One query for warehouse display names + status (avoids N× findById in stock APIs). */
+async function loadWarehouseMetaById(warehouseIds) {
   const ids = [
     ...new Set(
       (warehouseIds || [])
@@ -131,12 +131,26 @@ async function loadWarehouseNamesById(warehouseIds) {
   if (!ids.length) return new Map();
 
   const rows = await Warehouse.find({ _id: { $in: ids } })
-    .select("name")
+    .select("name status")
     .lean();
   const map = new Map();
   for (const row of rows) {
     const name = row?.name != null ? String(row.name).trim() : "";
-    if (name) map.set(String(row._id), name);
+    const status =
+      String(row?.status || "active")
+        .trim()
+        .toLowerCase() || "active";
+    map.set(String(row._id), { name, status });
+  }
+  return map;
+}
+
+/** @deprecated Prefer loadWarehouseMetaById — kept for callers that only need names. */
+async function loadWarehouseNamesById(warehouseIds) {
+  const meta = await loadWarehouseMetaById(warehouseIds);
+  const map = new Map();
+  for (const [id, value] of meta.entries()) {
+    if (value?.name) map.set(id, value.name);
   }
   return map;
 }
@@ -977,7 +991,7 @@ async function syncProductStockFromMovementLedger(
     return productNotFoundForCompanyResult(productIdStr, anyProduct);
   }
 
-  const warehouseNameById = await loadWarehouseNamesById(
+  const warehouseMetaById = await loadWarehouseMetaById(
     warehouseRows.map((row) => row.warehouse_id),
   );
 
@@ -986,22 +1000,27 @@ async function syncProductStockFromMovementLedger(
   let totalOut = 0;
 
   for (const row of warehouseRows) {
+    const warehouseIdStr = String(row.warehouse_id);
+    const meta = warehouseMetaById.get(warehouseIdStr);
+    const warehouseStatus = meta?.status || "active";
+    // Product stock views only surface active warehouses.
+    if (warehouseStatus === "inactive") continue;
+
     const qty_in = toFiniteNumber(row.qty_in);
     const qty_out = toFiniteNumber(row.qty_out);
     const net_qty = toFiniteNumber(row.net_qty);
     totalIn += qty_in;
     totalOut += qty_out;
 
-    const warehouseIdStr = String(row.warehouse_id);
     const entry = {
       warehouse_id: warehouseIdStr,
+      status: warehouseStatus,
       qty_in,
       qty_out,
       net_qty,
       available_qty: Math.max(0, net_qty),
     };
-    const whName = warehouseNameById.get(warehouseIdStr);
-    if (whName) entry.warehouse_name = whName;
+    if (meta?.name) entry.warehouse_name = meta.name;
 
     warehouses.push(entry);
   }
