@@ -98,6 +98,29 @@ describe("buildPosTrackingFieldsFromShopify", () => {
     assert.match(fields.tracking_details, /PostEx/);
   });
 
+  it("reads courier and number from tracking_info", () => {
+    const tracking = extractShopifyFulfillmentTracking({
+      fulfillments: [
+        {
+          status: "success",
+          tracking_info: [
+            {
+              company: "Leopards Courier",
+              number: "KI7547775221",
+              url: "https://www.leopardscourier.com/tracking/?cn=KI7547775221",
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(tracking.tracking_number, "KI7547775221");
+    assert.equal(tracking.courier_name, "Leopards Courier");
+    assert.equal(tracking.tracking_status, "in_transit");
+    const fields = buildPosTrackingFieldsFromShopify(tracking);
+    assert.equal(fields.courier_tracking_number, "KI7547775221");
+    assert.match(fields.tracking_details, /Leopards Courier/);
+  });
+
   it("returns empty object without tracking number", () => {
     assert.deepEqual(buildPosTrackingFieldsFromShopify(null), {});
     assert.deepEqual(buildPosTrackingFieldsFromShopify({}), {});

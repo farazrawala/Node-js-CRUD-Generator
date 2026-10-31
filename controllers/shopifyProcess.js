@@ -54,6 +54,7 @@ const {
   createImportedPosOrderOrGetExisting,
   extractShopifyFulfillmentTracking,
   buildPosTrackingFieldsFromShopify,
+  resolveCompanyCourierId,
   upsertImportedCourierShipmentFromTracking,
   resolveIntegrationOrderId,
   resolvePosProductForRemoteLine,
@@ -3455,37 +3456,102 @@ async function fetch_brand(req, res, process) {
  * List endpoints sometimes omit nested fulfillments. When Shopify reports a
  * fulfillment status but no tracking is present, load order detail / fulfillments.
  */
-async function enrichShopifyOrderFulfillments(remoteOrder, client) {
-  if (!remoteOrder?.id || !client) return remoteOrder;
+async function enrichShopifyOrderFulfillments(remoteOrder, client, graphql) {
+  if (!remoteOrder?.id) return remoteOrder;
   if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
 
   const fulfillmentStatus = String(remoteOrder.fulfillment_status || "")
     .trim()
     .toLowerCase();
-  if (!fulfillmentStatus || fulfillmentStatus === "null") {
-    return remoteOrder;
+  const looksFulfilled =
+    Boolean(fulfillmentStatus && fulfillmentStatus !== "null") ||
+    (Array.isArray(remoteOrder.fulfillments) && remoteOrder.fulfillments.length > 0);
+
+  if (client && looksFulfilled) {
+    try {
+      const detailResponse = await client.get({
+        path: `orders/${remoteOrder.id}`,
+      });
+      const full = detailResponse?.body?.order;
+      if (Array.isArray(full?.fulfillments) && full.fulfillments.length) {
+        remoteOrder.fulfillments = full.fulfillments;
+        if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
+      }
+
+      const fulfillmentsResponse = await client.get({
+        path: `orders/${remoteOrder.id}/fulfillments`,
+      });
+      const list = fulfillmentsResponse?.body?.fulfillments;
+      if (Array.isArray(list) && list.length) {
+        remoteOrder.fulfillments = list;
+        if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
+      }
+    } catch (err) {
+      console.warn(
+        `[shopify] fulfillments enrich failed for order ${remoteOrder.id}:`,
+        err?.message || err,
+      );
+    }
   }
 
-  try {
-    const detailResponse = await client.get({
-      path: `orders/${remoteOrder.id}`,
-    });
-    const full = detailResponse?.body?.order;
-    if (Array.isArray(full?.fulfillments) && full.fulfillments.length) {
-      remoteOrder.fulfillments = full.fulfillments;
-      if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
-    }
+  await attachShopifyFulfillmentTrackingFromGraphql(graphql, remoteOrder);
+  return remoteOrder;
+}
 
-    const fulfillmentsResponse = await client.get({
-      path: `orders/${remoteOrder.id}/fulfillments`,
+/**
+ * REST fulfillments often omit the courier and CN that Shopify admin shows.
+ * GraphQL `trackingInfo` is the source for "Leopards Courier tracking: KI…".
+ */
+async function attachShopifyFulfillmentTrackingFromGraphql(graphql, remoteOrder) {
+  if (!graphql || !remoteOrder) return remoteOrder;
+  if (extractShopifyFulfillmentTracking(remoteOrder)) return remoteOrder;
+  const gid = shopifyOrderGid(remoteOrder);
+  if (!gid) return remoteOrder;
+  try {
+    const result = await graphql.request(
+      `query OrderFulfillmentTracking($id: ID!) {
+        order(id: $id) {
+          fulfillments {
+            status
+            displayStatus
+            createdAt
+            updatedAt
+            trackingInfo { company number url }
+          }
+        }
+      }`,
+      { variables: { id: gid } },
+    );
+    const nodes = shopifyGraphqlData(result)?.order?.fulfillments;
+    if (!Array.isArray(nodes) || !nodes.length) return remoteOrder;
+    remoteOrder.fulfillments = nodes.map((node) => {
+      const display = String(node?.displayStatus || "")
+        .trim()
+        .toLowerCase();
+      const shipmentStatus = {
+        in_transit: "in_transit",
+        out_for_delivery: "out_for_delivery",
+        delivered: "delivered",
+        attempted_delivery: "attempted_delivery",
+        confirmed: "confirmed",
+        label_printed: "label_printed",
+        label_purchased: "label_purchased",
+        ready_for_pickup: "ready_for_pickup",
+        failure: "failure",
+        picked_up: "in_transit",
+      }[display] || "";
+      const status = String(node?.status || "success").trim().toLowerCase();
+      return {
+        status: status === "canceled" ? "cancelled" : status,
+        shipment_status: shipmentStatus,
+        created_at: node?.createdAt,
+        updated_at: node?.updatedAt,
+        tracking_info: Array.isArray(node?.trackingInfo) ? node.trackingInfo : [],
+      };
     });
-    const list = fulfillmentsResponse?.body?.fulfillments;
-    if (Array.isArray(list) && list.length) {
-      remoteOrder.fulfillments = list;
-    }
   } catch (err) {
     console.warn(
-      `[shopify] fulfillments enrich failed for order ${remoteOrder.id}:`,
+      `[shopify] GraphQL fulfillment tracking failed for order ${remoteOrder.id}:`,
       err?.message || err,
     );
   }
@@ -4075,7 +4141,7 @@ async function importShopifyOrderToPos(remoteOrder, orderCtx) {
           resolveMissingShopifyOrderLineProduct(line, product, orderCtx)
       : async () => null,
   };
-  await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client);
+  await enrichShopifyOrderFulfillments(remoteOrder, ctx?.client, ctx?.graphql);
   await attachShopifyOrderNote(ctx?.graphql, remoteOrder);
   const { companyId, process, stats, req } = ctx;
   const logCtx = { req, process, companyId };
@@ -4254,6 +4320,13 @@ async function importShopifyOrderToPos(remoteOrder, orderCtx) {
   const remoteTracking = extractShopifyFulfillmentTracking(remoteOrder);
   const trackingFields = buildPosTrackingFieldsFromShopify(remoteTracking);
   Object.assign(orderPayload, trackingFields);
+  if (remoteTracking?.courier_name) {
+    const courierId = await resolveCompanyCourierId(
+      companyId,
+      remoteTracking.courier_name,
+    );
+    if (courierId) orderPayload.courier_id = courierId;
+  }
 
   const createdResult = await createImportedPosOrderOrGetExisting(orderPayload);
   if (!createdResult.created) {

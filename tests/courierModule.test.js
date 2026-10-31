@@ -83,6 +83,7 @@ describe("courier factory", () => {
     assert.equal(normalizeProviderKey("M&P"), "M&P");
     assert.equal(normalizeProviderKey("flagship"), "Flagship");
     assert.equal(normalizeProviderKey("Flaship"), "Flagship");
+    assert.equal(normalizeProviderKey("Leopards Courier"), "Leopard");
   });
 
   it("builds TCS driver from config", () => {

@@ -81,6 +81,22 @@ function normalizeProviderKey(value) {
   const lower = raw.toLowerCase();
   if (PROVIDER_ALIASES[raw]) return PROVIDER_ALIASES[raw];
   if (PROVIDER_ALIASES[lower]) return PROVIDER_ALIASES[lower];
+
+  const folded = lower.replace(/[^a-z0-9&]+/g, " ").replace(/\s+/g, " ").trim();
+  const tokens = folded.split(" ").filter(Boolean);
+  const hasToken = (word) => tokens.includes(word);
+  if (tokens.some((token) => token === "lcs" || token.startsWith("leopard"))) {
+    return PROVIDERS.LEOPARD;
+  }
+  if (hasToken("tcs")) return PROVIDERS.TCS;
+  if (hasToken("blueex") || folded.includes("blue ex")) return PROVIDERS.BLUEEX;
+  if (hasToken("postex") || folded.includes("post ex")) return PROVIDERS.POSTEX;
+  if (hasToken("trax")) return PROVIDERS.TRAX;
+  if (hasToken("flagship") || hasToken("flaship")) return PROVIDERS.FLAGSHIP;
+  if (hasToken("mnp") || folded.includes("m&p") || folded.includes("m p")) {
+    return PROVIDERS.MNP;
+  }
+  if (folded.includes("call courier")) return PROVIDERS.CALL_COURIER;
   return raw;
 }
 

@@ -1888,6 +1888,17 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
         patch.tracking_details = trackingFields.tracking_details;
       }
     }
+
+    if (
+      remoteTracking?.courier_name &&
+      !coalesceObjectId(existing?.courier_id)
+    ) {
+      const courierId = await resolveCompanyCourierId(
+        existing?.company_id || header.company_id,
+        remoteTracking.courier_name,
+      );
+      if (courierId) patch.courier_id = courierId;
+    }
   }
 
   await Order.updateOne({ _id: existing._id }, { $set: patch });
@@ -2055,22 +2066,43 @@ function extractShopifyFulfillmentTracking(remoteOrder, fulfillments) {
     });
 
   for (const { f } of ranked) {
+    const infoRows = [
+      ...(Array.isArray(f?.tracking_info) ? f.tracking_info : []),
+      ...(f?.tracking_info && !Array.isArray(f.tracking_info) && typeof f.tracking_info === "object"
+        ? [f.tracking_info]
+        : []),
+      ...(Array.isArray(f?.trackingInfo) ? f.trackingInfo : []),
+    ];
+    const info = infoRows.find((row) =>
+      String(row?.number || row?.tracking_number || "").trim(),
+    );
     const numbers = Array.isArray(f?.tracking_numbers)
       ? f.tracking_numbers
       : [];
     const number = String(
-      f?.tracking_number || numbers.find((n) => String(n || "").trim()) || "",
+      f?.tracking_number ||
+        numbers.find((n) => String(n || "").trim()) ||
+        info?.number ||
+        info?.tracking_number ||
+        "",
     ).trim();
     if (!number) continue;
 
     const urls = Array.isArray(f?.tracking_urls) ? f.tracking_urls : [];
     const tracking_url = String(
-      f?.tracking_url || urls.find((u) => String(u || "").trim()) || "",
+      f?.tracking_url ||
+        urls.find((u) => String(u || "").trim()) ||
+        info?.url ||
+        "",
     ).trim();
-    const courier_name = String(f?.tracking_company || "").trim();
+    const courier_name = String(
+      f?.tracking_company || info?.company || "",
+    ).trim();
     const shipment_status = String(f?.shipment_status || "").trim();
+    const fulfillmentStatus = String(f?.status || "").trim().toLowerCase();
     const tracking_status =
-      mapShopifyShipmentStatusToPosTrackingStatus(shipment_status);
+      mapShopifyShipmentStatusToPosTrackingStatus(shipment_status) ||
+      (fulfillmentStatus === "success" ? "in_transit" : "");
 
     return {
       tracking_number: number,
@@ -2089,6 +2121,34 @@ function extractShopifyFulfillmentTracking(remoteOrder, fulfillments) {
  * @param {object|null} tracking
  * @returns {object}
  */
+const SHOPIFY_COURIER_TYPE_BY_PROVIDER = Object.freeze({
+  TCS: "tcs",
+  Leopard: "leopard",
+  BlueEX: "blueex",
+  "M&P": "mnp",
+  "Call Courier": "call_courier",
+  Trax: "trax",
+  PostEx: "postex",
+  Flagship: "flagship",
+});
+
+/** Match a Shopify courier label ("Leopards Courier") to this company's courier row. */
+async function resolveCompanyCourierId(companyId, courierName) {
+  const company = coalesceObjectId(companyId);
+  const label = String(courierName || "").trim();
+  if (!company || !label) return null;
+  const { PROVIDERS, normalizeProviderKey: normalizeCourier } = require("../src/couriers/constants");
+  const provider = normalizeCourier(label);
+  if (!Object.values(PROVIDERS).includes(provider)) return null;
+  const type = SHOPIFY_COURIER_TYPE_BY_PROVIDER[provider];
+  if (!type) return null;
+  const Courier = require("../models/courier");
+  const row = await Courier.findOne({ company_id: company, type })
+    .select("_id")
+    .lean();
+  return row?._id || null;
+}
+
 function buildPosTrackingFieldsFromShopify(tracking) {
   if (!tracking?.tracking_number) return {};
   const fields = {
@@ -3839,6 +3899,7 @@ module.exports = {
   mapTrackingStatusToShopifyFulfillmentEvent,
   mapShopifyShipmentStatusToPosTrackingStatus,
   extractShopifyFulfillmentTracking,
+  resolveCompanyCourierId,
   buildPosTrackingFieldsFromShopify,
   upsertImportedCourierShipmentFromTracking,
   resolvePosOrderTrackingForPush,
