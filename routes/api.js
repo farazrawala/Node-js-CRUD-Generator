@@ -385,6 +385,8 @@ const {
   listOnHoldSmsMessages,
   fetchRandomSmsMessage,
   markSmsMessageSent,
+  bulkCreateSmsMessages,
+  bulkDeleteSmsMessages,
 } = require("../controllers/sms_message");
 const { shopifyOrdersWebhook } = require("../controllers/shopifyWebhook");
 
@@ -773,6 +775,10 @@ router.patch("/sms_message/mark-sent/:id", markSmsMessageSent);
 router.get("/sms_messages/mark-sent/:id", markSmsMessageSent);
 router.post("/sms_messages/mark-sent/:id", markSmsMessageSent);
 router.patch("/sms_messages/mark-sent/:id", markSmsMessageSent);
+router.post("/sms_message/bulk-create", bulkCreateSmsMessages);
+router.post("/sms_messages/bulk-create", bulkCreateSmsMessages);
+router.post("/sms_message/bulk-delete", bulkDeleteSmsMessages);
+router.post("/sms_messages/bulk-delete", bulkDeleteSmsMessages);
 
 // Chat insert via POS auth token in URL (no Authorization header required)
 router.post("/chat/create/:pos_auth_token", chatCreate);
