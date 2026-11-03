@@ -150,6 +150,13 @@ const modelSchema = new mongoose.Schema(
       field_name: "Sync product stock",
       field_type: "select",
     },
+    sync_product_barcode: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "yes",
+      field_name: "Sync barcode",
+      field_type: "select",
+    },
 
     /**
      * custom_app: merchant pasted a custom-app Admin API token (existing flow).

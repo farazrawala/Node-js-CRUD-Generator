@@ -10,6 +10,7 @@ const SYNC_TOGGLE_KEYS = [
   "sync_product_price",
   "sync_product_description",
   "sync_product_status",
+  "sync_product_barcode",
 ];
 
 function isIntegrationSyncEnabled(integration, fieldKey) {
@@ -48,6 +49,7 @@ function formatProductSyncFieldRemarks(integration) {
     ["quantity", "quantity"],
     ["sync_product_description", "description"],
     ["sync_product_status", "status"],
+    ["sync_product_barcode", "barcode"],
   ];
   return fields
     .map(([key, label]) => {

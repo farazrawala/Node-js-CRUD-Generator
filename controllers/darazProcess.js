@@ -2018,14 +2018,16 @@ async function upsertDarazProductRow({
     payload.product_type = "Simple";
   }
 
-  const barcode = await resolveFetchProductBarcode({
-    remoteBarcode: String(skuRow?.package_content || skuRow?.SellerSku || "").trim(),
-    existingProduct: existing,
-    companyId,
-    stats,
-  });
-  if (barcode && !String(existing?.barcode || "").trim()) {
-    payload.barcode = barcode;
+  if (isIntegrationSyncEnabled(process?.integration_id, "sync_product_barcode")) {
+    const barcode = await resolveFetchProductBarcode({
+      remoteBarcode: String(skuRow?.package_content || skuRow?.SellerSku || "").trim(),
+      existingProduct: existing,
+      companyId,
+      stats,
+    });
+    if (barcode && !String(existing?.barcode || "").trim()) {
+      payload.barcode = barcode;
+    }
   }
 
   let posId;

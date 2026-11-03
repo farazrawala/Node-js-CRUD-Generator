@@ -91,6 +91,7 @@ const {
   parsePosVariationValues,
   hasSyncPayloadFields,
   formatProductSyncFieldRemarks,
+  isIntegrationSyncEnabled,
 } = require("../utils/integrationProductSync");
 
 /** POS qty for sync push: max(origin_qty, warehouse_inventory.quantity) plus source field. */
@@ -637,15 +638,17 @@ async function upsertWooProductRow({
     payload.parent_product_id = null;
   }
 
-  const barcode = await resolveFetchProductBarcode({
-    remoteBarcode: extractWooBarcode(remote),
-    existingProduct: existing,
-    companyId,
-    stats,
-  });
-  const existingHasBarcode = Boolean(String(existing?.barcode || "").trim());
-  if (barcode && (!existing || !existingHasBarcode)) {
-    payload.barcode = barcode;
+  if (isIntegrationSyncEnabled(process?.integration_id, "sync_product_barcode")) {
+    const barcode = await resolveFetchProductBarcode({
+      remoteBarcode: extractWooBarcode(remote),
+      existingProduct: existing,
+      companyId,
+      stats,
+    });
+    const existingHasBarcode = Boolean(String(existing?.barcode || "").trim());
+    if (barcode && (!existing || !existingHasBarcode)) {
+      payload.barcode = barcode;
+    }
   }
 
   let posId;

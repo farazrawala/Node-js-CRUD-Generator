@@ -1671,15 +1671,17 @@ async function upsertShopifyProductRow({
     payload.parent_product_id = coalesceObjectId(parentProductId);
   }
 
-  const barcode = await resolveFetchProductBarcode({
-    remoteBarcode: extractShopifyBarcode(variant),
-    existingProduct: existing,
-    companyId,
-    stats,
-  });
-  const existingHasBarcode = Boolean(String(existing?.barcode || "").trim());
-  if (barcode && (!existing || !existingHasBarcode)) {
-    payload.barcode = barcode;
+  if (isIntegrationSyncEnabled(process?.integration_id, "sync_product_barcode")) {
+    const barcode = await resolveFetchProductBarcode({
+      remoteBarcode: extractShopifyBarcode(variant),
+      existingProduct: existing,
+      companyId,
+      stats,
+    });
+    const existingHasBarcode = Boolean(String(existing?.barcode || "").trim());
+    if (barcode && (!existing || !existingHasBarcode)) {
+      payload.barcode = barcode;
+    }
   }
 
   let posId;
