@@ -318,14 +318,23 @@ function extractOrderPayload(body) {
  * Every hit emails the query string and POST body, then imports the order.
  */
 async function shopifyOrdersWebhook(req, res) {
+  let mailed = { sent: false, reason: "not_attempted" };
   try {
-    const mailed = await emailWebhookParameters(req);
+    mailed = await emailWebhookParameters(req);
     if (mailed && mailed.sent === false) {
       webhookConsole("warn", "order webhook email skipped", mailed.reason || "");
     }
   } catch (error) {
-    webhookConsole("warn", "order webhook email failed", error?.message || error);
+    mailed = { sent: false, reason: error?.message || "email_failed" };
+    webhookConsole("warn", "order webhook email failed", mailed.reason);
   }
+  const sendJson = res.json.bind(res);
+  res.json = (body) => {
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      body.email = mailed;
+    }
+    return sendJson(body);
+  };
 
   const shopHeader = headerValue(req, "x-shopify-shop-domain");
   const topic = String(headerValue(req, "x-shopify-topic") || "").trim();

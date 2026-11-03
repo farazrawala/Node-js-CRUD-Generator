@@ -2,9 +2,12 @@
  * Email the order-update webhook response.
  * Credentials come from the environment, not from source control.
  */
+const path = require("path");
 const nodemailer = require("nodemailer");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 function smtpSettings() {
+  require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
   const user = String(process.env.ORDER_UPDATE_SMTP_USER || "").trim();
   const pass = String(process.env.ORDER_UPDATE_SMTP_PASS || "").replace(/\s+/g, "");
   const to = String(process.env.ORDER_UPDATE_SMTP_TO || user).trim();
