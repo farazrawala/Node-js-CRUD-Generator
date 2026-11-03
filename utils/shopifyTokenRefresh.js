@@ -1,4 +1,9 @@
 const Integration = require("../models/integration");
+const { decryptToken: decryptStoredShopifyToken } = require("../src/shopify/tokenCrypto");
+const {
+  isOauthIntegration,
+  resolveOauthAccessToken,
+} = require("../src/shopify/oauthToken");
 
 function normalizeShopifyDomain(rawUrl) {
   const raw = String(rawUrl || "").trim();
@@ -153,8 +158,10 @@ function resolveShopifyClientCredentials(integration) {
       integration?.private_key ||
       integration?.client_secret,
   );
-  const rawToken = trimCredential(
-    integration?.token || integration?.access_token || integration?.password,
+  const rawToken = decryptStoredShopifyToken(
+    trimCredential(
+      integration?.token || integration?.access_token || integration?.password,
+    ),
   );
 
   let accessToken = rawToken;
@@ -176,6 +183,11 @@ function resolveShopifyClientCredentials(integration) {
   if (accessToken && /^shpss_/i.test(accessToken) && !clientSecret) {
     clientSecret = accessToken;
     accessToken = isShopifyAccessToken(rawSecret) ? rawSecret : null;
+  }
+
+  // OAuth installs keep the app secret in the environment, not on this row.
+  if (integration?.auth_mode === "oauth" || rawSecret === "oauth-managed") {
+    clientSecret = null;
   }
 
   return {
@@ -332,6 +344,9 @@ async function postShopifyTokenRequest(shopDomain, clientId, clientSecret) {
  */
 async function refreshShopifyAccessToken(integration, integrationId = null) {
   const fresh = await loadFreshShopifyIntegration(integration, integrationId);
+  if (isOauthIntegration(fresh)) {
+    return resolveOauthAccessToken(fresh, integrationId || fresh?._id);
+  }
   const shopDomain = normalizeShopifyDomain(fresh?.url);
   const resolved =
     fresh?._resolved || resolveShopifyClientCredentials(fresh);

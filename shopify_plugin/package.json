@@ -1,0 +1,10 @@
+{
+  "name": "shopify-pos-connector",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Embedded Shopify app. A merchant installs it on their store, then copies the POS connection values.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

@@ -1896,6 +1896,7 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
       const courierId = await resolveCompanyCourierId(
         existing?.company_id || header.company_id,
         remoteTracking.courier_name,
+        ctx?.process?.created_by?._id || ctx?.process?.created_by,
       );
       if (courierId) patch.courier_id = courierId;
     }
@@ -2121,32 +2122,39 @@ function extractShopifyFulfillmentTracking(remoteOrder, fulfillments) {
  * @param {object|null} tracking
  * @returns {object}
  */
-const SHOPIFY_COURIER_TYPE_BY_PROVIDER = Object.freeze({
-  TCS: "tcs",
-  Leopard: "leopard",
-  BlueEX: "blueex",
-  "M&P": "mnp",
-  "Call Courier": "call_courier",
-  Trax: "trax",
-  PostEx: "postex",
-  Flagship: "flagship",
-});
-
-/** Match a Shopify courier label ("Leopards Courier") to this company's courier row. */
-async function resolveCompanyCourierId(companyId, courierName) {
+/**
+ * Match a Shopify courier label to this company's courier row.
+ * Inserts a basic row (name + type, no API keys) when one does not exist yet.
+ */
+async function resolveCompanyCourierId(companyId, courierName, createdBy) {
   const company = coalesceObjectId(companyId);
-  const label = String(courierName || "").trim();
-  if (!company || !label) return null;
-  const { PROVIDERS, normalizeProviderKey: normalizeCourier } = require("../src/couriers/constants");
-  const provider = normalizeCourier(label);
-  if (!Object.values(PROVIDERS).includes(provider)) return null;
-  const type = SHOPIFY_COURIER_TYPE_BY_PROVIDER[provider];
-  if (!type) return null;
+  const { planImportedCourier } = require("../src/couriers/constants");
+  const plan = planImportedCourier(courierName);
+  if (!company || !plan?.type) return null;
   const Courier = require("../models/courier");
-  const row = await Courier.findOne({ company_id: company, type })
-    .select("_id")
-    .lean();
-  return row?._id || null;
+  const query = { company_id: company, type: plan.type };
+  if (plan.type === "other") query.name = plan.name;
+  let row = await Courier.findOne(query).select("_id").lean();
+  if (!row?._id && plan.type === "other") {
+    const candidates = await Courier.find({ company_id: company, type: "other" })
+      .select("_id name")
+      .lean();
+    row =
+      candidates.find(
+        (item) =>
+          String(item?.name || "").trim().toLowerCase() ===
+          plan.name.toLowerCase(),
+      ) || null;
+  }
+  if (row?._id) return row._id;
+  const created = await Courier.create({
+    type: plan.type,
+    name: plan.name,
+    company_id: company,
+    is_active: false,
+    created_user: coalesceObjectId(createdBy) || undefined,
+  });
+  return created?._id || null;
 }
 
 function buildPosTrackingFieldsFromShopify(tracking) {
@@ -2189,21 +2197,13 @@ async function upsertImportedCourierShipmentFromTracking({
   }
 
   const {
-    PROVIDERS,
     UNIFIED_STATUSES,
-    normalizeProviderKey,
+    planImportedCourier,
   } = require("../src/couriers/constants");
 
-  // Stores report whatever courier they used (Smart Lane, Stallion, Pak Post,
-  // Other…). Only couriers POS integrates get a shipment row; the order keeps
-  // the tracking number either way. An unknown name used to fail the enum
-  // check and abort the order import before its lines were saved.
-  const normalizedCourier = normalizeProviderKey(tracking.courier_name);
-  const courier =
-    Object.values(PROVIDERS).includes(normalizedCourier) ?
-      normalizedCourier
-    : null;
-  if (!courier) return null;
+  const plan = planImportedCourier(tracking.courier_name);
+  if (!plan?.provider) return null;
+  const courier = plan.provider;
 
   const statusKey = String(tracking.tracking_status || "")
     .trim()

@@ -151,6 +151,18 @@ const modelSchema = new mongoose.Schema(
       field_type: "select",
     },
 
+    /**
+     * custom_app: merchant pasted a custom-app Admin API token (existing flow).
+     * oauth: OrdersHub Shopify app install. `token` is encrypted and must not
+     * be refreshed with the client-credentials grant.
+     */
+    auth_mode: {
+      type: String,
+      enum: ["custom_app", "oauth"],
+      default: "custom_app",
+      field_name: "Auth Mode",
+    },
+
     // default fields
     company_id: {
       type: mongoose.Schema.Types.ObjectId,

@@ -35,6 +35,7 @@ const PROVIDERS = Object.freeze({
   TRAX: "Trax",
   POSTEX: "PostEx",
   FLAGSHIP: "Flagship",
+  OTHER: "Other",
 });
 
 const PROVIDER_ALIASES = Object.freeze({
@@ -100,6 +101,43 @@ function normalizeProviderKey(value) {
   return raw;
 }
 
+/** POS `courier.type` for each bookable provider. `Other` is handled separately. */
+const COURIER_TYPE_BY_PROVIDER = Object.freeze({
+  [PROVIDERS.TCS]: "tcs",
+  [PROVIDERS.LEOPARD]: "leopard",
+  [PROVIDERS.BLUEEX]: "blueex",
+  [PROVIDERS.MNP]: "mnp",
+  [PROVIDERS.CALL_COURIER]: "call_courier",
+  [PROVIDERS.TRAX]: "trax",
+  [PROVIDERS.POSTEX]: "postex",
+  [PROVIDERS.FLAGSHIP]: "flagship",
+});
+
+/**
+ * How a Shopify courier label should be stored.
+ * Known names reuse that courier type. Anything else gets a basic Other row
+ * named exactly as Shopify sent it.
+ */
+function planImportedCourier(courierName) {
+  const label = String(courierName || "").trim();
+  if (!label) return null;
+  const provider = normalizeProviderKey(label);
+  const known =
+    Object.values(PROVIDERS).includes(provider) && provider !== PROVIDERS.OTHER;
+  if (known) {
+    return {
+      type: COURIER_TYPE_BY_PROVIDER[provider],
+      name: provider,
+      provider,
+    };
+  }
+  return {
+    type: "other",
+    name: label.slice(0, 120),
+    provider: PROVIDERS.OTHER,
+  };
+}
+
 /**
  * Global courier sandbox switch from `.env` (`COURIER_SANDBOX`).
  * Used by all courier drivers (TCS, Leopard, PostEx, …).
@@ -137,7 +175,9 @@ module.exports = {
   TERMINAL_STATUSES,
   PROVIDERS,
   PROVIDER_ALIASES,
+  COURIER_TYPE_BY_PROVIDER,
   normalizeProviderKey,
+  planImportedCourier,
   readCourierSandboxEnv,
   isCourierSandbox,
 };

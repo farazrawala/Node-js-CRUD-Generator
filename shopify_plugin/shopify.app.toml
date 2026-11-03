@@ -1,0 +1,38 @@
+# Installable Shopify app for OrdersHub.
+# shopify.app.toml scopes must match src/shopify/constants.js.
+# Replace client_id and application_url, then: shopify app deploy
+#
+# application_url is the OrdersHub Shopify settings screen.
+# redirect_urls must match SHOPIFY_OAUTH_CALLBACK_URL
+# (default: {SHOPIFY_APP_URL}/api/shopify/oauth/callback).
+
+name = "OrdersHub"
+handle = "ordershub"
+client_id = "00000000000000000000000000000000"
+application_url = "https://example.com/settings/integrations/shopify"
+embedded = false
+
+[access_scopes]
+scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,write_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,read_reports"
+
+[auth]
+redirect_urls = [ "https://example.com/api/shopify/oauth/callback" ]
+
+[webhooks]
+api_version = "2026-10"
+
+[[webhooks.subscriptions]]
+topics = [
+  "products/create",
+  "products/update",
+  "products/delete",
+  "orders/create",
+  "orders/updated",
+  "orders/cancelled",
+  "inventory_levels/update",
+  "locations/create",
+  "locations/update",
+  "app/uninstalled"
+]
+compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+uri = "/api/shopify/webhooks"

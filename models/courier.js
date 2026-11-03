@@ -11,6 +11,7 @@ const COURIER_TYPE_VALUES = [
   "trax",
   "postex",
   "flagship",
+  "other",
 ];
 
 /**
@@ -49,6 +50,10 @@ const COURIER_TYPE_META = {
   flagship: {
     label: "Flagship (Flaship)",
     logo: "/public/couriers/flagship.jpg",
+  },
+  other: {
+    label: "Other",
+    logo: null,
   },
 };
 

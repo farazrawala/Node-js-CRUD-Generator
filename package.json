@@ -20,6 +20,7 @@
     "@shopify/shopify-api": "^12.1.1",
     "@woocommerce/woocommerce-rest-api": "^1.0.2",
     "bcrypt": "^6.0.0",
+    "bullmq": "^5.81.5",
     "connect-flash": "^0.1.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

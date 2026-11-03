@@ -131,6 +131,7 @@ modelFiles.forEach((file) => {
 require("./src/models/courier_provider.model");
 require("./src/models/courier_shipment.model");
 require("./src/models/courier_tracking.model");
+require("./src/shopify/models");
 
 const app = express();
 const BASE_PATH = getBasePath();
@@ -687,6 +688,16 @@ const server = app.listen(port, () => {
 
   const { startProcessQueueWorker } = require("./utils/processQueueWorker");
   startProcessQueueWorker();
+
+  try {
+    const { startShopifyWorker } = require("./src/shopify");
+    startShopifyWorker();
+  } catch (err) {
+    console.error(
+      "❌ Shopify worker failed to start:",
+      err?.message || err,
+    );
+  }
 
   const { startCourierModule } = require("./src");
   startCourierModule();

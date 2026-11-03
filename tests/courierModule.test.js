@@ -9,7 +9,11 @@ const {
   mapLeopardStatus,
   mapFlashipStatus,
 } = require("../src/couriers/statusMap");
-const { UNIFIED_STATUSES, normalizeProviderKey } = require("../src/couriers/constants");
+const {
+  UNIFIED_STATUSES,
+  normalizeProviderKey,
+  planImportedCourier,
+} = require("../src/couriers/constants");
 const CourierFactory = require("../src/couriers/CourierFactory");
 const {
   encryptSecret,
@@ -84,6 +88,20 @@ describe("courier factory", () => {
     assert.equal(normalizeProviderKey("flagship"), "Flagship");
     assert.equal(normalizeProviderKey("Flaship"), "Flagship");
     assert.equal(normalizeProviderKey("Leopards Courier"), "Leopard");
+  });
+
+  it("plans a basic courier row for known and unknown names", () => {
+    assert.deepEqual(planImportedCourier("Leopards Courier"), {
+      type: "leopard",
+      name: "Leopard",
+      provider: "Leopard",
+    });
+    assert.deepEqual(planImportedCourier("Stallion"), {
+      type: "other",
+      name: "Stallion",
+      provider: "Other",
+    });
+    assert.equal(planImportedCourier("  "), null);
   });
 
   it("builds TCS driver from config", () => {

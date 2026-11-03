@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="shopify-api-key" content="%SHOPIFY_API_KEY%" />
+  <title>POS Connector</title>
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.45 "Segoe UI", sans-serif; background: #f6f6f7; color: #1a1d21; }
+    main { max-width: 720px; margin: 0 auto; padding: 28px 18px 48px; }
+    h1 { font-size: 26px; margin: 0 0 8px; }
+    h2 { font-size: 16px; margin: 0 0 4px; }
+    .lead, .hint { color: #4b5563; }
+    .card { background: #fff; border: 1px solid #e3e5e8; border-radius: 12px; padding: 16px; margin-top: 14px; }
+    .status { background: #eef4ff; border: 1px solid #d5e2ff; border-radius: 10px; padding: 12px 14px; }
+    .field { display: block; margin-top: 14px; }
+    .field-label { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 650; }
+    .pos { color: #0f6b4c; font-weight: 600; }
+    .row { display: flex; gap: 8px; margin-top: 6px; }
+    input { flex: 1; min-width: 0; border: 1px solid #d0d5dd; border-radius: 8px; padding: 10px 12px; font: 13px/1.3 ui-monospace, Consolas, monospace; }
+    button { border: 0; border-radius: 8px; background: #111827; color: #fff; padding: 10px 14px; font: inherit; cursor: pointer; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .scopes { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-wrap: wrap; gap: 8px; }
+    .scopes li { font: 12px/1 ui-monospace, Consolas, monospace; background: #f2f4f7; border-radius: 999px; padding: 6px 10px; }
+    .scopes li.on { background: #e7f6ee; color: #0f6b4c; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>POS Connector</h1>
+    <p class="lead">This app is installed on the Shopify store. Connect it from OrdersHub under Settings → Integrations → Shopify. Access tokens stay on the OrdersHub server.</p>
+    <p class="status" id="status">Opening the installed app…</p>
+
+    <section class="card" id="credentials" hidden>
+      <h2>Store</h2>
+      <label class="field">
+        <span class="field-label">Shop URL</span>
+        <span class="row">
+          <input id="field-url" readonly />
+          <button type="button" data-copy="field-url">Copy</button>
+        </span>
+      </label>
+      <p class="hint" id="connect-message"></p>
+    </section>
+
+    <section class="card">
+      <h2>Access requested at install</h2>
+      <ul class="scopes" id="scopes">%SCOPE_ITEMS%</ul>
+    </section>
+  </main>
+  <script>
+    const statusEl = document.getElementById("status");
+    const credentials = document.getElementById("credentials");
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    async function sessionToken() {
+      if (!window.shopify || typeof window.shopify.idToken !== "function") {
+        throw new Error("Install the app on a Shopify store, then open it from Shopify admin.");
+      }
+      return window.shopify.idToken();
+    }
+
+    async function postSession(token) {
+      return fetch("/api/session", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + token },
+      });
+    }
+
+    function fill(data) {
+      document.getElementById("field-url").value = data.shop || "";
+      const message = document.getElementById("connect-message");
+      if (message) message.textContent = data.message || "Connect this shop from OrdersHub.";
+      const granted = new Set(data.scopes || []);
+      document.querySelectorAll("#scopes li").forEach((item) => {
+        item.classList.toggle("on", granted.has(item.dataset.scope));
+      });
+      credentials.hidden = false;
+      setStatus("Shop verified. Finish the connection in OrdersHub.");
+    }
+
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const input = document.getElementById(button.getAttribute("data-copy"));
+        if (!input || !input.value) return;
+        await navigator.clipboard.writeText(input.value);
+        const previous = button.textContent;
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = previous; }, 1200);
+      });
+    });
+
+    (async function start() {
+      try {
+        let token = await sessionToken();
+        let response = await postSession(token);
+        if (response.status === 401 && response.headers.get("X-Shopify-Retry-Invalid-Session-Request")) {
+          token = await sessionToken();
+          response = await postSession(token);
+        }
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "Shopify did not start a session for this store.");
+        fill(data);
+      } catch (error) {
+        credentials.hidden = true;
+        setStatus(error.message || "Install the app on a Shopify store, then open it from Shopify admin.");
+      }
+    })();
+  </script>
+</body>
+</html>

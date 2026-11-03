@@ -233,6 +233,13 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/shopify\/webhook\/orders\/.*/,
     /^\/shopify\/webhooks\/orders\/.*/,
     /^\/api\/shopify\/webhooks\/orders\/.*/,
+    // Shopify app OAuth callback and app webhooks (HMAC / state verified in handler)
+    "/shopify/oauth/callback",
+    "/api/shopify/oauth/callback",
+    "/shopify/webhooks",
+    "/api/shopify/webhooks",
+    "/shopify/health",
+    "/api/shopify/health",
     // SMS worker routes (public, company_id query — same pattern as whatsapp_message)
     "/sms_message/on-hold",
     "/api/sms_message/on-hold",
