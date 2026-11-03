@@ -10,6 +10,7 @@ const {
   fetchShopifyRemoteOrder,
   runWithShopifyClient,
 } = require("./shopifyProcess");
+const { emailOrderUpdateResponse } = require("../utils/orderUpdateMail");
 
 const ORDER_TOPICS = new Set([
   "orders/create",
@@ -554,12 +555,29 @@ async function shopifyOrdersWebhook(req, res) {
   }
 }
 
+async function respondOrderUpdate(res, status, body) {
+  try {
+    const mailed = await emailOrderUpdateResponse({
+      url: "/api/shopify/webhook/orders/update",
+      httpStatus: status,
+      response: body,
+    });
+    if (mailed && mailed.sent === false) {
+      webhookConsole("warn", "order update email skipped", mailed.reason || "");
+    }
+  } catch (error) {
+    webhookConsole("warn", "order update email failed", error?.message || error);
+  }
+  return res.status(status).json(body);
+}
+
 /**
  * POST /api/shopify/webhook/orders/update
  * POST /api/shopify/webhook/orders/update/:integrationId
  *
  * Shopify order-update trigger. The body only needs the order id.
  * This loads the current order from the Shopify Admin API, then updates POS.
+ * The JSON response is also emailed when SMTP env vars are set.
  */
 async function shopifyOrderUpdateTrigger(req, res) {
   const shopHeader = headerValue(req, "x-shopify-shop-domain");
@@ -577,7 +595,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
 
   try {
     if (topic && !ORDER_TOPICS.has(topic)) {
-      return res.status(200).json({
+      return respondOrderUpdate(res, 200, {
         success: true,
         status: 200,
         message: `Ignored Shopify topic ${topic}`,
@@ -587,7 +605,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
 
     const candidates = await findShopifyIntegrations(req);
     if (!candidates.length) {
-      return res.status(404).json({
+      return respondOrderUpdate(res, 404, {
         success: false,
         status: 404,
         message:
@@ -610,7 +628,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
           reason: hmac.reason,
         },
       });
-      return res.status(401).json({
+      return respondOrderUpdate(res, 401, {
         success: false,
         status: 401,
         message: "Invalid Shopify webhook signature",
@@ -620,7 +638,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
 
     const orderId = extractTriggerOrderId(req.body, req.query);
     if (!orderId) {
-      return res.status(400).json({
+      return respondOrderUpdate(res, 400, {
         success: false,
         status: 400,
         message: "Shopify order id is required",
@@ -628,7 +646,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
     }
 
     if (!companyId) {
-      return res.status(400).json({
+      return respondOrderUpdate(res, 400, {
         success: false,
         status: 400,
         message: "Integration is missing company_id",
@@ -668,7 +686,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
           requested_order_id: orderId,
         },
       });
-      return res.status(200).json({
+      return respondOrderUpdate(res, 200, {
         success: true,
         status: 200,
         message: `Shopify order ${orderId} was not found`,
@@ -730,7 +748,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
       description: resultData,
     });
 
-    return res.status(200).json({
+    return respondOrderUpdate(res, 200, {
       success: true,
       status: 200,
       message: `Shopify order fetched and ${outcome}`,
@@ -742,7 +760,7 @@ async function shopifyOrderUpdateTrigger(req, res) {
       shop: shopHeader || null,
       topic: topic || null,
     });
-    return res.status(500).json({
+    return respondOrderUpdate(res, 500, {
       success: false,
       status: 500,
       message: error.message || "Failed to fetch the Shopify order update",
