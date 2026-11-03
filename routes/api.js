@@ -406,7 +406,11 @@ router.post(
   shopifyOrderUpdateTrigger,
 );
 
-// Shopify order webhooks (public — HMAC verified with integration.secret)
+// Shopify order create and update. Emails GET query and POST body on every hit.
+router.get("/shopify/webhook/orders", shopifyOrdersWebhook);
+router.get("/shopify/webhook/orders/:integrationId", shopifyOrdersWebhook);
+router.get("/shopify/webhooks/orders", shopifyOrdersWebhook);
+router.get("/shopify/webhooks/orders/:integrationId", shopifyOrdersWebhook);
 router.post("/shopify/webhook/orders", shopifyOrdersWebhook);
 router.post("/shopify/webhook/orders/:integrationId", shopifyOrdersWebhook);
 router.post("/shopify/webhooks/orders", shopifyOrdersWebhook);

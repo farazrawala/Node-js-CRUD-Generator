@@ -21,7 +21,7 @@ function smtpSettings() {
   };
 }
 
-async function emailOrderUpdateResponse(payload) {
+async function sendWebhookEmail(payload, subject) {
   const settings = smtpSettings();
   if (!settings) return { sent: false, reason: "smtp_not_configured" };
 
@@ -35,20 +35,50 @@ async function emailOrderUpdateResponse(payload) {
     socketTimeout: 20000,
   });
 
-  const text = JSON.stringify(payload, null, 2).slice(0, 100000);
-  const status = payload?.httpStatus ?? "";
-  const message = String(payload?.response?.message || "Shopify order update").slice(0, 120);
-
   await transporter.sendMail({
     from: settings.user,
     to: settings.to,
-    subject: `Shopify order update webhook ${status}: ${message}`.slice(0, 180),
-    text,
+    subject: String(subject || "Shopify order webhook").slice(0, 180),
+    text: JSON.stringify(payload, null, 2).slice(0, 400000),
   });
 
   return { sent: true };
 }
 
+async function emailOrderUpdateResponse(payload) {
+  const status = payload?.httpStatus ?? "";
+  const message = String(payload?.response?.message || "Shopify order update").slice(0, 120);
+  return sendWebhookEmail(
+    payload,
+    `Shopify order update webhook ${status}: ${message}`,
+  );
+}
+
+/**
+ * Email the query string and POST body from a webhook hit.
+ */
+async function emailWebhookParameters(req) {
+  const topic = String(
+    req.get?.("x-shopify-topic") || req.headers?.["x-shopify-topic"] || "",
+  ).trim();
+  const shop = String(
+    req.get?.("x-shopify-shop-domain") || req.headers?.["x-shopify-shop-domain"] || "",
+  ).trim();
+  const method = String(req.method || "").toUpperCase();
+  return sendWebhookEmail(
+    {
+      method,
+      url: req.originalUrl || req.url || "",
+      topic: topic || null,
+      shop: shop || null,
+      get: req.query || {},
+      post: req.body ?? null,
+    },
+    `Shopify order webhook ${method}${topic ? ` ${topic}` : ""} parameters`,
+  );
+}
+
 module.exports = {
   emailOrderUpdateResponse,
+  emailWebhookParameters,
 };

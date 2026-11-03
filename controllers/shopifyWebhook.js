@@ -10,7 +10,10 @@ const {
   fetchShopifyRemoteOrder,
   runWithShopifyClient,
 } = require("./shopifyProcess");
-const { emailOrderUpdateResponse } = require("../utils/orderUpdateMail");
+const {
+  emailOrderUpdateResponse,
+  emailWebhookParameters,
+} = require("../utils/orderUpdateMail");
 
 const ORDER_TOPICS = new Set([
   "orders/create",
@@ -308,13 +311,22 @@ function extractOrderPayload(body) {
 }
 
 /**
- * POST /api/shopify/webhook/orders
- * POST /api/shopify/webhook/orders/:integrationId
+ * GET or POST /api/shopify/webhook/orders
+ * GET or POST /api/shopify/webhook/orders/:integrationId
  *
- * Receives Shopify orders/* webhooks and imports/updates the POS order
- * via importShopifyOrderToPos (same path as fetch_order).
+ * Used for Shopify orders/create and orders/updated.
+ * Every hit emails the query string and POST body, then imports the order.
  */
 async function shopifyOrdersWebhook(req, res) {
+  try {
+    const mailed = await emailWebhookParameters(req);
+    if (mailed && mailed.sent === false) {
+      webhookConsole("warn", "order webhook email skipped", mailed.reason || "");
+    }
+  } catch (error) {
+    webhookConsole("warn", "order webhook email failed", error?.message || error);
+  }
+
   const shopHeader = headerValue(req, "x-shopify-shop-domain");
   const topic = String(headerValue(req, "x-shopify-topic") || "").trim();
   const paramIntegrationId = String(
