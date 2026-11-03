@@ -4324,6 +4324,7 @@ async function importShopifyOrderToPos(remoteOrder, orderCtx) {
     const courierId = await resolveCompanyCourierId(
       companyId,
       remoteTracking.courier_name,
+      process.created_by?._id || process.created_by,
     );
     if (courierId) orderPayload.courier_id = courierId;
   }
@@ -6543,4 +6544,6 @@ module.exports = {
   sync_category,
   sync_brand,
   importShopifyOrderToPos,
+  fetchShopifyRemoteOrder,
+  runWithShopifyClient,
 };

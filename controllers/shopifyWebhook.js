@@ -7,6 +7,8 @@ const { createFetchOrderStats } = require("../utils/processHelpers");
 const {
   buildShopifyClient,
   importShopifyOrderToPos,
+  fetchShopifyRemoteOrder,
+  runWithShopifyClient,
 } = require("./shopifyProcess");
 
 const ORDER_TOPICS = new Set([
@@ -252,6 +254,40 @@ async function resolveWebhookActor(integration) {
     .select("_id")
     .lean();
   return coalesceObjectId(admin?._id);
+}
+
+function normalizeShopifyOrderId(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  const gid = text.match(/Order\/(\d+)\s*$/i);
+  if (gid) return gid[1];
+  return text.replace(/^#/, "");
+}
+
+/**
+ * Order id from a Shopify orders/* webhook, or from a thin trigger body/query.
+ * The rest of the payload is ignored; the handler loads the live order.
+ */
+function extractTriggerOrderId(body, query) {
+  const source = body && typeof body === "object" ? body : {};
+  const params = query && typeof query === "object" ? query : {};
+  const candidates = [
+    params.order_id,
+    params.orderId,
+    params.id,
+    source.order_id,
+    source.orderId,
+    source.id,
+    source.order?.id,
+    source.json?.id,
+    source.admin_graphql_api_id,
+    source.order?.admin_graphql_api_id,
+  ];
+  for (const value of candidates) {
+    const id = normalizeShopifyOrderId(value);
+    if (id) return id;
+  }
+  return "";
 }
 
 function extractOrderPayload(body) {
@@ -518,9 +554,207 @@ async function shopifyOrdersWebhook(req, res) {
   }
 }
 
+/**
+ * POST /api/shopify/webhook/orders/update
+ * POST /api/shopify/webhook/orders/update/:integrationId
+ *
+ * Shopify order-update trigger. The body only needs the order id.
+ * This loads the current order from the Shopify Admin API, then updates POS.
+ */
+async function shopifyOrderUpdateTrigger(req, res) {
+  const shopHeader = headerValue(req, "x-shopify-shop-domain");
+  const topic = String(headerValue(req, "x-shopify-topic") || "").trim();
+  const paramIntegrationId = String(
+    req.params?.integrationId || req.params?.id || "",
+  ).trim();
+
+  webhookConsole("log", "order update trigger", {
+    topic: topic || null,
+    shop: shopHeader || null,
+    integrationId: paramIntegrationId || null,
+    hasHmac: Boolean(headerValue(req, "x-shopify-hmac-sha256")),
+  });
+
+  try {
+    if (topic && !ORDER_TOPICS.has(topic)) {
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        message: `Ignored Shopify topic ${topic}`,
+        data: null,
+      });
+    }
+
+    const candidates = await findShopifyIntegrations(req);
+    if (!candidates.length) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        message:
+          "No active Shopify integration found for this shop domain / integration id",
+      });
+    }
+
+    const { integration, hmac } = resolveIntegrationByHmac(req, candidates);
+    const companyId = coalesceObjectId(integration?.company_id);
+    if (!hmac.ok || !integration) {
+      logWebhookEvent(req, {
+        action: "Shopify order update trigger HMAC failed",
+        company_id: companyId,
+        created_by: integration?.created_by,
+        extraTags: ["hmac_failed", "order_update"],
+        description: {
+          topic: topic || null,
+          shop: shopHeader || null,
+          integration_id: integration ? String(integration._id) : null,
+          reason: hmac.reason,
+        },
+      });
+      return res.status(401).json({
+        success: false,
+        status: 401,
+        message: "Invalid Shopify webhook signature",
+        reason: hmac.reason,
+      });
+    }
+
+    const orderId = extractTriggerOrderId(req.body, req.query);
+    if (!orderId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "Shopify order id is required",
+      });
+    }
+
+    if (!companyId) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        message: "Integration is missing company_id",
+      });
+    }
+
+    const actorId = await resolveWebhookActor(integration);
+    const process = {
+      _id: null,
+      company_id: companyId,
+      integration_id: integration._id,
+      created_by: actorId,
+      type: "shopify_order_update_trigger",
+    };
+
+    const fetched = await runWithShopifyClient(
+      integration,
+      process,
+      async (client, _active, graphql) => ({
+        remoteOrder: await fetchShopifyRemoteOrder(client, orderId),
+        client,
+        graphql,
+      }),
+    );
+    const remoteOrder = fetched?.remoteOrder;
+
+    if (!remoteOrder?.id) {
+      logWebhookEvent(req, {
+        action: `Shopify order update not found :: ${orderId}`,
+        company_id: companyId,
+        created_by: actorId || integration.created_by,
+        extraTags: ["order_update", "not_found"],
+        description: {
+          topic: topic || null,
+          shop: shopHeader || null,
+          integration_id: String(integration._id),
+          requested_order_id: orderId,
+        },
+      });
+      return res.status(200).json({
+        success: true,
+        status: 200,
+        message: `Shopify order ${orderId} was not found`,
+        data: {
+          outcome: "not_found",
+          requested_order_id: orderId,
+          integration_id: String(integration._id),
+        },
+      });
+    }
+
+    const stats = {
+      ...createFetchOrderStats(),
+      updated: 0,
+    };
+
+    await importShopifyOrderToPos(remoteOrder, {
+      companyId,
+      process,
+      stats,
+      req,
+      client: fetched.client,
+      graphql: fetched.graphql,
+      integration,
+      allowRemoteProductCreate: true,
+    });
+
+    const skipped = stats.skipped_orders?.[0] || null;
+    const outcome =
+      stats.inserted > 0 ? "created"
+      : stats.updated > 0 ? "updated"
+      : skipped?.reason === "already_imported" ? "duplicate"
+      : skipped ? "skipped"
+      : "processed";
+
+    const resultData = {
+      outcome,
+      source: "shopify_fetch",
+      topic: topic || null,
+      shop: shopHeader || null,
+      requested_order_id: orderId,
+      shopify_order_id: remoteOrder.id,
+      shopify_order_number: remoteOrder.order_number ?? null,
+      integration_id: String(integration._id),
+      company_id: String(companyId),
+      inserted: stats.inserted,
+      updated: stats.updated || 0,
+      lines_inserted: stats.lines_inserted,
+      lines_skipped: stats.lines_skipped,
+      skipped,
+    };
+
+    webhookConsole("log", `order update ${outcome}`, resultData);
+    logWebhookEvent(req, {
+      action: `Shopify order update ${outcome} :: #${remoteOrder.order_number ?? remoteOrder.id}`,
+      company_id: companyId,
+      created_by: actorId || integration.created_by,
+      extraTags: ["order_update", outcome],
+      description: resultData,
+    });
+
+    return res.status(200).json({
+      success: true,
+      status: 200,
+      message: `Shopify order fetched and ${outcome}`,
+      data: resultData,
+    });
+  } catch (error) {
+    webhookConsole("error", "order update trigger failed", {
+      message: error?.message || String(error),
+      shop: shopHeader || null,
+      topic: topic || null,
+    });
+    return res.status(500).json({
+      success: false,
+      status: 500,
+      message: error.message || "Failed to fetch the Shopify order update",
+    });
+  }
+}
+
 module.exports = {
   shopifyOrdersWebhook,
+  shopifyOrderUpdateTrigger,
   verifyShopifyHmac,
   normalizeShopDomain,
   extractOrderPayload,
+  extractTriggerOrderId,
 };

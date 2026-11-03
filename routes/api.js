@@ -388,7 +388,23 @@ const {
   bulkCreateSmsMessages,
   bulkDeleteSmsMessages,
 } = require("../controllers/sms_message");
-const { shopifyOrdersWebhook } = require("../controllers/shopifyWebhook");
+const {
+  shopifyOrdersWebhook,
+  shopifyOrderUpdateTrigger,
+} = require("../controllers/shopifyWebhook");
+
+// Order-update trigger: fetch the live Shopify order, then update POS.
+// Register before :integrationId so "update" is not treated as an id.
+router.post("/shopify/webhook/orders/update", shopifyOrderUpdateTrigger);
+router.post(
+  "/shopify/webhook/orders/update/:integrationId",
+  shopifyOrderUpdateTrigger,
+);
+router.post("/shopify/webhooks/orders/update", shopifyOrderUpdateTrigger);
+router.post(
+  "/shopify/webhooks/orders/update/:integrationId",
+  shopifyOrderUpdateTrigger,
+);
 
 // Shopify order webhooks (public — HMAC verified with integration.secret)
 router.post("/shopify/webhook/orders", shopifyOrdersWebhook);
@@ -1550,6 +1566,10 @@ const categoryController =
 /** Courier Integration Module (provider pattern — TCS, Leopard, …). */
 const courierRoutes = require("../src/routes/courier.routes");
 router.use("/courier", courierRoutes);
+
+/** Shopify app: OAuth, sync, webhooks, analytics. */
+const shopifyAppRoutes = require("../src/shopify/routes");
+router.use("/shopify", shopifyAppRoutes);
 
 // Frontend aliases (sales-returns edit page uses sales_order_return/*).
 // Register after dynamic routes; accept PATCH/PUT/POST (some proxies rewrite PATCH).
