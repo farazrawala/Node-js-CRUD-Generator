@@ -22,6 +22,7 @@ const ORDER_TOPICS = new Set([
   "orders/paid",
   "orders/fulfilled",
   "orders/partially_fulfilled",
+  "orders/cancelled",
 ]);
 
 const WEBHOOK_LOG_TAGS = ["webhook", "shopify"];
@@ -314,8 +315,9 @@ function extractOrderPayload(body) {
  * GET or POST /api/shopify/webhook/orders
  * GET or POST /api/shopify/webhook/orders/:integrationId
  *
- * Used for Shopify orders/create and orders/updated.
- * Every hit emails the query string and POST body, then imports the order.
+ * orders/create inserts the posted order into POS.
+ * Every other order topic loads the current order from Shopify, then updates POS.
+ * Every hit also emails the query string and POST body.
  */
 async function shopifyOrdersWebhook(req, res) {
   let mailed = { sent: false, reason: "not_attempted" };
@@ -425,31 +427,6 @@ async function shopifyOrdersWebhook(req, res) {
       candidates: candidates.length,
     });
 
-    const remoteOrder = extractOrderPayload(req.body);
-    if (!remoteOrder?.id) {
-      webhookConsole("warn", "missing order payload", {
-        shop: shopHeader,
-        integration_id: String(integration._id),
-        bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body).slice(0, 20) : [],
-      });
-      logWebhookEvent(req, {
-        action: "Shopify webhook missing order payload",
-        company_id: companyId,
-        created_by: integration.created_by,
-        extraTags: ["bad_payload"],
-        description: {
-          topic: topic || null,
-          shop: shopHeader || null,
-          integration_id: String(integration._id),
-        },
-      });
-      return res.status(400).json({
-        success: false,
-        status: 400,
-        message: "Shopify order payload is required",
-      });
-    }
-
     if (!companyId) {
       webhookConsole("warn", "integration missing company_id", {
         integration_id: String(integration._id),
@@ -470,27 +447,103 @@ async function shopifyOrdersWebhook(req, res) {
       type: "shopify_webhook",
     };
 
-    // Import from the webhook payload. A line whose product is not in POS is
-    // added to the products table from that line (name, SKU, price, Shopify ids).
-    // Pass ?enrich=1 to also call Shopify Admin API for images, stock, and notes.
-    const wantEnrich =
-      req.query?.enrich === "1" ||
-      req.query?.enrich === "true" ||
-      String(req.headers["x-pos-shopify-enrich"] || "").trim() === "1";
-
+    // orders/create inserts the posted order. Every other order topic loads
+    // the current order from Shopify, then updates POS.
+    const isCreate = topic === "orders/create";
+    let remoteOrder = null;
     let client = null;
     let graphql = null;
-    if (wantEnrich) {
-      try {
-        const built = buildShopifyClient(integration, { requireToken: true });
-        if (!built.error) {
-          client = built.client;
-          graphql = built.graphql;
-        } else {
-          webhookConsole("warn", "enrich skipped", built.error);
+    let orderSource = isCreate ? "webhook_payload" : "shopify_fetch";
+
+    if (isCreate) {
+      remoteOrder = extractOrderPayload(req.body);
+      if (!remoteOrder?.id) {
+        webhookConsole("warn", "missing order payload", {
+          shop: shopHeader,
+          integration_id: String(integration._id),
+          bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body).slice(0, 20) : [],
+        });
+        logWebhookEvent(req, {
+          action: "Shopify webhook missing order payload",
+          company_id: companyId,
+          created_by: integration.created_by,
+          extraTags: ["bad_payload"],
+          description: {
+            topic: topic || null,
+            shop: shopHeader || null,
+            integration_id: String(integration._id),
+          },
+        });
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          message: "Shopify order payload is required",
+        });
+      }
+
+      const wantEnrich =
+        req.query?.enrich === "1" ||
+        req.query?.enrich === "true" ||
+        String(req.headers["x-pos-shopify-enrich"] || "").trim() === "1";
+      if (wantEnrich) {
+        try {
+          const built = buildShopifyClient(integration, { requireToken: true });
+          if (!built.error) {
+            client = built.client;
+            graphql = built.graphql;
+          } else {
+            webhookConsole("warn", "enrich skipped", built.error);
+          }
+        } catch (err) {
+          webhookConsole("warn", "client init skipped", err?.message || err);
         }
-      } catch (err) {
-        webhookConsole("warn", "client init skipped", err?.message || err);
+      }
+    } else {
+      const orderId = extractTriggerOrderId(req.body, req.query);
+      if (!orderId) {
+        return res.status(400).json({
+          success: false,
+          status: 400,
+          message: "Shopify order id is required",
+        });
+      }
+      const fetched = await runWithShopifyClient(
+        integration,
+        process,
+        async (shopifyClient, _active, shopifyGraphql) => ({
+          remoteOrder: await fetchShopifyRemoteOrder(shopifyClient, orderId),
+          client: shopifyClient,
+          graphql: shopifyGraphql,
+        }),
+      );
+      remoteOrder = fetched?.remoteOrder;
+      client = fetched?.client || null;
+      graphql = fetched?.graphql || null;
+      if (!remoteOrder?.id) {
+        logWebhookEvent(req, {
+          action: `Shopify order update not found :: ${orderId}`,
+          company_id: companyId,
+          created_by: actorId || integration.created_by,
+          extraTags: ["order_update", "not_found"],
+          description: {
+            topic: topic || null,
+            shop: shopHeader || null,
+            integration_id: String(integration._id),
+            requested_order_id: orderId,
+          },
+        });
+        return res.status(200).json({
+          success: true,
+          status: 200,
+          message: `Shopify order ${orderId} was not found`,
+          data: {
+            outcome: "not_found",
+            source: "shopify_fetch",
+            topic: topic || null,
+            requested_order_id: orderId,
+            integration_id: String(integration._id),
+          },
+        });
       }
     }
 
@@ -499,7 +552,7 @@ async function shopifyOrdersWebhook(req, res) {
       order_number: remoteOrder.order_number ?? null,
       integration_id: String(integration._id),
       company_id: String(companyId),
-      enrich: wantEnrich && !!client,
+      source: orderSource,
       line_items: Array.isArray(remoteOrder.line_items)
         ? remoteOrder.line_items.length
         : 0,
@@ -533,6 +586,7 @@ async function shopifyOrdersWebhook(req, res) {
 
     const resultData = {
       outcome,
+      source: orderSource,
       topic: topic || null,
       shop: shopHeader || null,
       shopify_order_id: remoteOrder.id,
