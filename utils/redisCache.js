@@ -54,6 +54,7 @@ const LIST_CACHE_BYPASS_MODULES = new Set([
   "order_notes",
   "sms_message",
   "whatsapp_message",
+  "courier",
 ]);
 
 /** List endpoints that share the same invalidation on create/update/delete. */

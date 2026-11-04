@@ -782,6 +782,18 @@ function generateControllerFunctions(modelName) {
             if (!includeInactive) {
               filter.status = { $ne: "inactive" };
             }
+          } else if (!includeDeleted && modelName === "courier") {
+            // Treat missing status as active (rows saved before status was restored).
+            filter.$and = [
+              ...(Array.isArray(filter.$and) ? filter.$and : []),
+              {
+                $or: [
+                  { status: "active" },
+                  { status: { $exists: false } },
+                  { status: null },
+                ],
+              },
+            ];
           } else if (
             !includeDeleted &&
             modelName !== "user" &&

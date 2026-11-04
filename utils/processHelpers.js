@@ -2151,8 +2151,11 @@ async function resolveCompanyCourierId(companyId, courierName, createdBy) {
     type: plan.type,
     name: plan.name,
     company_id: company,
-    is_active: false,
-    created_user: coalesceObjectId(createdBy) || undefined,
+    url: "",
+    login: "",
+    password: "",
+    status: "inactive",
+    created_by: coalesceObjectId(createdBy) || undefined,
   });
   return created?._id || null;
 }

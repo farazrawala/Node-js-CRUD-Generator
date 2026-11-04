@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const Schema = mongoose.Schema;
 
 /** Canonical courier type keys (used by enum + logo map). */
 const COURIER_TYPE_VALUES = [
@@ -69,75 +68,130 @@ function listCourierTypes() {
   }));
 }
 
-var courier = new Schema(
+const modelSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: COURIER_TYPE_VALUES,
       required: true,
+      enum: COURIER_TYPE_VALUES,
+      default: "tcs",
+      field_name: "Courier",
+      field_type: "select",
     },
     name: {
       type: String,
       required: true,
+      field_name: "Name",
     },
-    email: {
+    url: {
       type: String,
       required: false,
+      default: "",
+      field_name: "API URL",
+    },
+    login: {
+      type: String,
+      required: false,
+      default: "",
+      field_name: "ID",
     },
     password: {
       type: String,
       required: false,
+      default: "",
+      field_name: "Password",
+      field_type: "password",
     },
-    api_key: {
+    token: {
       type: String,
-      required: false,
+      field_name: "Token",
+      field_type: "password",
     },
-    api_password: {
+    pickup_address: {
       type: String,
-      required: false,
+      field_name: "Pickup Address",
     },
-    cost_center_code: {
+    return_address: {
       type: String,
-      required: false,
+      field_name: "Return Address",
     },
-    origin_city: {
+    /** TCS OAuth client id — used to auto-refresh bearer Token when missing/expired. */
+    client_id: {
       type: String,
-      required: false,
+      field_name: "Client ID",
     },
-    is_active: {
+    /** TCS OAuth client secret — used to auto-refresh bearer Token when missing/expired. */
+    client_secret: {
+      type: String,
+      field_name: "Client Secret",
+      field_type: "password",
+    },
+    /**
+     * Optional rich fields used by the Provider module (src/).
+     * Prefer `courier_provider` collection for full multi-provider config;
+     * this model remains available for admin CRUD and legacy fallback.
+     */
+    account_no: {
+      type: String,
+      field_name: "Account No",
+    },
+    /** TCS cost center code (shipmentinfo.costcentercode). */
+    cost_center: {
+      type: String,
+      field_name: "Cost Center",
+    },
+    sandbox: {
       type: Boolean,
-      default: false,
+      default: true,
+      field_name: "Sandbox",
     },
+    settings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+      field_name: "Settings",
+    },
+    // default fields
     company_id: {
-      type: Schema.Types.ObjectId,
+      type: mongoose.Schema.Types.ObjectId,
       ref: "company",
-      required: false,
-      default: null,
+      required: true,
+      field_name: "Company",
     },
-    created_user: {
-      type: Schema.Types.ObjectId,
+    created_by: {
+      type: mongoose.Schema.Types.ObjectId,
       ref: "user",
-      required: false,
+      field_name: "Created By",
+    },
+    updated_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      field_name: "Updated By",
+    },
+    status: {
+      type: String,
+      required: true,
+      enum: ["active", "inactive"],
+      default: "active",
+    },
+    deletedAt: {
+      type: Date,
       default: null,
+      field_name: "Deleted At",
     },
   },
-  {
-    timestamps: { createdAt: "created_at", updatedAt: "updated_at" },
-    collection: "courier",
-    autoCreate: true,
-  }
+  { timestamps: true },
 );
 
-courier.virtual("logo").get(function () {
+modelSchema.virtual("logo").get(function () {
   return COURIER_TYPE_META[this.type]?.logo || null;
 });
 
-courier.set("toJSON", { virtuals: true });
-courier.set("toObject", { virtuals: true });
+modelSchema.set("toJSON", { virtuals: true });
+modelSchema.set("toObject", { virtuals: true });
 
-const Courier = mongoose.model("courier", courier);
+const MODEL = mongoose.model("courier", modelSchema);
 
-module.exports = Courier;
+module.exports = MODEL;
 module.exports.COURIER_TYPE_VALUES = COURIER_TYPE_VALUES;
 module.exports.COURIER_TYPE_META = COURIER_TYPE_META;
 module.exports.getCourierTypeMeta = getCourierTypeMeta;
