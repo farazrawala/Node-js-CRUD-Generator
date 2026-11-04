@@ -24,6 +24,36 @@ function smtpSettings() {
   };
 }
 
+const TOPIC_ACTION = {
+  "orders/updated": "updated",
+  "orders/edited": "updated",
+  "orders/paid": "paid",
+  "orders/fulfilled": "fulfilled",
+  "orders/partially_fulfilled": "partially fulfilled",
+  "orders/cancelled": "cancel",
+};
+
+function orderNumberFromBody(body) {
+  const source = body && typeof body === "object" ? body : {};
+  const nested = [source, source.order, source.json];
+  for (const item of nested) {
+    if (!item || typeof item !== "object") continue;
+    const value = item.order_number;
+    if (value == null || String(value).trim() === "") continue;
+    return String(value).replace(/^#/, "").trim();
+  }
+  return "";
+}
+
+function webhookEmailSubject(topic, body) {
+  const normalized = String(topic || "").trim().toLowerCase();
+  if (normalized === "orders/create") return "New Order arrived.";
+  const action = TOPIC_ACTION[normalized] || "updated";
+  const number = orderNumberFromBody(body);
+  if (!number) return `Order is ${action}`;
+  return `Order Number : ${number} is ${action}`;
+}
+
 async function sendWebhookEmail(payload, subject) {
   const settings = smtpSettings();
   if (!settings) return { sent: false, reason: "smtp_not_configured" };
@@ -77,11 +107,12 @@ async function emailWebhookParameters(req) {
       get: req.query || {},
       post: req.body ?? null,
     },
-    `Shopify order webhook ${method}${topic ? ` ${topic}` : ""} parameters`,
+    webhookEmailSubject(topic, req.body),
   );
 }
 
 module.exports = {
   emailOrderUpdateResponse,
   emailWebhookParameters,
+  webhookEmailSubject,
 };
