@@ -108,36 +108,50 @@ const toPngBytes = async (bytes) => {
   }
 };
 
-/** Trim transparent/white padding so the drawn box matches the visible mark. */
+/**
+ * Normalize store logos for PDF stamping:
+ * - honor EXIF orientation
+ * - trim transparent / near-white padding so artwork fills the draw box
+ * - always emit PNG for pdf-lib
+ */
 const toTrimmedPngBytes = async (bytes) => {
   if (!bytes || !bytes.length) return null;
   try {
     const sharp = require("sharp");
-    // Flatten soft/white edges then trim hard so wordmarks don't keep a tall empty box.
-    return await sharp(bytes)
-      .rotate()
-      .flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } })
-      .trim({ threshold: 28 })
-      .png()
-      .toBuffer();
-  } catch {
+    const base = sharp(bytes, { failOn: "none" }).rotate();
     try {
-      const sharp = require("sharp");
-      return await sharp(bytes).trim({ threshold: 20 }).png().toBuffer();
+      return await base
+        .clone()
+        .ensureAlpha()
+        .trim({ threshold: 12 })
+        .png()
+        .toBuffer();
     } catch {
-      return toPngBytes(bytes);
+      /* no trim edges — still convert */
     }
+    try {
+      return await sharp(bytes, { failOn: "none" })
+        .rotate()
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .trim({ threshold: 24 })
+        .png()
+        .toBuffer();
+    } catch {
+      return await sharp(bytes, { failOn: "none" }).rotate().png().toBuffer();
+    }
+  } catch {
+    return toPngBytes(bytes);
   }
 };
 
 const embedImage = async (pdfDoc, bytes) => {
   if (!bytes || !bytes.length) return null;
-  const trimmed = await toTrimmedPngBytes(bytes);
-  if (trimmed) {
+  const prepared = await toTrimmedPngBytes(bytes);
+  if (prepared) {
     try {
-      return await pdfDoc.embedPng(trimmed);
+      return await pdfDoc.embedPng(prepared);
     } catch {
-      /* fall through to raw bytes */
+      /* fall through */
     }
   }
   try {
@@ -311,36 +325,40 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  * @param {import('pdf-lib').PDFPage} page
  * @param {import('pdf-lib').PDFImage} logoImg
  */
+/**
+ * Draw store logo in Flaship Trax header cell 2 (between TRAX mark and barcode).
+ * Geometry measured on A4 595×842, 2-up pack — top label only.
+ */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
-  const { width, height } = page.getSize();
-  // Flaship leaves cell 2 empty — fill it, centered with the Trax mark.
-  const colLeft = 104;
-  const colRight = Math.min(198, width * 0.333);
-  const colW = Math.max(40, colRight - colLeft);
-  const wipeTop = 10;
-  const wipeBottom = 68;
-  const wipeH = wipeBottom - wipeTop;
-  const cellCenterY = height - (wipeTop + wipeBottom) / 2;
-
-  // Contain-fit inside the cell with padding (object-fit: contain).
-  const maxW = colW - 12;
-  const maxH = wipeH - 12;
+  const { height } = page.getSize();
+  // Fixed cell: stays inside header rules, vertically matches Trax mark.
+  const box = {
+    left: 108,
+    top: 12, // from page top
+    width: 86,
+    height: 52,
+  };
+  const pad = 5;
+  const innerW = box.width - pad * 2;
+  const innerH = box.height - pad * 2;
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
-  let drawW = maxW;
+
+  // object-fit: contain
+  let drawW = innerW;
   let drawH = drawW / aspect;
-  if (drawH > maxH) {
-    drawH = maxH;
+  if (drawH > innerH) {
+    drawH = innerH;
     drawW = drawH * aspect;
   }
 
-  const x = colLeft + (colW - drawW) / 2;
-  const y = cellCenterY - drawH / 2;
+  const x = box.left + (box.width - drawW) / 2;
+  const y = height - box.top - (box.height + drawH) / 2;
 
   page.drawRectangle({
-    x: colLeft + 1,
-    y: height - wipeBottom + 1,
-    width: colW - 2,
-    height: wipeH - 2,
+    x: box.left,
+    y: height - box.top - box.height,
+    width: box.width,
+    height: box.height,
     color: rgb(1, 1, 1),
   });
   page.drawImage(logoImg, { x, y, width: drawW, height: drawH });
@@ -671,6 +689,16 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   }
   if (logoImg) {
     drawAlignedStoreLogoOnLabelHeader(page, logoImg);
+  } else {
+    console.warn(
+      "[courier] Trax header logo skipped — no readable store/company logo bytes",
+      {
+        hasIntegrationImage: Boolean(ctx.integration?.image),
+        hasCompanyLogo: Boolean(
+          ctx.company?.company_logo || ctx.company?.logo || ctx.company?.image,
+        ),
+      },
+    );
   }
 
   const order = ctx.order || {};
