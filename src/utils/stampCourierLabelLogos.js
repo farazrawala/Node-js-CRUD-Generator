@@ -586,28 +586,32 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
 
   // Header: store logo + address | INVOICE + customer
   const invLogoH = 34;
+  const leftColW = contentW * 0.48;
   let leftX = marginX;
+  let logoDrawH = 0;
   if (logoImg) {
     const aspect = logoImg.width / Math.max(logoImg.height, 1);
     let h = invLogoH;
     let w = h * aspect;
-    if (w > 110) {
-      w = 110;
+    if (w > 72) {
+      w = 72;
       h = w / aspect;
     }
+    logoDrawH = h;
+    // Align logo top with the first text line of the address block.
     page.drawImage(logoImg, {
       x: leftX,
-      y: cursorY - h,
+      y: cursorY - 10 - h + 8,
       width: w,
       height: h,
     });
-    leftX += w + 10;
+    leftX += w + 8;
   }
 
-  const detailX = logoImg ? marginX : leftX;
-  let detailY = cursorY - invLogoH - 6;
+  const detailX = leftX;
   const detailSize = 8;
-  const leftColW = contentW * 0.48;
+  const addrMaxW = Math.max(90, leftColW - (detailX - marginX));
+  let detailY = cursorY - 10;
   if (!logoImg) {
     page.drawText(clip(fontBold, companyName, 11, leftColW), {
       x: detailX,
@@ -619,7 +623,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     detailY = cursorY - 26;
   }
 
-  const addressLines = wrapLines(font, companyAddress, detailSize, leftColW, 2);
+  const addressLines = wrapLines(font, companyAddress, detailSize, addrMaxW, 2);
   for (const row of addressLines) {
     page.drawText(row, {
       x: detailX,
@@ -631,7 +635,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     detailY -= 11;
   }
   for (const row of [companyPhone, companyEmail].filter((v) => String(v || "").trim())) {
-    page.drawText(clip(font, row, detailSize, leftColW), {
+    page.drawText(clip(font, row, detailSize, addrMaxW), {
       x: detailX,
       y: detailY,
       size: detailSize,
@@ -639,6 +643,11 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
       color: muted,
     });
     detailY -= 11;
+  }
+  // Keep header block height consistent when logo is taller than text.
+  if (logoImg) {
+    const logoBottom = cursorY - 10 - logoDrawH + 8;
+    if (detailY > logoBottom - 4) detailY = logoBottom - 4;
   }
 
   const rightX = width / 2 + 8;
@@ -749,7 +758,8 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   const colQty = width - marginX - 170;
   const colRate = width - marginX - 110;
   const colAmt = width - marginX - 50;
-  const rowH = 28;
+  const rowH = 34;
+  const thumbSize = 24;
 
   page.drawRectangle({
     x: marginX,
@@ -799,18 +809,22 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     subTotal += amount;
     const name = item.name || item.product_name || "Item";
     const sku = item.sku || item.product_code || "";
-    const y = cursorY - rowH + 8;
+    const rowTop = cursorY;
+    const rowBottom = cursorY - rowH;
+    // Vertically center thumbnail inside the row (below header/rule).
+    const thumbY = rowBottom + (rowH - thumbSize) / 2;
+    const textMidY = rowBottom + rowH / 2 - 3;
 
     page.drawLine({
-      start: { x: marginX, y: cursorY },
-      end: { x: width - marginX, y: cursorY },
+      start: { x: marginX, y: rowTop },
+      end: { x: width - marginX, y: rowTop },
       thickness: 0.5,
       color: line,
     });
 
     page.drawText(String(i + 1), {
       x: colHash + 4,
-      y: y + 8,
+      y: textMidY,
       size: 8,
       font,
       color: ink,
@@ -823,11 +837,20 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
         );
         const thumb = imgBytes ? await embedImage(pdfDoc, imgBytes) : null;
         if (thumb) {
+          page.drawRectangle({
+            x: colImg - 0.5,
+            y: thumbY - 0.5,
+            width: thumbSize + 1,
+            height: thumbSize + 1,
+            color: rgb(1, 1, 1),
+            borderColor: line,
+            borderWidth: 0.4,
+          });
           page.drawImage(thumb, {
             x: colImg,
-            y: y,
-            width: 22,
-            height: 22,
+            y: thumbY,
+            width: thumbSize,
+            height: thumbSize,
           });
         }
       } catch {
@@ -837,7 +860,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
 
     page.drawText(clip(fontBold, name, 8, colQty - colProduct - 8), {
       x: colProduct,
-      y: y + 12,
+      y: sku ? textMidY + 5 : textMidY,
       size: 8,
       font: fontBold,
       color: ink,
@@ -845,7 +868,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     if (sku) {
       page.drawText(clip(font, `SKU: ${sku}`, 7, colQty - colProduct - 8), {
         x: colProduct,
-        y: y + 2,
+        y: textMidY - 7,
         size: 7,
         font,
         color: muted,
@@ -854,27 +877,27 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
 
     page.drawText(String(qty), {
       x: colQty,
-      y: y + 8,
+      y: textMidY,
       size: 8,
       font,
       color: ink,
     });
     page.drawText(moneyRs(rate), {
       x: colRate,
-      y: y + 8,
+      y: textMidY,
       size: 8,
       font,
       color: ink,
     });
     page.drawText(moneyRs(amount), {
       x: colAmt,
-      y: y + 8,
+      y: textMidY,
       size: 8,
       font: fontBold,
       color: ink,
     });
 
-    cursorY -= rowH;
+    cursorY = rowBottom;
   }
 
   page.drawLine({
