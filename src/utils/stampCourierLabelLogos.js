@@ -406,6 +406,39 @@ function stampShipperNameAndPhone(
 }
 
 /**
+ * Replace Trax "Booked" YYYY-MM-DD with DD/MM/YYYY on the A4 2-up label.
+ */
+function stampBookedDate(page, fontBold, bookedRaw) {
+  const formatted = formatDayMonthYear(bookedRaw);
+  if (!formatted) return;
+
+  const { width, height } = page.getSize();
+  const labelH = height / 2;
+  // Booked value cell — left column of the details grid (under Order ID).
+  const coverX = 28;
+  const coverW = Math.min(120, width * 0.22);
+  const dateY = height - labelH * 0.668;
+  const coverH = 13;
+  const coverBottom = dateY - 3;
+
+  page.drawRectangle({
+    x: coverX,
+    y: coverBottom,
+    width: coverW,
+    height: coverH,
+    color: rgb(1, 1, 1),
+  });
+
+  page.drawText(formatted, {
+    x: coverX + 4,
+    y: dateY,
+    size: 9,
+    font: fontBold,
+    color: rgb(0.05, 0.05, 0.05),
+  });
+}
+
+/**
  * @param {Buffer} pdfBuffer
  * @param {object|string|null} logoSource
  * @returns {Promise<Buffer>}
@@ -439,12 +472,21 @@ const moneyRs = (n) => {
   })}`;
 };
 
-const shortDate = (iso) => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB");
+/** Format as day/month/year (DD/MM/YYYY). */
+const formatDayMonthYear = (value) => {
+  if (value == null || value === "") return "";
+  const raw = String(value).trim();
+  const isoDay = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDay) return `${isoDay[3]}/${isoDay[2]}/${isoDay[1]}`;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return "";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
 };
+
+const shortDate = (iso) => formatDayMonthYear(iso) || "—";
 
 /** Helvetica (WinAnsi) safe text — drop unsupported glyphs. */
 const safeText = (value) =>
@@ -590,6 +632,16 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     shipperEmail,
     shipperCity,
   );
+
+  const bookedRaw =
+    ctx.bookedDate ||
+    order.booked_at ||
+    order.bookedAt ||
+    order.shipped_at ||
+    order.createdAt ||
+    order.created_at ||
+    "";
+  stampBookedDate(page, fontBold, bookedRaw);
 
   // Bottom half invoice area (Flaship per_page=2 leaves this blank).
   const midY = height / 2;

@@ -1198,6 +1198,14 @@ async function printLabel(orderId, options = {}) {
         // Aggregator + actual carrier on the printed invoice (e.g. FLAGSHIP/TRAX).
         const courierName = `FLAGSHIP/${carrierLabel}`;
 
+        const bookedDate =
+          shipment.booked_at ||
+          shipment.bookedAt ||
+          shipment.created_at ||
+          shipment.createdAt ||
+          order?.createdAt ||
+          order?.created_at ||
+          "";
         const { composeFlagshipLabelWithInvoice } = require("../utils/stampCourierLabelLogos");
         const stamped = await composeFlagshipLabelWithInvoice(pdfBuf, {
           company,
@@ -1206,6 +1214,7 @@ async function printLabel(orderId, options = {}) {
           items,
           courierName,
           paymentMethod,
+          bookedDate,
         });
         if (stamped && stamped.length > 0) {
           labelBase64 = stamped.toString("base64");
