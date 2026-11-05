@@ -317,23 +317,43 @@ function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
 /**
  * Replace Flaship pickup shipper name/phone/email with the order's integration values.
  * Measured on A4 2-up Trax label (upper half).
+ * Cover must fully erase the previous pickup (e.g. BBG) — leftover glyphs were
+ * showing as "B"/"0"/"F-" over the new Night Suit lines.
  */
-function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhone, shipperEmail) {
+function stampShipperNameAndPhone(
+  page,
+  font,
+  fontBold,
+  shipperName,
+  shipperPhone,
+  shipperEmail,
+  shipperCity = "",
+) {
   const name = safeText(shipperName);
   const phone = safeText(shipperPhone);
   const email = safeText(shipperEmail);
-  if (!name && !phone && !email) return;
+  const city = safeText(shipperCity);
+  if (!name && !phone && !email && !city) return;
 
   const { width, height } = page.getSize();
   const labelH = height / 2;
-  // Shipper block sits under COD row on the left column of the top label.
-  const coverX = 28;
-  const coverW = Math.min(250, width * 0.42);
-  const lineGap = 12;
-  const nameY = height - labelH * 0.34;
-  const rows = [name, phone, email].filter(Boolean);
-  const coverH = Math.max(30, rows.length * lineGap + 8);
-  const coverBottom = nameY - (rows.length - 1) * lineGap - 6;
+  // Full shipper body: past left border → near center divider (must erase BBG leftovers).
+  const coverX = 16;
+  const coverW = Math.min(275, width * 0.47 - 14);
+  const textX = 34;
+  const textMaxW = coverW - (textX - coverX) - 6;
+  const lineGap = 13;
+  // First content line under the SHIPPER heading.
+  const nameY = height - labelH * 0.335;
+  const rows = [name, phone, email, city].filter(Boolean);
+  // Pad enough to blank prior pickup glyphs without eating the box border.
+  const padTop = 6;
+  const padBottom = city ? 8 : 4;
+  const coverH = Math.max(
+    48,
+    (rows.length - 1) * lineGap + 12 + padTop + padBottom,
+  );
+  const coverBottom = nameY - (rows.length - 1) * lineGap - padBottom;
 
   page.drawRectangle({
     x: coverX,
@@ -345,8 +365,8 @@ function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhon
 
   let y = nameY;
   if (name) {
-    page.drawText(clip(fontBold, name, 9, coverW - 8), {
-      x: coverX + 2,
+    page.drawText(clip(fontBold, name, 9, textMaxW), {
+      x: textX,
       y,
       size: 9,
       font: fontBold,
@@ -355,8 +375,8 @@ function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhon
     y -= lineGap;
   }
   if (phone) {
-    page.drawText(clip(font, phone, 8.5, coverW - 8), {
-      x: coverX + 2,
+    page.drawText(clip(font, phone, 8.5, textMaxW), {
+      x: textX,
       y,
       size: 8.5,
       font,
@@ -365,12 +385,22 @@ function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhon
     y -= lineGap;
   }
   if (email) {
-    page.drawText(clip(font, email, 8, coverW - 8), {
-      x: coverX + 2,
+    page.drawText(clip(font, email, 8, textMaxW), {
+      x: textX,
       y,
       size: 8,
       font,
       color: rgb(0.1, 0.1, 0.1),
+    });
+    y -= lineGap;
+  }
+  if (city) {
+    page.drawText(clip(fontBold, city.toUpperCase(), 9, textMaxW), {
+      x: textX,
+      y,
+      size: 9,
+      font: fontBold,
+      color: rgb(0.05, 0.05, 0.05),
     });
   }
 }
@@ -544,6 +574,13 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     company.company_email ||
     company.email ||
     "";
+  const shipperCity =
+    integration.city ||
+    company.company_city ||
+    company.city ||
+    order.shipper_city ||
+    order.origin_city ||
+    "";
   stampShipperNameAndPhone(
     page,
     font,
@@ -551,6 +588,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     shipperName,
     shipperPhone,
     shipperEmail,
+    shipperCity,
   );
 
   // Bottom half invoice area (Flaship per_page=2 leaves this blank).
