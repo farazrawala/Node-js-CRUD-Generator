@@ -305,18 +305,18 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Trax A4 2-up header cell 2 (between Trax rule ~104 and barcode rule ~196).
-  // Match the real header band height (~10–68 from page top), not into COD.
-  const headerTop = 10;
-  const headerBottom = 68;
-  const colLeft = 108;
-  const colRight = Math.min(194, width * 0.328);
+  // Cell 2 between Trax and barcode. Trax mark visual center ~48pt from page top.
+  const colLeft = 105;
+  const colRight = Math.min(196, width * 0.33);
   const colW = colRight - colLeft;
-  const colH = headerBottom - headerTop;
-  const centerY = height - (headerTop + headerBottom) / 2;
+  const wipeTop = 8;
+  const wipeBottom = 72;
+  const wipeH = wipeBottom - wipeTop;
+  const logoCenterFromTop = 48;
 
-  const maxW = Math.max(22, colW - 14);
-  const maxH = Math.max(18, colH - 14);
+  // Prefer a readable mark aligned with Trax (not a tiny top-hugging badge).
+  const maxW = Math.max(28, colW - 12);
+  const maxH = 40;
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
   let drawH = maxH;
   let drawW = drawH * aspect;
@@ -324,15 +324,20 @@ function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
     drawW = maxW;
     drawH = drawW / aspect;
   }
+  // Wide wordmarks: keep height at least ~28 so they don't look stuck to the top rule.
+  if (drawH < 28 && aspect > 1.6) {
+    drawH = Math.min(36, wipeH - 16);
+    drawW = Math.min(maxW, drawH * aspect);
+  }
 
   const x = colLeft + (colW - drawW) / 2;
-  const y = centerY - drawH / 2;
+  const y = height - logoCenterFromTop - drawH / 2;
 
   page.drawRectangle({
-    x: colLeft + 1.5,
-    y: height - headerBottom + 1.5,
-    width: colW - 3,
-    height: colH - 3,
+    x: colLeft + 1,
+    y: height - wipeBottom + 1,
+    width: colW - 2,
+    height: wipeH - 2,
     color: rgb(1, 1, 1),
   });
   page.drawImage(logoImg, { x, y, width: drawW, height: drawH });
@@ -356,9 +361,9 @@ function stampShipperNameAndPhone(
   const { width, height } = page.getSize();
   const labelH = height / 2;
   // Full shipper body: past left border → near center divider (must erase BBG leftovers).
-  const coverX = 16;
+  const coverX = 12;
   const coverW = Math.min(275, width * 0.47 - 14);
-  const textX = 34;
+  const textX = 32;
   const textMaxW = coverW - (textX - coverX) - 6;
     const nameSize = 11;
   const phoneSize = 10;
@@ -686,6 +691,17 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     shipperEmail,
     shipperCity,
   );
+  // Erase stray Flaship leftovers in the consignee address column.
+  {
+    const labelH = height / 2;
+    page.drawRectangle({
+      x: width * 0.5 + 8,
+      y: height - labelH * 0.42,
+      width: 14,
+      height: labelH * 0.12,
+      color: rgb(1, 1, 1),
+    });
+  }
 
   const bookedRaw =
     ctx.bookedDate ||
