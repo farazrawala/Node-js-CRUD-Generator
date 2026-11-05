@@ -6,6 +6,7 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <%- include('partials/theme-assets') %>
     <style>
         .sidebar { transition: transform 0.3s ease-in-out; }
         .sidebar.collapsed { transform: translateX(-100%); }
@@ -341,7 +342,7 @@
                                                                 onclick="removeImage(this, '<%= originalPath %>', '<%= field.name %>')"
                                                                 class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-600 transition-colors"
                                                                 title="Remove this image">
-                                                            ×
+                                                            �
                                                         </button>
                                                     </div>
                                                 <% }); %>
@@ -434,7 +435,7 @@
 
         // Form validation
         document.querySelector('form').addEventListener('submit', function(e) {
-            console.log('🔍 Form validation starting...');
+            console.log('?? Form validation starting...');
             
             const requiredFields = document.querySelectorAll('[required]');
             let isValid = true;
@@ -443,7 +444,7 @@
                 if (!field.value.trim()) {
                     isValid = false;
                     field.classList.add('border-red-500');
-                    console.log('❌ Required field empty:', field.name);
+                    console.log('? Required field empty:', field.name);
                 } else {
                     field.classList.remove('border-red-500');
                 }
@@ -452,9 +453,9 @@
             if (!isValid) {
                 e.preventDefault();
                 alert('Please fill in all required fields');
-                console.log('❌ Form submission prevented due to validation errors');
+                console.log('? Form submission prevented due to validation errors');
             } else {
-                console.log('✅ Form validation passed');
+                console.log('? Form validation passed');
             }
         });
 
@@ -471,14 +472,14 @@
 
         // Method override for PUT requests
         document.querySelector('form').addEventListener('submit', function(e) {
-            console.log('📤 Form submission started');
+            console.log('?? Form submission started');
             
             // Debug: Log all form data before submission
-            console.log('📤 Form submission data:');
+            console.log('?? Form submission data:');
             const formData = new FormData(this);
             for (let [key, value] of formData.entries()) {
                 if (key.startsWith('removed_images_')) {
-                    console.log('🗑️ Removed image data:', key, '=', value);
+                    console.log('??? Removed image data:', key, '=', value);
                 }
             }
             
@@ -491,19 +492,19 @@
                 hiddenMethod.name = '_method';
                 hiddenMethod.value = 'PUT';
                 this.appendChild(hiddenMethod);
-                console.log('✅ Method override set to PUT');
+                console.log('? Method override set to PUT');
             } else {
-                console.log('⚠️ Method override not found or not set to PUT');
+                console.log('?? Method override not found or not set to PUT');
             }
             
             // Don't prevent default - let the form submit normally
-            console.log('📤 Form submitting...');
+            console.log('?? Form submitting...');
         });
 
         // Function to remove individual images
         function removeImage(button, imageSrc, fieldName) {
             if (confirm('Are you sure you want to remove this image?')) {
-                console.log('🗑️ Removing image:', imageSrc, 'from field:', fieldName);
+                console.log('??? Removing image:', imageSrc, 'from field:', fieldName);
                 
                 // Hide the image container
                 button.closest('.relative').style.display = 'none';
@@ -517,18 +518,18 @@
                     hiddenInput.value = imageSrc;
                     removedContainer.appendChild(hiddenInput);
                     
-                    console.log('✅ Hidden input added for removed image:', imageSrc);
-                    console.log('📋 Current removed images for', fieldName + ':', Array.from(removedContainer.children).map(input => input.value));
+                    console.log('? Hidden input added for removed image:', imageSrc);
+                    console.log('?? Current removed images for', fieldName + ':', Array.from(removedContainer.children).map(input => input.value));
                     
                     // Debug: Check if the input was actually added to the form
                     const form = document.querySelector('form');
                     const allInputs = form.querySelectorAll('input[name="removed_images_' + fieldName + '[]"]');
-                    console.log('🔍 Total hidden inputs with this name:', allInputs.length);
+                    console.log('?? Total hidden inputs with this name:', allInputs.length);
                     allInputs.forEach((input, index) => {
-                        console.log('🔍 Hidden input', index + 1, ':', input.name, '=', input.value);
+                        console.log('?? Hidden input', index + 1, ':', input.name, '=', input.value);
                     });
                 } else {
-                    console.error('❌ Could not find removed container for field:', fieldName);
+                    console.error('? Could not find removed container for field:', fieldName);
                 }
             }
         }

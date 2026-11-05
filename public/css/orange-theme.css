@@ -1,0 +1,88 @@
+/**
+ * Orange admin theme — remaps Tailwind blue accents + shared CSS variables.
+ */
+:root {
+  --theme-50: #fff7ed;
+  --theme-100: #ffedd5;
+  --theme-200: #fed7aa;
+  --theme-300: #fdba74;
+  --theme-400: #fb923c;
+  --theme-500: #f97316;
+  --theme-600: #ea580c;
+  --theme-700: #c2410c;
+  --theme-800: #9a3412;
+  --theme-900: #7c2d12;
+  --primary: var(--theme-600);
+  --primary-dark: var(--theme-700);
+  --primary-soft: var(--theme-50);
+  --primary-ring: rgba(249, 115, 22, 0.35);
+}
+
+/* Backgrounds */
+.bg-blue-25,
+.bg-blue-50 { background-color: var(--theme-50) !important; }
+.bg-blue-100 { background-color: var(--theme-100) !important; }
+.bg-blue-200 { background-color: var(--theme-200) !important; }
+.bg-blue-400 { background-color: var(--theme-400) !important; }
+.bg-blue-500 { background-color: var(--theme-500) !important; }
+.bg-blue-600 { background-color: var(--theme-600) !important; }
+.bg-blue-700 { background-color: var(--theme-700) !important; }
+.bg-blue-800 { background-color: var(--theme-800) !important; }
+.bg-blue-900 { background-color: var(--theme-900) !important; }
+
+.hover\:bg-blue-50:hover { background-color: var(--theme-50) !important; }
+.hover\:bg-blue-100:hover { background-color: var(--theme-100) !important; }
+.hover\:bg-blue-600:hover { background-color: var(--theme-600) !important; }
+.hover\:bg-blue-700:hover { background-color: var(--theme-700) !important; }
+.hover\:bg-blue-800:hover { background-color: var(--theme-800) !important; }
+
+/* Text */
+.text-blue-500 { color: var(--theme-500) !important; }
+.text-blue-600 { color: var(--theme-600) !important; }
+.text-blue-700 { color: var(--theme-700) !important; }
+.text-blue-800 { color: var(--theme-800) !important; }
+.text-blue-900 { color: var(--theme-900) !important; }
+
+.hover\:text-blue-600:hover { color: var(--theme-600) !important; }
+.hover\:text-blue-700:hover { color: var(--theme-700) !important; }
+.hover\:text-blue-800:hover { color: var(--theme-800) !important; }
+.hover\:text-blue-900:hover { color: var(--theme-900) !important; }
+
+/* Borders */
+.border-blue-100 { border-color: var(--theme-100) !important; }
+.border-blue-200 { border-color: var(--theme-200) !important; }
+.border-blue-400 { border-color: var(--theme-400) !important; }
+.border-blue-500 { border-color: var(--theme-500) !important; }
+.border-blue-600 { border-color: var(--theme-600) !important; }
+.hover\:border-blue-400:hover { border-color: var(--theme-400) !important; }
+
+/* Focus rings (Tailwind 2) */
+.focus\:ring-blue-500:focus {
+  --tw-ring-opacity: 1;
+  --tw-ring-color: rgba(249, 115, 22, var(--tw-ring-opacity)) !important;
+}
+.focus\:border-blue-500:focus { border-color: var(--theme-500) !important; }
+
+/* Checkboxes / radios that use text-blue as accent */
+.text-blue-600:checked,
+input[type="checkbox"].text-blue-600,
+input[type="radio"].text-blue-600 {
+  accent-color: var(--theme-600);
+}
+
+/* Soft orange page wash for admin shells */
+body.bg-gray-100 {
+  background:
+    radial-gradient(1200px 500px at 0% -10%, rgba(249, 115, 22, 0.08), transparent 55%),
+    radial-gradient(900px 400px at 100% 0%, rgba(234, 88, 12, 0.06), transparent 50%),
+    #f3f4f6;
+}
+
+/* Active sidebar / header accents */
+header.bg-white {
+  border-bottom-color: #fed7aa;
+}
+aside#sidebar.bg-white,
+aside.sidebar.bg-white {
+  border-right-color: #ffedd5;
+}

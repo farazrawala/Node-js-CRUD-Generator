@@ -6,6 +6,7 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <%- include('partials/theme-assets') %>
     <style>
         .sidebar { transition: transform 0.3s ease-in-out; }
         .sidebar.collapsed { transform: translateX(-100%); }
@@ -277,7 +278,7 @@
                             <% recentTransfers.forEach(transfer => { %>
                                 <tr class="hover:bg-gray-50">
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                        <span class="font-semibold"><%= transfer.reference_code || 'â€”' %></span>
+                                        <span class="font-semibold"><%= transfer.reference_code || '—' %></span>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                                         <div class="flex flex-col">
@@ -301,11 +302,11 @@
                                     <td class="px-6 py-4 whitespace-nowrap text-sm">
                                         <% const _ts = String((transfer && transfer.transfer_status) || '').toLowerCase(); %>
                                         <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium <%= _ts === 'completed' ? 'bg-green-100 text-green-800' : (_ts === 'pending' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800') %>">
-                                            <%= _ts || 'â€”' %>
+                                            <%= _ts || '—' %>
                                         </span>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                        <%= transfer.transfer_date ? new Date(transfer.transfer_date).toLocaleString() : 'â€”' %>
+                                        <%= transfer.transfer_date ? new Date(transfer.transfer_date).toLocaleString() : '—' %>
                                     </td>
                                 </tr>
                             <% }); %>
@@ -434,7 +435,7 @@
                         </span>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        ${entry.last_updated ? new Date(entry.last_updated).toLocaleString() : 'â€”'}
+                        ${entry.last_updated ? new Date(entry.last_updated).toLocaleString() : '—'}
                     </td>
                 `;
                 inventoryTableBody.appendChild(row);

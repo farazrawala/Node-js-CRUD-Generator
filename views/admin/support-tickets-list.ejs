@@ -6,9 +6,10 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <%- include('partials/theme-assets') %>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        :root { --primary: #2563eb; --navy: #0f172a; --page: #f1f5f9; --border: #e2e8f0; }
+        :root { --primary: #ea580c; --navy: #0f172a; --page: #fff7ed; --border: #fed7aa; }
         * { box-sizing: border-box; }
         body { font-family: "Inter", sans-serif; color: var(--navy); }
         .sidebar { transition: transform 0.3s ease-in-out; }
@@ -50,18 +51,18 @@
         }
         .field-control:focus {
             outline: none;
-            border-color: #3b82f6;
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, .14);
+            border-color: #f97316;
+            box-shadow: 0 0 0 3px rgba(249, 115, 22, .14);
         }
         .ticket-row { transition: background .15s ease, transform .15s ease; }
-        .ticket-row:hover { background: #f8fafc; }
+        .ticket-row:hover { background: #fff7ed; }
         .view-button {
             display: inline-flex; align-items: center; gap: 7px;
             padding: 8px 12px; border-radius: 9px;
-            background: #eff6ff; color: #1d4ed8;
+            background: #ffedd5; color: #c2410c;
             font-size: 12px; font-weight: 700; transition: .2s ease;
         }
-        .view-button:hover { background: #2563eb; color: white; }
+        .view-button:hover { background: #ea580c; color: white; }
         @media (max-width: 1023px) {
             .sidebar { transform: translateX(-100%); }
             .sidebar.mobile-open { transform: translateX(0); }
@@ -278,7 +279,7 @@
                                     </td>
                                     <td class="px-4 py-3 whitespace-nowrap">
                                         <% const owner = ticket.created_by || ticket.user; %>
-                                        <div class="text-sm text-gray-900"><%= owner && owner.name ? owner.name : 'â€”' %></div>
+                                        <div class="text-sm text-gray-900"><%= owner && owner.name ? owner.name : '—' %></div>
                                         <div class="text-xs text-gray-500"><%= owner && owner.email ? owner.email : '' %></div>
                                     </td>
                                     <td class="px-4 py-3 whitespace-nowrap">

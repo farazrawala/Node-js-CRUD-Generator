@@ -6,15 +6,16 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <%- include('partials/theme-assets') %>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #2563eb;
-            --primary-dark: #1d4ed8;
+            --primary: #ea580c;
+            --primary-dark: #c2410c;
             --navy: #0f172a;
             --surface: #ffffff;
-            --page: #f1f5f9;
-            --border: #e2e8f0;
+            --page: #fff7ed;
+            --border: #fed7aa;
         }
         * { box-sizing: border-box; }
         body { font-family: "Inter", sans-serif; color: var(--navy); }
@@ -57,7 +58,7 @@
             font-weight: 700;
             box-shadow: 0 0 0 3px white;
         }
-        .avatar.admin { background: linear-gradient(135deg, #2563eb, #4f46e5); }
+        .avatar.admin { background: linear-gradient(135deg, #f97316, #ea580c); }
         .avatar.customer { background: linear-gradient(135deg, #475569, #0f172a); }
         .bubble {
             max-width: min(680px, 78%);
@@ -67,7 +68,7 @@
         }
         .bubble.admin {
             color: white;
-            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            background: linear-gradient(135deg, #f97316, #ea580c);
             border-bottom-right-radius: 4px;
         }
         .bubble.customer {
@@ -91,8 +92,8 @@
             margin: 8px 6px 0 0;
             padding: 7px 10px;
             border-radius: 9px;
-            background: #eff6ff;
-            color: #1d4ed8;
+            background: #ffedd5;
+            color: #c2410c;
             font-size: 12px;
             font-weight: 600;
         }
@@ -209,7 +210,7 @@
         }
         .field-control:focus {
             outline: none;
-            border-color: #3b82f6;
+            border-color: #f97316;
             box-shadow: 0 0 0 3px rgba(59, 130, 246, .14);
         }
         .primary-button {
@@ -220,13 +221,13 @@
             border-radius: 10px;
             padding: 11px 18px;
             color: white;
-            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            background: linear-gradient(135deg, #f97316, #ea580c);
             font-size: 14px;
             font-weight: 700;
             box-shadow: 0 6px 16px rgba(37, 99, 235, .22);
             transition: .2s ease;
         }
-        .primary-button:hover { transform: translateY(-1px); box-shadow: 0 9px 22px rgba(37, 99, 235, .28); }
+        .primary-button:hover { transform: translateY(-1px); box-shadow: 0 9px 22px rgba(234, 88, 12, .28); }
         .secondary-button {
             border: 1px solid #cbd5e1;
             border-radius: 9px;
@@ -251,8 +252,8 @@
             display: grid;
             place-items: center;
             border-radius: 9px;
-            color: #2563eb;
-            background: #eff6ff;
+            color: #ea580c;
+            background: #ffedd5;
         }
         @media (max-width: 1023px) {
             .sidebar { transform: translateX(-100%); }
@@ -484,7 +485,7 @@
                         <div class="detail-row">
                             <span class="detail-icon"><i class="far fa-user"></i></span>
                             <div><dt class="text-xs font-medium text-gray-500 mb-0.5">Customer</dt>
-                            <dd class="font-semibold text-gray-900"><%= ticketOwner && ticketOwner.name ? ticketOwner.name : 'â€”' %></dd>
+                            <dd class="font-semibold text-gray-900"><%= ticketOwner && ticketOwner.name ? ticketOwner.name : '—' %></dd>
                             <dd class="text-xs text-gray-500 break-all"><%= ticketOwner && ticketOwner.email ? ticketOwner.email : '' %></dd></div>
                         </div>
                         <div class="detail-row">
@@ -495,7 +496,7 @@
                         <div class="detail-row">
                             <span class="detail-icon"><i class="far fa-clock"></i></span>
                             <div><dt class="text-xs font-medium text-gray-500 mb-0.5">Last reply</dt>
-                            <dd class="font-medium text-gray-900"><%= ticket.last_reply_at ? new Date(ticket.last_reply_at).toLocaleString() : 'â€”' %></dd></div>
+                            <dd class="font-medium text-gray-900"><%= ticket.last_reply_at ? new Date(ticket.last_reply_at).toLocaleString() : '—' %></dd></div>
                         </div>
                         <% if (ticket.closed_at) { %>
                             <div>

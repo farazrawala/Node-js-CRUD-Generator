@@ -6,6 +6,7 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <%- include('partials/theme-assets') %>
     <% if (typeof ordersTrendChart !== 'undefined' && ordersTrendChart) { %>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <% } %>
@@ -81,8 +82,8 @@
             font-size: 0.65rem;
         }
         .column-visibility-option.is-checked .column-visibility-check {
-            background: #2563eb;
-            border-color: #2563eb;
+            background: #ea580c;
+            border-color: #ea580c;
         }
         th.col-hidden, td.col-hidden { display: none !important; }
 
@@ -281,7 +282,7 @@
         <% if (typeof ordersTrendChart !== 'undefined') { %>
         <% if (!ordersTrendChart) { %>
         <div class="bg-white rounded-lg shadow-sm border border-red-200 p-6 mb-6">
-            <h3 class="text-lg font-semibold text-gray-900 mb-1">Orders Trend ‚Äî Last 30 Days</h3>
+            <h3 class="text-lg font-semibold text-gray-900 mb-1">Orders Trend ó Last 30 Days</h3>
             <p class="text-sm text-red-600">Could not load order analytics. Please refresh the page or try again later.</p>
         </div>
         <% } else { %>
@@ -289,12 +290,12 @@
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6 overflow-hidden">
             <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
                 <div>
-                    <h3 class="text-lg font-semibold text-gray-900">Orders Trend ‚Äî Last <%= ordersTrendChart.days || 30 %> Days</h3>
+                    <h3 class="text-lg font-semibold text-gray-900">Orders Trend ó Last <%= ordersTrendChart.days || 30 %> Days</h3>
                     <p class="text-sm text-gray-500">
                         <%= ordersTrendChart.labelsShort && ordersTrendChart.labelsShort.length
-                              ? (ordersTrendChart.labelsShort[0] + ' ‚Äì ' + ordersTrendChart.labelsShort[ordersTrendChart.labelsShort.length - 1])
+                              ? (ordersTrendChart.labelsShort[0] + ' ñ ' + ordersTrendChart.labelsShort[ordersTrendChart.labelsShort.length - 1])
                               : '' %>
-                        ¬∑ <%= ordersTrendChart.timeZone || 'local' %>
+                        ∑ <%= ordersTrendChart.timeZone || 'local' %>
                     </p>
                 </div>
                 <button type="button" id="ordersTrendShowAllBtn"
@@ -322,8 +323,8 @@
                 </div>
                 <div class="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2.5">
                     <p class="text-xs text-emerald-700">Top Company</p>
-                    <p class="text-sm font-semibold text-emerald-900 truncate" title="<%= trendSummary.topCompany ? trendSummary.topCompany.companyName : '‚Äî' %>">
-                        <%= trendSummary.topCompany ? trendSummary.topCompany.companyName : '‚Äî' %>
+                    <p class="text-sm font-semibold text-emerald-900 truncate" title="<%= trendSummary.topCompany ? trendSummary.topCompany.companyName : 'ó' %>">
+                        <%= trendSummary.topCompany ? trendSummary.topCompany.companyName : 'ó' %>
                     </p>
                     <% if (trendSummary.topCompany) { %>
                         <p class="text-xs text-emerald-700"><%= Number(trendSummary.topCompany.total || 0).toLocaleString() %> orders</p>
@@ -333,7 +334,7 @@
                     <p class="text-xs text-gray-500">vs Prior <%= ordersTrendChart.days || 30 %>d</p>
                     <% const growth = trendSummary.growthPct; %>
                     <p class="text-lg font-semibold <%= growth > 0 ? 'text-emerald-700' : (growth < 0 ? 'text-red-600' : 'text-gray-900') %>">
-                        <%= growth > 0 ? '+' : '' %><%= growth == null ? '‚Äî' : growth %>%
+                        <%= growth > 0 ? '+' : '' %><%= growth == null ? 'ó' : growth %>%
                     </p>
                 </div>
             </div>
@@ -414,7 +415,7 @@
                                     return trend.labelsLong[idx] || trend.labelsShort[idx] || '';
                                 },
                                 label: function (ctx) {
-                                    return ctx.dataset.label + ' ‚Äî Orders: ' + (ctx.parsed.y || 0);
+                                    return ctx.dataset.label + ' ó Orders: ' + (ctx.parsed.y || 0);
                                 },
                             },
                         },
@@ -793,10 +794,10 @@
                                                         <% cleanedImages.slice(0, 3).forEach((imageSrc, index) => { %>
                                                             <img src="<%= imageSrc %>"  alt="<%= field.label %> <%= index + 1 %>" class="h-10 w-10 rounded object-cover border border-gray-200">
                                                             <script>
-                                                                console.log('üîç Image src:', '<%= imageSrc %>');
-                                                                console.log('üîç Image data src:', '<%= imageSrc %>');
-                                                    console.log('üîç Image alt:', '<%= field.label %> <%= index + 1 %>');
-                                                                console.log('üîç Image class:', 'h-10 w-10 rounded object-cover border border-gray-200');
+                                                                console.log('?? Image src:', '<%= imageSrc %>');
+                                                                console.log('?? Image data src:', '<%= imageSrc %>');
+                                                    console.log('?? Image alt:', '<%= field.label %> <%= index + 1 %>');
+                                                                console.log('?? Image class:', 'h-10 w-10 rounded object-cover border border-gray-200');
                                                             </script>
                                                         <% }); %>
                                                         <% if (cleanedImages.length > 3) { %>
@@ -838,16 +839,16 @@
                                                 <%= record.company_id.company_name %>
                                             <% } else if (field.type === 'custom') { %>
                                                 <script>
-                                                    console.log('üîç Custom field detected:', '<%= fieldName %>');
-                                                    console.log('üîç Field config:', <%= JSON.stringify(field) %>);
-                                                    console.log('üîç Record data:', <%= JSON.stringify(record[fieldName]) %>);
+                                                    console.log('?? Custom field detected:', '<%= fieldName %>');
+                                                    console.log('?? Field config:', <%= JSON.stringify(field) %>);
+                                                    console.log('?? Record data:', <%= JSON.stringify(record[fieldName]) %>);
                                                 </script>
                                                 <% if (fieldName === 'warehouse_inventory' && Array.isArray(record[fieldName])) { %>
-                                                    <script>console.log('üè™ Processing warehouse inventory array:', <%= record[fieldName].length %>);</script>
+                                                    <script>console.log('?? Processing warehouse inventory array:', <%= record[fieldName].length %>);</script>
                                                     <% if (record[fieldName].length > 0) { %>
                                                         <div class="space-y-1">
                                                             <% record[fieldName].forEach((item, index) => { %>
-                                                                <script>console.log('üè™ Item <%= index %>:', <%= JSON.stringify(item) %>);</script>
+                                                                <script>console.log('?? Item <%= index %>:', <%= JSON.stringify(item) %>);</script>
                                                                 <div class="flex items-center justify-between bg-gray-50 px-2 py-1 rounded text-xs">
                                                                     <span class="font-medium">
                                                                         <%= item.warehouse_id?.warehouse_name || 'Unknown Warehouse' %>
@@ -862,7 +863,7 @@
                                                             </div>
                                                         </div>
                                                     <% } else { %>
-                                                        <script>console.log('üè™ No inventory items found');</script>
+                                                        <script>console.log('?? No inventory items found');</script>
                                                         <span class="text-gray-400 text-xs">No inventory</span>
                                                     <% } %>
                                                 <% } else if (fieldName === 'attribute_values' && Array.isArray(record[fieldName])) { %>
@@ -896,7 +897,7 @@
                                                         <span class="text-gray-400 text-xs">No values</span>
                                                     <% } %>
                                                 <% } else { %>
-                                                    <script>console.log('üè™ Warehouse inventory is not an array or field name mismatch');</script>
+                                                    <script>console.log('?? Warehouse inventory is not an array or field name mismatch');</script>
                                                     <div>
                                                         <div class="font-medium"><%= record[fieldName] || '-' %></div>
                                                         <div class="text-xs text-gray-500">Custom Field</div>
@@ -913,7 +914,7 @@
                                                         Reset
                                                     </button>
                                                 <% } else { %>
-                                                    <span class="text-gray-400 text-xs">‚Ä¢‚Ä¢‚Ä¢‚Ä¢‚Ä¢‚Ä¢‚Ä¢‚Ä¢</span>
+                                                    <span class="text-gray-400 text-xs">ïïïïïïïï</span>
                                                 <% } %>
                                             <% } else { %>
                                                 <div>
@@ -1045,7 +1046,7 @@
                                 i === pagination.currentPage - 3 ||
                                 i === pagination.currentPage + 3
                             ) { %>
-                                <span class="px-2 py-2 text-sm text-gray-400">‚Ä¶</span>
+                                <span class="px-2 py-2 text-sm text-gray-400">Ö</span>
                             <% } %>
                         <% } %>
 
@@ -1367,7 +1368,7 @@
 
             try {
                 let response = await fetch(url, requestOpts);
-                // Fallback for environments that block POST path oddly ‚Äî try PATCH
+                // Fallback for environments that block POST path oddly ó try PATCH
                 if (response.status === 404 || response.status === 405) {
                     response = await fetch(url, { ...requestOpts, method: 'PATCH' });
                 }
@@ -1565,7 +1566,7 @@
 
             function defaultVisible(key) {
                 if (key === 'actions' || key === 'serialNo') return true;
-                // Company list is very wide ‚Äî hide default GL account columns until enabled.
+                // Company list is very wide ó hide default GL account columns until enabled.
                 if (modelName === 'company' && /account/i.test(key) && /default_|receivable|payable/i.test(key)) {
                     return false;
                 }

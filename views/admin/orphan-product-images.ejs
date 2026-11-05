@@ -6,6 +6,7 @@
     <title><%= title %> - Admin Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <%- include('partials/theme-assets') %>
     <style>
         .sidebar { transition: transform 0.3s ease-in-out; }
         .sidebar.collapsed { transform: translateX(-100%); }
@@ -186,7 +187,7 @@
 
             <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
                 <div class="text-sm text-gray-600">
-                    Showing <%= orphans.length ? ((pagination.currentPage - 1) * pagination.itemsPerPage + 1) : 0 %>â€“
+                    Showing <%= orphans.length ? ((pagination.currentPage - 1) * pagination.itemsPerPage + 1) : 0 %>–
                     <%= Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems) %>
                     of <%= pagination.totalItems %>
                 </div>
@@ -253,7 +254,7 @@
                                     <td class="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">
                                         <% 
                                           const createdRaw = item.createdAt || item.mtime;
-                                          let createdLabel = 'â€”';
+                                          let createdLabel = '—';
                                           if (createdRaw) {
                                             const d = new Date(createdRaw);
                                             if (!Number.isNaN(d.getTime())) {
@@ -274,7 +275,7 @@
                                         <% if (item.productId) { %>
                                             <a href="<%= basePath %>/admin/products/<%= item.productId %>/edit" class="text-blue-600 hover:underline"><%= item.productId %></a>
                                         <% } else { %>
-                                            â€”
+                                            —
                                         <% } %>
                                     </td>
                                     <td class="px-4 py-3 text-right">
