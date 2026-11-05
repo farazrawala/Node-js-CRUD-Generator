@@ -1175,12 +1175,28 @@ async function printLabel(orderId, options = {}) {
           options.payment_method ||
           (Number(shipment.cod_amount) > 0 ? "COD" : "") ||
           "COD";
-        const courierName =
+        const rawCarrier = String(
           shipment.courier_company ||
-          shipment.courier ||
-          result.courier ||
-          driver?.providerName ||
-          "TRAX";
+            shipment.courier_code ||
+            shipment.courierCode ||
+            result.courier_company ||
+            result.courier ||
+            "",
+        ).trim();
+        const carrierLabel = (() => {
+          const key = rawCarrier.toLowerCase().replace(/[\s_-]+/g, "");
+          if (!key || /flagship|flaship/.test(key)) return "TRAX";
+          if (key.includes("trax")) return "TRAX";
+          if (key.includes("leopard") || key === "lcs") return "LEOPARD";
+          if (key.includes("tcs")) return "TCS";
+          if (key.includes("postex")) return "POSTEX";
+          if (key.includes("mnp") || key.includes("m&p") || key === "mp") return "M&P";
+          if (key.includes("blueex") || key.includes("blue")) return "BLUEEX";
+          if (key.includes("call")) return "CALL COURIER";
+          return rawCarrier.toUpperCase();
+        })();
+        // Aggregator + actual carrier on the printed invoice (e.g. FLAGSHIP/TRAX).
+        const courierName = `FLAGSHIP/${carrierLabel}`;
 
         const { composeFlagshipLabelWithInvoice } = require("../utils/stampCourierLabelLogos");
         const stamped = await composeFlagshipLabelWithInvoice(pdfBuf, {
