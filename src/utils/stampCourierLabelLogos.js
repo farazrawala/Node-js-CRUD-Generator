@@ -313,28 +313,28 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Cell 2 between Trax and barcode. Align with Trax mark center (~40pt from top).
-  const colLeft = 105;
-  const colRight = Math.min(196, width * 0.33);
-  const colW = colRight - colLeft;
-  const wipeTop = 8;
-  const wipeBottom = 70;
+  // Flaship leaves cell 2 empty — fill it, centered with the Trax mark.
+  const colLeft = 104;
+  const colRight = Math.min(198, width * 0.333);
+  const colW = Math.max(40, colRight - colLeft);
+  const wipeTop = 10;
+  const wipeBottom = 68;
   const wipeH = wipeBottom - wipeTop;
-  const logoCenterFromTop = 40;
+  const cellCenterY = height - (wipeTop + wipeBottom) / 2;
 
-  // Fit inside the header cell; keep clear of the COD divider (~70pt).
-  const maxW = Math.max(28, colW - 16);
-  const maxH = 30;
+  // Contain-fit inside the cell with padding (object-fit: contain).
+  const maxW = colW - 12;
+  const maxH = wipeH - 12;
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
-  let drawH = Math.min(maxH, wipeH - 18);
-  let drawW = drawH * aspect;
-  if (drawW > maxW) {
-    drawW = maxW;
-    drawH = drawW / aspect;
+  let drawW = maxW;
+  let drawH = drawW / aspect;
+  if (drawH > maxH) {
+    drawH = maxH;
+    drawW = drawH * aspect;
   }
 
   const x = colLeft + (colW - drawW) / 2;
-  const y = height - logoCenterFromTop - drawH / 2;
+  const y = cellCenterY - drawH / 2;
 
   page.drawRectangle({
     x: colLeft + 1,
@@ -635,8 +635,19 @@ const wrapLines = (font, text, size, maxW, maxLines = 2) => {
 async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   if (!Buffer.isBuffer(pdfBuffer) || pdfBuffer.length < 5) return pdfBuffer;
 
-  const logoSource = ctx.integration?.image ? ctx.integration : ctx.company;
-  const logoBytes = await readLogoBytes(logoSource);
+  // Prefer integration store image, then company logo fields.
+  const logoSource = ctx.integration?.image
+    ? ctx.integration
+    : ctx.company?.company_logo || ctx.company?.logo || ctx.company?.image
+      ? ctx.company
+      : ctx.integration || ctx.company;
+  let logoBytes = await readLogoBytes(logoSource);
+  if (!logoBytes && ctx.company && logoSource !== ctx.company) {
+    logoBytes = await readLogoBytes(ctx.company);
+  }
+  if (!logoBytes && ctx.integration && logoSource !== ctx.integration) {
+    logoBytes = await readLogoBytes(ctx.integration);
+  }
 
   const pdfDoc = await PDFDocument.load(pdfBuffer);
   const pages = pdfDoc.getPages();
@@ -651,10 +662,16 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   const line = rgb(0.7, 0.72, 0.74);
   const headerBg = rgb(0.925, 0.935, 0.94);
 
-  // Do NOT wipe/redraw the Trax header logo cell. Flaship already embeds the
-  // merchant mark correctly; our wipe left a blank blue-selectable hole and a
-  // mis-placed redraw. Keep logoBytes only for the bottom invoice half.
-  const logoImg = logoBytes ? await embedImage(pdfDoc, logoBytes) : null;
+  // Flaship header cell 2 is often empty — stamp store logo centered there.
+  // Also reused on the bottom invoice half.
+  let logoImg = logoBytes ? await embedImage(pdfDoc, logoBytes) : null;
+  if (!logoImg && ctx.company && ctx.company !== logoSource) {
+    const companyLogoBytes = await readLogoBytes(ctx.company);
+    logoImg = companyLogoBytes ? await embedImage(pdfDoc, companyLogoBytes) : null;
+  }
+  if (logoImg) {
+    drawAlignedStoreLogoOnLabelHeader(page, logoImg);
+  }
 
   const order = ctx.order || {};
   const company = ctx.company || {};
