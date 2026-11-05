@@ -108,8 +108,30 @@ const toPngBytes = async (bytes) => {
   }
 };
 
+/** Trim transparent/white padding so the drawn box matches the visible mark. */
+const toTrimmedPngBytes = async (bytes) => {
+  if (!bytes || !bytes.length) return null;
+  try {
+    const sharp = require("sharp");
+    return await sharp(bytes)
+      .trim({ threshold: 8 })
+      .png()
+      .toBuffer();
+  } catch {
+    return toPngBytes(bytes);
+  }
+};
+
 const embedImage = async (pdfDoc, bytes) => {
   if (!bytes || !bytes.length) return null;
+  const trimmed = await toTrimmedPngBytes(bytes);
+  if (trimmed) {
+    try {
+      return await pdfDoc.embedPng(trimmed);
+    } catch {
+      /* fall through to raw bytes */
+    }
+  }
   try {
     return await pdfDoc.embedPng(bytes);
   } catch {
@@ -283,13 +305,13 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Match Trax header icon band (not the page top edge).
-  // Trax mark is ~70pt tall starting ~16pt below the top on A4 2-up labels.
-  const traxTopPad = 16;
-  const traxH = Math.min(58, Math.max(48, height * 0.065));
-  const traxCenterY = height - traxTopPad - traxH / 2;
+  // Match the visible Trax wordmark center in the A4 2-up header cell
+  // (image box starts higher; green "TRAX" artwork sits lower with padding).
+  const headerTop = 10;
+  const headerH = Math.min(78, Math.max(64, height * 0.09));
+  const headerCenterY = height - headerTop - headerH / 2;
 
-  const targetH = Math.min(28, Math.max(22, traxH * 0.48));
+  const targetH = Math.min(32, Math.max(24, headerH * 0.42));
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
   let drawH = targetH;
   let drawW = drawH * aspect;
@@ -301,7 +323,7 @@ function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
 
   // Immediately after Trax (~x 28–95), before the barcode column.
   const x = Math.min(102, width * 0.175);
-  const y = traxCenterY - drawH / 2;
+  const y = headerCenterY - drawH / 2;
 
   // Clear only the logo footprint so Trax/borders stay intact.
   page.drawRectangle({
@@ -342,16 +364,20 @@ function stampShipperNameAndPhone(
   const coverW = Math.min(275, width * 0.47 - 14);
   const textX = 34;
   const textMaxW = coverW - (textX - coverX) - 6;
-  const lineGap = 13;
+    const nameSize = 12;
+  const phoneSize = 11;
+  const emailSize = 10.5;
+  const citySize = 11;
+  const lineGap = 16;
   // First content line under the SHIPPER heading.
   const nameY = height - labelH * 0.335;
   const rows = [name, phone, email, city].filter(Boolean);
   // Pad enough to blank prior pickup glyphs without eating the box border.
   const padTop = 6;
-  const padBottom = city ? 8 : 4;
+  const padBottom = city ? 10 : 6;
   const coverH = Math.max(
-    48,
-    (rows.length - 1) * lineGap + 12 + padTop + padBottom,
+    58,
+    (rows.length - 1) * lineGap + nameSize + padTop + padBottom,
   );
   const coverBottom = nameY - (rows.length - 1) * lineGap - padBottom;
 
@@ -365,40 +391,40 @@ function stampShipperNameAndPhone(
 
   let y = nameY;
   if (name) {
-    page.drawText(clip(fontBold, name, 9, textMaxW), {
+    page.drawText(clip(fontBold, name, nameSize, textMaxW), {
       x: textX,
       y,
-      size: 9,
+      size: nameSize,
       font: fontBold,
       color: rgb(0.05, 0.05, 0.05),
     });
     y -= lineGap;
   }
   if (phone) {
-    page.drawText(clip(font, phone, 8.5, textMaxW), {
+    page.drawText(clip(font, phone, phoneSize, textMaxW), {
       x: textX,
       y,
-      size: 8.5,
+      size: phoneSize,
       font,
       color: rgb(0.1, 0.1, 0.1),
     });
     y -= lineGap;
   }
   if (email) {
-    page.drawText(clip(font, email, 8, textMaxW), {
+    page.drawText(clip(font, email, emailSize, textMaxW), {
       x: textX,
       y,
-      size: 8,
+      size: emailSize,
       font,
       color: rgb(0.1, 0.1, 0.1),
     });
     y -= lineGap;
   }
   if (city) {
-    page.drawText(clip(fontBold, city.toUpperCase(), 9, textMaxW), {
+    page.drawText(clip(fontBold, city.toUpperCase(), citySize, textMaxW), {
       x: textX,
       y,
-      size: 9,
+      size: citySize,
       font: fontBold,
       color: rgb(0.05, 0.05, 0.05),
     });
@@ -435,6 +461,38 @@ function stampBookedDate(page, fontBold, bookedRaw) {
     size: 9,
     font: fontBold,
     color: rgb(0.05, 0.05, 0.05),
+  });
+}
+
+/**
+ * Replace abbreviated Trax "DEST" header with full "Destination".
+ * Measured on A4 2-up Trax label (upper half), middle column of ORIGIN|DEST|PIECES.
+ */
+function stampDestinationHeading(page, font) {
+  const { width, height } = page.getSize();
+  const labelH = height / 2;
+  // Middle column header beside ORIGIN — keep clear of LAHORE value below.
+  const coverX = Math.min(118, width * 0.2);
+  const coverW = Math.min(72, width * 0.13);
+  const textY = height - labelH * 0.548;
+  const fontSize = 7;
+  const coverH = 11;
+  const coverBottom = textY - 2;
+
+  page.drawRectangle({
+    x: coverX,
+    y: coverBottom,
+    width: coverW,
+    height: coverH,
+    color: rgb(1, 1, 1),
+  });
+
+  page.drawText("Destination", {
+    x: coverX + 1,
+    y: textY,
+    size: fontSize,
+    font,
+    color: rgb(0.15, 0.15, 0.15),
   });
 }
 
@@ -642,6 +700,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     order.created_at ||
     "";
   stampBookedDate(page, fontBold, bookedRaw);
+  stampDestinationHeading(page, font);
 
   // Bottom half invoice area (Flaship per_page=2 leaves this blank).
   const midY = height / 2;
