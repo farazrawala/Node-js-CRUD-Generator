@@ -305,43 +305,42 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Match the visible Trax wordmark center in the A4 2-up header cell
-  // (image box starts higher; green "TRAX" artwork sits lower with padding).
-  const headerTop = 10;
-  const headerH = Math.min(78, Math.max(64, height * 0.09));
-  const headerCenterY = height - headerTop - headerH / 2;
+  // Trax A4 2-up header: 4 cells [TRAX | store logo | barcode | QR].
+  // Center the store mark inside cell 2 only (between vertical rules).
+  const headerTop = 12;
+  const headerBottom = 80; // from page top
+  const colLeft = 106;
+  const colRight = Math.min(198, width * 0.335);
+  const colW = colRight - colLeft;
+  const colH = headerBottom - headerTop;
+  const centerY = height - (headerTop + headerBottom) / 2;
 
-  const targetH = Math.min(32, Math.max(24, headerH * 0.42));
+  const padX = 6;
+  const padY = 8;
+  const maxW = Math.max(24, colW - padX * 2);
+  const maxH = Math.max(20, colH - padY * 2);
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
-  let drawH = targetH;
+  let drawH = maxH;
   let drawW = drawH * aspect;
-  const maxW = 88;
   if (drawW > maxW) {
     drawW = maxW;
     drawH = drawW / aspect;
   }
 
-  // Immediately after Trax (~x 28–95), before the barcode column.
-  const x = Math.min(102, width * 0.175);
-  const y = headerCenterY - drawH / 2;
+  const x = colLeft + (colW - drawW) / 2;
+  const y = centerY - drawH / 2;
 
-  // Clear only the logo footprint so Trax/borders stay intact.
+  // Wipe the whole logo cell so Trax/old mark and our draw never overlap borders.
   page.drawRectangle({
-    x: x - 1,
-    y: y - 1,
-    width: drawW + 2,
-    height: drawH + 2,
+    x: colLeft + 1.5,
+    y: height - headerBottom + 1.5,
+    width: colW - 3,
+    height: colH - 3,
     color: rgb(1, 1, 1),
   });
   page.drawImage(logoImg, { x, y, width: drawW, height: drawH });
 }
 
-/**
- * Replace Flaship pickup shipper name/phone/email with the order's integration values.
- * Measured on A4 2-up Trax label (upper half).
- * Cover must fully erase the previous pickup (e.g. BBG) — leftover glyphs were
- * showing as "B"/"0"/"F-" over the new Night Suit lines.
- */
 function stampShipperNameAndPhone(
   page,
   font,
@@ -441,9 +440,9 @@ function stampBookedDate(page, fontBold, bookedRaw) {
   const { width, height } = page.getSize();
   const labelH = height / 2;
   // Booked value cell — left column of the details grid (under Order ID).
-  const coverX = 28;
-  const coverW = Math.min(120, width * 0.22);
-  const dateY = height - labelH * 0.668;
+  const coverX = Math.min(198, width * 0.333);
+  const coverW = Math.min(88, width * 0.15);
+  const dateY = height - labelH * 0.585;
   const coverH = 13;
   const coverBottom = dateY - 3;
 
@@ -472,11 +471,11 @@ function stampDestinationHeading(page, font) {
   const { width, height } = page.getSize();
   const labelH = height / 2;
   // Middle column header beside ORIGIN — keep clear of LAHORE value below.
-  const coverX = Math.min(118, width * 0.2);
-  const coverW = Math.min(72, width * 0.13);
-  const textY = height - labelH * 0.548;
-  const fontSize = 7;
-  const coverH = 11;
+  const coverX = Math.min(120, width * 0.202);
+  const coverW = Math.min(78, width * 0.14);
+  const textY = height - labelH * 0.472;
+  const fontSize = 8;
+  const coverH = 12;
   const coverBottom = textY - 2;
 
   page.drawRectangle({
@@ -699,8 +698,10 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     order.createdAt ||
     order.created_at ||
     "";
-  stampBookedDate(page, fontBold, bookedRaw);
-  stampDestinationHeading(page, font);
+  // stampBookedDate disabled — prior coords drew into REMARKS.
+  // stampBookedDate(page, fontBold, bookedRaw);
+  // stampDestinationHeading disabled — prior coords overlapped ORDER REF.
+  // stampDestinationHeading(page, font);
 
   // Bottom half invoice area (Flaship per_page=2 leaves this blank).
   const midY = height / 2;
