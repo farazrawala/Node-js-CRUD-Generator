@@ -64,10 +64,45 @@ const readLogoBytes = async (source) => {
 
   const relative = toUploadRelativePath(trimmed);
   if (!relative) return null;
-  const abs = path.join(process.cwd(), relative);
+  const candidates = [
+    path.join(process.cwd(), relative),
+    path.join(process.cwd(), "public", relative),
+    path.join(process.cwd(), "uploads", path.basename(relative)),
+  ];
+  for (const abs of candidates) {
+    try {
+      if (fs.existsSync(abs)) {
+        const buf = fs.readFileSync(abs);
+        if (buf.length) return buf;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+
+  // Fallback: fetch from this host when the file is served under /uploads.
+  const publicBase = String(process.env.PUBLIC_API_ORIGIN || process.env.APP_URL || "")
+    .trim()
+    .replace(/\/$/, "");
+  if (publicBase) {
+    try {
+      const res = await fetch(`${publicBase}/${relative.replace(/^\/+/, "")}`);
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length) return buf;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+};
+
+const toPngBytes = async (bytes) => {
+  if (!bytes || !bytes.length) return null;
   try {
-    if (!fs.existsSync(abs)) return null;
-    return fs.readFileSync(abs);
+    const sharp = require("sharp");
+    return await sharp(bytes).png().toBuffer();
   } catch {
     return null;
   }
@@ -81,7 +116,13 @@ const embedImage = async (pdfDoc, bytes) => {
     try {
       return await pdfDoc.embedJpg(bytes);
     } catch {
-      return null;
+      const png = await toPngBytes(bytes);
+      if (!png) return null;
+      try {
+        return await pdfDoc.embedPng(png);
+      } catch {
+        return null;
+      }
     }
   }
 };
@@ -267,15 +308,26 @@ async function stampFlagshipLabelStoreLogo(pdfBuffer, logoSource = null) {
       drawH = drawW / aspect;
     }
 
-    // After Trax/carrier wordmark (~left), before barcode (~mid).
-    const x = Math.max(95, width * 0.17);
-    const topPads = [18];
+    // Gap between Trax/carrier logo (left) and tracking barcode (center).
+    const x = Math.max(118, width * 0.2);
+    const logoHPad = Math.min(48, Math.max(32, height * 0.065));
+    drawH = Math.min(drawH, logoHPad);
+    drawW = drawH * aspect;
+    const topPads = [14];
     // Second half when Flaship prints 2 labels per A4 page.
-    if (height >= 700) topPads.push(height / 2 + 18);
+    if (height >= 700) topPads.push(height / 2 + 14);
 
     for (const topPad of topPads) {
       const y = height - topPad - drawH;
       if (y < 8) continue;
+      // White pad so the store logo stays readable on busy headers.
+      page.drawRectangle({
+        x: x - 3,
+        y: y - 3,
+        width: drawW + 6,
+        height: drawH + 6,
+        color: rgb(1, 1, 1),
+      });
       page.drawImage(logoImg, {
         x,
         y,

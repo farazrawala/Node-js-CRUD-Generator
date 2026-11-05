@@ -1102,7 +1102,9 @@ async function printLabel(orderId, options = {}) {
     providerKey === "flaship" ||
     courierKey === "flagship" ||
     courierKey === "flaship" ||
-    courierKey === "trax";
+    courierKey === "trax" ||
+    /flaship|flagship|trax/i.test(String(shipment.courier || result.courier || ""));
+  let stampedFlagship = false;
   if (isFlagshipLabel) {
     try {
       const pdfBuf = await ensureLabelBytes();
@@ -1127,7 +1129,10 @@ async function printLabel(orderId, options = {}) {
         const logoSource = integration?.image ? integration : company;
         const { stampFlagshipLabelStoreLogo } = require("../utils/stampCourierLabelLogos");
         const stamped = await stampFlagshipLabelStoreLogo(pdfBuf, logoSource);
-        labelBase64 = stamped.toString("base64");
+        if (stamped && stamped.length > 0) {
+          labelBase64 = stamped.toString("base64");
+          stampedFlagship = Buffer.compare(stamped, pdfBuf) !== 0;
+        }
       }
     } catch (stampErr) {
       console.warn(
@@ -1137,9 +1142,16 @@ async function printLabel(orderId, options = {}) {
     }
   }
 
+  // When we stamped a PDF, do not return Flaship's remote URL — clients prefer
+  // label_url and would otherwise open the unstamped "Flaship print pack".
+  const remoteLabelUrl =
+    stampedFlagship || (isFlagshipLabel && labelBase64)
+      ? null
+      : result.labelUrl || shipment.label_url || null;
+
   return {
     success: true,
-    label_url: result.labelUrl || shipment.label_url || null,
+    label_url: remoteLabelUrl,
     label_base64: labelBase64,
     content_type: result.contentType || "application/pdf",
     tracking_number: shipment.tracking_number,
