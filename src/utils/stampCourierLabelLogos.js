@@ -113,12 +113,20 @@ const toTrimmedPngBytes = async (bytes) => {
   if (!bytes || !bytes.length) return null;
   try {
     const sharp = require("sharp");
+    // Flatten soft/white edges then trim hard so wordmarks don't keep a tall empty box.
     return await sharp(bytes)
-      .trim({ threshold: 8 })
+      .rotate()
+      .flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } })
+      .trim({ threshold: 28 })
       .png()
       .toBuffer();
   } catch {
-    return toPngBytes(bytes);
+    try {
+      const sharp = require("sharp");
+      return await sharp(bytes).trim({ threshold: 20 }).png().toBuffer();
+    } catch {
+      return toPngBytes(bytes);
+    }
   }
 };
 
@@ -305,29 +313,24 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Cell 2 between Trax and barcode. Trax mark visual center ~48pt from page top.
+  // Cell 2 between Trax and barcode. Align with Trax mark center (~40pt from top).
   const colLeft = 105;
   const colRight = Math.min(196, width * 0.33);
   const colW = colRight - colLeft;
   const wipeTop = 8;
-  const wipeBottom = 72;
+  const wipeBottom = 70;
   const wipeH = wipeBottom - wipeTop;
-  const logoCenterFromTop = 48;
+  const logoCenterFromTop = 40;
 
-  // Prefer a readable mark aligned with Trax (not a tiny top-hugging badge).
-  const maxW = Math.max(28, colW - 12);
-  const maxH = 40;
+  // Fit inside the header cell; keep clear of the COD divider (~70pt).
+  const maxW = Math.max(28, colW - 16);
+  const maxH = 30;
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
-  let drawH = maxH;
+  let drawH = Math.min(maxH, wipeH - 18);
   let drawW = drawH * aspect;
   if (drawW > maxW) {
     drawW = maxW;
     drawH = drawW / aspect;
-  }
-  // Wide wordmarks: keep height at least ~28 so they don't look stuck to the top rule.
-  if (drawH < 28 && aspect > 1.6) {
-    drawH = Math.min(36, wipeH - 16);
-    drawW = Math.min(maxW, drawH * aspect);
   }
 
   const x = colLeft + (colW - drawW) / 2;
