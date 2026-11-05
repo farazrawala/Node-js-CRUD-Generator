@@ -1095,8 +1095,8 @@ async function printLabel(orderId, options = {}) {
     }
   }
 
-  // Flaship / Trax (and other Flagship carrier) labels: stamp the order's
-  // integration store logo in the header gap next to the carrier logo.
+  // Flaship / Trax pack: align store logo on the Trax label + draw invoice
+  // in the empty bottom half of the A4 (per_page=2) sheet.
   const isFlagshipLabel =
     providerKey === "flagship" ||
     providerKey === "flaship" ||
@@ -1110,11 +1110,11 @@ async function printLabel(orderId, options = {}) {
       const pdfBuf = await ensureLabelBytes();
       if (pdfBuf) {
         let integration = null;
+        let order = null;
+        let items = [];
         try {
           const Order = mongoose.model("order");
-          const order = await Order.findById(orderId)
-            .select("integration_id")
-            .lean();
+          order = await Order.findById(orderId).lean();
           if (order?.integration_id) {
             integration = await mongoose
               .model("integration")
@@ -1122,21 +1122,83 @@ async function printLabel(orderId, options = {}) {
               .select("image store_name name")
               .lean();
           }
-        } catch {
-          integration = null;
+          const OrderItem = mongoose.model("order_item");
+          const rawItems = await OrderItem.find({
+            order_id: orderId,
+            deletedAt: null,
+            status: { $ne: "inactive" },
+          })
+            .populate(
+              "product_id",
+              "product_name name product_code sku product_image product_image_thumbnail_url image",
+            )
+            .lean();
+          items = (rawItems || []).map((line) => {
+            const product =
+              line.product_id && typeof line.product_id === "object"
+                ? line.product_id
+                : null;
+            return {
+              name:
+                line.name ||
+                product?.product_name ||
+                product?.name ||
+                "Item",
+              sku:
+                line.sku ||
+                line.product_code ||
+                product?.sku ||
+                product?.product_code ||
+                "",
+              image:
+                line.product_image ||
+                product?.product_image_thumbnail_url ||
+                product?.product_image ||
+                product?.image ||
+                "",
+              qty: Number(line.qty) || 1,
+              price: Number(line.price) || 0,
+              subtotal:
+                Number(line.subtotal) ||
+                (Number(line.qty) || 1) * (Number(line.price) || 0),
+            };
+          });
+        } catch (loadErr) {
+          console.warn(
+            "[courier] Flagship invoice context load failed:",
+            loadErr?.message || loadErr,
+          );
         }
 
-        const logoSource = integration?.image ? integration : company;
-        const { stampFlagshipLabelStoreLogo } = require("../utils/stampCourierLabelLogos");
-        const stamped = await stampFlagshipLabelStoreLogo(pdfBuf, logoSource);
+        const paymentMethod =
+          options.paymentMethod ||
+          options.payment_method ||
+          (Number(shipment.cod_amount) > 0 ? "COD" : "") ||
+          "COD";
+        const courierName =
+          shipment.courier_company ||
+          shipment.courier ||
+          result.courier ||
+          driver?.providerName ||
+          "TRAX";
+
+        const { composeFlagshipLabelWithInvoice } = require("../utils/stampCourierLabelLogos");
+        const stamped = await composeFlagshipLabelWithInvoice(pdfBuf, {
+          company,
+          integration,
+          order,
+          items,
+          courierName,
+          paymentMethod,
+        });
         if (stamped && stamped.length > 0) {
           labelBase64 = stamped.toString("base64");
-          stampedFlagship = Buffer.compare(stamped, pdfBuf) !== 0;
+          stampedFlagship = true;
         }
       }
     } catch (stampErr) {
       console.warn(
-        "[courier] Failed to stamp Flagship label store logo:",
+        "[courier] Failed to compose Flagship label + invoice:",
         stampErr?.message || stampErr,
       );
     }
