@@ -433,6 +433,58 @@ const clip = (font, text, size, maxW) => {
   return `${t}...`;
 };
 
+/** Word-wrap text into up to `maxLines` lines (last line ellipsized if still too long). */
+const wrapLines = (font, text, size, maxW, maxLines = 2) => {
+  const raw = safeText(text);
+  if (!raw) return [];
+  if (font.widthOfTextAtSize(raw, size) <= maxW) return [raw];
+
+  const words = raw.split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+
+  const pushLine = (line, isLastSlot) => {
+    const value = String(line || "").trim();
+    if (!value) return;
+    if (font.widthOfTextAtSize(value, size) <= maxW) {
+      lines.push(value);
+      return;
+    }
+    lines.push(clip(font, value, size, maxW));
+  };
+
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    const next = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(next, size) <= maxW) {
+      current = next;
+      continue;
+    }
+    if (current) {
+      pushLine(current, lines.length + 1 >= maxLines);
+      current = word;
+    } else {
+      pushLine(word, lines.length + 1 >= maxLines);
+      current = "";
+    }
+    if (lines.length >= maxLines) {
+      // Remaining words go into the last line (clipped).
+      const rest = [current, ...words.slice(i + 1)].filter(Boolean).join(" ");
+      if (rest) {
+        lines[lines.length - 1] = clip(
+          font,
+          `${lines[lines.length - 1]} ${rest}`.trim(),
+          size,
+          maxW,
+        );
+      }
+      return lines.slice(0, maxLines);
+    }
+  }
+  if (current && lines.length < maxLines) pushLine(current, true);
+  return lines.slice(0, maxLines);
+};
+
 /**
  * Flaship A4 2-up pack: keep Trax label on top, draw sales invoice in the empty bottom half.
  *
@@ -555,13 +607,9 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   const detailX = logoImg ? marginX : leftX;
   let detailY = cursorY - invLogoH - 6;
   const detailSize = 8;
-  const detailLines = [
-    companyAddress,
-    companyPhone,
-    companyEmail,
-  ].filter((v) => String(v || "").trim());
+  const leftColW = contentW * 0.48;
   if (!logoImg) {
-    page.drawText(clip(fontBold, companyName, 11, contentW * 0.45), {
+    page.drawText(clip(fontBold, companyName, 11, leftColW), {
       x: detailX,
       y: cursorY - 12,
       size: 11,
@@ -570,8 +618,20 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     });
     detailY = cursorY - 26;
   }
-  for (const row of detailLines) {
-    page.drawText(clip(font, row, detailSize, contentW * 0.48), {
+
+  const addressLines = wrapLines(font, companyAddress, detailSize, leftColW, 2);
+  for (const row of addressLines) {
+    page.drawText(row, {
+      x: detailX,
+      y: detailY,
+      size: detailSize,
+      font,
+      color: muted,
+    });
+    detailY -= 11;
+  }
+  for (const row of [companyPhone, companyEmail].filter((v) => String(v || "").trim())) {
+    page.drawText(clip(font, row, detailSize, leftColW), {
       x: detailX,
       y: detailY,
       size: detailSize,
@@ -582,6 +642,7 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   }
 
   const rightX = width / 2 + 8;
+  const rightColW = contentW * 0.45;
   page.drawText("INVOICE", {
     x: rightX,
     y: cursorY - 16,
@@ -590,25 +651,43 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     color: ink,
   });
   let custY = cursorY - 34;
-  const customerLines = [
-    order.name || order.customer_name || "—",
-    [order.address, order.city, order.state || order.province, order.zip]
-      .map((v) => String(v || "").trim())
-      .filter(Boolean)
-      .join(", "),
-    order.email || "",
-    order.phone || "",
-  ].filter((v) => String(v || "").trim());
-  customerLines.forEach((row, idx) => {
-    page.drawText(clip(font, row, idx === 0 ? 9.5 : 8, contentW * 0.45), {
+  const customerName = order.name || order.customer_name || "—";
+  const customerAddress = [order.address, order.city, order.state || order.province, order.zip]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+    .join(", ");
+
+  page.drawText(clip(fontBold, customerName, 9.5, rightColW), {
+    x: rightX,
+    y: custY,
+    size: 9.5,
+    font: fontBold,
+    color: ink,
+  });
+  custY -= 12;
+
+  for (const row of wrapLines(font, customerAddress, 8, rightColW, 2)) {
+    page.drawText(row, {
       x: rightX,
       y: custY,
-      size: idx === 0 ? 9.5 : 8,
-      font: idx === 0 ? fontBold : font,
+      size: 8,
+      font,
       color: ink,
     });
-    custY -= idx === 0 ? 12 : 10;
-  });
+    custY -= 10;
+  }
+  for (const row of [order.email || "", order.phone || ""].filter((v) =>
+    String(v || "").trim(),
+  )) {
+    page.drawText(clip(font, row, 8, rightColW), {
+      x: rightX,
+      y: custY,
+      size: 8,
+      font,
+      color: ink,
+    });
+    custY -= 10;
+  }
 
   cursorY = Math.min(detailY, custY) - 10;
 
