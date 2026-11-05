@@ -305,20 +305,18 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Trax A4 2-up header: 4 cells [TRAX | store logo | barcode | QR].
-  // Center the store mark inside cell 2 only (between vertical rules).
-  const headerTop = 12;
-  const headerBottom = 80; // from page top
-  const colLeft = 106;
-  const colRight = Math.min(198, width * 0.335);
+  // Trax A4 2-up header cell 2 (between Trax rule ~104 and barcode rule ~196).
+  // Match the real header band height (~10–68 from page top), not into COD.
+  const headerTop = 10;
+  const headerBottom = 68;
+  const colLeft = 108;
+  const colRight = Math.min(194, width * 0.328);
   const colW = colRight - colLeft;
   const colH = headerBottom - headerTop;
   const centerY = height - (headerTop + headerBottom) / 2;
 
-  const padX = 6;
-  const padY = 8;
-  const maxW = Math.max(24, colW - padX * 2);
-  const maxH = Math.max(20, colH - padY * 2);
+  const maxW = Math.max(22, colW - 14);
+  const maxH = Math.max(18, colH - 14);
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
   let drawH = maxH;
   let drawW = drawH * aspect;
@@ -330,7 +328,6 @@ function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const x = colLeft + (colW - drawW) / 2;
   const y = centerY - drawH / 2;
 
-  // Wipe the whole logo cell so Trax/old mark and our draw never overlap borders.
   page.drawRectangle({
     x: colLeft + 1.5,
     y: height - headerBottom + 1.5,
@@ -363,22 +360,22 @@ function stampShipperNameAndPhone(
   const coverW = Math.min(275, width * 0.47 - 14);
   const textX = 34;
   const textMaxW = coverW - (textX - coverX) - 6;
-    const nameSize = 12;
-  const phoneSize = 11;
-  const emailSize = 10.5;
-  const citySize = 11;
-  const lineGap = 16;
+    const nameSize = 11;
+  const phoneSize = 10;
+  const emailSize = 9.5;
+  const citySize = 10;
+  const lineGap = 14;
   // First content line under the SHIPPER heading.
   const nameY = height - labelH * 0.335;
   const rows = [name, phone, email, city].filter(Boolean);
-  // Pad enough to blank prior pickup glyphs without eating the box border.
-  const padTop = 6;
-  const padBottom = city ? 10 : 6;
-  const coverH = Math.max(
-    58,
-    (rows.length - 1) * lineGap + nameSize + padTop + padBottom,
-  );
-  const coverBottom = nameY - (rows.length - 1) * lineGap - padBottom;
+  // Keep wipe inside shipper body only — never into ORIGIN/DEST row (~0.45+).
+  const padTop = 4;
+  const padBottom = 4;
+  const minCoverBottom = height - labelH * 0.445;
+  const naturalBottom = nameY - (rows.length - 1) * lineGap - padBottom;
+  const coverBottom = Math.max(minCoverBottom, naturalBottom);
+  const coverTop = nameY + padTop + 2;
+  const coverH = Math.max(36, coverTop - coverBottom);
 
   page.drawRectangle({
     x: coverX,
