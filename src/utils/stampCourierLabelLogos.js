@@ -363,10 +363,10 @@ function stampShipperNameAndPhone(
 
   const { width, height } = page.getSize();
   const labelH = height / 2;
-  // Full shipper body: past left border → near center divider (must erase BBG leftovers).
-  const coverX = 12;
-  const coverW = Math.min(275, width * 0.47 - 14);
-  const textX = 32;
+  // Full shipper body: align with Trax text column (avoid a wide empty strip at left).
+  const coverX = 26;
+  const coverW = Math.min(260, width * 0.47 - 20);
+  const textX = 28;
   const textMaxW = coverW - (textX - coverX) - 6;
     const nameSize = 11;
   const phoneSize = 10;
@@ -651,10 +651,10 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
   const line = rgb(0.7, 0.72, 0.74);
   const headerBg = rgb(0.925, 0.935, 0.94);
 
+  // Do NOT wipe/redraw the Trax header logo cell. Flaship already embeds the
+  // merchant mark correctly; our wipe left a blank blue-selectable hole and a
+  // mis-placed redraw. Keep logoBytes only for the bottom invoice half.
   const logoImg = logoBytes ? await embedImage(pdfDoc, logoBytes) : null;
-  if (logoImg) {
-    drawAlignedStoreLogoOnLabelHeader(page, logoImg);
-  }
 
   const order = ctx.order || {};
   const company = ctx.company || {};
@@ -694,17 +694,6 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     shipperEmail,
     shipperCity,
   );
-  // Erase stray Flaship leftovers in the consignee address column.
-  {
-    const labelH = height / 2;
-    page.drawRectangle({
-      x: width * 0.5 + 8,
-      y: height - labelH * 0.42,
-      width: 14,
-      height: labelH * 0.12,
-      color: rgb(1, 1, 1),
-    });
-  }
 
   const bookedRaw =
     ctx.bookedDate ||
