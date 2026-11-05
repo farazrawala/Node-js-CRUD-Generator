@@ -283,21 +283,20 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Top label band on A4 2-up: roughly the upper half.
-  const labelTop = height;
-  const targetH = Math.min(36, Math.max(28, height * 0.042));
+  // Sit beside Trax in the header band — keep above the COD divider line.
+  const targetH = Math.min(32, Math.max(24, height * 0.036));
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
   let drawH = targetH;
   let drawW = drawH * aspect;
-  const maxW = 100;
+  const maxW = 92;
   if (drawW > maxW) {
     drawW = maxW;
     drawH = drawW / aspect;
   }
-  // Trax mark sits ~left; place store logo clearly after it, before barcode.
-  const x = Math.min(Math.max(128, width * 0.215), width * 0.36 - drawW);
-  const topPad = 22;
-  const y = labelTop - topPad - drawH;
+  // After Trax wordmark, before barcode; higher so it doesn't sit on the rule.
+  const x = Math.min(Math.max(122, width * 0.205), width * 0.34 - drawW);
+  const topPad = 10;
+  const y = height - topPad - drawH;
 
   page.drawRectangle({
     x: x - 2,
@@ -307,6 +306,53 @@ function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
     color: rgb(1, 1, 1),
   });
   page.drawImage(logoImg, { x, y, width: drawW, height: drawH });
+}
+
+/**
+ * Replace Flaship pickup shipper name/phone with the order's integration values.
+ * Measured on A4 2-up Trax label (upper half).
+ */
+function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhone) {
+  const name = safeText(shipperName);
+  const phone = safeText(shipperPhone);
+  if (!name && !phone) return;
+
+  const { width, height } = page.getSize();
+  const labelH = height / 2;
+  // Shipper block sits under COD row on the left column of the top label.
+  const coverX = 28;
+  const coverW = Math.min(250, width * 0.42);
+  const nameY = height - labelH * 0.34;
+  const phoneY = nameY - 13;
+  const coverH = 30;
+  const coverBottom = phoneY - 4;
+
+  page.drawRectangle({
+    x: coverX,
+    y: coverBottom,
+    width: coverW,
+    height: coverH,
+    color: rgb(1, 1, 1),
+  });
+
+  if (name) {
+    page.drawText(clip(fontBold, name, 9, coverW - 8), {
+      x: coverX + 2,
+      y: nameY,
+      size: 9,
+      font: fontBold,
+      color: rgb(0.05, 0.05, 0.05),
+    });
+  }
+  if (phone) {
+    page.drawText(clip(font, phone, 8.5, coverW - 8), {
+      x: coverX + 2,
+      y: phoneY,
+      size: 8.5,
+      font,
+      color: rgb(0.1, 0.1, 0.1),
+    });
+  }
 }
 
 /**
@@ -404,6 +450,25 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     drawAlignedStoreLogoOnLabelHeader(page, logoImg);
   }
 
+  const order = ctx.order || {};
+  const company = ctx.company || {};
+  const integration = ctx.integration || {};
+  const items = Array.isArray(ctx.items) ? ctx.items : [];
+
+  // Prefer integration store name/phone (e.g. Night Suit / 0331…) over Flaship pickup.
+  const shipperName =
+    integration.name ||
+    integration.store_name ||
+    company.company_name ||
+    company.name ||
+    "";
+  const shipperPhone =
+    integration.phone ||
+    company.company_phone ||
+    company.phone ||
+    "";
+  stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhone);
+
   // Bottom half invoice area (Flaship per_page=2 leaves this blank).
   const midY = height / 2;
   const marginX = 28;
@@ -419,15 +484,21 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     color: rgb(1, 1, 1),
   });
 
-  const order = ctx.order || {};
-  const company = ctx.company || {};
-  const items = Array.isArray(ctx.items) ? ctx.items : [];
   const companyName =
-    company.company_name || company.name || company.store_name || "Store";
+    shipperName ||
+    company.company_name ||
+    company.name ||
+    company.store_name ||
+    "Store";
   const companyAddress =
-    company.company_address || company.address || company.companyAddress || "";
-  const companyPhone = company.company_phone || company.phone || "";
-  const companyEmail = company.company_email || company.email || "";
+    integration.address ||
+    company.company_address ||
+    company.address ||
+    company.companyAddress ||
+    "";
+  const companyPhone = shipperPhone || company.company_phone || company.phone || "";
+  const companyEmail =
+    integration.email || company.company_email || company.email || "";
 
   // Header: store logo + address | INVOICE + customer
   const invLogoH = 34;

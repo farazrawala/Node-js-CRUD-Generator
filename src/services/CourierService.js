@@ -1119,7 +1119,7 @@ async function printLabel(orderId, options = {}) {
             integration = await mongoose
               .model("integration")
               .findById(order.integration_id)
-              .select("image store_name name")
+              .select("image store_name name phone email address city state")
               .lean();
           }
           const OrderItem = mongoose.model("order_item");
