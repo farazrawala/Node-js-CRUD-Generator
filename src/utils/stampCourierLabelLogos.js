@@ -283,26 +283,32 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
  */
 function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
   const { width, height } = page.getSize();
-  // Sit beside Trax in the header band — keep above the COD divider line.
-  const targetH = Math.min(32, Math.max(24, height * 0.036));
+  // Match Trax header icon band (not the page top edge).
+  // Trax mark is ~70pt tall starting ~16pt below the top on A4 2-up labels.
+  const traxTopPad = 16;
+  const traxH = Math.min(58, Math.max(48, height * 0.065));
+  const traxCenterY = height - traxTopPad - traxH / 2;
+
+  const targetH = Math.min(28, Math.max(22, traxH * 0.48));
   const aspect = logoImg.width / Math.max(logoImg.height, 1);
   let drawH = targetH;
   let drawW = drawH * aspect;
-  const maxW = 92;
+  const maxW = 88;
   if (drawW > maxW) {
     drawW = maxW;
     drawH = drawW / aspect;
   }
-  // After Trax wordmark, before barcode; higher so it doesn't sit on the rule.
-  const x = Math.min(Math.max(122, width * 0.205), width * 0.34 - drawW);
-  const topPad = 10;
-  const y = height - topPad - drawH;
 
+  // Immediately after Trax (~x 28–95), before the barcode column.
+  const x = Math.min(102, width * 0.175);
+  const y = traxCenterY - drawH / 2;
+
+  // Clear only the logo footprint so Trax/borders stay intact.
   page.drawRectangle({
-    x: x - 2,
-    y: y - 2,
-    width: drawW + 4,
-    height: drawH + 4,
+    x: x - 1,
+    y: y - 1,
+    width: drawW + 2,
+    height: drawH + 2,
     color: rgb(1, 1, 1),
   });
   page.drawImage(logoImg, { x, y, width: drawW, height: drawH });
