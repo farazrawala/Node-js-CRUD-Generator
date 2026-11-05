@@ -309,23 +309,25 @@ function drawAlignedStoreLogoOnLabelHeader(page, logoImg) {
 }
 
 /**
- * Replace Flaship pickup shipper name/phone with the order's integration values.
+ * Replace Flaship pickup shipper name/phone/email with the order's integration values.
  * Measured on A4 2-up Trax label (upper half).
  */
-function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhone) {
+function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhone, shipperEmail) {
   const name = safeText(shipperName);
   const phone = safeText(shipperPhone);
-  if (!name && !phone) return;
+  const email = safeText(shipperEmail);
+  if (!name && !phone && !email) return;
 
   const { width, height } = page.getSize();
   const labelH = height / 2;
   // Shipper block sits under COD row on the left column of the top label.
   const coverX = 28;
   const coverW = Math.min(250, width * 0.42);
+  const lineGap = 12;
   const nameY = height - labelH * 0.34;
-  const phoneY = nameY - 13;
-  const coverH = 30;
-  const coverBottom = phoneY - 4;
+  const rows = [name, phone, email].filter(Boolean);
+  const coverH = Math.max(30, rows.length * lineGap + 8);
+  const coverBottom = nameY - (rows.length - 1) * lineGap - 6;
 
   page.drawRectangle({
     x: coverX,
@@ -335,20 +337,32 @@ function stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhon
     color: rgb(1, 1, 1),
   });
 
+  let y = nameY;
   if (name) {
     page.drawText(clip(fontBold, name, 9, coverW - 8), {
       x: coverX + 2,
-      y: nameY,
+      y,
       size: 9,
       font: fontBold,
       color: rgb(0.05, 0.05, 0.05),
     });
+    y -= lineGap;
   }
   if (phone) {
     page.drawText(clip(font, phone, 8.5, coverW - 8), {
       x: coverX + 2,
-      y: phoneY,
+      y,
       size: 8.5,
+      font,
+      color: rgb(0.1, 0.1, 0.1),
+    });
+    y -= lineGap;
+  }
+  if (email) {
+    page.drawText(clip(font, email, 8, coverW - 8), {
+      x: coverX + 2,
+      y,
+      size: 8,
       font,
       color: rgb(0.1, 0.1, 0.1),
     });
@@ -467,7 +481,19 @@ async function composeFlagshipLabelWithInvoice(pdfBuffer, ctx = {}) {
     company.company_phone ||
     company.phone ||
     "";
-  stampShipperNameAndPhone(page, font, fontBold, shipperName, shipperPhone);
+  const shipperEmail =
+    integration.email ||
+    company.company_email ||
+    company.email ||
+    "";
+  stampShipperNameAndPhone(
+    page,
+    font,
+    fontBold,
+    shipperName,
+    shipperPhone,
+    shipperEmail,
+  );
 
   // Bottom half invoice area (Flaship per_page=2 leaves this blank).
   const midY = height / 2;
