@@ -36,13 +36,16 @@ const toUploadRelativePath = (raw) => {
   return p;
 };
 
-const readLogoBytes = async (company) => {
+const readLogoBytes = async (source) => {
   const raw =
-    company?.company_logo ||
-    company?.companyLogo ||
-    company?.logo ||
-    company?.logo_image ||
-    "";
+    source?.company_logo ||
+    source?.companyLogo ||
+    source?.logo ||
+    source?.logo_image ||
+    source?.image ||
+    source?.store_image ||
+    source?.storeImage ||
+    (typeof source === "string" ? source : "");
   if (!raw || typeof raw !== "string") return null;
 
   const trimmed = raw.trim();
@@ -230,8 +233,65 @@ async function stampPostexLabelLogos(pdfBuffer, company = null, options = {}) {
   return Buffer.from(out);
 }
 
+/**
+ * Stamp the order's integration/store logo onto a Flaship (Trax/etc.) label header,
+ * in the empty gap between the carrier logo and the tracking barcode.
+ * Flaship A4 download often uses per_page=2 — stamp both label halves when present.
+ *
+ * @param {Buffer} pdfBuffer
+ * @param {object|string|null} logoSource integration row (or image path/url)
+ * @returns {Promise<Buffer>}
+ */
+async function stampFlagshipLabelStoreLogo(pdfBuffer, logoSource = null) {
+  if (!Buffer.isBuffer(pdfBuffer) || pdfBuffer.length < 5) return pdfBuffer;
+
+  const logoBytes = await readLogoBytes(logoSource);
+  if (!logoBytes) return pdfBuffer;
+
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
+  const pages = pdfDoc.getPages();
+  if (!pages.length) return pdfBuffer;
+
+  const logoImg = await embedImage(pdfDoc, logoBytes);
+  if (!logoImg) return pdfBuffer;
+
+  for (const page of pages) {
+    const { width, height } = page.getSize();
+    const logoH = Math.min(42, Math.max(28, height * 0.055));
+    const aspect = logoImg.width / Math.max(logoImg.height, 1);
+    let drawH = logoH;
+    let drawW = drawH * aspect;
+    const maxW = Math.min(110, width * 0.2);
+    if (drawW > maxW) {
+      drawW = maxW;
+      drawH = drawW / aspect;
+    }
+
+    // After Trax/carrier wordmark (~left), before barcode (~mid).
+    const x = Math.max(95, width * 0.17);
+    const topPads = [18];
+    // Second half when Flaship prints 2 labels per A4 page.
+    if (height >= 700) topPads.push(height / 2 + 18);
+
+    for (const topPad of topPads) {
+      const y = height - topPad - drawH;
+      if (y < 8) continue;
+      page.drawImage(logoImg, {
+        x,
+        y,
+        width: drawW,
+        height: drawH,
+      });
+    }
+  }
+
+  const out = await pdfDoc.save();
+  return Buffer.from(out);
+}
+
 module.exports = {
   stampPostexLabelLogos,
+  stampFlagshipLabelStoreLogo,
   readLogoBytes,
   formatCodAmountLabel,
 };

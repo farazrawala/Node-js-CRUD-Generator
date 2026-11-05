@@ -1037,18 +1037,27 @@ async function printLabel(orderId, options = {}) {
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, "");
+  const providerKey = String(driver?.providerName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+
+  const ensureLabelBytes = async () => {
+    if (labelBase64) return Buffer.from(labelBase64, "base64");
+    if (!result.labelUrl) return null;
+    const res = await fetch(String(result.labelUrl));
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    labelBase64 = buf.toString("base64");
+    return buf;
+  };
 
   // PostEx airway bill: stamp company logo before PostEx logo on the PDF header.
   // Also stamp COD amount / Order Type when booking stored a collectable amount.
   if (courierKey === "postex" || courierKey === "postexpk") {
     try {
-      if (!labelBase64 && result.labelUrl) {
-        const res = await fetch(String(result.labelUrl));
-        if (res.ok) {
-          labelBase64 = Buffer.from(await res.arrayBuffer()).toString("base64");
-        }
-      }
-      if (labelBase64) {
+      const pdfBuf = await ensureLabelBytes();
+      if (pdfBuf) {
         const shipmentCod = Number(shipment.cod_amount);
         const rawIsCod = options.isCod ?? options.is_cod ?? options.cod;
         const explicitCod =
@@ -1072,19 +1081,57 @@ async function printLabel(orderId, options = {}) {
         const isCod = explicitCod || (!explicitNotCod && codAmount > 0);
 
         const { stampPostexLabelLogos } = require("../utils/stampCourierLabelLogos");
-        const stamped = await stampPostexLabelLogos(
-          Buffer.from(labelBase64, "base64"),
-          company,
-          {
-            isCod,
-            codAmount,
-          },
-        );
+        const stamped = await stampPostexLabelLogos(pdfBuf, company, {
+          isCod,
+          codAmount,
+        });
         labelBase64 = stamped.toString("base64");
       }
     } catch (stampErr) {
       console.warn(
         "[courier] Failed to stamp PostEx label logos:",
+        stampErr?.message || stampErr,
+      );
+    }
+  }
+
+  // Flaship / Trax (and other Flagship carrier) labels: stamp the order's
+  // integration store logo in the header gap next to the carrier logo.
+  const isFlagshipLabel =
+    providerKey === "flagship" ||
+    providerKey === "flaship" ||
+    courierKey === "flagship" ||
+    courierKey === "flaship" ||
+    courierKey === "trax";
+  if (isFlagshipLabel) {
+    try {
+      const pdfBuf = await ensureLabelBytes();
+      if (pdfBuf) {
+        let integration = null;
+        try {
+          const Order = mongoose.model("order");
+          const order = await Order.findById(orderId)
+            .select("integration_id")
+            .lean();
+          if (order?.integration_id) {
+            integration = await mongoose
+              .model("integration")
+              .findById(order.integration_id)
+              .select("image store_name name")
+              .lean();
+          }
+        } catch {
+          integration = null;
+        }
+
+        const logoSource = integration?.image ? integration : company;
+        const { stampFlagshipLabelStoreLogo } = require("../utils/stampCourierLabelLogos");
+        const stamped = await stampFlagshipLabelStoreLogo(pdfBuf, logoSource);
+        labelBase64 = stamped.toString("base64");
+      }
+    } catch (stampErr) {
+      console.warn(
+        "[courier] Failed to stamp Flagship label store logo:",
         stampErr?.message || stampErr,
       );
     }
