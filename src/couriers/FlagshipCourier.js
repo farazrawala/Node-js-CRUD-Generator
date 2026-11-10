@@ -7,7 +7,7 @@
  */
 
 const BaseCourier = require("./BaseCourier");
-const { UNIFIED_STATUSES, PROVIDERS } = require("./constants");
+const { UNIFIED_STATUSES, PROVIDERS, TERMINAL_STATUSES } = require("./constants");
 const { mapFlashipStatus } = require("./statusMap");
 const {
   CourierError,
@@ -580,16 +580,27 @@ class FlagshipCourier extends BaseCourier {
       return tb - ta;
     });
 
+    // `status` is Flaship's portal bucket (SHIPPER_ADVISE, IN_TRANSIT, ...);
+    // `live_courier_status` is the courier's own latest scan
+    // ("Shipment - Delivery Unsuccessful"). Show the live scan while the parcel
+    // is moving; keep the portal code once it is final (delivered / returned /
+    // cancelled) since the courier feed can lag or never reflect a cancel.
+    const portalStatus = String(res.data?.status || "").trim();
+    const liveStatus = String(res.data?.live_courier_status || "").trim();
+    const portalIsFinal =
+      Boolean(portalStatus) &&
+      TERMINAL_STATUSES.includes(mapFlashipStatus({ status: portalStatus }));
     const lastStatus =
-      res.data?.status ||
-      res.data?.live_courier_status ||
+      (portalIsFinal ? portalStatus : "") ||
+      liveStatus ||
       events[0]?.description ||
+      portalStatus ||
       events[0]?.status ||
       "BOOKED";
 
     if (!events.length) {
       events.push({
-        status: mapFlashipStatus({ status: lastStatus }),
+        status: mapFlashipStatus({ status: portalStatus || lastStatus }),
         description: lastStatus,
         location: null,
         eventTime: null,

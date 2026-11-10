@@ -1871,14 +1871,18 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
       Object.assign(patch, trackingFields);
       appliedShopifyTracking = remoteTracking;
     } else if (trackingFields.courier_tracking_number && existingCn) {
-      // Same CN (or Shopify CN already on POS): still refresh status/details.
-      if (trackingFields.tracking_status) {
-        patch.tracking_status = trackingFields.tracking_status;
+      // A shipment booked from POS is tracked live from the courier API.
+      // Shopify only knows the coarse status we pushed (e.g. in_transit), so
+      // it must not overwrite the courier's status/details on pull.
+      if (!(await hasPosBookedCourierShipment(existing._id))) {
+        if (trackingFields.tracking_status) {
+          patch.tracking_status = trackingFields.tracking_status;
+        }
+        if (trackingFields.tracking_details) {
+          patch.tracking_details = trackingFields.tracking_details;
+        }
+        appliedShopifyTracking = remoteTracking;
       }
-      if (trackingFields.tracking_details) {
-        patch.tracking_details = trackingFields.tracking_details;
-      }
-      appliedShopifyTracking = remoteTracking;
     } else if (
       trackingFields.tracking_status &&
       !String(existing?.tracking_status || "").trim()
@@ -2001,6 +2005,9 @@ function mapTrackingStatusToShopifyFulfillmentEvent(trackingStatus, orderStatus)
   if (/unbooked|pending/.test(s)) return "confirmed";
   if (/booked|created|consignment/.test(s)) return "confirmed";
   if (/pick/.test(s)) return "picked_up";
+  // Before /deliver/: "Shipment - Delivery Unsuccessful" is not a delivery.
+  if (/unsuccessful|undeliver|attempt/.test(s)) return "attempted_delivery";
+  if (/fail|exception/.test(s)) return "failure";
   if (/out.*delivery/.test(s)) return "out_for_delivery";
   if (/deliver/.test(s)) return "delivered";
   if (/transit|dispatch|depart/.test(s)) return "in_transit";
@@ -2179,6 +2186,27 @@ function buildPosTrackingFieldsFromShopify(tracking) {
     fields.tracking_details = detailParts.join(" | ").slice(0, 500);
   }
   return fields;
+}
+
+/**
+ * True when the order has a courier shipment booked from POS (not one created
+ * by importing Shopify tracking). Those are tracked live from the courier API.
+ */
+async function hasPosBookedCourierShipment(orderId) {
+  if (!orderId) return false;
+  let CourierShipment;
+  try {
+    CourierShipment = require("../src/models/courier_shipment.model");
+  } catch {
+    return false;
+  }
+  const row = await CourierShipment.exists({
+    order_id: orderId,
+    deletedAt: null,
+    tracking_number: { $nin: [null, ""] },
+    "api_request.source": { $ne: "shopify_import" },
+  });
+  return Boolean(row);
 }
 
 /**

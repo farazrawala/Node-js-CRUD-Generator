@@ -152,6 +152,24 @@ describe("courier tracking → Shopify fulfillment event", () => {
     );
   });
 
+  it("does not treat an unsuccessful delivery as delivered", () => {
+    assert.equal(
+      mapTrackingStatusToShopifyFulfillmentEvent(
+        "Shipment - Delivery Unsuccessful",
+        "in_transit",
+      ),
+      "attempted_delivery",
+    );
+    assert.equal(
+      mapTrackingStatusToShopifyFulfillmentEvent("Delivery Failed", "in_transit"),
+      "failure",
+    );
+    assert.equal(
+      mapTrackingStatusToShopifyFulfillmentEvent("Shipment - Delivered"),
+      "delivered",
+    );
+  });
+
   it("falls back from order_status when tracking is empty", () => {
     assert.equal(
       mapTrackingStatusToShopifyFulfillmentEvent("", "in_transit"),
