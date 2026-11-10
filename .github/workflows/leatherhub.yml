@@ -1,0 +1,37 @@
+name: Deploy Leatherhub (FTP)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-leatherhub-ftp
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync application files to Leatherhub
+        uses: SamKirkland/FTP-Deploy-Action@4.3.3
+        with:
+          server: 170.39.76.190
+          username: ${{ secrets.LEATHERHUB_FTP_USERNAME }}
+          password: ${{ secrets.LEATHERHUB_FTP_PASSWORD }}
+          local-dir: ./
+          server-dir: /
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/node_modules
+            **/uploads/**
+            **/uploads
+            **/logs/**
+            **/logs
+            **/.env
+            **/.env.*
