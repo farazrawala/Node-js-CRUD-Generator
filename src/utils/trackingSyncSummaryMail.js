@@ -81,6 +81,39 @@ function changeLine(change) {
   return from ? `${label} from ${from} to ${to}` : `${label} set to ${to}`;
 }
 
+const MAX_ORDERS_PER_REASON = 60;
+
+/**
+ * Group failed shipments by error message, biggest group first:
+ *   "Invalid API credentials for Flagship" - 35 orders
+ *     Order No 1132, 1133, ORD-2041
+ */
+function failureLines(failures) {
+  const rows = Array.isArray(failures) ? failures : [];
+  const groups = new Map();
+  for (const row of rows) {
+    const reason = String(row.reason || "Unknown error").trim() || "Unknown error";
+    if (!groups.has(reason)) groups.set(reason, []);
+    groups.get(reason).push(row);
+  }
+
+  const lines = [];
+  const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  for (const [reason, group] of sorted) {
+    const labels = group.map(orderLabel);
+    const shown = labels.slice(0, MAX_ORDERS_PER_REASON).join(", ");
+    const more = labels.length > MAX_ORDERS_PER_REASON
+      ? ` +${labels.length - MAX_ORDERS_PER_REASON} more`
+      : "";
+    lines.push(
+      "",
+      `Reason: ${reason} (${group.length} order${group.length === 1 ? "" : "s"})`,
+      `  Order No ${shown}${more}`,
+    );
+  }
+  return lines;
+}
+
 /**
  * @param {object} summary  result of CourierService.syncOpenShipments (or { error })
  * @param {object} [meta]
@@ -127,7 +160,11 @@ function buildTrackingSyncSummaryEmail(summary = {}, meta = {}) {
       ` (took ${formatDuration(meta.durationMs)}).`,
   );
   if (errors) {
-    lines.push(`${errors} shipment${errors === 1 ? "" : "s"} could not be checked this time.`);
+    lines.push(
+      "",
+      `${errors} shipment${errors === 1 ? "" : "s"} could not be checked this time:`,
+    );
+    lines.push(...failureLines(summary.failures));
   }
 
   return {

@@ -35,7 +35,7 @@ async function runOnce() {
     summary = await CourierService.syncOpenShipments({
       limit: Number(process.env.COURIER_TRACKING_SYNC_LIMIT) || 100,
     });
-    const { changes, ...counts } = summary;
+    const { changes, failures, ...counts } = summary;
     courierLogger.syncJob({
       phase: "done",
       durationMs: Date.now() - started,

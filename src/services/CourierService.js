@@ -1290,6 +1290,7 @@ async function syncOpenShipments(options = {}) {
     order_status_changed: 0,
     tracking_status_changed: 0,
     changes: [],
+    failures: [],
   };
 
   for (const shipment of open) {
@@ -1313,6 +1314,12 @@ async function syncOpenShipments(options = {}) {
       }
     } catch (err) {
       summary.errors += 1;
+      summary.failures.push({
+        order_id: String(shipment.order_id || ""),
+        courier: shipment.courier || null,
+        tracking_number: shipment.tracking_number || null,
+        reason: String(err?.message || "Unknown error").slice(0, 300),
+      });
       courierLogger.apiError({
         event: "sync_error",
         shipmentId: String(shipment._id),
@@ -1321,7 +1328,31 @@ async function syncOpenShipments(options = {}) {
     }
   }
 
+  await attachOrderNumbers(summary.failures);
   return summary;
+}
+
+/** Fill order_no / integration_order_id on failure rows (one query). */
+async function attachOrderNumbers(rows) {
+  const ids = rows
+    .map((r) => r.order_id)
+    .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
+  if (!ids.length) return;
+  try {
+    const orders = await mongoose
+      .model("order")
+      .find({ _id: { $in: ids } })
+      .select("order_no integration_order_id")
+      .lean();
+    const byId = new Map(orders.map((o) => [String(o._id), o]));
+    for (const row of rows) {
+      const order = byId.get(row.order_id);
+      row.order_no = order?.order_no || null;
+      row.integration_order_id = order?.integration_order_id || null;
+    }
+  } catch {
+    /* order numbers are cosmetic for the summary email */
+  }
 }
 
 /**
