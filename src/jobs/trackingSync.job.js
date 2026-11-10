@@ -6,6 +6,7 @@
 
 const CourierService = require("../services/CourierService");
 const courierLogger = require("../utils/courierLogger");
+const { emailTrackingSyncSummary } = require("../utils/trackingSyncSummaryMail");
 
 const DEFAULT_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -28,27 +29,41 @@ async function runOnce() {
   if (running) return { skipped: true };
   running = true;
   const started = Date.now();
+  let summary;
   try {
     courierLogger.syncJob({ phase: "start" });
-    const summary = await CourierService.syncOpenShipments({
+    summary = await CourierService.syncOpenShipments({
       limit: Number(process.env.COURIER_TRACKING_SYNC_LIMIT) || 100,
     });
+    const { changes, ...counts } = summary;
     courierLogger.syncJob({
       phase: "done",
       durationMs: Date.now() - started,
-      ...summary,
+      ...counts,
     });
-    return summary;
   } catch (err) {
     courierLogger.apiError({
       event: "sync_job_failed",
       error: err.message,
       stack: err.stack,
     });
-    return { error: err.message };
+    summary = { error: err.message };
   } finally {
     running = false;
   }
+
+  const mail = await emailTrackingSyncSummary(summary, {
+    startedAt: new Date(started),
+    durationMs: Date.now() - started,
+  });
+  if (!mail.sent && mail.reason !== "disabled") {
+    courierLogger.apiError({
+      event: "sync_summary_email_failed",
+      reason: mail.reason,
+      error: mail.error,
+    });
+  }
+  return summary;
 }
 
 /**

@@ -54,7 +54,11 @@ function webhookEmailSubject(topic, body) {
   return `Order Number : ${number} is ${action}`;
 }
 
-async function sendWebhookEmail(payload, subject) {
+/**
+ * Send one email through the ORDER_UPDATE_SMTP_* account.
+ * `to` defaults to ORDER_UPDATE_SMTP_TO.
+ */
+async function sendEmail({ to, subject, text, html } = {}) {
   const settings = smtpSettings();
   if (!settings) return { sent: false, reason: "smtp_not_configured" };
 
@@ -70,12 +74,20 @@ async function sendWebhookEmail(payload, subject) {
 
   await transporter.sendMail({
     from: settings.user,
-    to: settings.to,
-    subject: String(subject || "Shopify order webhook").slice(0, 180),
-    text: JSON.stringify(payload, null, 2).slice(0, 400000),
+    to: String(to || "").trim() || settings.to,
+    subject: String(subject || "").slice(0, 180),
+    text: text == null ? undefined : String(text).slice(0, 400000),
+    html: html == null ? undefined : String(html).slice(0, 400000),
   });
 
   return { sent: true };
+}
+
+async function sendWebhookEmail(payload, subject) {
+  return sendEmail({
+    subject: subject || "Shopify order webhook",
+    text: JSON.stringify(payload, null, 2),
+  });
 }
 
 async function emailOrderUpdateResponse(payload) {
@@ -112,6 +124,7 @@ async function emailWebhookParameters(req) {
 }
 
 module.exports = {
+  sendEmail,
   emailOrderUpdateResponse,
   emailWebhookParameters,
   webhookEmailSubject,

@@ -736,6 +736,10 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     status_code: result.statusCode,
     tracking_status: lastStatus,
     order_status: orderTracking?.order_status || null,
+    order_status_change: orderTracking?.order_status_change || null,
+    tracking_status_change: orderTracking?.tracking_status_change || null,
+    order_no: orderTracking?.order_no || null,
+    integration_order_id: orderTracking?.integration_order_id || null,
     tracking_details: result.raw ?? null,
     history,
     last_tracking_sync: new Date(),
@@ -834,7 +838,7 @@ async function persistOrderTracking(shipment, result) {
   try {
     order = await Order.findById(shipment.order_id)
       .select(
-        "order_status company_id deletedAt status courier_tracking_number tracking_status",
+        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id",
       )
       .lean();
   } catch (err) {
@@ -846,6 +850,7 @@ async function persistOrderTracking(shipment, result) {
   }
 
   const update = {};
+  const previousTrackingStatus = String(order?.tracking_status || "").trim();
   const nextTrackingStatus = lastStatus ? String(lastStatus) : "";
   if (
     nextTrackingStatus &&
@@ -896,7 +901,11 @@ async function persistOrderTracking(shipment, result) {
   }
 
   if (!Object.keys(update).length) {
-    return { order_status: currentStatus || mappedOrderStatus || null };
+    return {
+      order_status: currentStatus || mappedOrderStatus || null,
+      order_status_change: null,
+      tracking_status_change: null,
+    };
   }
 
   try {
@@ -907,7 +916,11 @@ async function persistOrderTracking(shipment, result) {
       orderId: String(shipment.order_id),
       error: err.message,
     });
-    return { order_status: currentStatus || null };
+    return {
+      order_status: currentStatus || null,
+      order_status_change: null,
+      tracking_status_change: null,
+    };
   }
 
   if (shouldSetOrderStatus) {
@@ -929,6 +942,14 @@ async function persistOrderTracking(shipment, result) {
 
   return {
     order_status: update.order_status || currentStatus || mappedOrderStatus || null,
+    order_status_change: shouldSetOrderStatus
+      ? { from: currentStatus || null, to: mappedOrderStatus }
+      : null,
+    tracking_status_change: update.tracking_status
+      ? { from: previousTrackingStatus || null, to: update.tracking_status }
+      : null,
+    order_no: order?.order_no || null,
+    integration_order_id: order?.integration_order_id || null,
   };
 }
 
@@ -1262,12 +1283,34 @@ async function syncOpenShipments(options = {}) {
     .limit(limit)
     .lean();
 
-  const summary = { total: open.length, updated: 0, errors: 0 };
+  const summary = {
+    total: open.length,
+    updated: 0,
+    errors: 0,
+    order_status_changed: 0,
+    tracking_status_changed: 0,
+    changes: [],
+  };
 
   for (const shipment of open) {
     try {
-      await refreshTrackingForShipment(shipment, { allowStale: false });
+      const result = await refreshTrackingForShipment(shipment, {
+        allowStale: false,
+      });
       summary.updated += 1;
+      if (result?.order_status_change) summary.order_status_changed += 1;
+      if (result?.tracking_status_change) summary.tracking_status_changed += 1;
+      if (result?.order_status_change || result?.tracking_status_change) {
+        summary.changes.push({
+          order_id: String(shipment.order_id || ""),
+          order_no: result.order_no || null,
+          integration_order_id: result.integration_order_id || null,
+          courier: shipment.courier || null,
+          tracking_number: shipment.tracking_number || null,
+          order_status_change: result.order_status_change || null,
+          tracking_status_change: result.tracking_status_change || null,
+        });
+      }
     } catch (err) {
       summary.errors += 1;
       courierLogger.apiError({
