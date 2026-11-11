@@ -172,9 +172,41 @@ async function attachCourierTrackingToOrders(orders) {
     byOrderId.set(key, shipment);
   }
 
+  const CourierTracking = getCourierTrackingModel();
+  const inTransitSinceByShipment = new Map();
+  if (CourierTracking) {
+    const inTransitEvents = await CourierTracking.aggregate([
+      {
+        $match: {
+          shipment_id: { $in: shipments.map((shipment) => shipment._id) },
+          status: "In Transit",
+          event_time: { $ne: null },
+        },
+      },
+      {
+        $group: {
+          _id: "$shipment_id",
+          since: { $min: "$event_time" },
+        },
+      },
+    ]);
+    for (const event of inTransitEvents) {
+      if (event.since) {
+        inTransitSinceByShipment.set(String(event._id), event.since);
+      }
+    }
+  }
+
   return orders.map((order) => {
     const shipment = byOrderId.get(String(order._id));
     if (shipment) {
+      const inTransitSince = inTransitSinceByShipment.get(String(shipment._id));
+      const inTransitDays = inTransitSince
+        ? Math.max(
+            0,
+            Math.floor((Date.now() - new Date(inTransitSince).getTime()) / 86400000),
+          )
+        : null;
       const tracking_id = shipment.tracking_number || null;
       const tracking_url =
         shipment.label_url ||
@@ -195,6 +227,8 @@ async function attachCourierTrackingToOrders(orders) {
         tracking_id,
         tracking_number: tracking_id,
         tracking_url,
+        in_transit_since: inTransitSince || null,
+        in_transit_days: inTransitDays,
         courier_provider: shipment.courier || null,
         courier_company,
         courier_shipment: {
