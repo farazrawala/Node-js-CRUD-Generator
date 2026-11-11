@@ -22,6 +22,7 @@ const { createApplicationLog } = require("../utils/applicationLogs");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   buildTrackingStatusFilter,
+  findStuckInTransitOrderIds,
   isStoredInTransitTrackingStatus,
 } = require("../src/utils/orderTrackingStatus");
 const {
@@ -85,6 +86,17 @@ function getCourierShipmentModel() {
     CourierShipmentModel = null;
   }
   return CourierShipmentModel;
+}
+
+let CourierTrackingModel = null;
+function getCourierTrackingModel() {
+  if (CourierTrackingModel) return CourierTrackingModel;
+  try {
+    CourierTrackingModel = require("../src/models/courier_tracking.model");
+  } catch {
+    CourierTrackingModel = null;
+  }
+  return CourierTrackingModel;
 }
 
 /** Public track page for known Pakistani couriers (UI link when API has no tracking_url). */
@@ -2773,6 +2785,39 @@ async function getOrdersWithItems(
     }
   }
 
+  let stuckInTransitOrderIds = null;
+  const rawStuckInTransitDays = req.query?.stuck_in_transit_days;
+  if (rawStuckInTransitDays != null && String(rawStuckInTransitDays).trim()) {
+    const days = Number(rawStuckInTransitDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid stuck_in_transit_days value",
+        message: "Use a whole number between 1 and 365",
+      });
+    }
+
+    const companyId = req.user?.company_id;
+    const companyObjectId =
+      companyId instanceof mongoose.Types.ObjectId
+        ? companyId
+        : mongoose.Types.ObjectId.isValid(String(companyId))
+          ? new mongoose.Types.ObjectId(String(companyId))
+          : companyId;
+    const CourierTracking = getCourierTrackingModel();
+    const CourierShipment = getCourierShipmentModel();
+    if (!CourierTracking || !CourierShipment) {
+      throw new Error("Courier tracking models are unavailable");
+    }
+    stuckInTransitOrderIds = await findStuckInTransitOrderIds({
+      CourierTracking,
+      CourierShipment,
+      companyId: companyObjectId,
+      days,
+    });
+  }
+
   const filter = {
     ...(deletedOnly ?
       { deletedAt: { $exists: true, $ne: null } }
@@ -2785,6 +2830,14 @@ async function getOrdersWithItems(
       : {}),
     ...(typeof req.query?.tracking_status === "string"
       ? buildTrackingStatusFilter(req.query.tracking_status)
+      : {}),
+    ...(stuckInTransitOrderIds
+      ? {
+          $and: [
+            { _id: { $in: stuckInTransitOrderIds } },
+            { order_status: /^in[\s_-]*transit$/i },
+          ],
+        }
       : {}),
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
   };
