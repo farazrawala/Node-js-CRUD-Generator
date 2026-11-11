@@ -2912,6 +2912,7 @@ async function getOrdersWithItems(
   const includeTrackingStatusCounts =
     !deletedOnly && String(req.query?.includeTrackingStatusCounts).toLowerCase() === "true";
   let trackingStatusCounts;
+  let orderStatusCounts;
   if (includeTrackingStatusCounts) {
     const companyId = req.user?.company_id;
     const companyObjectId =
@@ -2936,6 +2937,28 @@ async function getOrdersWithItems(
         },
       },
     ]);
+    const orderStatusRows = await Order.aggregate([
+      {
+        $match: {
+          status: "active",
+          deletedAt: null,
+          company_id: companyObjectId,
+          ...extraFilter,
+        },
+      },
+      {
+        $group: {
+          _id: "$order_status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    orderStatusCounts = orderStatusRows.reduce((counts, row) => {
+      if (typeof row._id === "string" && row._id.trim()) {
+        counts[row._id] = row.count;
+      }
+      return counts;
+    }, {});
     trackingStatusCounts = trackingStatusRows.reduce((counts, row) => {
       if (typeof row._id === "string" && row._id.trim()) {
         if (!isStoredInTransitTrackingStatus(row._id)) {
@@ -2958,6 +2981,7 @@ async function getOrdersWithItems(
     return res.status(response.status).json({
       ...response,
       ...(trackingStatusCounts ? { tracking_status_counts: trackingStatusCounts } : {}),
+      ...(orderStatusCounts ? { order_status_counts: orderStatusCounts } : {}),
     });
   }
 
@@ -3004,6 +3028,7 @@ async function getOrdersWithItems(
     ...response,
     data,
     ...(trackingStatusCounts ? { tracking_status_counts: trackingStatusCounts } : {}),
+    ...(orderStatusCounts ? { order_status_counts: orderStatusCounts } : {}),
   });
 }
 

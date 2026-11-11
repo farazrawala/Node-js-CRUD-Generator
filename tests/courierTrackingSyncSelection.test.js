@@ -4,18 +4,47 @@ const test = require("node:test");
 const CourierService = require("../src/services/CourierService");
 const CourierProvider = require("../src/models/courier_provider.model");
 const CourierShipment = require("../src/models/courier_shipment.model");
-const { UNIFIED_STATUSES } = require("../src/couriers/constants");
+const Order = require("../models/order");
+const { TERMINAL_STATUSES } = require("../src/couriers/constants");
 
-test("tracking sync selects only in-transit shipments with an active courier integration", async () => {
+test("tracking sync selects only POS in-transit shipments with an active courier integration", async () => {
   const shipments = [
-    { _id: "missing-config", company_id: "company-a", courier: "Leopard" },
-    { _id: "configured", company_id: "company-b", courier: "Trax" },
-    { _id: "past-limit", company_id: "company-c", courier: "TCS" },
+    {
+      _id: "missing-config",
+      order_id: "order-a",
+      company_id: "company-a",
+      courier: "Leopard",
+      shipment_status: "Booked",
+    },
+    {
+      _id: "configured",
+      order_id: "order-b",
+      company_id: "company-b",
+      courier: "Trax",
+      shipment_status: "Picked",
+    },
+    {
+      _id: "pos-packed",
+      order_id: "order-c",
+      company_id: "company-c",
+      courier: "TCS",
+      shipment_status: "In Transit",
+    },
+    {
+      _id: "past-limit",
+      order_id: "order-d",
+      company_id: "company-d",
+      courier: "TCS",
+      shipment_status: "Booked",
+    },
   ];
-  const configured = new Set(["company-b:Trax", "company-c:TCS"]);
+  const configured = new Set(["company-b:Trax", "company-d:TCS"]);
+  const posInTransit = new Set(["order-a", "order-b", "order-d"]);
   const findFilters = [];
+  const orderFilters = [];
   const providerFilters = [];
   const originalShipmentFind = CourierShipment.find;
+  const originalOrderFind = Order.find;
   const originalProviderFindOne = CourierProvider.findOne;
 
   CourierShipment.find = (filter) => {
@@ -39,6 +68,20 @@ test("tracking sync selects only in-transit shipments with an active courier int
       },
     };
   };
+  Order.find = (filter) => {
+    orderFilters.push(filter);
+    return {
+      select() {
+        return this;
+      },
+      lean: async () =>
+        [...posInTransit]
+          .filter((id) =>
+            filter._id.$in.some((candidate) => String(candidate) === id),
+          )
+          .map((_id) => ({ _id })),
+    };
+  };
   CourierProvider.findOne = (filter) => {
     providerFilters.push(filter);
     return {
@@ -56,7 +99,12 @@ test("tracking sync selects only in-transit shipments with an active courier int
     assert.deepEqual(findFilters[0], {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
-      shipment_status: UNIFIED_STATUSES.IN_TRANSIT,
+      shipment_status: { $nin: TERMINAL_STATUSES },
+    });
+    assert.deepEqual(orderFilters[0], {
+      _id: { $in: shipments.map((shipment) => shipment.order_id) },
+      deletedAt: null,
+      order_status: "in_transit",
     });
     assert.deepEqual(
       providerFilters.map(({ company_id, provider }) => `${company_id}:${provider}`),
@@ -64,6 +112,7 @@ test("tracking sync selects only in-transit shipments with an active courier int
     );
   } finally {
     CourierShipment.find = originalShipmentFind;
+    Order.find = originalOrderFind;
     CourierProvider.findOne = originalProviderFindOne;
   }
 });

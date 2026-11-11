@@ -43,6 +43,7 @@ const CourierTracking = require("../models/courier_tracking.model");
 async function findSyncableShipments(limit) {
   const syncable = [];
   const providerConfigs = new Map();
+  const Order = mongoose.model("order");
   const pageSize = 100;
   let offset = 0;
 
@@ -50,7 +51,7 @@ async function findSyncableShipments(limit) {
     const candidates = await CourierShipment.find({
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
-      shipment_status: UNIFIED_STATUSES.IN_TRANSIT,
+      shipment_status: { $nin: TERMINAL_STATUSES },
     })
       .sort({ last_tracking_sync: 1, created_at: 1, _id: 1 })
       .skip(offset)
@@ -60,7 +61,20 @@ async function findSyncableShipments(limit) {
     if (!candidates.length) break;
     offset += candidates.length;
 
+    const ordersInTransit = await Order.find({
+      _id: { $in: candidates.map((shipment) => shipment.order_id) },
+      deletedAt: null,
+      order_status: "in_transit",
+    })
+      .select("_id")
+      .lean();
+    const inTransitOrderIds = new Set(
+      ordersInTransit.map((order) => String(order._id)),
+    );
+
     for (const shipment of candidates) {
+      if (!inTransitOrderIds.has(String(shipment.order_id))) continue;
+
       const provider = normalizeProviderKey(shipment.courier) || shipment.courier;
       const configKey = `${shipment.company_id}:${provider}`;
       if (!providerConfigs.has(configKey)) {
