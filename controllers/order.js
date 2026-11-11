@@ -2860,7 +2860,12 @@ async function getOrdersWithItems(
     ...extraFilter,
     ...(typeof req.query?.order_status === "string" &&
     req.query.order_status.trim()
-      ? { order_status: req.query.order_status.trim() }
+      ? {
+          order_status: new RegExp(
+            `^${req.query.order_status.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+            "i",
+          ),
+        }
       : {}),
     ...(typeof req.query?.tracking_status === "string"
       ? buildTrackingStatusFilter(req.query.tracking_status)
