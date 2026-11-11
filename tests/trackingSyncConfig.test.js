@@ -2,9 +2,26 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const { connectMonogodb } = require("../connection");
-const { getSyncBatchSize } = require("../src/jobs/trackingSync.job");
+const {
+  getIntervalMs,
+  getSyncBatchSize,
+} = require("../src/jobs/trackingSync.job");
 
 describe("tracking sync configuration", () => {
+  it("uses an hourly interval by default and supports an override", () => {
+    const previous = process.env.COURIER_TRACKING_SYNC_MS;
+    try {
+      delete process.env.COURIER_TRACKING_SYNC_MS;
+      assert.equal(getIntervalMs(), 60 * 60 * 1000);
+
+      process.env.COURIER_TRACKING_SYNC_MS = "7200000";
+      assert.equal(getIntervalMs(), 2 * 60 * 60 * 1000);
+    } finally {
+      if (previous === undefined) delete process.env.COURIER_TRACKING_SYNC_MS;
+      else process.env.COURIER_TRACKING_SYNC_MS = previous;
+    }
+  });
+
   it("uses a batch size of 25 and never exceeds it", () => {
     const previous = process.env.COURIER_TRACKING_SYNC_LIMIT;
     try {

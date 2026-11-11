@@ -1,5 +1,5 @@
 /**
- * Background tracking sync — every 30 minutes by default.
+ * Background tracking sync — every hour by default.
  * Stops syncing terminal statuses (Delivered / Returned / Cancelled / Failed).
  * @module src/jobs/trackingSync.job
  */
@@ -8,7 +8,7 @@ const CourierService = require("../services/CourierService");
 const courierLogger = require("../utils/courierLogger");
 const { emailTrackingSyncSummary } = require("../utils/trackingSyncSummaryMail");
 
-const DEFAULT_INTERVAL_MS = 30 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_SYNC_BATCH_SIZE = 25;
 
 let timer = null;
@@ -120,5 +120,6 @@ module.exports = {
   stopTrackingSyncJob,
   runOnce,
   getTrackingSyncStatus,
+  getIntervalMs,
   getSyncBatchSize,
 };

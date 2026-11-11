@@ -40,6 +40,46 @@ const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
 const CourierTracking = require("../models/courier_tracking.model");
 
+async function findSyncableShipments(limit) {
+  const syncable = [];
+  const providerConfigs = new Map();
+  const pageSize = 100;
+  let offset = 0;
+
+  while (syncable.length < limit) {
+    const candidates = await CourierShipment.find({
+      deletedAt: null,
+      tracking_number: { $nin: [null, ""] },
+      shipment_status: UNIFIED_STATUSES.IN_TRANSIT,
+    })
+      .sort({ last_tracking_sync: 1, created_at: 1, _id: 1 })
+      .skip(offset)
+      .limit(pageSize)
+      .lean();
+
+    if (!candidates.length) break;
+    offset += candidates.length;
+
+    for (const shipment of candidates) {
+      const provider = normalizeProviderKey(shipment.courier) || shipment.courier;
+      const configKey = `${shipment.company_id}:${provider}`;
+      if (!providerConfigs.has(configKey)) {
+        providerConfigs.set(
+          configKey,
+          Boolean(await loadProviderConfig(shipment.company_id, provider)),
+        );
+      }
+
+      if (providerConfigs.get(configKey)) syncable.push(shipment);
+      if (syncable.length >= limit) break;
+    }
+
+    if (candidates.length < pageSize) break;
+  }
+
+  return syncable;
+}
+
 /** Public track page for known Pakistani couriers. */
 function buildPublicCourierTrackingUrl(provider, trackingId) {
   const id = trackingId != null ? String(trackingId).trim() : "";
@@ -1312,14 +1352,7 @@ async function syncOpenShipments(options = {}) {
     Number.isFinite(requestedLimit) && requestedLimit > 0
       ? Math.max(1, Math.min(Math.floor(requestedLimit), 25))
       : 25;
-  const open = await CourierShipment.find({
-    deletedAt: null,
-    tracking_number: { $nin: [null, ""] },
-    shipment_status: { $nin: TERMINAL_STATUSES },
-  })
-    .sort({ last_tracking_sync: 1, created_at: 1 })
-    .limit(limit)
-    .lean();
+  const open = await findSyncableShipments(limit);
 
   const summary = {
     total: open.length,
@@ -1587,6 +1620,7 @@ module.exports = {
   cancelShipment,
   printLabel,
   syncOpenShipments,
+  findSyncableShipments,
   testCredentials,
   getBookingOptions,
   loadProviderConfig,
