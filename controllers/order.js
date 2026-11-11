@@ -2749,13 +2749,37 @@ async function getOrdersWithItems(
     return res.status(dateResolved.error.status).json(dateResolved.error.body);
   }
 
+  const createdAtFilter = { ...(dateResolved.createdAt || {}) };
+  const rawCreatedAfter = req.query?.createdAfter;
+  if (rawCreatedAfter != null && String(rawCreatedAfter).trim()) {
+    const createdAfter = new Date(String(rawCreatedAfter).trim());
+    if (Number.isNaN(createdAfter.getTime())) {
+      return res.status(400).json({
+        success: false,
+        status: 400,
+        error: "Invalid createdAfter timestamp",
+        message: "Use a valid ISO timestamp for createdAfter",
+      });
+    }
+    if (
+      !createdAtFilter.$gte ||
+      createdAtFilter.$gte.getTime() < createdAfter.getTime()
+    ) {
+      createdAtFilter.$gte = createdAfter;
+    }
+  }
+
   const filter = {
     ...(deletedOnly ?
       { deletedAt: { $exists: true, $ne: null } }
     : { status: "active", deletedAt: null }),
     company_id: req.user?.company_id,
     ...extraFilter,
-    ...(dateResolved.createdAt ? { createdAt: dateResolved.createdAt } : {}),
+    ...(typeof req.query?.order_status === "string" &&
+    req.query.order_status.trim()
+      ? { order_status: req.query.order_status.trim() }
+      : {}),
+    ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (

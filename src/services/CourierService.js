@@ -1273,7 +1273,11 @@ async function printLabel(orderId, options = {}) {
  * @param {number} [options.limit]
  */
 async function syncOpenShipments(options = {}) {
-  const limit = Number(options.limit) || 100;
+  const requestedLimit = Number(options.limit);
+  const limit =
+    Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.max(1, Math.min(Math.floor(requestedLimit), 25))
+      : 25;
   const open = await CourierShipment.find({
     deletedAt: null,
     tracking_number: { $nin: [null, ""] },
