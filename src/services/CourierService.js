@@ -838,7 +838,7 @@ async function persistOrderTracking(shipment, result) {
   try {
     order = await Order.findById(shipment.order_id)
       .select(
-        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id",
+        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id integration_id",
       )
       .lean();
   } catch (err) {
@@ -900,6 +900,8 @@ async function persistOrderTracking(shipment, result) {
     update.order_status = mappedOrderStatus;
   }
 
+  const trackingStatusChanged = Boolean(previousTrackingStatus && update.tracking_status);
+
   if (!Object.keys(update).length) {
     return {
       order_status: currentStatus || mappedOrderStatus || null,
@@ -934,6 +936,38 @@ async function persistOrderTracking(shipment, result) {
     } catch (err) {
       courierLogger.apiError({
         event: "order_status_history_from_tracking_failed",
+        orderId: String(shipment.order_id),
+        error: err.message,
+      });
+    }
+  }
+
+  if (trackingStatusChanged) {
+    try {
+      const integration = order?.integration_id
+        ? await mongoose
+            .model("integration")
+            .findById(order.integration_id)
+            .select("image name")
+            .lean()
+        : null;
+      const { emailTrackingStatusUpdate } = require("../utils/trackingStatusUpdateMail");
+      const mail = await emailTrackingStatusUpdate({
+        orderNo: order?.order_no,
+        status: update.tracking_status,
+        integrationImage: integration?.image,
+        integrationName: integration?.name,
+      });
+      if (!mail.sent) {
+        courierLogger.apiError({
+          event: "tracking_status_email_not_sent",
+          orderId: String(shipment.order_id),
+          reason: mail.reason,
+        });
+      }
+    } catch (err) {
+      courierLogger.apiError({
+        event: "tracking_status_email_failed",
         orderId: String(shipment.order_id),
         error: err.message,
       });
