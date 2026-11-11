@@ -2785,16 +2785,21 @@ async function getOrdersWithItems(
       : {}),
     ...(typeof req.query?.tracking_status === "string" &&
     req.query.tracking_status.trim()
-      ? {
-          tracking_status: new RegExp(
-            `^(?:(?:shipment|shipper)\\s*[-:–]\\s*)?${escapeRegex(
-              req.query.tracking_status
-                .trim()
-                .replace(/^\s*(?:shipment|shipper)\s*[-:–]\s*/i, ""),
-            )}$`,
-            "i",
-          ),
-        }
+      ? (() => {
+          const requestedTrackingStatus = req.query.tracking_status
+            .trim()
+            .replace(/^\s*(?:shipment|shipper)\s*[-:–]\s*/i, "");
+          const statusPattern =
+            /^in[\s_-]*transit$/i.test(requestedTrackingStatus)
+              ? "in[\\s_-]*transit|transit|dispatched|departed|on[\\s_-]*route"
+              : escapeRegex(requestedTrackingStatus);
+          return {
+            tracking_status: new RegExp(
+              `^(?:(?:shipment|shipper)\\s*[-:–]\\s*)?(?:${statusPattern})$`,
+              "i",
+            ),
+          };
+        })()
       : {}),
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
   };
