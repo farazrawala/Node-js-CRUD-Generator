@@ -123,6 +123,10 @@ function buildPublicCourierTrackingUrl(provider, trackingId) {
   return "";
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Attach latest courier shipment tracking_id / tracking_url onto order list rows.
  * @param {Array<object>} orders
@@ -2778,6 +2782,19 @@ async function getOrdersWithItems(
     ...(typeof req.query?.order_status === "string" &&
     req.query.order_status.trim()
       ? { order_status: req.query.order_status.trim() }
+      : {}),
+    ...(typeof req.query?.tracking_status === "string" &&
+    req.query.tracking_status.trim()
+      ? {
+          tracking_status: new RegExp(
+            `^(?:(?:shipment|shipper)\\s*[-:–]\\s*)?${escapeRegex(
+              req.query.tracking_status
+                .trim()
+                .replace(/^\s*(?:shipment|shipper)\s*[-:–]\s*/i, ""),
+            )}$`,
+            "i",
+          ),
+        }
       : {}),
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
   };
