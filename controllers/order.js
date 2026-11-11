@@ -21,6 +21,10 @@ const {
 const { createApplicationLog } = require("../utils/applicationLogs");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
+  buildTrackingStatusFilter,
+  isStoredInTransitTrackingStatus,
+} = require("../src/utils/orderTrackingStatus");
+const {
   createTransactionsFromItems: transactionBulkCreate,
 } = require("./transaction");
 const {
@@ -121,10 +125,6 @@ function buildPublicCourierTrackingUrl(provider, trackingId) {
     return `https://partners.flaship.pk`;
   }
   return "";
-}
-
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -2783,23 +2783,8 @@ async function getOrdersWithItems(
     req.query.order_status.trim()
       ? { order_status: req.query.order_status.trim() }
       : {}),
-    ...(typeof req.query?.tracking_status === "string" &&
-    req.query.tracking_status.trim()
-      ? (() => {
-          const requestedTrackingStatus = req.query.tracking_status
-            .trim()
-            .replace(/^\s*(?:shipment|shipper)\s*[-:–]\s*/i, "");
-          const statusPattern =
-            /^in[\s_-]*transit$/i.test(requestedTrackingStatus)
-              ? "in[\\s_-]*transit|transit|dispatched|departed|on[\\s_-]*route"
-              : escapeRegex(requestedTrackingStatus);
-          return {
-            tracking_status: new RegExp(
-              `^(?:(?:shipment|shipper)\\s*[-:–]\\s*)?(?:${statusPattern})$`,
-              "i",
-            ),
-          };
-        })()
+    ...(typeof req.query?.tracking_status === "string"
+      ? buildTrackingStatusFilter(req.query.tracking_status)
       : {}),
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
   };
@@ -2866,10 +2851,19 @@ async function getOrdersWithItems(
     ]);
     trackingStatusCounts = trackingStatusRows.reduce((counts, row) => {
       if (typeof row._id === "string" && row._id.trim()) {
-        counts[row._id] = row.count;
+        if (!isStoredInTransitTrackingStatus(row._id)) {
+          counts[row._id] = row.count;
+        }
       }
       return counts;
     }, {});
+    trackingStatusCounts["In Transit"] = await Order.countDocuments({
+      status: "active",
+      deletedAt: null,
+      company_id: companyObjectId,
+      ...extraFilter,
+      ...buildTrackingStatusFilter("In Transit"),
+    });
   }
 
   const orderIds = response.data.map((o) => o._id).filter(Boolean);
