@@ -2832,9 +2832,47 @@ async function getOrdersWithItems(
     return res.status(response.status).json(response);
   }
 
+  const includeTrackingStatusCounts =
+    !deletedOnly && String(req.query?.includeTrackingStatusCounts).toLowerCase() === "true";
+  let trackingStatusCounts;
+  if (includeTrackingStatusCounts) {
+    const companyId = req.user?.company_id;
+    const companyObjectId =
+      companyId instanceof mongoose.Types.ObjectId
+        ? companyId
+        : mongoose.Types.ObjectId.isValid(String(companyId))
+          ? new mongoose.Types.ObjectId(String(companyId))
+          : companyId;
+    const trackingStatusRows = await Order.aggregate([
+      {
+        $match: {
+          status: "active",
+          deletedAt: null,
+          company_id: companyObjectId,
+          ...extraFilter,
+        },
+      },
+      {
+        $group: {
+          _id: "$tracking_status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    trackingStatusCounts = trackingStatusRows.reduce((counts, row) => {
+      if (typeof row._id === "string" && row._id.trim()) {
+        counts[row._id] = row.count;
+      }
+      return counts;
+    }, {});
+  }
+
   const orderIds = response.data.map((o) => o._id).filter(Boolean);
   if (orderIds.length === 0) {
-    return res.status(response.status).json(response);
+    return res.status(response.status).json({
+      ...response,
+      ...(trackingStatusCounts ? { tracking_status_counts: trackingStatusCounts } : {}),
+    });
   }
 
   const itemFilter = {
@@ -2879,6 +2917,7 @@ async function getOrdersWithItems(
   return res.status(response.status).json({
     ...response,
     data,
+    ...(trackingStatusCounts ? { tracking_status_counts: trackingStatusCounts } : {}),
   });
 }
 
