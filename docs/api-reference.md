@@ -278,7 +278,13 @@ Shipments are created with **orderId only** — the service loads customer, addr
 | `POST` | `/courier/cancel/:orderId` | Yes | Cancel active shipment |
 | `GET` | `/courier/label/:orderId` | Yes | Label URL |
 | `GET` | `/courier/providers` | Yes | Registered provider keys |
-| `POST` | `/courier/sync` | Yes | Manual open-shipment tracking sync |
+| `POST` | `/courier/sync/in-transit` | Yes | Manually sync up to 25 in-transit POS orders for the authenticated company; accepts optional `{ "limit": 25, "courier_ids": ["<integration-id>"] }` to select integrations |
+| `POST` | `/courier/sync` | Yes | Alias for the manual in-transit tracking sync |
+
+Manual tracking sync requires an authenticated user with company context. It checks only that
+company's POS orders whose status is `in_transit`, have a non-terminal courier shipment with
+a tracking number, and have an active courier integration configured. When `courier_ids` is
+provided, only orders linked to those courier integrations are checked.
 
 Programmatic API:
 

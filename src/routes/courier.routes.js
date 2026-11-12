@@ -22,6 +22,7 @@ router.get("/providers", CourierController.listProviders);
 router.get("/types", CourierController.listTypes);
 router.get("/booking-options", CourierController.getBookingOptions);
 router.post("/sync", CourierController.syncTracking);
+router.post("/sync/in-transit", CourierController.syncTracking);
 
 /** Verify saved (or form-override) courier API credentials. */
 router.post("/test/:courierId", CourierController.testCredentials);

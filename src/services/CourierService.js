@@ -40,19 +40,27 @@ const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
 const CourierTracking = require("../models/courier_tracking.model");
 
-async function findSyncableShipments(limit) {
+async function findSyncableShipments(limit, options = {}) {
   const syncable = [];
   const providerConfigs = new Map();
   const Order = mongoose.model("order");
+  const companyId = options.companyId || null;
+  const hasCourierSelection = Array.isArray(options.courierIds);
+  const courierIds = Array.isArray(options.courierIds)
+    ? options.courierIds.map(String).filter(Boolean)
+    : [];
   const pageSize = 100;
   let offset = 0;
 
   while (syncable.length < limit) {
-    const candidates = await CourierShipment.find({
+    const shipmentFilter = {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
       shipment_status: { $nin: TERMINAL_STATUSES },
-    })
+    };
+    if (companyId) shipmentFilter.company_id = companyId;
+
+    const candidates = await CourierShipment.find(shipmentFilter)
       .sort({ last_tracking_sync: 1, created_at: 1, _id: 1 })
       .skip(offset)
       .limit(pageSize)
@@ -61,11 +69,15 @@ async function findSyncableShipments(limit) {
     if (!candidates.length) break;
     offset += candidates.length;
 
-    const ordersInTransit = await Order.find({
+    const orderFilter = {
       _id: { $in: candidates.map((shipment) => shipment.order_id) },
       deletedAt: null,
       order_status: "in_transit",
-    })
+      ...(hasCourierSelection ? { courier_id: { $in: courierIds } } : {}),
+    };
+    if (companyId) orderFilter.company_id = companyId;
+
+    const ordersInTransit = await Order.find(orderFilter)
       .select("_id")
       .lean();
     const inTransitOrderIds = new Set(
@@ -1366,7 +1378,10 @@ async function syncOpenShipments(options = {}) {
     Number.isFinite(requestedLimit) && requestedLimit > 0
       ? Math.max(1, Math.min(Math.floor(requestedLimit), 25))
       : 25;
-  const open = await findSyncableShipments(limit);
+  const open = await findSyncableShipments(limit, {
+    companyId: options.companyId,
+    courierIds: options.courierIds,
+  });
 
   const summary = {
     total: open.length,

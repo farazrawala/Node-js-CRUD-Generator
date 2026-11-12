@@ -6,6 +6,7 @@
 const CourierService = require("../services/CourierService");
 const { CourierError } = require("../couriers/errors");
 const { logControllerError } = require("../../utils/logControllerError");
+const { createApplicationLog } = require("../../utils/applicationLogs");
 const CourierFactory = require("../couriers/CourierFactory");
 const courierLogger = require("../utils/courierLogger");
 const { listCourierTypes } = require("../../models/courier");
@@ -251,12 +252,63 @@ async function listTypes(req, res) {
  * POST /courier/sync — manual sync trigger (admin)
  */
 async function syncTracking(req, res) {
+  const companyId =
+    req.user?.company_id?._id ||
+    req.user?.company_id ||
+    null;
   try {
+    if (!companyId) {
+      return res.status(401).json({
+        success: false,
+        error: "Authenticated company context is required",
+      });
+    }
+
     const summary = await CourierService.syncOpenShipments({
-      limit: Number(req.query.limit) || 100,
+      companyId,
+      limit: Number(req.body?.limit ?? req.query?.limit) || 25,
+      courierIds: Array.isArray(req.body?.courier_ids)
+        ? req.body.courier_ids.map((id) => String(id).trim()).filter(Boolean)
+        : undefined,
     });
-    return res.status(200).json({ success: true, ...summary });
+    await createApplicationLog(req, {
+      action: "Courier tracking sync",
+      tags: ["syc_courier"],
+      description: {
+        scope: "company",
+        order_status: "in_transit",
+        total: summary.total,
+        updated: summary.updated,
+        errors: summary.errors,
+        order_status_changed: summary.order_status_changed,
+        tracking_status_changed: summary.tracking_status_changed,
+      },
+      company_id: companyId,
+      created_by: req.user?._id,
+    });
+    return res.status(200).json({
+      success: true,
+      scope: "company",
+      order_status: "in_transit",
+      ...summary,
+    });
   } catch (err) {
+    if (companyId) {
+      await createApplicationLog(req, {
+        action: "Courier tracking sync failed",
+        tags: ["syc_courier"],
+        description: {
+          scope: "company",
+          order_status: "in_transit",
+          error: String(err?.message || "Courier tracking sync failed").slice(
+            0,
+            300,
+          ),
+        },
+        company_id: companyId,
+        created_by: req.user?._id,
+      });
+    }
     return sendError(res, err);
   }
 }

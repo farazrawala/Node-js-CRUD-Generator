@@ -37,9 +37,16 @@ test("tracking sync selects only POS in-transit shipments with an active courier
       courier: "TCS",
       shipment_status: "Booked",
     },
+    {
+      _id: "booked-in-transit",
+      order_id: "order-e",
+      company_id: "company-e",
+      courier: "PostEx",
+      shipment_status: "Booked",
+    },
   ];
-  const configured = new Set(["company-b:Trax", "company-d:TCS"]);
-  const posInTransit = new Set(["order-a", "order-b", "order-d"]);
+  const configured = new Set(["company-b:Trax", "company-d:TCS", "company-e:PostEx"]);
+  const posInTransit = new Set(["order-a", "order-b", "order-e"]);
   const findFilters = [];
   const orderFilters = [];
   const providerFilters = [];
@@ -93,9 +100,12 @@ test("tracking sync selects only POS in-transit shipments with an active courier
   };
 
   try {
-    const selected = await CourierService.findSyncableShipments(1);
+    const selected = await CourierService.findSyncableShipments(2);
 
-    assert.deepEqual(selected.map((shipment) => shipment._id), ["configured"]);
+    assert.deepEqual(selected.map((shipment) => shipment._id), [
+      "configured",
+      "booked-in-transit",
+    ]);
     assert.deepEqual(findFilters[0], {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
@@ -108,11 +118,137 @@ test("tracking sync selects only POS in-transit shipments with an active courier
     });
     assert.deepEqual(
       providerFilters.map(({ company_id, provider }) => `${company_id}:${provider}`),
-      ["company-a:Leopard", "company-b:Trax"],
+      ["company-a:Leopard", "company-b:Trax", "company-e:PostEx"],
     );
   } finally {
     CourierShipment.find = originalShipmentFind;
     Order.find = originalOrderFind;
     CourierProvider.findOne = originalProviderFindOne;
+  }
+});
+
+test("manual sync can limit selection to the authenticated company", async () => {
+  const originalShipmentFind = CourierShipment.find;
+  let receivedFilter;
+
+  CourierShipment.find = (filter) => {
+    receivedFilter = filter;
+    return {
+      sort() {
+        return this;
+      },
+      skip() {
+        return this;
+      },
+      limit() {
+        return this;
+      },
+      async lean() {
+        return [];
+      },
+    };
+  };
+
+  try {
+    assert.deepEqual(
+      await CourierService.findSyncableShipments(25, {
+        companyId: "company-b",
+      }),
+      [],
+    );
+    assert.equal(receivedFilter.company_id, "company-b");
+  } finally {
+    CourierShipment.find = originalShipmentFind;
+  }
+});
+
+test("manual sync can limit in-transit orders to selected courier integration IDs", async () => {
+  const shipments = [
+    { _id: "selected", order_id: "order-a", company_id: "company-a", courier: "TCS" },
+    { _id: "other", order_id: "order-b", company_id: "company-a", courier: "TCS" },
+  ];
+  const selectedCourierId = "64b000000000000000000003";
+  const originalShipmentFind = CourierShipment.find;
+  const originalOrderFind = Order.find;
+  const originalProviderFindOne = CourierProvider.findOne;
+  let receivedOrderFilter;
+
+  CourierShipment.find = () => ({
+    sort() {
+      return this;
+    },
+    skip() {
+      return this;
+    },
+    limit() {
+      return this;
+    },
+    lean: async () => shipments,
+  });
+  Order.find = (filter) => {
+    receivedOrderFilter = filter;
+    return {
+      select() {
+        return this;
+      },
+      lean: async () => [{ _id: "order-a" }],
+    };
+  };
+  CourierProvider.findOne = () => ({ lean: async () => ({ enabled: true }) });
+
+  try {
+    const selected = await CourierService.findSyncableShipments(25, {
+      companyId: "company-a",
+      courierIds: [selectedCourierId],
+    });
+
+    assert.deepEqual(selected.map((shipment) => shipment._id), ["selected"]);
+    assert.deepEqual(receivedOrderFilter.courier_id, { $in: [selectedCourierId] });
+  } finally {
+    CourierShipment.find = originalShipmentFind;
+    Order.find = originalOrderFind;
+    CourierProvider.findOne = originalProviderFindOne;
+  }
+});
+
+test("manual sync with an empty integration selection does not include every integration", async () => {
+  const originalShipmentFind = CourierShipment.find;
+  const originalOrderFind = Order.find;
+  let receivedOrderFilter;
+
+  CourierShipment.find = () => ({
+    sort() {
+      return this;
+    },
+    skip() {
+      return this;
+    },
+    limit() {
+      return this;
+    },
+    lean: async () => [
+      { _id: "shipment-a", order_id: "order-a", company_id: "company-a" },
+    ],
+  });
+  Order.find = (filter) => {
+    receivedOrderFilter = filter;
+    return {
+      select() {
+        return this;
+      },
+      lean: async () => [],
+    };
+  };
+
+  try {
+    const selected = await CourierService.findSyncableShipments(25, {
+      courierIds: [],
+    });
+
+    assert.deepEqual(selected, []);
+    assert.deepEqual(receivedOrderFilter.courier_id, { $in: [] });
+  } finally {
+    CourierShipment.find = originalShipmentFind;
+    Order.find = originalOrderFind;
   }
 });
