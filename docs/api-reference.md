@@ -282,8 +282,8 @@ Shipments are created with **orderId only** — the service loads customer, addr
 | `POST` | `/courier/sync` | Yes | Alias for the manual in-transit tracking sync |
 
 Manual tracking sync requires an authenticated user with company context. It checks only that
-company's POS orders whose status is `in_transit`, have a non-terminal courier shipment with
-a tracking number, and have an active courier integration configured. When `courier_ids` is
+company's POS orders whose status is `in_transit` or whose courier shipment status is `Booked`,
+with a non-terminal shipment, tracking number, and active courier integration configured. When `courier_ids` is
 provided, only orders linked to those courier integrations are checked.
 
 Programmatic API:

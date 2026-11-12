@@ -44,8 +44,20 @@ test("tracking sync selects only POS in-transit shipments with an active courier
       courier: "PostEx",
       shipment_status: "Booked",
     },
+    {
+      _id: "booked-pos-packed",
+      order_id: "order-f",
+      company_id: "company-f",
+      courier: "Flagship",
+      shipment_status: "Booked",
+    },
   ];
-  const configured = new Set(["company-b:Trax", "company-d:TCS", "company-e:PostEx"]);
+  const configured = new Set([
+    "company-b:Trax",
+    "company-d:TCS",
+    "company-e:PostEx",
+    "company-f:Flagship",
+  ]);
   const posInTransit = new Set(["order-a", "order-b", "order-e"]);
   const findFilters = [];
   const orderFilters = [];
@@ -77,12 +89,18 @@ test("tracking sync selects only POS in-transit shipments with an active courier
   };
   Order.find = (filter) => {
     orderFilters.push(filter);
+    const bookedCondition = filter.$or.find((condition) => condition._id);
+    const bookedOrderIds = bookedCondition
+      ? bookedCondition._id.$in
+      : [];
     return {
       select() {
         return this;
       },
       lean: async () =>
         [...posInTransit]
+          .concat((bookedOrderIds || []).map(String))
+          .filter((id, index, values) => values.indexOf(id) === index)
           .filter((id) =>
             filter._id.$in.some((candidate) => String(candidate) === id),
           )
@@ -100,11 +118,13 @@ test("tracking sync selects only POS in-transit shipments with an active courier
   };
 
   try {
-    const selected = await CourierService.findSyncableShipments(2);
+    const selected = await CourierService.findSyncableShipments(4);
 
     assert.deepEqual(selected.map((shipment) => shipment._id), [
       "configured",
+      "past-limit",
       "booked-in-transit",
+      "booked-pos-packed",
     ]);
     assert.deepEqual(findFilters[0], {
       deletedAt: null,
@@ -114,11 +134,20 @@ test("tracking sync selects only POS in-transit shipments with an active courier
     assert.deepEqual(orderFilters[0], {
       _id: { $in: shipments.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      order_status: "in_transit",
+      $or: [
+        { order_status: "in_transit" },
+        { _id: { $in: ["order-a", "order-d", "order-e", "order-f"] } },
+      ],
     });
     assert.deepEqual(
       providerFilters.map(({ company_id, provider }) => `${company_id}:${provider}`),
-      ["company-a:Leopard", "company-b:Trax", "company-e:PostEx"],
+      [
+        "company-a:Leopard",
+        "company-b:Trax",
+        "company-d:TCS",
+        "company-e:PostEx",
+        "company-f:Flagship",
+      ],
     );
   } finally {
     CourierShipment.find = originalShipmentFind;

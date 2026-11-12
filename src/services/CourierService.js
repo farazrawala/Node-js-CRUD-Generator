@@ -69,10 +69,18 @@ async function findSyncableShipments(limit, options = {}) {
     if (!candidates.length) break;
     offset += candidates.length;
 
+    const bookedOrderIds = candidates
+      .filter(
+        (shipment) => shipment.shipment_status === UNIFIED_STATUSES.BOOKED,
+      )
+      .map((shipment) => shipment.order_id);
     const orderFilter = {
       _id: { $in: candidates.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      order_status: "in_transit",
+      $or: [
+        { order_status: "in_transit" },
+        ...(bookedOrderIds.length ? [{ _id: { $in: bookedOrderIds } }] : []),
+      ],
       ...(hasCourierSelection ? { courier_id: { $in: courierIds } } : {}),
     };
     if (companyId) orderFilter.company_id = companyId;
