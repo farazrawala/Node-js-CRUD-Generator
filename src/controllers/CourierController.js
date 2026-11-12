@@ -273,7 +273,7 @@ async function syncTracking(req, res) {
     });
     await createApplicationLog(req, {
       action: "Courier tracking sync",
-      tags: ["syc_courier"],
+      tags: ["sync_courier"],
       description: {
         scope: "company",
         eligible_statuses: ["in_transit", "shipment_booked"],
@@ -296,7 +296,7 @@ async function syncTracking(req, res) {
     if (companyId) {
       await createApplicationLog(req, {
         action: "Courier tracking sync failed",
-        tags: ["syc_courier"],
+        tags: ["sync_courier"],
         description: {
           scope: "company",
           eligible_statuses: ["in_transit", "shipment_booked"],
