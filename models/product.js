@@ -92,6 +92,46 @@ const modelSchema = new mongoose.Schema(
       enum: ["Single", "Variable"],
       default: "Single",
     },
+    is_deal: {
+      type: Boolean,
+      field_name: "Is Deal",
+      default: false,
+    },
+    deal_product_ids: {
+      type: [mongoose.Schema.Types.ObjectId],
+      ref: "product",
+      default: [],
+      field_name: "Deal Products",
+      field_type: "multiselect",
+    },
+    deal_products: {
+      type: [
+        {
+          _id: false,
+          product_id: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "product",
+            required: true,
+          },
+          variant_id: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "product",
+          },
+          attributes: {
+            type: [
+              {
+                _id: false,
+                name: { type: String, trim: true, required: true },
+                value: { type: String, trim: true, required: true },
+              },
+            ],
+            default: [],
+          },
+        },
+      ],
+      default: [],
+      field_name: "Deal Product Sizes",
+    },
     // stock: {
     //   type: Number,
     //   default: 0,
