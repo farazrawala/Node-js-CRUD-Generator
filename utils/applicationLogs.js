@@ -46,7 +46,8 @@ function shouldDeferListAccessLogToHandler(req) {
     .toLowerCase();
   if (
     path.includes("/company/list-cache") ||
-    path.includes("/company/remove-cache")
+    path.includes("/company/remove-cache") ||
+    path.includes("/company/table-backup")
   ) {
     return true;
   }

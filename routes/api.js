@@ -914,6 +914,13 @@ router.get("/company/get-all-for-listing", getAllForListing);
 
 router.get("/company/list-cache", listAllCache);
 
+const {
+  listCompanyTables,
+  downloadCompanyTable,
+} = require("../controllers/companyTableBackup");
+router.get("/company/table-backup", listCompanyTables);
+router.get("/company/table-backup/:table/download", downloadCompanyTable);
+
 router.get("/company/queue", listAllQueues);
 router.get("/company/queue/:module", getQueueStatus);
 router.post("/company/queue/:module/enqueue", enqueueQueueJob);
