@@ -39,9 +39,10 @@ const ORDER_STATUS_LABELS = {
   processing: "Processing",
   return: "Returned",
   return_received: "Return received",
+  shipment_cancel: "Shipment cancelled",
 };
 /** Statuses where the order has not left the store yet. */
-const CANCELLABLE_STATUSES = new Set(["active", "placed", "confirmed", "pending", "draft", "on_hold", "processing"]);
+const CANCELLABLE_STATUSES = new Set(["active", "placed", "confirmed", "pending", "draft", "on_hold", "processing", "shipment_cancel"]);
 
 const statusLabel = (status) =>
   ORDER_STATUS_LABELS[status] ||

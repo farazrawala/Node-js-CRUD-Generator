@@ -28,6 +28,7 @@ Allowed values for `order.order_status`, with stock effect:
 | `processing` | Payment received, awaiting fulfillment | **out** |
 | `return` | Return in progress / recorded | **in** |
 | `return_received` | Return received | **in** |
+| `shipment_cancel` | Courier shipment cancelled, awaiting a new booking | **in** |
 
 Export: `Order.ORDER_STATUS_VALUES` / `require("../models/order").ORDER_STATUS_VALUES`.
 

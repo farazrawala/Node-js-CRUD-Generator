@@ -1545,6 +1545,9 @@ const POS_ORDER_STATUS_RANK = Object.freeze({
   // Legacy / invalid values previously written by older Shopify mappers
   completed: 6,
   delivered: 6,
+  // Courier shipment cancelled in OMS. The store still shows the old fulfillment,
+  // so a pull must not move the order back to packed / in_transit / delivered.
+  shipment_cancel: 7,
   cancelled: 90,
   failed: 90,
   duplicate: 90,
@@ -2309,6 +2312,7 @@ function mapPosOrderStatusToWoo(posStatus) {
     refunded: "refunded",
     return: "refunded",
     return_received: "refunded",
+    shipment_cancel: "processing",
     duplicate: "cancelled",
     draft: "pending",
   };

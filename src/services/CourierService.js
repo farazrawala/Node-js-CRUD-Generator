@@ -1101,7 +1101,7 @@ async function appendTrackingEvent({
 const SHIPPING_ORDER_STATUSES = new Set(["packed", "in_transit"]);
 
 /**
- * After a courier cancel: order packed / in_transit → pending (+ website status).
+ * After a courier cancel: order packed / in_transit → shipment_cancel (+ website status).
  * Orders in any other status (delivered, cancelled, return…) are left alone.
  */
 async function revertOrderStatusAfterShipmentCancel(shipment) {
@@ -1113,7 +1113,7 @@ async function revertOrderStatusAfterShipmentCancel(shipment) {
   const currentStatus = String(order.order_status || "").trim();
   if (!SHIPPING_ORDER_STATUSES.has(currentStatus)) return null;
 
-  const nextStatus = "pending";
+  const nextStatus = "shipment_cancel";
   const companyId = order.company_id || shipment.company_id;
 
   const { applyOrderStatusStockTransition } = require("../../controllers/order");
@@ -1190,7 +1190,7 @@ async function cancelShipment(orderId, options = {}) {
   }
 
   // Booking moved the order to packed / in_transit; with the shipment gone it
-  // goes back to pending, like a freshly placed order (stock is restored too).
+  // moves to shipment_cancel until it is booked again (stock is restored too).
   try {
     await revertOrderStatusAfterShipmentCancel(shipment);
   } catch (err) {

@@ -2139,6 +2139,8 @@ function orderStatusRestoreReferenceName(toStatus) {
     case "return":
     case "return_received":
       return "Order Return";
+    case "shipment_cancel":
+      return "Shipment Cancel";
     case "refunded":
       return "Order Refund";
     default:
@@ -7151,6 +7153,7 @@ const POS_TO_WEBSITE_STATUS_FALLBACK = Object.freeze({
   on_hold: "on-hold",
   return: "refunded",
   return_received: "refunded",
+  shipment_cancel: "pending",
   duplicate: "voided",
   products_skipped: "on-hold",
 });

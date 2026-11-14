@@ -68,6 +68,7 @@ const ORDER_STATUS_VALUES = [
   "processing", // Payment received, awaiting fulfillment
   "return", // Return in progress / recorded
   "return_received", // Return received
+  "shipment_cancel", // Courier shipment cancelled — awaiting a new booking
 ];
 
 /** Allowed values for `order.tags`. */
@@ -115,6 +116,7 @@ const ORDER_STATUS_STOCK = Object.freeze({
     "failed",
     "return",
     "return_received",
+    "shipment_cancel",
     // website / legacy (not in ORDER_STATUS_VALUES)
     "refunded",
   ]),
@@ -200,6 +202,7 @@ const POS_TO_WEBSITE_STATUS = Object.freeze({
   on_hold: "on-hold",
   return: "refunded",
   return_received: "refunded",
+  shipment_cancel: "pending",
   duplicate: "voided",
   products_skipped: "on-hold",
 });
@@ -230,6 +233,7 @@ const ORDER_STATUS_GROUPS = {
     "on_hold",
     "processing",
     "products_skipped",
+    "shipment_cancel",
   ]),
   /** Physical / digital fulfillment */
   fulfillment: new Set(["packed", "in_transit", "shipped", "delivered"]),
@@ -1073,6 +1077,7 @@ async function softDeleteDuplicateImportedOrders(coll) {
     duplicate: 0,
     return: 0,
     return_received: 0,
+    shipment_cancel: 20,
   };
 
   function rankStatus(status) {
