@@ -556,6 +556,37 @@ async function createShipment(orderId, options = {}) {
       if (courierRef) {
         orderUpdate.courier_id = courierRef;
       }
+      // Cancelling the previous shipment put this order's stock back; booking
+      // again takes it out, so the two always net to zero.
+      try {
+        const currentOrder = await mongoose
+          .model("order")
+          .findById(order._id)
+          .lean();
+        if (
+          currentOrder &&
+          String(currentOrder.order_status || "").trim() === "shipment_cancel"
+        ) {
+          const {
+            applyOrderStatusStockTransition,
+          } = require("../../controllers/order");
+          await applyOrderStatusStockTransition({
+            order: currentOrder,
+            toStatus: orderUpdate.order_status,
+            req: buildSystemReq(
+              currentOrder.company_id || order.company_id,
+              "/api/courier/shipment",
+            ),
+            logUrl: "/api/courier/shipment",
+          });
+        }
+      } catch (err) {
+        courierLogger.apiError({
+          event: "order_status_stock_after_rebook_failed",
+          orderId: String(order._id),
+          error: err.message,
+        });
+      }
       await mongoose.model("order").findByIdAndUpdate(order._id, orderUpdate);
       try {
         const updatedOrder = await mongoose
@@ -956,10 +987,10 @@ async function persistOrderTracking(shipment, result) {
       await applyOrderStatusStockTransition({
         order,
         toStatus: mappedOrderStatus,
-        req: {
-          user: { company_id: order.company_id || shipment.company_id },
-          originalUrl: "/api/courier/tracking",
-        },
+        req: buildSystemReq(
+          order.company_id || shipment.company_id,
+          "/api/courier/tracking",
+        ),
         logUrl: "/api/courier/tracking",
       });
     } catch (err) {
@@ -1101,6 +1132,23 @@ async function appendTrackingEvent({
 const SHIPPING_ORDER_STATUSES = new Set(["packed", "in_transit"]);
 
 /**
+ * Request stand-in for order helpers called outside an HTTP request. They read
+ * and temporarily rewrite `params` / `body`, so those must exist.
+ */
+function buildSystemReq(companyId, url) {
+  return {
+    user: { company_id: companyId },
+    params: {},
+    body: {},
+    query: {},
+    headers: {},
+    method: "POST",
+    originalUrl: url,
+    path: url,
+  };
+}
+
+/**
  * After a courier cancel: order packed / in_transit → shipment_cancel (+ website status).
  * Orders in any other status (delivered, cancelled, return…) are left alone.
  */
@@ -1116,16 +1164,24 @@ async function revertOrderStatusAfterShipmentCancel(shipment) {
   const nextStatus = "shipment_cancel";
   const companyId = order.company_id || shipment.company_id;
 
-  const { applyOrderStatusStockTransition } = require("../../controllers/order");
-  await applyOrderStatusStockTransition({
-    order,
-    toStatus: nextStatus,
-    req: {
-      user: { company_id: companyId },
-      originalUrl: "/api/courier/cancel",
-    },
-    logUrl: "/api/courier/cancel",
-  });
+  // Stock restore must not block the status change (same as tracking updates).
+  try {
+    const { applyOrderStatusStockTransition } = require("../../controllers/order");
+    await applyOrderStatusStockTransition({
+      order,
+      toStatus: nextStatus,
+      req: buildSystemReq(companyId, "/api/courier/cancel"),
+      logUrl: "/api/courier/cancel",
+    });
+  } catch (err) {
+    courierLogger.apiError({
+      event: "order_status_stock_after_cancel_failed",
+      orderId: String(order._id),
+      from: currentStatus,
+      to: nextStatus,
+      error: err.message,
+    });
+  }
 
   const $set = { order_status: nextStatus };
   const websiteStatus =
