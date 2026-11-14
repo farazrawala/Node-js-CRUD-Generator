@@ -56,6 +56,7 @@ const POS_TO_SHOPIFY_ACTION_CASES = [
   ["return", "refund"],
   ["return_received", "refund"],
   ["on_hold", "hold"],
+  ["shipment_cancel", "cancel_fulfillment"],
   ["failed", "none"],
   ["products_skipped", "none"],
 ];

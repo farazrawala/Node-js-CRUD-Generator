@@ -1972,6 +1972,10 @@ function mapPosOrderStatusToShopifyFulfillmentAction(posStatus) {
   if (s === "on_hold") {
     return "hold";
   }
+  if (s === "shipment_cancel") {
+    // Courier booking cancelled in OMS → cancel that fulfillment on Shopify.
+    return "cancel_fulfillment";
+  }
   if (s === "delivered" || s === "completed") {
     return "deliver";
   }

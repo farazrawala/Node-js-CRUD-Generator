@@ -1143,7 +1143,25 @@ async function revertOrderStatusAfterShipmentCancel(shipment) {
     companyId,
   });
 
-  return { from: currentStatus, to: nextStatus };
+  // Tell the store: the fulfillment carrying the cancelled CN is cancelled there too.
+  let push_order = null;
+  try {
+    const updatedOrder = await Order.findById(order._id).lean();
+    const { enqueuePushOrderJob } = require("../../utils/orderPushQueue");
+    push_order = await enqueuePushOrderJob({
+      order: updatedOrder,
+      companyId,
+      remarks: `Auto push_order after courier shipment cancel (${currentStatus} → ${nextStatus})`,
+    });
+  } catch (err) {
+    courierLogger.apiError({
+      event: "push_order_after_shipment_cancel_failed",
+      orderId: String(order._id),
+      error: err.message,
+    });
+  }
+
+  return { from: currentStatus, to: nextStatus, push_order };
 }
 
 /**
@@ -1163,7 +1181,22 @@ async function cancelShipment(orderId, options = {}) {
 
   const company = await mongoose.model("company").findById(shipment.company_id).lean();
   const { driver } = await resolveDriver(company, shipment.courier);
-  const result = await driver.cancelShipment(shipment.toObject());
+  let result;
+  try {
+    result = await driver.cancelShipment(shipment.toObject());
+  } catch (err) {
+    // The courier refuses to cancel a CN it already cancelled. If its own
+    // tracking says the shipment is cancelled, finish the cancel on our side.
+    let alreadyCancelled = false;
+    try {
+      const live = await driver.getTracking(shipment.tracking_number);
+      alreadyCancelled = live?.status === UNIFIED_STATUSES.CANCELLED;
+    } catch {
+      /* keep the original cancel error */
+    }
+    if (!alreadyCancelled) throw err;
+    result = { success: true, raw: err.details || null };
+  }
 
   shipment.shipment_status = UNIFIED_STATUSES.CANCELLED;
   shipment.api_response = result.raw || shipment.api_response;

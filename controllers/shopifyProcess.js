@@ -5413,6 +5413,94 @@ async function updateShopifyFulfillmentTracking(
   });
 }
 
+/** Tracking numbers Shopify holds on a fulfillment (REST shape). */
+function shopifyFulfillmentTrackingNumbers(fulfillment) {
+  const numbers = [
+    fulfillment?.tracking_number,
+    ...(Array.isArray(fulfillment?.tracking_numbers)
+      ? fulfillment.tracking_numbers
+      : []),
+  ];
+  return [
+    ...new Set(
+      numbers.map((value) => String(value || "").trim()).filter(Boolean),
+    ),
+  ];
+}
+
+/**
+ * Cancel the Shopify fulfillments that carry a courier booking cancelled in OMS.
+ * Only fulfillments whose tracking number matches a cancelled POS shipment are
+ * touched, so a live booking (or one made in Shopify) is never cancelled.
+ */
+async function cancelShopifyFulfillmentsForCancelledShipments(
+  client,
+  remoteOrderId,
+  posOrderId,
+) {
+  const result = { cancelled: [], failed: [], cancelled_tracking_numbers: [] };
+
+  let CourierShipment;
+  try {
+    CourierShipment = require("../src/models/courier_shipment.model");
+  } catch {
+    return { ...result, skipped: true, reason: "courier_module_unavailable" };
+  }
+  const orderId = coalesceObjectId(posOrderId);
+  if (!orderId) return { ...result, skipped: true, reason: "missing_order_id" };
+
+  const shipments = await CourierShipment.find({
+    order_id: orderId,
+    deletedAt: null,
+    tracking_number: { $nin: [null, ""] },
+  })
+    .select("tracking_number shipment_status")
+    .lean();
+  const liveCns = new Set();
+  const cancelledCns = new Set();
+  for (const shipment of shipments) {
+    const cn = String(shipment.tracking_number || "").trim();
+    if (!cn) continue;
+    if (shipment.shipment_status === "Cancelled") cancelledCns.add(cn);
+    else liveCns.add(cn);
+  }
+  // Booked again with the same CN → that fulfillment is live, leave it.
+  for (const cn of liveCns) cancelledCns.delete(cn);
+  result.cancelled_tracking_numbers = [...cancelledCns];
+  if (!cancelledCns.size) {
+    return { ...result, skipped: true, reason: "no_cancelled_shipment" };
+  }
+
+  const fulfillments = await listShopifyOrderFulfillments(client, remoteOrderId);
+  for (const fulfillment of fulfillments) {
+    const status = String(fulfillment?.status || "").trim().toLowerCase();
+    if (status === "cancelled" || status === "error" || status === "failure") {
+      continue;
+    }
+    const numbers = shopifyFulfillmentTrackingNumbers(fulfillment);
+    if (!numbers.some((number) => cancelledCns.has(number))) continue;
+    try {
+      await client.post({
+        path: `fulfillments/${fulfillment.id}/cancel`,
+        data: {},
+        type: "application/json",
+      });
+      result.cancelled.push({ id: fulfillment.id, tracking_numbers: numbers });
+    } catch (error) {
+      console.warn(
+        `[shopify push_order] cancel fulfillment ${fulfillment.id} failed:`,
+        describeShopifyError(error),
+      );
+      result.failed.push({
+        id: fulfillment.id,
+        tracking_numbers: numbers,
+        error: describeShopifyError(error),
+      });
+    }
+  }
+  return result;
+}
+
 async function markShopifyFulfillmentsDelivered(client, remoteOrderId) {
   const fulfillments = await listShopifyOrderFulfillments(
     client,
@@ -5736,6 +5824,25 @@ async function push_order(req, res, process) {
           posStatus,
           note: `OMS return push for ${posOrder.order_no || posOrder._id}`,
         });
+      } else if (fulfillmentAction === "cancel_fulfillment") {
+        syncResult.fulfillment_cancel =
+          await cancelShopifyFulfillmentsForCancelledShipments(
+            client,
+            remoteId,
+            posOrder._id,
+          );
+        if ((syncResult.fulfillment_cancel.failed || []).length) {
+          const first = syncResult.fulfillment_cancel.failed[0];
+          const msg =
+            `Could not cancel Shopify fulfillment for ${posOrder.order_no || posOrder._id} ` +
+            `(tracking ${(first.tracking_numbers || []).join(", ") || "—"}): ${first.error}`;
+          await markProcessOutcome(process._id, "failed", msg.slice(0, 500));
+          return res.status(502).json({
+            success: false,
+            message: msg,
+            data: syncResult,
+          });
+        }
       } else if (fulfillmentAction === "none") {
         syncResult.skipped = true;
         syncResult.reason = "no_shopify_fulfillment_mapping";
@@ -5928,6 +6035,10 @@ async function push_order(req, res, process) {
           : syncResult.shipment?.shipment_events?.length ?
             `shipment status → ${syncResult.shipment.shipment_event_status?.replace(/_/g, " ") || "updated"}`
           : "no shipment tracking update"
+        : fulfillmentAction === "cancel_fulfillment" ?
+          (syncResult.fulfillment_cancel?.cancelled || []).length
+            ? `cancelled ${(syncResult.fulfillment_cancel.cancelled || []).length} fulfillment(s) for tracking ${(syncResult.fulfillment_cancel.cancelled_tracking_numbers || []).join(", ")}`
+            : `no fulfillment to cancel (${syncResult.fulfillment_cancel?.reason || "none carries the cancelled tracking"})`
         : fulfillmentAction === "deliver" ?
           `delivered (${(syncResult.delivered || []).length} fulfillment event(s))`
         : syncResult.oms_status_tag?.updated
@@ -6541,6 +6652,7 @@ module.exports = {
   pull_order,
   push_order,
   push_order_tracking,
+  cancelShopifyFulfillmentsForCancelledShipments,
   fetch_product,
   sync_product,
   sync_category,
