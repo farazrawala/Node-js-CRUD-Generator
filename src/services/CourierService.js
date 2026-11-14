@@ -1121,6 +1121,26 @@ async function cancelShipment(orderId, options = {}) {
   shipment.api_response = result.raw || shipment.api_response;
   await shipment.save();
 
+  // Drop the cancelled CN from the order so lists stop showing it as live tracking.
+  // Only when the order still points at this CN (a newer booking must be kept).
+  try {
+    const cancelledCn = String(shipment.tracking_number || "").trim();
+    if (cancelledCn) {
+      await mongoose.model("order").updateOne(
+        { _id: shipment.order_id, courier_tracking_number: cancelledCn },
+        {
+          $set: {
+            courier_tracking_number: "",
+            tracking_status: "",
+            tracking_details: "",
+          },
+        },
+      );
+    }
+  } catch {
+    /* non-fatal */
+  }
+
   await appendTrackingEvent({
     shipment,
     trackingNumber: shipment.tracking_number,

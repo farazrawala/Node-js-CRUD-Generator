@@ -172,6 +172,23 @@ async function attachCourierTrackingToOrders(orders) {
     byOrderId.set(key, shipment);
   }
 
+  // CNs cancelled with the courier: the order may still carry one in
+  // courier_tracking_number (cancelled before the cancel flow cleared it).
+  const cancelledShipments = await CourierShipment.find({
+    order_id: { $in: orderIds },
+    deletedAt: null,
+    tracking_number: { $nin: [null, ""] },
+    shipment_status: "Cancelled",
+  })
+    .select("order_id tracking_number")
+    .lean();
+  const cancelledCnKeys = new Set(
+    cancelledShipments.map(
+      (shipment) =>
+        `${String(shipment.order_id)}:${String(shipment.tracking_number).trim()}`,
+    ),
+  );
+
   const CourierTracking = getCourierTrackingModel();
   const inTransitSinceByShipment = new Map();
   if (CourierTracking) {
@@ -245,6 +262,10 @@ async function attachCourierTrackingToOrders(orders) {
     const tracking_id =
       String(order.courier_tracking_number || "").trim() || null;
     if (!tracking_id) return order;
+    if (cancelledCnKeys.has(`${String(order._id)}:${tracking_id}`)) {
+      // Blank it in the row too — the list reads courier_tracking_number as a CN.
+      return { ...order, courier_tracking_number: "" };
+    }
 
     const details = String(order.tracking_details || "");
     const courierMatch = details.match(/Courier:\s*([^|]+)/i);
