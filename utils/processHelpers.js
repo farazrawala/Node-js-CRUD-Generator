@@ -1866,7 +1866,15 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
 
   let appliedShopifyTracking = null;
   if (String(store || "").toLowerCase() === "shopify") {
-    const remoteTracking = extractShopifyFulfillmentTracking(remoteOrder);
+    let remoteTracking = extractShopifyFulfillmentTracking(remoteOrder);
+    // The shipment was cancelled in OMS but the store still lists its fulfillment:
+    // do not bring that CN (or its status) back onto the order.
+    if (
+      remoteTracking?.tracking_number &&
+      (await isCancelledPosShipmentCn(existing._id, remoteTracking.tracking_number))
+    ) {
+      remoteTracking = null;
+    }
     const trackingFields = buildPosTrackingFieldsFromShopify(remoteTracking);
     const existingCn = String(existing?.courier_tracking_number || "").trim();
     // Prefer POS-booked tracking when already set; otherwise import from Shopify.
@@ -2208,6 +2216,25 @@ async function hasPosBookedCourierShipment(orderId) {
     deletedAt: null,
     tracking_number: { $nin: [null, ""] },
     "api_request.source": { $ne: "shopify_import" },
+  });
+  return Boolean(row);
+}
+
+/** True when this CN belongs to a shipment of the order that was cancelled in OMS. */
+async function isCancelledPosShipmentCn(orderId, trackingNumber) {
+  const cn = String(trackingNumber || "").trim();
+  if (!orderId || !cn) return false;
+  let CourierShipment;
+  try {
+    CourierShipment = require("../src/models/courier_shipment.model");
+  } catch {
+    return false;
+  }
+  const row = await CourierShipment.exists({
+    order_id: orderId,
+    deletedAt: null,
+    tracking_number: cn,
+    shipment_status: "Cancelled",
   });
   return Boolean(row);
 }
