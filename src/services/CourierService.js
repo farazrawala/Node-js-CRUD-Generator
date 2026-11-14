@@ -1098,6 +1098,54 @@ async function appendTrackingEvent({
   });
 }
 
+const SHIPPING_ORDER_STATUSES = new Set(["packed", "in_transit"]);
+
+/**
+ * After a courier cancel: order packed / in_transit → pending (+ website status).
+ * Orders in any other status (delivered, cancelled, return…) are left alone.
+ */
+async function revertOrderStatusAfterShipmentCancel(shipment) {
+  if (!shipment?.order_id) return null;
+  const Order = mongoose.model("order");
+  const order = await Order.findById(shipment.order_id).lean();
+  if (!order || order.deletedAt) return null;
+
+  const currentStatus = String(order.order_status || "").trim();
+  if (!SHIPPING_ORDER_STATUSES.has(currentStatus)) return null;
+
+  const nextStatus = "pending";
+  const companyId = order.company_id || shipment.company_id;
+
+  const { applyOrderStatusStockTransition } = require("../../controllers/order");
+  await applyOrderStatusStockTransition({
+    order,
+    toStatus: nextStatus,
+    req: {
+      user: { company_id: companyId },
+      originalUrl: "/api/courier/cancel",
+    },
+    logUrl: "/api/courier/cancel",
+  });
+
+  const $set = { order_status: nextStatus };
+  const websiteStatus =
+    typeof Order.mapPosOrderStatusToWebsiteStatus === "function"
+      ? Order.mapPosOrderStatusToWebsiteStatus(nextStatus)
+      : null;
+  if (websiteStatus) $set.order_website_status = websiteStatus;
+
+  await Order.updateOne({ _id: order._id }, { $set });
+
+  const { recordOrderStatusUpdate } = require("../../utils/orderStatusHistory");
+  await recordOrderStatusUpdate({
+    orderId: order._id,
+    orderStatus: nextStatus,
+    companyId,
+  });
+
+  return { from: currentStatus, to: nextStatus };
+}
+
 /**
  * @param {string} orderId
  * @param {object} [options]
@@ -1139,6 +1187,18 @@ async function cancelShipment(orderId, options = {}) {
     }
   } catch {
     /* non-fatal */
+  }
+
+  // Booking moved the order to packed / in_transit; with the shipment gone it
+  // goes back to pending, like a freshly placed order (stock is restored too).
+  try {
+    await revertOrderStatusAfterShipmentCancel(shipment);
+  } catch (err) {
+    courierLogger.apiError({
+      event: "order_status_revert_after_cancel_failed",
+      orderId: String(shipment.order_id),
+      error: err.message,
+    });
   }
 
   await appendTrackingEvent({
