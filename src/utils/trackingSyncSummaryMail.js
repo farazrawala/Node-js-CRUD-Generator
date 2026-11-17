@@ -47,11 +47,11 @@ function formatDuration(ms) {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-/** Store order number (Shopify/Woo e.g. 1132) first, then POS ORD-####. */
+/** Prefer POS order id (ORD-####), then store/integration number. */
 function orderLabel(change) {
-  const storeNo = String(change.integration_order_id || "").trim().replace(/^#/, "");
   const orderNo = String(change.order_no || "").trim();
-  return storeNo || orderNo || change.order_id || "-";
+  const storeNo = String(change.integration_order_id || "").trim().replace(/^#/, "");
+  return orderNo || storeNo || change.order_id || "-";
 }
 
 /** Status text for the email: courier status ("Out For Delivery"), else order status. */
@@ -77,7 +77,7 @@ function changeLine(change) {
   const status = statusChangeOf(change) || {};
   const from = prettyStatus(status.from);
   const to = prettyStatus(status.to) || "-";
-  const label = `Order No ${orderLabel(change)}`;
+  const label = `POS Order ${orderLabel(change)}`;
   return from ? `${label} from ${from} to ${to}` : `${label} set to ${to}`;
 }
 
@@ -109,13 +109,13 @@ function failureLines(failures) {
     lines.push(
       "",
       `Reason: ${reason} (${group.length} order${group.length === 1 ? "" : "s"})`,
-      `  Order No ${shown}${more}`,
+      `  POS Order ${shown}${more}`,
     );
   }
   return lines;
 }
 
-/** Compact list of every order id included in this sync run. */
+/** Compact list of every POS order id included in this sync run. */
 function checkedOrderLines(checked) {
   const rows = Array.isArray(checked) ? checked : [];
   if (!rows.length) return [];
@@ -126,7 +126,7 @@ function checkedOrderLines(checked) {
     labels.length > MAX_CHECKED_ORDERS
       ? ` +${labels.length - MAX_CHECKED_ORDERS} more`
       : "";
-  return ["", `Order No ${shown}${more}`];
+  return ["", `POS Order ${shown}${more}`];
 }
 
 /**
