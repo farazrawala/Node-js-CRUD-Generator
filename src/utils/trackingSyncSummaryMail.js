@@ -82,6 +82,7 @@ function changeLine(change) {
 }
 
 const MAX_ORDERS_PER_REASON = 60;
+const MAX_CHECKED_ORDERS = 80;
 
 /**
  * Group failed shipments by error message, biggest group first:
@@ -112,6 +113,20 @@ function failureLines(failures) {
     );
   }
   return lines;
+}
+
+/** Compact list of every order id included in this sync run. */
+function checkedOrderLines(checked) {
+  const rows = Array.isArray(checked) ? checked : [];
+  if (!rows.length) return [];
+  const labels = [...new Set(rows.map(orderLabel).filter((label) => label && label !== "-"))];
+  if (!labels.length) return [];
+  const shown = labels.slice(0, MAX_CHECKED_ORDERS).join(", ");
+  const more =
+    labels.length > MAX_CHECKED_ORDERS
+      ? ` +${labels.length - MAX_CHECKED_ORDERS} more`
+      : "";
+  return ["", `Order No ${shown}${more}`];
 }
 
 /**
@@ -153,6 +168,8 @@ function buildTrackingSyncSummaryEmail(summary = {}, meta = {}) {
     lines.push("");
     for (const c of changes) lines.push(changeLine(c));
   }
+  // Always list which orders were polled (including the 0-change email).
+  lines.push(...checkedOrderLines(summary.checked));
   lines.push(
     "",
     "--",

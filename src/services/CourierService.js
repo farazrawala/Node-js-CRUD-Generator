@@ -1567,15 +1567,26 @@ async function syncOpenShipments(options = {}) {
     order_status_changed: 0,
     tracking_status_changed: 0,
     changes: [],
+    checked: [],
     failures: [],
   };
 
   for (const shipment of open) {
+    const checkedRow = {
+      order_id: String(shipment.order_id || ""),
+      order_no: null,
+      integration_order_id: null,
+      courier: shipment.courier || null,
+      tracking_number: shipment.tracking_number || null,
+    };
     try {
       const result = await refreshTrackingForShipment(shipment, {
         allowStale: false,
       });
       summary.updated += 1;
+      checkedRow.order_no = result?.order_no || null;
+      checkedRow.integration_order_id = result?.integration_order_id || null;
+      summary.checked.push(checkedRow);
       if (result?.order_status_change) summary.order_status_changed += 1;
       if (result?.tracking_status_change) summary.tracking_status_changed += 1;
       if (result?.order_status_change || result?.tracking_status_change) {
@@ -1591,6 +1602,7 @@ async function syncOpenShipments(options = {}) {
       }
     } catch (err) {
       summary.errors += 1;
+      summary.checked.push(checkedRow);
       summary.failures.push({
         order_id: String(shipment.order_id || ""),
         courier: shipment.courier || null,
@@ -1605,6 +1617,7 @@ async function syncOpenShipments(options = {}) {
     }
   }
 
+  await attachOrderNumbers(summary.checked);
   await attachOrderNumbers(summary.failures);
   return summary;
 }
