@@ -35,7 +35,12 @@ class LeopardCourier extends BaseCourier {
   }
 
   credentialsPayload() {
-    const api_key = this.config.api_key;
+    // Courier Integration stores the merchant API key in Login.
+    const api_key =
+      this.config.api_key ||
+      this.config.username ||
+      this.config.login ||
+      null;
     const api_password = this.config.password || this.config.secret;
     if (!api_key || !api_password) {
       throw invalidCredentials(this.providerName);

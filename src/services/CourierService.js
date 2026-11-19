@@ -194,6 +194,7 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
   }
 
   const isTokenAuth = /postex|flagship|flaship/i.test(String(providerKey));
+  const isLeopard = /leopard/i.test(String(providerKey));
 
   return {
     company_id: legacy.company_id,
@@ -211,8 +212,13 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
         if (legacy.sandbox === true || legacy.sandbox === "true") return true;
         return /devconnect|staging|sandbox|uat/i.test(String(legacy.url || ""));
       })(),
-    api_key: clientId || settings.api_key || (isTokenAuth ? token : null) || null,
-    secret: clientSecret || settings.secret || null,
+    api_key:
+      clientId ||
+      settings.api_key ||
+      (isTokenAuth ? token : null) ||
+      (isLeopard ? legacy.login : null) ||
+      null,
+    secret: clientSecret || settings.secret || (isLeopard ? legacy.password : null) || null,
     account_no: legacy.account_no || settings.account_no || null,
     pickup_location:
       legacy.cost_center ||
