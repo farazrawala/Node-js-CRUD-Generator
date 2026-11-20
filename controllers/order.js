@@ -4702,6 +4702,24 @@ async function order_update(req, res) {
         mongoSession,
       });
     }
+    const normalizedNext = nextStatus
+      .toLowerCase()
+      .replace(/-/g, "_")
+      .replace(/\s+/g, "_");
+    const normalizedPrevious = previousStatus
+      .toLowerCase()
+      .replace(/-/g, "_")
+      .replace(/\s+/g, "_");
+    if (
+      normalizedNext === "in_transit" ||
+      normalizedPrevious === "in_transit"
+    ) {
+      await Order.updateOne(
+        { _id: orderId },
+        { $pull: { tags: "stock_awaiting" } },
+        sessOpts,
+      );
+    }
     // Header-only: steps 1–3 + 12; line replace: steps 4–11.
   };
 
@@ -7300,12 +7318,26 @@ async function order_update_status(req, res) {
   if (String(existingOrder.order_status || "").trim() === nextStatus) {
     const currentWebsite = String(existingOrder.order_website_status || "").trim();
     if (!websiteStatus || websiteStatus === currentWebsite) {
+      let unchangedOrder = existingOrder;
+      if (nextStatus === "in_transit") {
+        unchangedOrder =
+          (await Order.findOneAndUpdate(
+            {
+              _id: orderId,
+              company_id: companyId,
+              status: "active",
+              deletedAt: null,
+            },
+            { $pull: { tags: "stock_awaiting" } },
+            { new: true },
+          ).lean()) || existingOrder;
+      }
       return res.status(200).json({
         success: true,
         status: 200,
         message: "Order status unchanged",
         data: {
-          order: existingOrder,
+          order: unchangedOrder,
           previous_status: existingOrder.order_status,
           stock_action: "none",
           stock_updates: [],
@@ -7367,6 +7399,12 @@ async function order_update_status(req, res) {
       $set.updated_by = actorUserId;
     }
 
+    const previousStatus = String(existingOrder.order_status || "").trim();
+    const updateDoc = { $set };
+    if (nextStatus === "in_transit" || previousStatus === "in_transit") {
+      updateDoc.$pull = { tags: "stock_awaiting" };
+    }
+
     updatedOrder = await Order.findOneAndUpdate(
       {
         _id: orderId,
@@ -7374,7 +7412,7 @@ async function order_update_status(req, res) {
         status: "active",
         deletedAt: null,
       },
-      { $set },
+      updateDoc,
       { new: true, runValidators: true, ...orderSessionOpts(mongoSession) },
     ).lean();
 

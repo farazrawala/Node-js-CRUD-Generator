@@ -1022,7 +1022,14 @@ async function persistOrderTracking(shipment, result) {
   }
 
   try {
-    await Order.findByIdAndUpdate(shipment.order_id, { $set: update });
+    const orderUpdateOp = { $set: update };
+    if (
+      mappedOrderStatus === "in_transit" ||
+      currentStatus === "in_transit"
+    ) {
+      orderUpdateOp.$pull = { tags: "stock_awaiting" };
+    }
+    await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
   } catch (err) {
     courierLogger.apiError({
       event: "order_tracking_persist_failed",
