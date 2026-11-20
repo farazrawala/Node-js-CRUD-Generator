@@ -145,7 +145,10 @@ function buildTrackingStatusUpdateEmail({
   const safeOrder = escapeHtml(orderLabel);
   const safeStatus = escapeHtml(deliveryStatus);
   const safeStore = escapeHtml(storeName);
-  const safeName = escapeHtml(String(customerName || "").trim());
+  const titledName = String(customerName || "")
+    .trim()
+    .replace(/\S+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+  const safeName = escapeHtml(titledName);
   const safeDate = escapeHtml(formatOrderDate(orderDate));
   const safeTrackingNo = escapeHtml(String(trackingNumber || "").trim());
   const trackHref = escapeHtml(safeHttpUrl(trackingUrl));
