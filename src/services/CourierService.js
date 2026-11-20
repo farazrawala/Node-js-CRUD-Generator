@@ -1027,7 +1027,9 @@ async function persistOrderTracking(shipment, result) {
       mappedOrderStatus === "in_transit" ||
       currentStatus === "in_transit"
     ) {
-      orderUpdateOp.$pull = { tags: "stock_awaiting" };
+      orderUpdateOp.$pullAll = {
+        tags: ["stock_awaiting", "incomplete_address"],
+      };
     }
     await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
   } catch (err) {

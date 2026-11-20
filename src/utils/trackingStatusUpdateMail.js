@@ -155,8 +155,8 @@ function buildTrackingStatusUpdateEmail({
   const year = new Date().getFullYear();
 
   const logo = logoUrl
-    ? `<img src="${escapeHtml(logoUrl)}" alt="${safeStore}" width="160" style="display:block;width:160px;max-width:180px;height:auto;border:0;outline:none;text-decoration:none;">`
-    : `<div style="font-size:22px;line-height:28px;font-weight:700;color:#111827;">${safeStore}</div>`;
+    ? `<img src="${escapeHtml(logoUrl)}" alt="${safeStore}" width="160" style="display:block;width:160px;max-width:180px;height:auto;margin:0 auto;border:0;outline:none;text-decoration:none;">`
+    : `<div style="font-size:22px;line-height:28px;font-weight:700;color:#111827;text-align:center;">${safeStore}</div>`;
 
   const greeting = safeName ? `Hello ${safeName},` : "Hello,";
   const dateRow = safeDate
@@ -200,9 +200,9 @@ function buildTrackingStatusUpdateEmail({
       <td align="center" style="padding:24px 12px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;">
           <tr>
-            <td style="padding:28px 32px 20px;border-bottom:1px solid #f1f5f9;">
+            <td align="center" style="padding:28px 32px 20px;border-bottom:1px solid #f1f5f9;text-align:center;">
               ${logo}
-              <div style="margin-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#64748b;">Your trusted shopping experience</div>
+              <div style="margin-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#64748b;text-align:center;">Your trusted shopping experience</div>
             </td>
           </tr>
           <tr>

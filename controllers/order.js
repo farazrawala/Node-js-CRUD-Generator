@@ -4716,7 +4716,7 @@ async function order_update(req, res) {
     ) {
       await Order.updateOne(
         { _id: orderId },
-        { $pull: { tags: "stock_awaiting" } },
+        { $pullAll: { tags: ["stock_awaiting", "incomplete_address"] } },
         sessOpts,
       );
     }
@@ -7328,7 +7328,7 @@ async function order_update_status(req, res) {
               status: "active",
               deletedAt: null,
             },
-            { $pull: { tags: "stock_awaiting" } },
+            { $pullAll: { tags: ["stock_awaiting", "incomplete_address"] } },
             { new: true },
           ).lean()) || existingOrder;
       }
@@ -7402,7 +7402,7 @@ async function order_update_status(req, res) {
     const previousStatus = String(existingOrder.order_status || "").trim();
     const updateDoc = { $set };
     if (nextStatus === "in_transit" || previousStatus === "in_transit") {
-      updateDoc.$pull = { tags: "stock_awaiting" };
+      updateDoc.$pullAll = { tags: ["stock_awaiting", "incomplete_address"] };
     }
 
     updatedOrder = await Order.findOneAndUpdate(
