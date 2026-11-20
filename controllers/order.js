@@ -7337,7 +7337,7 @@ async function order_update_status(req, res) {
         status: 200,
         message: "Order status unchanged",
         data: {
-          order: unchangedOrder,
+          order: existingOrder,
           previous_status: existingOrder.order_status,
           stock_action: "none",
           stock_updates: [],
