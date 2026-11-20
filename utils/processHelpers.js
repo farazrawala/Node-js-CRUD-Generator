@@ -1934,15 +1934,8 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
     });
   }
 
-  if (String(store || "").toLowerCase() === "shopify") {
-    await applyIncompleteAddressTagIfNeeded(existing._id, {
-      address: header.address,
-      city: header.city,
-      state: header.state,
-      zip: header.zip,
-      country: header.country,
-    });
-  }
+  // incomplete_address is decided once at import. A later Shopify pull must
+  // not put the tag back after someone removed it in OMS.
 
   if (patch.order_status && patch.order_status !== previousStatus) {
     await recordOrderStatusUpdate({
