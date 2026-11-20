@@ -949,7 +949,7 @@ async function persistOrderTracking(shipment, result) {
   try {
     order = await Order.findById(shipment.order_id)
       .select(
-        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id integration_id",
+        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id integration_id name email createdAt",
       )
       .lean();
   } catch (err) {
@@ -1070,11 +1070,20 @@ async function persistOrderTracking(shipment, result) {
             .lean()
         : null;
       const { emailTrackingStatusUpdate } = require("../utils/trackingStatusUpdateMail");
+      const trackingNumber =
+        String(shipment?.tracking_number || order?.courier_tracking_number || "").trim();
       const mail = await emailTrackingStatusUpdate({
         orderNo: order?.order_no,
         status: update.tracking_status,
         integrationImage: integration?.image,
         integrationName: integration?.name,
+        customerName: order?.name,
+        orderDate: order?.createdAt,
+        trackingNumber,
+        trackingUrl: buildPublicCourierTrackingUrl(
+          shipment?.courier || pickShipmentCourierCompany(shipment),
+          trackingNumber,
+        ),
       });
       if (!mail.sent) {
         courierLogger.apiError({
