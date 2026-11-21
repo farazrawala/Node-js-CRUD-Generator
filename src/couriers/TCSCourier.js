@@ -995,7 +995,10 @@ class TCSCourier extends BaseCourier {
         weightinkg: weight,
         pieces: Math.max(1, Math.round(Number(pieces) || 1)),
         fragile: Boolean(settings.fragile),
-        remarks: courierRemarksText(order),
+        remarks: (() => {
+          const text = courierRemarksText(order);
+          return text.length >= 3 ? text : "Order";
+        })(),
         skus: (order.items || []).map((item) => ({
           description: String(item.name || "Item").slice(0, 50),
           quantity: Math.max(1, Math.round(Number(item.qty) || 1)),
@@ -1057,6 +1060,10 @@ class TCSCourier extends BaseCourier {
         "Content-Type": "application/json",
       },
       body: this.stringifyBookingBody(payload),
+      // One attempt. Retries on HTTP 502 hold the request until the proxy
+      // returns its own 502 and the booking dialog never sees the TCS body.
+      retries: 0,
+      timeoutMs: 25000,
     });
 
     courierLogger.shipmentResponse({
@@ -1078,18 +1085,22 @@ class TCSCourier extends BaseCourier {
       res.data?.result?.consignmentno ||
       res.data?.result?.ConsignmentNo;
 
-    const tcsErrors =
-      Array.isArray(res.data?.errorList) ?
-        res.data.errorList
+    const errorRows = []
+      .concat(Array.isArray(res.data?.errorList) ? res.data.errorList : [])
+      .concat(Array.isArray(res.data?.error) ? res.data.error : []);
+    const tcsErrors = errorRows.length
+      ? errorRows
           .map((e) => {
             const key = e.key || e.field || "";
-            const msg = e.errormessage || e.message || "";
+            const msg = e.errormessage || e.errorname || e.message || "";
             if (key && msg) return `${key}: ${msg}`;
             return msg || key;
           })
           .filter(Boolean)
           .join("; ")
-      : null;
+      : typeof res.data === "string" && res.data.trim()
+        ? res.data.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)
+        : null;
 
     const ok =
       res.status < 400 &&
@@ -1126,7 +1137,7 @@ class TCSCourier extends BaseCourier {
         },
         city: order.city,
         weight: order.weightKg,
-        httpStatus: res.status >= 400 ? res.status : 502,
+        httpStatus: res.status >= 400 && res.status < 500 ? res.status : 400,
       });
     }
 
