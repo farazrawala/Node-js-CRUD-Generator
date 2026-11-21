@@ -11,7 +11,12 @@ function roundMoney2(n) {
 }
 
 /** Grand total from line subtotal snapshot, discount, shipping and service charges (POS header). */
-function computeTotalAmount(linesSubtotal, discount, shipment, serviceCharges = 0) {
+function computeTotalAmount(
+  linesSubtotal,
+  discount,
+  shipment,
+  serviceCharges = 0,
+) {
   const lines = roundMoney2(Math.max(0, linesSubtotal));
   const disc = roundMoney2(Math.max(0, discount));
   const ship = roundMoney2(Math.max(0, shipment));
@@ -208,7 +213,9 @@ const POS_TO_WEBSITE_STATUS = Object.freeze({
 });
 
 function mapPosOrderStatusToWebsiteStatus(posStatus) {
-  const key = String(posStatus || "").trim().toLowerCase();
+  const key = String(posStatus || "")
+    .trim()
+    .toLowerCase();
   const mapped = POS_TO_WEBSITE_STATUS[key];
   if (mapped && ORDER_WEBSITE_STATUS_VALUES.includes(mapped)) {
     return mapped;
@@ -354,6 +361,15 @@ const modelSchema = new mongoose.Schema(
     phone: {
       type: String,
       // required: true,
+    },
+    /**
+     * Earlier orders for this phone, counted by order_status.
+     * Example: { pending: 1, delivered: 3, return: 2 }
+     */
+    phone_order_counts: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+      field_name: "Phone Order Counts",
     },
     /** Optional POS / CRM link; transactions use reference_user_id when set. */
     customer_id: {
@@ -866,7 +882,9 @@ modelSchema.pre(
 
       const existing = await this.model
         .findOne(filter)
-        .select("lines_subtotal discount shipment service_charges amount_received")
+        .select(
+          "lines_subtotal discount shipment service_charges amount_received",
+        )
         .lean();
       if (!existing) return next();
 
@@ -1087,12 +1105,19 @@ async function softDeleteDuplicateImportedOrders(coll) {
   };
 
   function rankStatus(status) {
-    return STATUS_RANK[String(status || "").trim().toLowerCase()] ?? 30;
+    return (
+      STATUS_RANK[
+        String(status || "")
+          .trim()
+          .toLowerCase()
+      ] ?? 30
+    );
   }
 
   function pickKeeper(rows) {
     return [...(rows || [])].sort((a, b) => {
-      const statusDiff = rankStatus(b.order_status) - rankStatus(a.order_status);
+      const statusDiff =
+        rankStatus(b.order_status) - rankStatus(a.order_status);
       if (statusDiff !== 0) return statusDiff;
       const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
@@ -1232,7 +1257,8 @@ if (mongoose.connection.readyState === 1) {
 module.exports = MODEL;
 module.exports.ORDER_STATUS_VALUES = ORDER_STATUS_VALUES;
 module.exports.ORDER_WEBSITE_STATUS_VALUES = ORDER_WEBSITE_STATUS_VALUES;
-module.exports.mapPosOrderStatusToWebsiteStatus = mapPosOrderStatusToWebsiteStatus;
+module.exports.mapPosOrderStatusToWebsiteStatus =
+  mapPosOrderStatusToWebsiteStatus;
 module.exports.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
 module.exports.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;
 module.exports.getOrderStatusStockEffect = getOrderStatusStockEffect;

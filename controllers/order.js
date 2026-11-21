@@ -1161,6 +1161,47 @@ async function customerReceivableBalance(user, customerId) {
 }
 
 /**
+ * Counts of earlier orders for the same phone, keyed by order_status.
+ * @returns {Promise<Record<string, number>>}
+ */
+async function previousOrdersByPhone(user, phone) {
+  const companyOid = coalesceObjectId(user?.company_id);
+  const raw = String(phone || "").trim();
+  const digits = raw.replace(/\D/g, "");
+  if (!(companyOid instanceof mongoose.Types.ObjectId) || digits.length < 10) {
+    return {};
+  }
+
+  const last10 = digits.slice(-10);
+  const variants = new Set([
+    raw,
+    digits,
+    `0${last10}`,
+    `92${last10}`,
+    `+92${last10}`,
+  ]);
+
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        company_id: companyOid,
+        deletedAt: null,
+        phone: { $in: [...variants] },
+      },
+    },
+    { $group: { _id: "$order_status", count: { $sum: 1 } } },
+  ]);
+
+  const counts = {};
+  for (const row of rows) {
+    const status = String(row?._id || "").trim();
+    const count = Number(row?.count) || 0;
+    if (status && count > 0) counts[status] = count;
+  }
+  return counts;
+}
+
+/**
  * Resolve Mode-of-Payment account: `posPayMethod` → `payment_method_accounts_id` →
  * company `default_account_receivable_account`. Writes the result onto the body.
  */
@@ -3621,6 +3662,17 @@ async function order_save(req, res) {
   } catch (balErr) {
     console.warn("[order_save] previous_balance lookup failed", balErr?.message);
     req.body.previous_balance = 0;
+  }
+
+  // Earlier orders on the same phone, grouped by order_status.
+  try {
+    req.body.phone_order_counts = await previousOrdersByPhone(
+      req.user,
+      req.body.phone,
+    );
+  } catch (phoneErr) {
+    console.warn("[order_save] phone_order_counts lookup failed", phoneErr?.message);
+    req.body.phone_order_counts = {};
   }
   // step 1 end
 
