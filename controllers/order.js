@@ -8617,15 +8617,21 @@ async function order_record_label_print(req, res) {
     });
   }
 
-  const updated = await Order.findOneAndUpdate(
-    { _id: orderId, company_id: companyId, deletedAt: null },
-    { $inc: { print_times: 1 } },
-    { new: true },
-  )
-    .select("print_times")
-    .lean();
+  // Native update so the counter is stored even when company_id was saved
+  // as a string, and so a schema path miss cannot drop $inc.
+  const id = new mongoose.Types.ObjectId(orderId);
+  const increment = async (companyValue) => {
+    const updated = await Order.collection.findOneAndUpdate(
+      { _id: id, company_id: companyValue, deletedAt: null },
+      { $inc: { print_times: 1 } },
+      { returnDocument: "after", projection: { print_times: 1 } },
+    );
+    return updated && updated.value !== undefined ? updated.value : updated;
+  };
+  const doc =
+    (await increment(companyId)) || (await increment(String(companyId)));
 
-  if (!updated) {
+  if (!doc) {
     return res.status(404).json({
       success: false,
       status: 404,
@@ -8636,7 +8642,7 @@ async function order_record_label_print(req, res) {
   return res.status(200).json({
     success: true,
     status: 200,
-    print_times: Number(updated.print_times) || 0,
+    print_times: Number(doc.print_times) || 0,
   });
 }
 
