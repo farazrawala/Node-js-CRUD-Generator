@@ -79,6 +79,7 @@ describe("courier factory", () => {
     assert.ok(CourierFactory.isRegistered("postex"));
     assert.ok(CourierFactory.isRegistered("flagship"));
     assert.ok(CourierFactory.isRegistered("flaship"));
+    assert.ok(CourierFactory.isRegistered("trax"));
   });
 
   it("normalizes provider aliases", () => {
@@ -87,6 +88,7 @@ describe("courier factory", () => {
     assert.equal(normalizeProviderKey("M&P"), "M&P");
     assert.equal(normalizeProviderKey("flagship"), "Flagship");
     assert.equal(normalizeProviderKey("Flaship"), "Flagship");
+    assert.equal(normalizeProviderKey("trax"), "Trax");
     assert.equal(normalizeProviderKey("Leopards Courier"), "Leopard");
   });
 

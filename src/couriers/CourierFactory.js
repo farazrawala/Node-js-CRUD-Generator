@@ -8,6 +8,7 @@ const TCSCourier = require("./TCSCourier");
 const LeopardCourier = require("./LeopardCourier");
 const PostExCourier = require("./PostExCourier");
 const FlagshipCourier = require("./FlagshipCourier");
+const TraxCourier = require("./TraxCourier");
 const { PROVIDERS, normalizeProviderKey } = require("./constants");
 const { unsupportedCourier, configMissing } = require("./errors");
 const {
@@ -31,6 +32,7 @@ register(PROVIDERS.TCS, TCSCourier);
 register(PROVIDERS.LEOPARD, LeopardCourier);
 register(PROVIDERS.POSTEX, PostExCourier);
 register(PROVIDERS.FLAGSHIP, FlagshipCourier);
+register(PROVIDERS.TRAX, TraxCourier);
 
 /**
  * Resolve preferred provider key from a company document / settings.

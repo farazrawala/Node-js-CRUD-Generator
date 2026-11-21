@@ -194,7 +194,7 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     settings.client_secret = clientSecret;
   }
 
-  const isTokenAuth = /postex|flagship|flaship/i.test(String(providerKey));
+  const isTokenAuth = /postex|flagship|flaship|trax/i.test(String(providerKey));
   const isLeopard = /leopard/i.test(String(providerKey));
 
   return {
@@ -289,7 +289,9 @@ async function loadProviderConfig(companyId, providerKey, courierId = null) {
                 ? "PostEx"
                 : /flagship|flaship/.test(String(legacy.type || "").toLowerCase())
                   ? "Flagship"
-                  : key;
+                  : String(legacy.type || "").toLowerCase().includes("trax")
+                    ? "Trax"
+                    : key;
         return mapLegacyCourierToConfig(
           legacy,
           normalizeProviderKey(fromType) || key,
@@ -1755,15 +1757,22 @@ async function testCredentials(options = {}) {
   }
 
   if (!merged.url || !String(merged.url).trim()) {
-    throw new CourierError("API URL is required", {
-      code: "VALIDATION_ERROR",
-      httpStatus: 400,
-    });
+    const typeHint = String(merged.type || overrides.type || "")
+      .trim()
+      .toLowerCase();
+    if (typeHint.includes("trax")) {
+      merged.url = "https://sonic.pk";
+    } else {
+      throw new CourierError("API URL is required", {
+        code: "VALIDATION_ERROR",
+        httpStatus: 400,
+      });
+    }
   }
   const typeKey = String(merged.type || overrides.type || "tcs")
     .trim()
     .toLowerCase();
-  const isTokenCourier = /postex|flagship|flaship/.test(typeKey);
+  const isTokenCourier = /postex|flagship|flaship|trax/.test(typeKey);
 
   if (isTokenCourier) {
     const hasKey = [merged.token, merged.login, merged.password].some((v) =>
@@ -1789,7 +1798,7 @@ async function testCredentials(options = {}) {
 
   if (!providerKey || !CourierFactory.isRegistered(providerKey)) {
     throw new CourierError(
-      `Credential check is not available for courier type "${merged.type || typeKey}". Supported: TCS, Leopard, PostEx, Flagship.`,
+      `Credential check is not available for courier type "${merged.type || typeKey}". Supported: TCS, Leopard, PostEx, Flagship, Trax.`,
       {
         code: "UNSUPPORTED_COURIER",
         httpStatus: 400,
