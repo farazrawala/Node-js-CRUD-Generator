@@ -43,6 +43,8 @@ const RESERVED_QUERY_KEYS = new Set([
   "include_deleted",
   "role",
   "tag",
+  "integration_id",
+  "integrationId",
   ...INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 ]);
 
@@ -181,6 +183,55 @@ function applyQueryFilters(baseFilter, query = {}, modelName = null) {
  * chat list: ?number=923… matches from_user_id OR to_user_id (PK phone variants).
  * Removes literal `number`/`phone` keys that are not schema fields on chat.
  */
+/**
+ * Category list: `?integration_id=<id>` keeps categories with an active
+ * sync_category row for that store. `integration_id=none` keeps categories
+ * that are not actively linked to any store.
+ */
+async function applyCategoryIntegrationFilter(filter, query = {}, companyId) {
+  const raw = String(query.integration_id ?? query.integrationId ?? "").trim();
+  if (!raw || raw.toLowerCase() === "all") return { filter, error: null };
+
+  const SyncCategory = require("../models/sync_category");
+  const notDeleted = {
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+  const baseMatch = {
+    status: "active",
+    ...notDeleted,
+    ...(companyId ? { company_id: companyId } : {}),
+  };
+
+  if (raw.toLowerCase() === "none" || raw.toLowerCase() === "unlinked") {
+    const linked = await SyncCategory.distinct("category_id", baseMatch);
+    filter._id = { $nin: linked.filter(Boolean) };
+    return { filter, error: null };
+  }
+
+  const integrationOid = coalesceObjectId(raw);
+  if (
+    !integrationOid ||
+    !mongoose.Types.ObjectId.isValid(String(integrationOid))
+  ) {
+    return {
+      filter,
+      error: {
+        success: false,
+        status: 400,
+        error: "Invalid integration_id",
+        message: "integration_id must be a valid 24-character ObjectId",
+      },
+    };
+  }
+
+  const linked = await SyncCategory.distinct("category_id", {
+    ...baseMatch,
+    integration_id: integrationOid,
+  });
+  filter._id = { $in: linked.filter(Boolean) };
+  return { filter, error: null };
+}
+
 function applyChatNumberQueryFilter(filter, query = {}) {
   const raw = query?.number ?? query?.phone;
   if (raw == null || String(raw).trim() === "") {
@@ -726,6 +777,15 @@ function generateControllerFunctions(modelName) {
           if (modelName === "chat") {
             filter = applyChatNumberQueryFilter(filter, req.query);
           }
+          if (modelName === "category") {
+            const integrationFilter = await applyCategoryIntegrationFilter(
+              filter,
+              req.query,
+              tenantCo,
+            );
+            if (integrationFilter.error) return integrationFilter.error;
+            filter = integrationFilter.filter;
+          }
           const roleFilter = applyUserRoleQueryFilter(
             filter,
             req.query,
@@ -815,6 +875,15 @@ function generateControllerFunctions(modelName) {
           if (modelName === "chat") {
             filter = applyChatNumberQueryFilter(filter, req.query);
           }
+          if (modelName === "category") {
+            const integrationFilter = await applyCategoryIntegrationFilter(
+              filter,
+              req.query,
+              tenantCo,
+            );
+            if (integrationFilter.error) return integrationFilter.error;
+            filter = integrationFilter.filter;
+          }
           const roleFilter = applyUserRoleQueryFilter(
             filter,
             req.query,
@@ -859,6 +928,15 @@ function generateControllerFunctions(modelName) {
           filter = applyQueryFilters(filter, req.query, modelName);
           if (modelName === "chat") {
             filter = applyChatNumberQueryFilter(filter, req.query);
+          }
+          if (modelName === "category") {
+            const integrationFilter = await applyCategoryIntegrationFilter(
+              filter,
+              req.query,
+              tenantCo,
+            );
+            if (integrationFilter.error) return integrationFilter.error;
+            filter = integrationFilter.filter;
           }
           const roleFilter = applyUserRoleQueryFilter(
             filter,

@@ -78,6 +78,17 @@ describe("darazProcess category matching", () => {
     assert.equal(leaf.name, "Pyjama sets");
   });
 
+  it("matches Kids Sweatshirt & Pant to a Sweatshirts leaf, not a short Kids leaf", () => {
+    const nodes = flattenDarazCategoryTree([
+      { category_id: 10001252, name: "Kids", leaf: true },
+      { category_id: 4401, name: "Boys Sweatshirts", leaf: true },
+      { category_id: 4402, name: "Pants", leaf: true },
+    ]);
+    const leaf = findDarazLeafForName(nodes, "Kids Sweatshirt & Pant");
+    assert.equal(leaf.category_id, "4401");
+    assert.equal(leaf.name, "Boys Sweatshirts");
+  });
+
   it("accepts numeric Daraz category ids only", () => {
     assert.equal(isDarazCategoryId("12345"), true);
     assert.equal(isDarazCategoryId("pets"), false);

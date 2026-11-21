@@ -194,6 +194,9 @@ function darazCategoryTokens(name) {
     .replace(/\bpyjamas?\b/g, "pyjama")
     .replace(/\bsets\b/g, "set")
     .split(" ")
+    .map((token) =>
+      token.length > 4 && token.endsWith("s") ? token.slice(0, -1) : token,
+    )
     .filter((token) => token.length >= 3);
 }
 
@@ -1914,11 +1917,15 @@ async function importDarazCategoryToPos(remote, { companyId, process, stats }) {
   let posId;
   if (existing) {
     posId = coalesceObjectId(existing._id);
+    if (!existing.is_daraz) {
+      await Category.updateOne({ _id: posId }, { $set: { is_daraz: true } });
+    }
     stats.skipped += 1;
   } else {
     const created = await Category.create({
       name,
       slug,
+      is_daraz: true,
       company_id: companyId,
       status: "active",
       created_by: coalesceObjectId(process.created_by?._id || process.created_by),
