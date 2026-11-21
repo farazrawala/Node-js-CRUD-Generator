@@ -5320,7 +5320,11 @@ async function findSalesDayWise(req, res) {
       {
         $group: {
           _id: {
-            $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+              timezone: "Asia/Karachi",
+            },
           },
           total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
           order_count: { $sum: 1 },
