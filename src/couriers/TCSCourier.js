@@ -30,16 +30,31 @@ class TCSCourier extends BaseCourier {
     this.providerName = PROVIDERS.TCS;
   }
 
-  get baseUrl() {
-    const raw =
-      this.config.base_url || (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD);
-    // Accept pasted full paths like .../ecom/api/authentication/token
-    return String(raw)
+  /**
+   * A saved production host must stay on production even when COURIER_SANDBOX=true.
+   * Live Client ID / Client Secret are rejected by devconnect with no access token.
+   */
+  get isSandbox() {
+    const url = String(this.config.base_url || this.config.url || "");
+    if (/devconnect\.tcscourier\.com/i.test(url)) return true;
+    if (/oc[it]?connect\.tcscourier\.com/i.test(url)) return false;
+    return super.isSandbox;
+  }
+
+  normalizeTcsHost(raw) {
+    return String(raw || "")
       .trim()
+      .replace(/octconnect\.tcscourier\.com/gi, "ociconnect.tcscourier.com")
       .replace(/\/+$/, "")
       .replace(/\/ecom(\/.*)?$/i, "")
       .replace(/\/auth(\/.*)?$/i, "")
       .replace(/\/tracking(\/.*)?$/i, "");
+  }
+
+  get baseUrl() {
+    const raw =
+      this.config.base_url || (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD);
+    return this.normalizeTcsHost(raw);
   }
 
   /**
@@ -53,12 +68,7 @@ class TCSCourier extends BaseCourier {
       this.config.settings?.tracking_base_url ||
       this.config.tracking_base_url ||
       (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD);
-    return String(raw)
-      .trim()
-      .replace(/\/+$/, "")
-      .replace(/\/tracking(\/.*)?$/i, "")
-      .replace(/\/ecom(\/.*)?$/i, "")
-      .replace(/\/auth(\/.*)?$/i, "");
+    return this.normalizeTcsHost(raw);
   }
 
   /**
@@ -259,36 +269,34 @@ class TCSCourier extends BaseCourier {
       );
     }
 
-    const authUrl =
+    const authUrl = this.normalizeTcsHost(
       this.config.settings?.auth_url ||
-      (this.isSandbox ?
-        "https://devconnect.tcscourier.com/auth/api/auth"
-      : "https://ociconnect.tcscourier.com/auth/api/auth");
+        (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD),
+    ) + "/auth/api/auth";
 
-    const authWithQuery = `${authUrl}?clientid=${encodeURIComponent(String(clientId))}&clientsecret=${encodeURIComponent(String(clientSecret))}`;
+    const payload = {
+      clientid: String(clientId),
+      clientsecret: String(clientSecret),
+    };
 
-    let res = await httpRequest(authWithQuery, {
+    // TCS Authorization is GET with a JSON body (clientid + clientsecret).
+    let res = await httpRequest(authUrl, {
       method: "GET",
       provider: this.providerName,
-      headers: {
-        clientid: String(clientId),
-        clientsecret: String(clientSecret),
-      },
+      body: payload,
+      headers: payload,
     });
 
-    // Some TCS gateways expect JSON body even on auth (non-standard GET).
     if (
       !res.data?.result?.accessToken &&
       !res.data?.result?.accesstoken &&
       !res.data?.accessToken
     ) {
-      res = await httpRequest(authUrl, {
-        method: "POST",
+      const authWithQuery = `${authUrl}?clientid=${encodeURIComponent(payload.clientid)}&clientsecret=${encodeURIComponent(payload.clientsecret)}`;
+      res = await httpRequest(authWithQuery, {
+        method: "GET",
         provider: this.providerName,
-        body: {
-          clientid: String(clientId),
-          clientsecret: String(clientSecret),
-        },
+        headers: payload,
       });
     }
 
@@ -311,10 +319,14 @@ class TCSCourier extends BaseCourier {
         step: "bearer",
         response: res.data,
       });
+      const hostHint = this.isSandbox
+        ? " Request went to the sandbox host (devconnect). Live Client ID and Client Secret only work on ociconnect — set the API URL to https://ociconnect.tcscourier.com."
+        : " Request went to the live host (ociconnect). Client ID and Client Secret must be the OAuth pair from TCS, separate from Login and Password.";
       throw invalidCredentials(
         this.providerName,
-        tcsMsg ||
-          "TCS did not return an access token. Check Client ID + Client Secret (OAuth), not only eCom ID/Password.",
+        (tcsMsg ||
+          "TCS did not return an access token. Check Client ID + Client Secret (OAuth), not only eCom ID/Password.") +
+          hostHint,
       );
     }
 
