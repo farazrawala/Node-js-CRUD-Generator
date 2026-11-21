@@ -4702,6 +4702,24 @@ async function order_update(req, res) {
         mongoSession,
       });
     }
+    const normalizedNext = nextStatus
+      .toLowerCase()
+      .replace(/-/g, "_")
+      .replace(/\s+/g, "_");
+    const normalizedPrevious = previousStatus
+      .toLowerCase()
+      .replace(/-/g, "_")
+      .replace(/\s+/g, "_");
+    if (
+      normalizedNext === "in_transit" ||
+      normalizedPrevious === "in_transit"
+    ) {
+      await Order.updateOne(
+        { _id: orderId },
+        { $pullAll: { tags: ["stock_awaiting", "incomplete_address"] } },
+        sessOpts,
+      );
+    }
     // Header-only: steps 1–3 + 12; line replace: steps 4–11.
   };
 
@@ -7300,6 +7318,20 @@ async function order_update_status(req, res) {
   if (String(existingOrder.order_status || "").trim() === nextStatus) {
     const currentWebsite = String(existingOrder.order_website_status || "").trim();
     if (!websiteStatus || websiteStatus === currentWebsite) {
+      let unchangedOrder = existingOrder;
+      if (nextStatus === "in_transit") {
+        unchangedOrder =
+          (await Order.findOneAndUpdate(
+            {
+              _id: orderId,
+              company_id: companyId,
+              status: "active",
+              deletedAt: null,
+            },
+            { $pullAll: { tags: ["stock_awaiting", "incomplete_address"] } },
+            { new: true },
+          ).lean()) || existingOrder;
+      }
       return res.status(200).json({
         success: true,
         status: 200,
@@ -7367,6 +7399,12 @@ async function order_update_status(req, res) {
       $set.updated_by = actorUserId;
     }
 
+    const previousStatus = String(existingOrder.order_status || "").trim();
+    const updateDoc = { $set };
+    if (nextStatus === "in_transit" || previousStatus === "in_transit") {
+      updateDoc.$pullAll = { tags: ["stock_awaiting", "incomplete_address"] };
+    }
+
     updatedOrder = await Order.findOneAndUpdate(
       {
         _id: orderId,
@@ -7374,7 +7412,7 @@ async function order_update_status(req, res) {
         status: "active",
         deletedAt: null,
       },
-      { $set },
+      updateDoc,
       { new: true, runValidators: true, ...orderSessionOpts(mongoSession) },
     ).lean();
 
@@ -8327,8 +8365,9 @@ async function order_validate_address(req, res) {
 /**
  * PATCH|POST /api/order/update-address/:id
  * Body: { address?, city?, state?, zip?, country?, name?, email?, phone? }
- * Always validates the merged address and syncs `incomplete_address` tag
- * (adds when incomplete, removes when complete).
+ * Validates the merged address. Does not add `incomplete_address`
+ * (that tag is set only when the order is created). Removes the tag
+ * when the saved address is now complete.
  * Optional: { strict: true } → 400 if score is severely low.
  */
 async function order_update_address(req, res) {
@@ -8420,7 +8459,6 @@ async function order_update_address(req, res) {
     req.query?.strict === "1" ||
     req.query?.strict === "true";
 
-  // Always score the merged address so incomplete_address can be added/removed.
   const addressValidation = validateOrderAddressFields(mergedForValidation);
   if (strict) {
     const cfg = loadAddressValidationConfig();
@@ -8469,7 +8507,8 @@ async function order_update_address(req, res) {
     });
   }
 
-  // Keep incomplete_address in sync with the saved address (same rules as fetch import).
+  // Tag is applied only on create. A later address edit must not add it back.
+  // If the address is now complete, drop a tag that was set at creation.
   if (
     Array.isArray(Order.ORDER_TAG_VALUES) &&
     Order.ORDER_TAG_VALUES.includes("incomplete_address")
@@ -8478,13 +8517,7 @@ async function order_update_address(req, res) {
     const incomplete = isIncompleteOrderAddress(mergedForValidation);
     const hasTag = (updatedOrder.tags || []).includes("incomplete_address");
 
-    if (incomplete && !hasTag) {
-      await Order.updateOne(
-        { _id: orderId },
-        { $addToSet: { tags: "incomplete_address" } },
-      );
-      updatedOrder = await Order.findById(orderId).lean();
-    } else if (!incomplete && hasTag) {
+    if (!incomplete && hasTag) {
       await Order.updateOne(
         { _id: orderId },
         { $pull: { tags: "incomplete_address" } },

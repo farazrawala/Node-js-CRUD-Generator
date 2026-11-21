@@ -194,6 +194,7 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
   }
 
   const isTokenAuth = /postex|flagship|flaship/i.test(String(providerKey));
+  const isLeopard = /leopard/i.test(String(providerKey));
 
   return {
     company_id: legacy.company_id,
@@ -211,8 +212,13 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
         if (legacy.sandbox === true || legacy.sandbox === "true") return true;
         return /devconnect|staging|sandbox|uat/i.test(String(legacy.url || ""));
       })(),
-    api_key: clientId || settings.api_key || (isTokenAuth ? token : null) || null,
-    secret: clientSecret || settings.secret || null,
+    api_key:
+      clientId ||
+      settings.api_key ||
+      (isTokenAuth ? token : null) ||
+      (isLeopard ? legacy.login : null) ||
+      null,
+    secret: clientSecret || settings.secret || (isLeopard ? legacy.password : null) || null,
     account_no: legacy.account_no || settings.account_no || null,
     pickup_location:
       legacy.cost_center ||
@@ -943,7 +949,7 @@ async function persistOrderTracking(shipment, result) {
   try {
     order = await Order.findById(shipment.order_id)
       .select(
-        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id integration_id",
+        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id integration_id name email createdAt",
       )
       .lean();
   } catch (err) {
@@ -1016,7 +1022,16 @@ async function persistOrderTracking(shipment, result) {
   }
 
   try {
-    await Order.findByIdAndUpdate(shipment.order_id, { $set: update });
+    const orderUpdateOp = { $set: update };
+    if (
+      mappedOrderStatus === "in_transit" ||
+      currentStatus === "in_transit"
+    ) {
+      orderUpdateOp.$pullAll = {
+        tags: ["stock_awaiting", "incomplete_address"],
+      };
+    }
+    await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
   } catch (err) {
     courierLogger.apiError({
       event: "order_tracking_persist_failed",
@@ -1057,11 +1072,20 @@ async function persistOrderTracking(shipment, result) {
             .lean()
         : null;
       const { emailTrackingStatusUpdate } = require("../utils/trackingStatusUpdateMail");
+      const trackingNumber =
+        String(shipment?.tracking_number || order?.courier_tracking_number || "").trim();
       const mail = await emailTrackingStatusUpdate({
         orderNo: order?.order_no,
         status: update.tracking_status,
         integrationImage: integration?.image,
         integrationName: integration?.name,
+        customerName: order?.name,
+        orderDate: order?.createdAt,
+        trackingNumber,
+        trackingUrl: buildPublicCourierTrackingUrl(
+          shipment?.courier || pickShipmentCourierCompany(shipment),
+          trackingNumber,
+        ),
       });
       if (!mail.sent) {
         courierLogger.apiError({
