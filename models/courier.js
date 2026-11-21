@@ -24,7 +24,7 @@ const COURIER_TYPE_META = {
   },
   leopard: {
     label: "Leopard",
-    logo: "/public/couriers/leopard.svg",
+    logo: "/public/couriers/leopard.png",
   },
   blueex: {
     label: "BlueEx",
