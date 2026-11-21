@@ -10,6 +10,7 @@ const BaseCourier = require("./BaseCourier");
 const { UNIFIED_STATUSES, PROVIDERS } = require("./constants");
 const { mapGenericStatus } = require("./statusMap");
 const {
+  CourierError,
   fromProviderMessage,
   invalidCredentials,
   invalidCity,
@@ -29,11 +30,13 @@ class TraxCourier extends BaseCourier {
   }
 
   get baseUrl() {
-    let raw = String(
-      this.config.base_url ||
-        this.config.url ||
-        (this.isSandbox ? DEFAULT_SANDBOX : DEFAULT_PROD),
-    ).trim();
+    if (this._forceOrigin) return this._forceOrigin;
+    let raw = String(this.config.base_url || this.config.url || "").trim();
+    // A profile API key is issued for live sonic.pk. The global COURIER_SANDBOX
+    // flag must not send that key to app.sonic.pk (Trax rejects it as invalid).
+    if (!raw || /sonic\.pk/i.test(raw)) {
+      raw = /app\.sonic\.pk/i.test(raw) ? DEFAULT_SANDBOX : DEFAULT_PROD;
+    }
     if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
     return raw.replace(/\/+$/, "").replace(/\/api$/i, "");
   }
@@ -53,10 +56,12 @@ class TraxCourier extends BaseCourier {
         this.config.settings?.token ||
         this.config.api_key ||
         this.config.settings?.api_key ||
-        this.config.password ||
         this.config.username ||
+        this.config.password ||
         "",
-    ).trim();
+    )
+      .trim()
+      .replace(/^bearer\s+/i, "");
     if (!key) {
       throw invalidCredentials(
         this.providerName,
@@ -88,6 +93,21 @@ class TraxCourier extends BaseCourier {
     return httpStatus >= 400 ? `HTTP ${httpStatus}: ${fallback}` : fallback;
   }
 
+  /**
+   * Keep Trax's own message. fromProviderMessage rewrites "Invalid API Token"
+   * into a generic "Authentication failed", which hides the real cause.
+   */
+  providerError(res, fallback) {
+    const message = this.extractErrorMessage(res, fallback);
+    return new CourierError(message, {
+      code: /invalid api token|unauthor/i.test(message)
+        ? "AUTH_ERROR"
+        : "PROVIDER_ERROR",
+      httpStatus: /invalid api token|unauthor/i.test(message) ? 401 : 502,
+      details: { response: res?.data },
+    });
+  }
+
   /** Trax uses status 0 for success. */
   isOk(data) {
     if (!data || typeof data !== "object") return false;
@@ -95,7 +115,7 @@ class TraxCourier extends BaseCourier {
     return code === 0 || code === "0";
   }
 
-  async request(path, { method = "GET", query, body } = {}) {
+  async request(path, { method = "GET", query, body } = {}, optsRetried = false) {
     const qs = query
       ? `?${new URLSearchParams(
           Object.fromEntries(
@@ -122,6 +142,18 @@ class TraxCourier extends BaseCourier {
       headers,
       body: payload,
     });
+    const message = this.extractErrorMessage(res, "");
+    // Live key on the sandbox host (or the reverse) comes back as a bad token.
+    if (
+      !optsRetried &&
+      /invalid api token/i.test(message) &&
+      /sonic\.pk/i.test(this.baseUrl)
+    ) {
+      this._forceOrigin = /app\.sonic\.pk/i.test(this.baseUrl)
+        ? DEFAULT_PROD
+        : DEFAULT_SANDBOX;
+      return this.request(path, options, true);
+    }
     return { ...res, url };
   }
 
@@ -140,14 +172,7 @@ class TraxCourier extends BaseCourier {
     if (this._cities) return this._cities;
     const res = await this.request("cities");
     if (res.status >= 400 || !this.isOk(res.data)) {
-      throw fromProviderMessage(
-        this.extractErrorMessage(res, "Trax city list failed"),
-        {
-          provider: this.providerName,
-          httpStatus: res.status >= 400 ? res.status : 502,
-          details: { url: res.url, response: res.data },
-        },
-      );
+      throw this.providerError(res, "Trax city list failed");
     }
     const cities = Array.isArray(res.data?.cities) ? res.data.cities : [];
     this._cities = cities.map((c) => ({
@@ -177,14 +202,7 @@ class TraxCourier extends BaseCourier {
   async listPickupAddresses() {
     const res = await this.request("pickup_addresses");
     if (res.status >= 400 || !this.isOk(res.data)) {
-      throw fromProviderMessage(
-        this.extractErrorMessage(res, "Trax pickup addresses failed"),
-        {
-          provider: this.providerName,
-          httpStatus: res.status >= 400 ? res.status : 502,
-          details: { response: res.data },
-        },
-      );
+      throw this.providerError(res, "Trax pickup addresses failed");
     }
     return Array.isArray(res.data?.pickup_addresses)
       ? res.data.pickup_addresses
@@ -298,14 +316,7 @@ class TraxCourier extends BaseCourier {
     const body = await this.buildBookBody(order);
     const res = await this.request("shipment/book", { method: "POST", body });
     if (res.status >= 400 || !this.isOk(res.data)) {
-      throw fromProviderMessage(
-        this.extractErrorMessage(res, "Trax booking failed"),
-        {
-          provider: this.providerName,
-          httpStatus: res.status >= 400 ? res.status : 502,
-          details: { response: res.data, request: body },
-        },
-      );
+      throw this.providerError(res, "Trax booking failed");
     }
     const tracking =
       res.data?.["tracking number"] ||
@@ -339,10 +350,7 @@ class TraxCourier extends BaseCourier {
       body: { tracking_number: cn },
     });
     if (res.status >= 400 || !this.isOk(res.data)) {
-      throw fromProviderMessage(
-        this.extractErrorMessage(res, "Trax cancel failed"),
-        { provider: this.providerName, details: { response: res.data } },
-      );
+      throw this.providerError(res, "Trax cancel failed");
     }
     return { success: true, raw: res.data };
   }
@@ -370,10 +378,7 @@ class TraxCourier extends BaseCourier {
       url,
     });
     if (res.status >= 400 || !this.isOk(res.data)) {
-      throw fromProviderMessage(
-        this.extractErrorMessage(res, "Trax tracking failed"),
-        { provider: this.providerName, details: { response: res.data } },
-      );
+      throw this.providerError(res, "Trax tracking failed");
     }
     const history = Array.isArray(res.data?.details?.tracking_history)
       ? res.data.details.tracking_history
