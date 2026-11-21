@@ -40,6 +40,15 @@ const categorySchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    is_daraz: {
+      type: Boolean,
+      default: false,
+      set(value) {
+        if (value === true || value === 1) return true;
+        const text = String(value ?? "").trim().toLowerCase();
+        return text === "yes" || text === "true" || text === "1";
+      },
+    },
     /** Show/hide in storefront or pickers; not the same as collection-level `status` on order, product, etc. */
     isActive: {
       type: Boolean,
