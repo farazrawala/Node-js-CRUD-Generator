@@ -20,7 +20,7 @@ const COURIER_TYPE_VALUES = [
 const COURIER_TYPE_META = {
   tcs: {
     label: "TCS",
-    logo: "/public/couriers/tcs.svg",
+    logo: "/public/couriers/tcs.png",
   },
   leopard: {
     label: "Leopard",
@@ -40,7 +40,7 @@ const COURIER_TYPE_META = {
   },
   trax: {
     label: "Trax",
-    logo: "/public/couriers/trax.svg",
+    logo: "/public/couriers/trax.png",
   },
   postex: {
     label: "PostEx",
