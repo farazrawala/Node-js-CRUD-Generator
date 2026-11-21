@@ -241,10 +241,9 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     settings: {
       ...settings,
       costcentercode:
-        settings.costcentercode ||
         legacy.cost_center ||
+        settings.costcentercode ||
         settings.cost_center ||
-        legacy.pickup_location ||
         null,
       pickup_address:
         legacy.pickup_address || settings.pickup_address || null,

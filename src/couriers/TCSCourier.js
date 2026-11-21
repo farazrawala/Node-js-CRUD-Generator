@@ -615,27 +615,33 @@ class TCSCourier extends BaseCourier {
    * @param {object} [order]
    * @returns {Promise<string>}
    */
+  costCenterCodeOf(row) {
+    return String(
+      row?.costcentercode || row?.costCenterCode || row?.code || "",
+    ).trim();
+  }
+
+  /** A pickup address must not be sent as costcentercode. */
+  looksLikeCostCenterCode(value) {
+    const text = String(value || "").trim();
+    if (!text || /^default$/i.test(text)) return false;
+    if (text.length > 20 || /,/.test(text)) return false;
+    if (text.split(/\s+/).length > 4) return false;
+    return true;
+  }
+
   async resolveCostCenterCode(accessToken, accountNo, order = {}) {
     const settings = this.config.settings || {};
-    let configured = String(
-      settings.costcentercode ||
-        this.config.pickup_location ||
-        settings.cost_center ||
-        this.config.cost_center ||
-        "",
-    ).trim();
-
-    if (!configured && this.isSandbox) {
-      configured = String(
-        settings.sandbox_cost_center ||
-          process.env.TCS_SANDBOX_COST_CENTER ||
-          "Test-01",
-      ).trim();
-    }
-
-    if (configured && !/^default$/i.test(configured)) {
-      return configured.slice(0, 20);
-    }
+    const configured = [
+      settings.costcentercode,
+      settings.cost_center,
+      this.config.cost_center,
+      this.config.pickup_location,
+      this.isSandbox ? settings.sandbox_cost_center : "",
+      this.isSandbox ? process.env.TCS_SANDBOX_COST_CENTER : "",
+    ]
+      .map((value) => String(value || "").trim())
+      .find((value) => this.looksLikeCostCenterCode(value)) || "";
 
     if (!accountNo) {
       throw fromProviderMessage(
@@ -649,40 +655,27 @@ class TCSCourier extends BaseCourier {
     }
 
     const inquired = await this.inquireCostCenters(accessToken, accountNo);
-    if (inquired.length > 0) {
-      const code = String(
-        inquired[0].costcentercode ||
-          inquired[0].costCenterCode ||
-          inquired[0].code ||
-          "",
-      ).trim();
-      if (code) {
-        this.config.settings = {
-          ...settings,
-          costcentercode: code,
-        };
-        return code.slice(0, 20);
-      }
+    const codes = inquired.map((row) => this.costCenterCodeOf(row)).filter(Boolean);
+    const matched = codes.find(
+      (code) => code.toLowerCase() === configured.toLowerCase(),
+    );
+    const chosen = matched || (!codes.length ? configured : "") || codes[0] || "";
+    if (chosen) {
+      this.config.settings = { ...settings, costcentercode: chosen };
+      return chosen.slice(0, 20);
     }
 
-    // Sandbox: create a cost center when the account has none yet.
-    if (this.isSandbox) {
-      const created = await this.createCostCenter(
-        accessToken,
-        accountNo,
-        order,
-      );
-      if (created) {
-        this.config.settings = {
-          ...(this.config.settings || {}),
-          costcentercode: created,
-        };
-        return created.slice(0, 20);
-      }
+    const created = await this.createCostCenter(accessToken, accountNo, order);
+    if (created) {
+      this.config.settings = {
+        ...(this.config.settings || {}),
+        costcentercode: created,
+      };
+      return created.slice(0, 20);
     }
 
     throw fromProviderMessage(
-      "No TCS Cost Center found. Set Cost Center on the courier integration (or create one in TCS Envio).",
+      "No TCS Cost Center found for this account. Create one in TCS, or set Pickup Address and Return Address so one can be created.",
       {
         provider: this.providerName,
         code: "CONFIG_MISSING",
@@ -704,39 +697,48 @@ class TCSCourier extends BaseCourier {
       accessToken: String(accessToken),
       customerno: String(accountNo),
     });
-    // Swagger: GET /ecom/api/inquiry/costcenterinquiry?accesstoken=&customerno=
-    const url = `${this.baseUrl}/ecom/api/inquiry/costcenterinquiry?${qs.toString()}`;
+    const urls = [
+      `${this.baseUrl}/ecom/api/inquiry/costcenterinquiry?${qs.toString()}`,
+      `${this.baseUrl}/ecom/inquiry/costcenterinquiry?${qs.toString()}`,
+    ];
 
-    try {
-      const res = await httpRequest(url, {
-        method: "GET",
-        provider: this.providerName,
-        headers: {
-          ...headers,
-          accesstoken: String(accessToken),
-        },
-      });
+    for (const url of urls) {
+      try {
+        const res = await httpRequest(url, {
+          method: "GET",
+          provider: this.providerName,
+          headers: {
+            ...headers,
+            accesstoken: String(accessToken),
+          },
+          retries: 0,
+        });
 
-      courierLogger.log("info", "cost_center_inquiry", {
-        provider: this.providerName,
-        accountNo,
-        httpStatus: res.status,
-        response: res.data,
-      });
+        courierLogger.log("info", "cost_center_inquiry", {
+          provider: this.providerName,
+          accountNo,
+          url,
+          httpStatus: res.status,
+          response: res.data,
+        });
 
-      if (Array.isArray(res.data?.detail)) return res.data.detail;
-      if (Array.isArray(res.data?.result)) return res.data.result;
-      if (Array.isArray(res.data?.costcenters)) return res.data.costcenters;
-      if (Array.isArray(res.data)) return res.data;
-      return [];
-    } catch (err) {
-      courierLogger.apiError({
-        provider: this.providerName,
-        step: "cost_center_inquiry",
-        error: err.message,
-      });
-      return [];
+        const rows =
+          Array.isArray(res.data?.detail) ? res.data.detail
+          : Array.isArray(res.data?.result) ? res.data.result
+          : Array.isArray(res.data?.costcenters) ? res.data.costcenters
+          : Array.isArray(res.data) ? res.data
+          : [];
+        if (rows.some((row) => this.costCenterCodeOf(row))) return rows;
+      } catch (err) {
+        courierLogger.apiError({
+          provider: this.providerName,
+          step: "cost_center_inquiry",
+          url,
+          error: err.message,
+        });
+      }
     }
+    return [];
   }
 
   /**
@@ -749,10 +751,10 @@ class TCSCourier extends BaseCourier {
   async createCostCenter(accessToken, accountNo, order = {}) {
     const settings = this.config.settings || {};
     const company = order.company || {};
-    const code = String(settings.create_costcentercode || "Test-01").slice(
-      0,
-      20,
-    );
+    const code = String(
+      settings.create_costcentercode ||
+        (this.isSandbox ? "Test-01" : "POS1"),
+    ).slice(0, 20);
     const city =
       order.warehouse?.city ||
       settings.shipper_city ||
@@ -813,13 +815,12 @@ class TCSCourier extends BaseCourier {
       });
 
       const msg = String(res.data?.message || res.data?.Message || "");
-      if (/success/i.test(msg) || res.status < 400) {
-        return (
-          res.data?.costcentercode || res.data?.result?.costcentercode || code
-        );
-      }
-      // Already exists — reuse requested code
-      if (/exist|already/i.test(msg)) return code;
+      const returned = String(
+        res.data?.costcentercode || res.data?.result?.costcentercode || "",
+      ).trim();
+      if (/exist|already/i.test(msg)) return returned || code;
+      if (/fail/i.test(msg)) return null;
+      if (/success/i.test(msg) || returned) return returned || code;
       return null;
     } catch (err) {
       courierLogger.apiError({
