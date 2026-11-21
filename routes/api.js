@@ -176,6 +176,7 @@ const {
   order_confirm_by_email,
   order_confirm_by_whatsapp,
   order_update_address,
+  order_record_label_print,
   order_validate_address,
   order_delete,
   order_merge,
@@ -1076,6 +1077,7 @@ router.patch("/order/confirm-by-email/:id", order_confirm_by_email);
 router.post("/order/confirm-by-email/:id", order_confirm_by_email);
 router.patch("/order/confirm-by-whatsapp/:id", order_confirm_by_whatsapp);
 router.post("/order/confirm-by-whatsapp/:id", order_confirm_by_whatsapp);
+router.post("/order/record-label-print/:id", order_record_label_print);
 router.patch("/order/update-address/:id", order_update_address);
 router.post("/order/update-address/:id", order_update_address);
 router.post("/order/validate-address", order_validate_address);

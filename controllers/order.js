@@ -8542,6 +8542,52 @@ async function order_update_address(req, res) {
   });
 }
 
+/**
+ * POST /api/order/record-label-print/:id
+ * Increments order.print_times by 1.
+ */
+async function order_record_label_print(req, res) {
+  const orderId = String(req.params?.id || "").trim();
+  if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Invalid id",
+    });
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+    });
+  }
+
+  const updated = await Order.findOneAndUpdate(
+    { _id: orderId, company_id: companyId, deletedAt: null },
+    { $inc: { print_times: 1 } },
+    { new: true },
+  )
+    .select("print_times")
+    .lean();
+
+  if (!updated) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "Order not found",
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    print_times: Number(updated.print_times) || 0,
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -8556,6 +8602,7 @@ module.exports = {
   order_confirm_by_email,
   order_confirm_by_whatsapp,
   order_update_address,
+  order_record_label_print,
   order_validate_address,
   order_merge,
   order_delete,

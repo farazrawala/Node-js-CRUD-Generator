@@ -365,6 +365,12 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Courier Tracking Number",
     },
+    /** How many times a shipping label was printed for this order. */
+    print_times: {
+      type: Number,
+      default: 0,
+      field_name: "Print Times",
+    },
     courier_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "courier",
