@@ -279,24 +279,25 @@ class TCSCourier extends BaseCourier {
       clientsecret: String(clientSecret),
     };
 
-    // TCS Authorization is GET with a JSON body (clientid + clientsecret).
+    const readToken = (data) =>
+      data?.result?.accessToken || data?.result?.accesstoken || data?.accessToken;
+
+    // Node fetch rejects a body on GET. TCS accepts the same JSON on POST.
     let res = await httpRequest(authUrl, {
-      method: "GET",
+      method: "POST",
       provider: this.providerName,
       body: payload,
-      headers: payload,
     });
 
-    if (
-      !res.data?.result?.accessToken &&
-      !res.data?.result?.accesstoken &&
-      !res.data?.accessToken
-    ) {
+    if (!readToken(res.data)) {
       const authWithQuery = `${authUrl}?clientid=${encodeURIComponent(payload.clientid)}&clientsecret=${encodeURIComponent(payload.clientsecret)}`;
       res = await httpRequest(authWithQuery, {
         method: "GET",
         provider: this.providerName,
-        headers: payload,
+        headers: {
+          clientid: payload.clientid,
+          clientsecret: payload.clientsecret,
+        },
       });
     }
 
