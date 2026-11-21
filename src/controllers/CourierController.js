@@ -332,6 +332,8 @@ async function testCredentials(req, res) {
         password: req.body?.password,
         token: req.body?.token,
         account_no: req.body?.account_no ?? req.body?.accountNo,
+        client_id: req.body?.client_id ?? req.body?.clientId,
+        client_secret: req.body?.client_secret ?? req.body?.clientSecret,
         provider: req.body?.provider,
       },
     });

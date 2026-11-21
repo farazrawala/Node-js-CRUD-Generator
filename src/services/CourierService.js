@@ -184,13 +184,14 @@ function mapLegacyCourierToConfig(legacy, providerKey) {
     settings.secret ||
     null;
 
+  // Top-level fields are the current form values; they must win over stale settings.*.
   if (clientId) {
-    settings.clientId = settings.clientId || clientId;
-    settings.client_id = settings.client_id || clientId;
+    settings.clientId = clientId;
+    settings.client_id = clientId;
   }
   if (clientSecret) {
-    settings.clientSecret = settings.clientSecret || clientSecret;
-    settings.client_secret = settings.client_secret || clientSecret;
+    settings.clientSecret = clientSecret;
+    settings.client_secret = clientSecret;
   }
 
   const isTokenAuth = /postex|flagship|flaship/i.test(String(providerKey));
@@ -1731,7 +1732,12 @@ async function testCredentials(options = {}) {
     if (value == null) return;
     const text = String(value);
     // Keep stored password/token when the form field is left blank.
-    if ((key === "password" || key === "token") && !text.trim()) return;
+    if (
+      (key === "password" || key === "token" || key === "client_secret") &&
+      !text.trim()
+    ) {
+      return;
+    }
     merged[key] = typeof value === "string" ? text.trim() || text : value;
   };
 
@@ -1743,6 +1749,8 @@ async function testCredentials(options = {}) {
     "token",
     "account_no",
     "name",
+    "client_id",
+    "client_secret",
   ]) {
     pickOverride(key);
   }
