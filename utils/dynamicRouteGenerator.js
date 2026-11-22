@@ -45,6 +45,7 @@ const RESERVED_QUERY_KEYS = new Set([
   "tag",
   "integration_id",
   "integrationId",
+  "daraz_roots",
   ...INCLUDE_EXCLUDE_ID_QUERY_KEYS,
 ]);
 
@@ -778,6 +779,14 @@ function generateControllerFunctions(modelName) {
             filter = applyChatNumberQueryFilter(filter, req.query);
           }
           if (modelName === "category") {
+            const rootsOnly =
+              req.query.daraz_roots === "1" || req.query.daraz_roots === "true";
+            if (rootsOnly) {
+              filter.$and = [
+                ...(Array.isArray(filter.$and) ? filter.$and : []),
+                { description: { $regex: "^[^>]+$" } },
+              ];
+            }
             const integrationFilter = await applyCategoryIntegrationFilter(
               filter,
               req.query,
@@ -876,6 +885,14 @@ function generateControllerFunctions(modelName) {
             filter = applyChatNumberQueryFilter(filter, req.query);
           }
           if (modelName === "category") {
+            const rootsOnly =
+              req.query.daraz_roots === "1" || req.query.daraz_roots === "true";
+            if (rootsOnly) {
+              filter.$and = [
+                ...(Array.isArray(filter.$and) ? filter.$and : []),
+                { description: { $regex: "^[^>]+$" } },
+              ];
+            }
             const integrationFilter = await applyCategoryIntegrationFilter(
               filter,
               req.query,
@@ -930,6 +947,14 @@ function generateControllerFunctions(modelName) {
             filter = applyChatNumberQueryFilter(filter, req.query);
           }
           if (modelName === "category") {
+            const rootsOnly =
+              req.query.daraz_roots === "1" || req.query.daraz_roots === "true";
+            if (rootsOnly) {
+              filter.$and = [
+                ...(Array.isArray(filter.$and) ? filter.$and : []),
+                { description: { $regex: "^[^>]+$" } },
+              ];
+            }
             const integrationFilter = await applyCategoryIntegrationFilter(
               filter,
               req.query,
