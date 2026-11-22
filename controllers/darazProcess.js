@@ -1438,7 +1438,7 @@ async function resolveDarazSyncRootProduct(product, companyId) {
   if (!productId) return { rootProduct: product };
 
   const stored = await Product.findById(productId)
-    .select("product_type product_name daraz_category_id parent_product_id category_id")
+    .select("product_type product_name daraz_category_id daraz_chart_image parent_product_id category_id")
     .lean();
   let rootProduct = stored ? { ...product, ...stored } : product;
 
@@ -1759,6 +1759,30 @@ async function createDarazListing({
     );
   }
 
+  let sizeChartUrl = "";
+  const chartSource = String(product?.daraz_chart_image || "").trim();
+  if (chartSource) {
+    const chartPublic = /^https?:\/\//i.test(chartSource)
+      ? chartSource
+      : resolvePublicAssetUrl(chartSource) || chartSource;
+    try {
+      const hosted = await migrateDarazImages(client, [chartPublic]);
+      sizeChartUrl = hosted[0] || "";
+    } catch (err) {
+      console.warn("Daraz size chart migrate failed:", err?.message || err);
+    }
+  }
+  const sizeChartRequired = (attributes || []).some((attr) =>
+    /size[\s_]*chart/i.test(String(attr?.name || attr?.label || "")),
+  );
+  if (sizeChartRequired && !sizeChartUrl) {
+    const err = new Error(
+      "Daraz requires a product size chart for this category. Upload a Daraz chart image on the product, then sync again.",
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
   const ctx = {
     name: product.product_name || skus[0]?.sellerSku,
     sku: skus[0]?.sellerSku,
@@ -1773,6 +1797,7 @@ async function createDarazListing({
       brand: brandName,
       warranty_type: "No Warranty",
       model: resolvePosProductSku(product),
+      ...(sizeChartUrl ? { size_chart: sizeChartUrl } : {}),
     },
   };
   let built = assignDarazSkuSaleProps(attributes, skus, ctx);
@@ -1828,6 +1853,9 @@ async function createDarazListing({
   }
   const skusWithAttributes = built.skusWithAttributes;
   const extraAttributes = buildDarazAttributeObject(attributes, ctx, false);
+  if (sizeChartUrl && !extraAttributes.size_chart) {
+    extraAttributes.size_chart = sizeChartUrl;
+  }
 
   const payloadXml = buildDarazProductCreateXml({
     primaryCategory,
