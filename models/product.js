@@ -152,6 +152,12 @@ const modelSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    daraz_category_path: {
+      type: String,
+      field_name: "Daraz Category Path",
+      trim: true,
+      default: "",
+    },
     product_relations: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "product_relations",

@@ -1437,16 +1437,21 @@ async function resolveDarazSyncRootProduct(product, companyId) {
   const productId = coalesceObjectId(product?._id);
   if (!productId) return { rootProduct: product };
 
+  const stored = await Product.findById(productId)
+    .select("product_type product_name daraz_category_id parent_product_id category_id")
+    .lean();
+  let rootProduct = stored ? { ...product, ...stored } : product;
+
   if (
-    typeof product?.product_type === "string" &&
-    product.product_type.toLowerCase() === "variable"
+    typeof rootProduct?.product_type === "string" &&
+    rootProduct.product_type.toLowerCase() === "variable"
   ) {
-    return { rootProduct: product };
+    return { rootProduct };
   }
 
-  const parentId = coalesceObjectId(product?.parent_product_id);
+  const parentId = coalesceObjectId(rootProduct?.parent_product_id);
   if (!parentId || String(parentId) === String(productId)) {
-    return { rootProduct: product };
+    return { rootProduct };
   }
 
   const parent = await Product.findOne({
@@ -1463,7 +1468,7 @@ async function resolveDarazSyncRootProduct(product, companyId) {
     return { rootProduct: parent };
   }
 
-  return { rootProduct: product };
+  return { rootProduct };
 }
 
 async function loadPosVariationChildren(parentProductId, companyId) {
