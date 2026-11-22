@@ -2967,9 +2967,12 @@ function buildVariantDescription(baseDescription, attributes = []) {
       }
 
       const parentId = String(req.query?.parent_id || "").trim();
+      const categoryId = String(req.query?.category_id || "").trim();
       const search = String(req.query?.search || "").trim().toLowerCase();
       let nodes = cached.nodes;
-      if (search) {
+      if (categoryId) {
+        nodes = nodes.filter((node) => String(node.category_id) === categoryId);
+      } else if (search) {
         nodes = nodes
           .filter((node) => {
             const name = String(node.name || "").toLowerCase();

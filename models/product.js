@@ -158,6 +158,12 @@ const modelSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    daraz_chart_image: {
+      type: String,
+      field_type: "image",
+      field_name: "Daraz Chart Image",
+      default: "",
+    },
     product_relations: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "product_relations",
