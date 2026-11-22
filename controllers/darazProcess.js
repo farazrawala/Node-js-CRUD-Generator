@@ -147,18 +147,32 @@ function asArray(value) {
   return [value];
 }
 
-function flattenDarazCategoryTree(nodes, parentId = null, acc = []) {
+function darazCategoryChildNodes(node) {
+  return asArray(
+    node?.children ||
+      node?.child ||
+      node?.children_list ||
+      node?.sub_categories ||
+      node?.subCategories,
+  );
+}
+
+function flattenDarazCategoryTree(nodes, parentId = null, path = [], acc = []) {
   for (const node of asArray(nodes)) {
     const categoryId = node?.category_id ?? node?.categoryId ?? node?.id;
     if (categoryId == null) continue;
+    const name = String(node?.name || node?.var || "").trim();
+    const nextPath = name ? [...path, name] : path;
     acc.push({
       category_id: String(categoryId),
-      name: String(node?.name || node?.var || "").trim(),
+      name,
       leaf: Boolean(node?.leaf),
       parent_id: parentId,
+      path: nextPath.join(" > "),
     });
-    if (node?.children) {
-      flattenDarazCategoryTree(node.children, String(categoryId), acc);
+    const children = darazCategoryChildNodes(node);
+    if (children.length) {
+      flattenDarazCategoryTree(children, String(categoryId), nextPath, acc);
     }
   }
   return acc;
@@ -1211,6 +1225,11 @@ async function resolveDarazPrimaryCategoryId(
   companyId,
   { client, process } = {},
 ) {
+  const assignedOnProduct = String(product?.daraz_category_id || "")
+    .replace(/^daraz-/i, "")
+    .trim();
+  if (isDarazCategoryId(assignedOnProduct)) return assignedOnProduct;
+
   const cats = Array.isArray(product?.category_id)
     ? product.category_id
     : product?.category_id
@@ -1904,28 +1923,46 @@ async function recordBrandSyncMapping(
   return row;
 }
 
-async function importDarazCategoryToPos(remote, { companyId, process, stats }) {
-  const name = String(remote?.name || "").trim();
+async function importDarazCategoryToPos(remote, { companyId, process, stats, remoteToPos }) {
+  const name = String(remote?.name || "").trim().slice(0, 100);
   const remoteId = String(remote?.category_id || "").trim();
-  if (!name || !remoteId) {
+  if (name.length < 2 || !remoteId) {
     stats.skipped += 1;
     return null;
   }
 
-  const slug = categorySlugFromName(name);
-  const existing = await findExistingCategory(name, slug, companyId);
+  const slug = `daraz-${remoteId}`;
+  const parentPosId = remote?.parent_id
+    ? remoteToPos?.get(String(remote.parent_id)) || null
+    : null;
+  const description = String(remote?.path || name).slice(0, 500);
+  const existing = await Category.findOne({
+    company_id: companyId,
+    deletedAt: null,
+    slug,
+  }).lean();
   let posId;
   if (existing) {
     posId = coalesceObjectId(existing._id);
-    if (!existing.is_daraz) {
-      await Category.updateOne({ _id: posId }, { $set: { is_daraz: true } });
-    }
+    await Category.updateOne(
+      { _id: posId },
+      {
+        $set: {
+          is_daraz: true,
+          name,
+          description,
+          ...(parentPosId ? { parent_id: parentPosId } : {}),
+        },
+      },
+    );
     stats.skipped += 1;
   } else {
     const created = await Category.create({
       name,
       slug,
+      description,
       is_daraz: true,
+      parent_id: parentPosId,
       company_id: companyId,
       status: "active",
       created_by: coalesceObjectId(process.created_by?._id || process.created_by),
@@ -1934,6 +1971,7 @@ async function importDarazCategoryToPos(remote, { companyId, process, stats }) {
     stats.inserted += 1;
   }
 
+  if (remoteToPos && posId) remoteToPos.set(remoteId, posId);
   await recordCategorySyncMapping(process, companyId, posId, remoteId, stats);
   return posId;
 }
@@ -2434,8 +2472,9 @@ async function fetch_category(req, res, process) {
     const data = await client.call("/category/tree/get", {});
     const tree = data?.category_list || data?.data || data;
     const all = flattenDarazCategoryTree(tree);
-    const start = (page - 1) * limit;
-    const remoteCategories = all.slice(start, start + limit);
+    // Daraz returns the whole seller tree in one call. A process limit of 5
+    // would leave every level after the first few rows unimported.
+    const remoteCategories = all;
     const stats = {
       inserted: 0,
       skipped: 0,
@@ -2447,9 +2486,15 @@ async function fetch_category(req, res, process) {
       sync_category_mapped: 0,
     };
 
+    const remoteToPos = new Map();
     for (const remote of remoteCategories) {
       try {
-        await importDarazCategoryToPos(remote, { companyId, process, stats });
+        await importDarazCategoryToPos(remote, {
+          companyId,
+          process,
+          stats,
+          remoteToPos,
+        });
       } catch (err) {
         console.error(
           `Failed to import Daraz category ${remote?.category_id}:`,

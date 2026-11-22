@@ -145,6 +145,13 @@ const modelSchema = new mongoose.Schema(
       field_name: "Category",
       field_type: "multiselect",
     },
+    /** Daraz leaf category id chosen from the cascading Daraz category picker. */
+    daraz_category_id: {
+      type: String,
+      field_name: "Daraz Category",
+      trim: true,
+      default: "",
+    },
     product_relations: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "product_relations",
