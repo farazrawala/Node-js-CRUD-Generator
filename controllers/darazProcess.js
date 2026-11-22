@@ -363,18 +363,41 @@ function posProductDescription(product) {
   return String(product?.product_description || product?.product_name || "").trim();
 }
 
+function darazImageAssetPath(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value).trim();
+  }
+  if (typeof value !== "object" || Array.isArray(value)) return "";
+  return String(
+    value.url ||
+      value.path ||
+      value.src ||
+      value.image_url ||
+      value.imageUrl ||
+      value.product_image ||
+      value.image ||
+      "",
+  ).trim();
+}
+
 function collectDarazImageUrls(product) {
   const paths = [];
   const seen = new Set();
   const add = (value) => {
-    const trimmed = String(value || "").trim();
-    if (!trimmed || seen.has(trimmed)) return;
+    const trimmed = darazImageAssetPath(value);
+    if (!trimmed || trimmed === "[object Object]" || seen.has(trimmed)) return;
     seen.add(trimmed);
     paths.push(trimmed);
   };
   add(product?.product_image);
+  add(product?.product_image_thumbnail_url);
+  add(product?.image);
   if (Array.isArray(product?.multi_images)) {
     product.multi_images.forEach(add);
+  }
+  if (Array.isArray(product?.images)) {
+    product.images.forEach(add);
   }
   const out = [];
   for (const asset of paths) {
@@ -397,10 +420,12 @@ function isDarazHostedImage(url) {
 }
 
 function darazMigratedImageUrl(data) {
+  const image = data?.image && typeof data.image === "object" ? data.image : data;
   return String(
-    data?.image?.url ||
-      data?.image?.Url ||
-      data?.image?.url_online ||
+    image?.url ||
+      image?.Url ||
+      image?.url_online ||
+      image?.image_url ||
       (typeof data?.image === "string" ? data.image : "") ||
       data?.url ||
       data?.image_url ||
@@ -1129,7 +1154,7 @@ ${images.map((url) => `      <Image>${xmlEscape(url)}</Image>`).join("\n")}
         ? `          <Images>
 ${sku.images.map((url) => `            <Image>${xmlEscape(url)}</Image>`).join("\n")}
           </Images>`
-        : "          <Images></Images>";
+        : "";
       return `        <Sku>
           ${sku.skuId ? `<SkuId>${xmlEscape(sku.skuId)}</SkuId>` : ""}
           <SellerSku>${xmlEscape(sku.sellerSku)}</SellerSku>
@@ -1618,6 +1643,16 @@ async function applyDarazProductAttributeUpdate({
     }
     if (!images.length) {
       images = [...new Set((Array.isArray(skus) ? skus : []).flatMap((sku) => sku.images || []))];
+    }
+    const hadSource = [product, ...(Array.isArray(skus) ? skus.map((sku) => sku.imageProduct) : [])]
+      .filter(Boolean)
+      .some((row) => collectDarazImageUrls(row).length);
+    if (hadSource && !images.length) {
+      const err = new Error(
+        "Daraz did not accept the product images. Check that each variation image is a public file, then sync again.",
+      );
+      err.statusCode = 400;
+      throw err;
     }
   }
   if (!nameOn && !descOn && !images.length) return false;
