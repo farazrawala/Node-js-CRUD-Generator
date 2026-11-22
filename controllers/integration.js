@@ -2906,6 +2906,102 @@ function buildVariantDescription(baseDescription, attributes = []) {
     return { integration, integrationId };
   }
 
+  const darazCategoryTreeCache = new Map();
+
+  /**
+   * GET /api/integration/daraz/categories
+   * Live Daraz Pakistan category tree. Optional parent_id returns that node's
+   * children. Optional search matches the category name or its full path.
+   */
+  async function getDarazCategories(req, res) {
+    try {
+      const Integration = require("../models/integration");
+      const { coalesceObjectId } = require("../utils/modelHelper");
+      const {
+        buildDarazClient,
+        flattenDarazCategoryTree,
+      } = require("./darazProcess");
+
+      let loaded = await loadDarazIntegrationForToken(req);
+      if (loaded.error && !req.query?.integration_id && !req.params?.id) {
+        const companyId = coalesceObjectId(
+          req.query?.company_id || req.user?.company_id,
+        );
+        const integration = await Integration.findOne({
+          ...(companyId ? { company_id: companyId } : {}),
+          store_type: /^daraz$/i,
+          status: "active",
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        }).lean();
+        loaded = integration
+          ? { integration, integrationId: integration._id }
+          : {
+              error: {
+                status: 404,
+                message: "No active Daraz integration found for this company.",
+              },
+            };
+      }
+      if (loaded.error) {
+        return res.status(loaded.error.status).json({
+          success: false,
+          message: loaded.error.message,
+        });
+      }
+
+      const { client, error } = buildDarazClient(loaded.integration);
+      if (error) {
+        return res.status(400).json({ success: false, message: error });
+      }
+
+      const cacheKey = String(loaded.integrationId);
+      let cached = darazCategoryTreeCache.get(cacheKey);
+      if (!cached || Date.now() - cached.at > 10 * 60 * 1000) {
+        const data = await client.call("/category/tree/get", {});
+        const tree = data?.category_list || data?.data || data;
+        cached = {
+          at: Date.now(),
+          nodes: flattenDarazCategoryTree(tree),
+        };
+        darazCategoryTreeCache.set(cacheKey, cached);
+      }
+
+      const parentId = String(req.query?.parent_id || "").trim();
+      const search = String(req.query?.search || "").trim().toLowerCase();
+      let nodes = cached.nodes;
+      if (search) {
+        nodes = nodes
+          .filter((node) => {
+            const name = String(node.name || "").toLowerCase();
+            const path = String(node.path || "").toLowerCase();
+            return name.includes(search) || path.includes(search);
+          })
+          .slice(0, 50);
+      } else if (parentId) {
+        nodes = nodes.filter((node) => String(node.parent_id || "") === parentId);
+      } else {
+        nodes = nodes.filter((node) => !node.parent_id);
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: nodes.map((node) => ({
+          category_id: node.category_id,
+          name: node.name,
+          parent_id: node.parent_id || "",
+          leaf: Boolean(node.leaf),
+          path: node.path || node.name,
+        })),
+      });
+    } catch (error) {
+      console.error("getDarazCategories:", error?.message || error);
+      return res.status(500).json({
+        success: false,
+        message: error?.message || "Failed to load Daraz categories.",
+      });
+    }
+  }
+
   /**
    * GET /api/integration/daraz/authorize-url/:id
    * Pakistan seller login URL. redirect_uri must match the Daraz app Callback URL
@@ -3278,6 +3374,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
     refreshDarazIntegrationToken,
     refreshDarazIntegrationTokensCron,
     getDarazAuthorizeUrl,
+    getDarazCategories,
     darazOAuthCallback,
   };
   
