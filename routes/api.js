@@ -229,6 +229,7 @@ const {
   refreshDarazIntegrationTokensCron,
   getDarazAuthorizeUrl,
   getDarazCategories,
+  getDarazCategoryAttributes,
   darazOAuthCallback,
 } = require("../controllers/integration");
 const { unlinkSyncProduct } = require("../controllers/sync_product");
@@ -725,6 +726,7 @@ router.get(
 );
 router.get("/integration/daraz/categories", getDarazCategories);
 router.get("/integration/daraz/categories/:id", getDarazCategories);
+router.get("/integration/daraz/category-attributes", getDarazCategoryAttributes);
 router.get("/integration/daraz/authorize-url/:id", getDarazAuthorizeUrl);
 router.get("/integration/daraz/authorize-url", getDarazAuthorizeUrl);
 router.get("/integration/daraz/callback", darazOAuthCallback);

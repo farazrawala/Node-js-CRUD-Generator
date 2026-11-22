@@ -771,6 +771,10 @@ function assignDarazSkuSaleProps(attributes, skus, ctx) {
     for (const attr of attributes || []) {
       const name = darazAttrName(attr);
       if (!saleProps.has(name) || darazSalePropGroup(attr) !== "size") continue;
+      const picked = String(sku.darazSize || "").trim();
+      if (picked) {
+        skuAttributes[name] = darazOptionForValue(attr, picked) || picked;
+      }
       const used = usedSizes.get(name) || new Set();
       let value = String(skuAttributes[name] || "").trim();
       if (!value || used.has(value.toLowerCase())) {
@@ -3165,6 +3169,7 @@ async function syncDarazVariableProductToStore({
       quantity: plan.quantity,
       packageContent: plan.child.product_name || plan.sellerSku,
       variationName: plan.child.product_name,
+      darazSize: plan.child.daraz_size || "",
       imageProduct: plan.child,
     })),
   });
@@ -3834,6 +3839,7 @@ module.exports = {
   sync_brand,
   importDarazProductToPos,
   flattenDarazCategoryTree,
+  fetchDarazCategoryAttributes,
   findDarazLeafForName,
   isDarazCategoryId,
   isDarazHostedImage,

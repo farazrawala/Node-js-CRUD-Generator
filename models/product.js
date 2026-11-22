@@ -158,6 +158,13 @@ const modelSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    /** Daraz size option chosen on a variation (sale property `size`). */
+    daraz_size: {
+      type: String,
+      field_name: "Daraz Size",
+      trim: true,
+      default: "",
+    },
     daraz_chart_image: {
       type: String,
       field_type: "image",

@@ -3006,6 +3006,75 @@ function buildVariantDescription(baseDescription, attributes = []) {
   }
 
   /**
+   * GET /api/integration/daraz/category-attributes?category_id=
+   * Size (and other) options for one Daraz leaf category.
+   */
+  async function getDarazCategoryAttributes(req, res) {
+    try {
+      const Integration = require("../models/integration");
+      const { coalesceObjectId } = require("../utils/modelHelper");
+      const {
+        buildDarazClient,
+        fetchDarazCategoryAttributes,
+      } = require("./darazProcess");
+
+      const categoryId = String(
+        req.query?.category_id || req.query?.primary_category_id || "",
+      ).trim();
+      if (!categoryId) {
+        return res.status(400).json({
+          success: false,
+          message: "category_id is required.",
+        });
+      }
+
+      let loaded = await loadDarazIntegrationForToken(req);
+      if (loaded.error && !req.query?.integration_id && !req.params?.id) {
+        const companyId = coalesceObjectId(
+          req.query?.company_id || req.user?.company_id,
+        );
+        const integration = await Integration.findOne({
+          ...(companyId ? { company_id: companyId } : {}),
+          store_type: /^daraz$/i,
+          status: "active",
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        }).lean();
+        loaded = integration
+          ? { integration, integrationId: integration._id }
+          : {
+              error: {
+                status: 404,
+                message: "No active Daraz integration found for this company.",
+              },
+            };
+      }
+      if (loaded.error) {
+        return res.status(loaded.error.status).json({
+          success: false,
+          message: loaded.error.message,
+        });
+      }
+
+      const { client, error } = buildDarazClient(loaded.integration);
+      if (error) {
+        return res.status(400).json({ success: false, message: error });
+      }
+
+      const attributes = await fetchDarazCategoryAttributes(client, categoryId);
+      return res.status(200).json({
+        success: true,
+        data: Array.isArray(attributes) ? attributes : [],
+      });
+    } catch (error) {
+      console.error("getDarazCategoryAttributes:", error?.message || error);
+      return res.status(500).json({
+        success: false,
+        message: error?.message || "Failed to load Daraz category attributes.",
+      });
+    }
+  }
+
+  /**
    * GET /api/integration/daraz/authorize-url/:id
    * Pakistan seller login URL. redirect_uri must match the Daraz app Callback URL
    * (default: pos_webhook/webhook.php?callback=daraz).
@@ -3378,6 +3447,7 @@ function buildVariantDescription(baseDescription, attributes = []) {
     refreshDarazIntegrationTokensCron,
     getDarazAuthorizeUrl,
     getDarazCategories,
+    getDarazCategoryAttributes,
     darazOAuthCallback,
   };
   
