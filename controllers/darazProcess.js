@@ -522,14 +522,24 @@ async function migrateDarazImages(client, urls) {
 async function resolveDarazCreateImages(client, product, companyId, options = {}) {
   const imageSyncEnabled = options.imageSyncEnabled !== false;
   if (imageSyncEnabled) {
-    const images = await migrateDarazImages(
-      client,
-      collectDarazImageUrls(product),
-    );
+    const urls = [
+      ...collectDarazImageUrls(product),
+      ...(options.extraProducts || []).flatMap((row) => collectDarazImageUrls(row)),
+    ];
+    const images = await migrateDarazImages(client, urls);
     if (images.length) return images;
   }
   const placeholder = await uploadDarazPlaceholderImage(client);
   return placeholder ? [placeholder] : [];
+}
+
+async function darazHostedImagesForProduct(client, product) {
+  const hosted = [];
+  for (const url of collectDarazImageUrls(product)) {
+    const [image] = await migrateDarazImages(client, [url]);
+    if (image && !hosted.includes(image)) hosted.push(image);
+  }
+  return hosted;
 }
 
 function isDarazAttrOn(value) {
@@ -993,7 +1003,8 @@ function sellerNameFallback(skus) {
 function buildDarazSkuXml(sku, extraSkuXml = "", images = []) {
   const price = Number(sku.price);
   const quantity = Number(sku.quantity);
-  const imageXml = (images || [])
+  const skuImages = sku.images?.length ? sku.images : images;
+  const imageXml = (skuImages || [])
     .map((url) => `            <Image>${xmlEscape(url)}</Image>`)
     .join("\n");
   const attributeXml = [extraSkuXml, darazAttributeObjectXml(sku.attributes)]
@@ -1601,6 +1612,13 @@ async function applyDarazProductAttributeUpdate({
   let images = [];
   if (imageOn) {
     images = await migrateDarazImages(client, collectDarazImageUrls(product));
+    for (const sku of Array.isArray(skus) ? skus : []) {
+      if (!sku.imageProduct) continue;
+      sku.images = await darazHostedImagesForProduct(client, sku.imageProduct);
+    }
+    if (!images.length) {
+      images = [...new Set((Array.isArray(skus) ? skus : []).flatMap((sku) => sku.images || []))];
+    }
   }
   if (!nameOn && !descOn && !images.length) return false;
 
@@ -1739,7 +1757,15 @@ async function createDarazListing({
         integration,
         "sync_product_image",
       ),
+      extraProducts: (skus || []).map((sku) => sku.imageProduct).filter(Boolean),
     });
+    for (const sku of skus || []) {
+      if (!sku.imageProduct) continue;
+      sku.images = await darazHostedImagesForProduct(client, sku.imageProduct);
+    }
+    if (!images.length) {
+      images = [...new Set((skus || []).flatMap((sku) => sku.images || []))];
+    }
   } catch (err) {
     console.warn("Daraz image migrate failed:", err?.message || err);
   }
@@ -3036,6 +3062,7 @@ async function syncDarazVariableProductToStore({
           null;
         return {
           sellerSku: plan.sellerSku,
+          imageProduct: plan.child,
           skuId: String(
             remote?.SkuId ||
               remote?.sku_id ||
@@ -3103,6 +3130,7 @@ async function syncDarazVariableProductToStore({
       quantity: plan.quantity,
       packageContent: plan.child.product_name || plan.sellerSku,
       variationName: plan.child.product_name,
+      imageProduct: plan.child,
     })),
   });
   const createdItemId = darazCreatedItemId(created);
