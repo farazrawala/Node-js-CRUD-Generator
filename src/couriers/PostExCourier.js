@@ -865,7 +865,10 @@ class PostExCourier extends BaseCourier {
   }
 
   async getCities(operationalCityType = "Delivery") {
-    const cacheKey = `postex_cities_${operationalCityType || "all"}`;
+    const cacheKey = `${this.baseUrl}|${operationalCityType || "all"}|${this.getToken()}`;
+    if (!PostExCourier._sharedCities) PostExCourier._sharedCities = new Map();
+    const shared = PostExCourier._sharedCities.get(cacheKey);
+    if (shared?.expiresAt > Date.now()) return shared.data;
     if (this._citiesCache?.[cacheKey]?.expiresAt > Date.now()) {
       return this._citiesCache[cacheKey].data;
     }
@@ -895,6 +898,7 @@ class PostExCourier extends BaseCourier {
       data: cities,
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
     };
+    PostExCourier._sharedCities.set(cacheKey, this._citiesCache[cacheKey]);
     return cities;
   }
 

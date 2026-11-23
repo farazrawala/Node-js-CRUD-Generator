@@ -56,6 +56,85 @@ function sendError(res, err) {
   });
 }
 
+function bookingOptionsFromReq(req) {
+  return {
+    companyId: companyIdFromReq(req),
+    userId: req.user?._id,
+    provider: req.body?.provider || req.query?.provider,
+    courierId:
+      req.body?.courier_id ||
+      req.body?.courierId ||
+      req.query?.courier_id ||
+      req.query?.courierId ||
+      null,
+    async: req.body?.async === true || req.query?.async === "1",
+    queueOnUnavailable:
+      req.body?.queueOnUnavailable === true ||
+      req.query?.queueOnUnavailable === "1",
+    courierCompany:
+      req.body?.courier_company ||
+      req.body?.courierCompany ||
+      req.query?.courier_company ||
+      null,
+    courierOption:
+      req.body?.courier_option ||
+      req.body?.courierOption ||
+      req.query?.courier_option ||
+      null,
+    pickuplocation:
+      req.body?.pickuplocation ||
+      req.body?.pickup_location ||
+      req.query?.pickuplocation ||
+      null,
+    isCod:
+      req.body?.isCod ??
+      req.body?.is_cod ??
+      req.body?.cod ??
+      req.query?.isCod ??
+      req.query?.is_cod ??
+      req.query?.cod,
+    codAmount:
+      req.body?.codAmount ??
+      req.body?.cod_amount ??
+      req.body?.amount ??
+      req.body?.total_amount ??
+      req.query?.codAmount ??
+      req.query?.cod_amount ??
+      req.query?.amount ??
+      req.query?.total_amount,
+    city:
+      req.body?.city ||
+      req.body?.destinationCity ||
+      req.body?.destination_city ||
+      req.body?.cityName ||
+      req.body?.city_name ||
+      req.query?.city ||
+      null,
+  };
+}
+
+/**
+ * POST /courier/create-bulk
+ * Body: { order_ids: string[], courier_id, ...same booking fields as single create }
+ */
+async function createShipmentsBulk(req, res) {
+  try {
+    const orderIds = req.body?.order_ids || req.body?.orderIds || [];
+    const result = await CourierService.createShipmentsBulk(orderIds, {
+      ...bookingOptionsFromReq(req),
+      concurrency: req.body?.concurrency,
+    });
+    const status = result.booked > 0 ? 201 : 422;
+    return res.status(status).json(result);
+  } catch (err) {
+    await logControllerError(req, err.message, {
+      action: "COURIER BULK CREATE SHIPMENT",
+      tags: ["courier", "create", "bulk", "error"],
+    });
+    return sendError(res, err instanceof CourierError ? err : err);
+  }
+}
+
 /**
  * POST /courier/create/:orderId
  */
@@ -70,60 +149,10 @@ async function createShipment(req, res) {
       });
     }
 
-    const result = await CourierService.createShipment(orderId, {
-      companyId: companyIdFromReq(req),
-      userId: req.user?._id,
-      provider: req.body?.provider || req.query?.provider,
-      courierId:
-        req.body?.courier_id ||
-        req.body?.courierId ||
-        req.query?.courier_id ||
-        req.query?.courierId ||
-        null,
-      async: req.body?.async === true || req.query?.async === "1",
-      queueOnUnavailable:
-        req.body?.queueOnUnavailable === true ||
-        req.query?.queueOnUnavailable === "1",
-      courierCompany:
-        req.body?.courier_company ||
-        req.body?.courierCompany ||
-        req.query?.courier_company ||
-        null,
-      courierOption:
-        req.body?.courier_option ||
-        req.body?.courierOption ||
-        req.query?.courier_option ||
-        null,
-      pickuplocation:
-        req.body?.pickuplocation ||
-        req.body?.pickup_location ||
-        req.query?.pickuplocation ||
-        null,
-      isCod:
-        req.body?.isCod ??
-        req.body?.is_cod ??
-        req.body?.cod ??
-        req.query?.isCod ??
-        req.query?.is_cod ??
-        req.query?.cod,
-      codAmount:
-        req.body?.codAmount ??
-        req.body?.cod_amount ??
-        req.body?.amount ??
-        req.body?.total_amount ??
-        req.query?.codAmount ??
-        req.query?.cod_amount ??
-        req.query?.amount ??
-        req.query?.total_amount,
-      city:
-        req.body?.city ||
-        req.body?.destinationCity ||
-        req.body?.destination_city ||
-        req.body?.cityName ||
-        req.body?.city_name ||
-        req.query?.city ||
-        null,
-    });
+    const result = await CourierService.createShipment(
+      orderId,
+      bookingOptionsFromReq(req),
+    );
 
     return res.status(result.queued ? 202 : 201).json(result);
   } catch (err) {
@@ -372,6 +401,7 @@ async function getBookingOptions(req, res) {
 
 module.exports = {
   createShipment,
+  createShipmentsBulk,
   getTrackingByNumber,
   getTrackingByOrder,
   cancelShipment,

@@ -24,6 +24,11 @@ const DEFAULT_SANDBOX = "https://devconnect.tcscourier.com";
 const TCS_MIN_WEIGHT_KG = 0.5;
 const TCS_MAX_WEIGHT_KG = 10;
 
+/** Tokens are reused across bookings. A new driver is built per order. */
+const sharedBearerCache = new Map();
+const sharedEcomCache = new Map();
+const sharedCityCache = new Map();
+
 class TCSCourier extends BaseCourier {
   constructor(config, options) {
     super(config, options);
@@ -345,9 +350,27 @@ class TCSCourier extends BaseCourier {
    * @param {{ forceRefresh?: boolean }} [options]
    * @returns {Promise<string>}
    */
+  tokenCacheId() {
+    const username = String(this.config.username || this.config.login || "").trim();
+    let clientId = "";
+    try {
+      clientId = String(this.resolveOAuthClientCredentials().clientId || "");
+    } catch {
+      clientId = "";
+    }
+    return `${this.baseUrl}|${clientId}|${username}`;
+  }
+
   async getBearerToken(options = {}) {
     const forceRefresh = options.forceRefresh === true;
     const now = Date.now();
+    const cacheId = this.tokenCacheId();
+    if (!forceRefresh && !this._bearerCache?.token) {
+      const shared = sharedBearerCache.get(cacheId);
+      if (shared?.token && shared.expiresAt > now + 60_000) {
+        this._bearerCache = shared;
+      }
+    }
     if (
       !forceRefresh &&
       this._bearerCache?.token &&
@@ -377,6 +400,7 @@ class TCSCourier extends BaseCourier {
         token: savedToken,
         expiresAt: savedExpiry,
       };
+      sharedBearerCache.set(cacheId, this._bearerCache);
       return savedToken;
     }
 
@@ -396,6 +420,7 @@ class TCSCourier extends BaseCourier {
         token: fresh.token,
         expiresAt: fresh.expiresAt,
       };
+      sharedBearerCache.set(cacheId, this._bearerCache);
       await this.persistBearerToken(fresh.token, fresh.expiresAt);
       return fresh.token;
     }
@@ -405,6 +430,7 @@ class TCSCourier extends BaseCourier {
         token: savedToken,
         expiresAt: savedExpiry || now + 5 * 60_000,
       };
+      sharedBearerCache.set(cacheId, this._bearerCache);
       return savedToken;
     }
 
@@ -423,6 +449,13 @@ class TCSCourier extends BaseCourier {
   async getAccessToken(options = {}) {
     const forceRefresh = options.forceRefresh === true;
     const now = Date.now();
+    const ecomKey = this.tokenCacheId();
+    if (!forceRefresh && !this._tokenCache?.token) {
+      const shared = sharedEcomCache.get(ecomKey);
+      if (shared?.token && shared.expiresAt > now + 60_000) {
+        this._tokenCache = shared;
+      }
+    }
     if (
       !forceRefresh &&
       this._tokenCache.token &&
@@ -479,6 +512,8 @@ class TCSCourier extends BaseCourier {
         });
         this._bearerCache = null;
         this._tokenCache = { token: null, expiresAt: 0 };
+        sharedBearerCache.delete(this.tokenCacheId());
+        sharedEcomCache.delete(this.tokenCacheId());
         return this.getAccessToken({ forceRefresh: true, _retried: true });
       }
 
@@ -495,6 +530,7 @@ class TCSCourier extends BaseCourier {
 
     const expiry = Date.parse(res.data?.expiry || "") || now + 3600_000;
     this._tokenCache = { token, expiresAt: expiry };
+    sharedEcomCache.set(this.tokenCacheId(), this._tokenCache);
     return token;
   }
 
@@ -1469,7 +1505,11 @@ class TCSCourier extends BaseCourier {
   }
 
   async getCities(countryCode = "PK") {
-    const cacheKey = `tcs_cities_${countryCode}`;
+    const cacheKey = `${this.baseUrl}|${countryCode}`;
+    const shared = sharedCityCache.get(cacheKey);
+    if (shared?.expiresAt > Date.now()) {
+      return shared.data;
+    }
     if (this._citiesCache?.[cacheKey]?.expiresAt > Date.now()) {
       return this._citiesCache[cacheKey].data;
     }
@@ -1498,6 +1538,7 @@ class TCSCourier extends BaseCourier {
       data: cities,
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
     };
+    sharedCityCache.set(cacheKey, this._citiesCache[cacheKey]);
     return cities;
   }
 

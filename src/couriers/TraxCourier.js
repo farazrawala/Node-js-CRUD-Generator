@@ -169,6 +169,13 @@ class TraxCourier extends BaseCourier {
   }
 
   async getCities() {
+    const cacheKey = `${this.baseUrl || ""}|${this.getApiKey?.() || ""}`;
+    if (!TraxCourier._sharedCities) TraxCourier._sharedCities = new Map();
+    const shared = TraxCourier._sharedCities.get(cacheKey);
+    if (shared) {
+      this._cities = shared;
+      return shared;
+    }
     if (this._cities) return this._cities;
     const res = await this.request("cities");
     if (res.status >= 400 || !this.isOk(res.data)) {
@@ -181,6 +188,8 @@ class TraxCourier extends BaseCourier {
       delivery: c.delivery || null,
       pickup: Boolean(c.pickup),
     }));
+    if (!TraxCourier._sharedCities) TraxCourier._sharedCities = new Map();
+    TraxCourier._sharedCities.set(cacheKey, this._cities);
     return this._cities;
   }
 

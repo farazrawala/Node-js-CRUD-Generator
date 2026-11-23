@@ -9,6 +9,9 @@ const CourierController = require("../controllers/CourierController");
 
 const router = express.Router();
 
+/** Book many orders together. Must stay above /create/:orderId. */
+router.post("/create-bulk", CourierController.createShipmentsBulk);
+
 /** Create shipment — body must NOT include customer/address data; only orderId in path. */
 router.post("/create/:orderId", CourierController.createShipment);
 

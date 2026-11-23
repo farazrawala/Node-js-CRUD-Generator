@@ -21,6 +21,9 @@ const { courierRemarksText } = require("../utils/orderContextLoader");
 const DEFAULT_PROD = "https://merchantapi.leopardscourier.com/api/";
 const DEFAULT_SANDBOX = "https://merchantapistaging.leopardscourier.com/api/";
 
+/** City list is the same for every booking. Keep it across driver instances. */
+const sharedCityCache = new Map();
+
 class LeopardCourier extends BaseCourier {
   constructor(config, options) {
     super(config, options);
@@ -332,7 +335,22 @@ class LeopardCourier extends BaseCourier {
     };
   }
 
+  cityCacheKey() {
+    try {
+      const { api_key } = this.credentialsPayload();
+      return `${this.baseUrl}|${api_key}`;
+    } catch {
+      return this.baseUrl;
+    }
+  }
+
   async getCities() {
+    const cacheKey = this.cityCacheKey();
+    const shared = sharedCityCache.get(cacheKey);
+    if (shared?.expiresAt > Date.now()) {
+      this._citiesCache = shared;
+      return shared.data;
+    }
     if (this._citiesCache?.expiresAt > Date.now()) {
       return this._citiesCache.data;
     }
@@ -360,6 +378,7 @@ class LeopardCourier extends BaseCourier {
       data: cities,
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
     };
+    sharedCityCache.set(cacheKey, this._citiesCache);
     return cities;
   }
 

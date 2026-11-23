@@ -36,6 +36,10 @@ function pickShipmentCourierCompany(shipment) {
   return value || null;
 }
 
+/** Skip a repeat health check for the same courier during a bulk run. */
+const healthOkUntil = new Map();
+const HEALTH_OK_MS = 10 * 60 * 1000;
+
 const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
 const CourierTracking = require("../models/courier_tracking.model");
@@ -422,8 +426,18 @@ async function createShipment(orderId, options = {}) {
     throw err;
   }
 
+  const healthKey = `${company._id}:${providerKey}:${options.courierId || ""}`;
+  const healthStillFresh =
+    options.skipHealthCheck === true ||
+    (healthOkUntil.get(healthKey) || 0) > Date.now();
+
   try {
-    const healthy = await driver.healthCheck();
+    const healthy = healthStillFresh
+      ? { ok: true, message: "Courier health check reused" }
+      : await driver.healthCheck();
+    if (healthy?.ok) {
+      healthOkUntil.set(healthKey, Date.now() + HEALTH_OK_MS);
+    }
     if (!healthy?.ok) {
       // Auth/config failures should surface immediately — do not book or silently queue.
       const msg = healthy?.message || `Courier provider unavailable: ${providerKey}`;
@@ -659,6 +673,119 @@ async function createShipment(orderId, options = {}) {
       provider: providerKey,
     });
   }
+}
+
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await fn(items[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Book many orders with one courier login and a few bookings in flight at once.
+ * One failure does not stop the rest.
+ * @param {string[]} orderIds
+ * @param {object} [options] same fields as createShipment
+ * @returns {Promise<object>}
+ */
+async function createShipmentsBulk(orderIds, options = {}) {
+  const ids = [
+    ...new Set(
+      (Array.isArray(orderIds) ? orderIds : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!ids.length) {
+    throw new CourierError("order_ids is required", {
+      code: "VALIDATION_ERROR",
+      httpStatus: 400,
+    });
+  }
+  if (ids.length > 100) {
+    throw new CourierError("Bulk booking is limited to 100 orders", {
+      code: "VALIDATION_ERROR",
+      httpStatus: 400,
+    });
+  }
+
+  const concurrency = Math.min(
+    8,
+    Math.max(1, Number(options.concurrency) || 5),
+  );
+
+  // One login / city-list check for the whole batch, then bookings run together.
+  try {
+    const sample = await loadOrderContext(ids[0], {
+      companyId: options.companyId,
+    });
+    const resolved = await resolveDriver(
+      sample.company,
+      options.provider,
+      options.courierId,
+    );
+    const healthy = await resolved.driver.healthCheck();
+    if (healthy?.ok && sample.company?._id) {
+      healthOkUntil.set(
+        `${sample.company._id}:${resolved.providerKey}:${options.courierId || ""}`,
+        Date.now() + HEALTH_OK_MS,
+      );
+    } else if (
+      /credential|unauthor|auth|bearer token is missing/i.test(
+        healthy?.message || "",
+      )
+    ) {
+      throw invalidCredentials(
+        resolved.providerKey,
+        healthy?.message || "Invalid courier credentials",
+      );
+    }
+  } catch (err) {
+    if (err instanceof CourierError && err.code === "INVALID_CREDENTIALS") {
+      throw err;
+    }
+  }
+
+  const results = await mapWithConcurrency(ids, concurrency, async (orderId) => {
+    try {
+      const result = await createShipment(orderId, options);
+      return {
+        order_id: orderId,
+        success: true,
+        tracking_number: result.tracking_number || null,
+        queued: Boolean(result.queued),
+        status: result.status || null,
+        message: result.message || null,
+      };
+    } catch (err) {
+      return {
+        order_id: orderId,
+        success: false,
+        error: err.message || "Booking failed",
+        code: err.code || "COURIER_ERROR",
+      };
+    }
+  });
+
+  const booked = results.filter((row) => row.success).length;
+  return {
+    success: booked === results.length,
+    total: results.length,
+    booked,
+    failed: results.length - booked,
+    results,
+  };
 }
 
 async function enqueueShipmentCreation(order, options, reason) {
@@ -1874,6 +2001,7 @@ async function getBookingOptions(options = {}) {
 
 module.exports = {
   createShipment,
+  createShipmentsBulk,
   getTracking,
   getTrackingByTrackingNumber,
   cancelShipment,

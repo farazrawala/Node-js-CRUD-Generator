@@ -741,6 +741,13 @@ class FlagshipCourier extends BaseCourier {
   }
 
   async getCities() {
+    const cacheKey = `${this.baseUrl || ""}|${this.getApiKey?.() || ""}`;
+    if (!FlagshipCourier._sharedCities) FlagshipCourier._sharedCities = new Map();
+    const shared = FlagshipCourier._sharedCities.get(cacheKey);
+    if (shared?.expiresAt > Date.now()) {
+      this._citiesCache = shared;
+      return shared.data;
+    }
     if (this._citiesCache?.expiresAt > Date.now()) {
       return this._citiesCache.data;
     }
@@ -764,6 +771,7 @@ class FlagshipCourier extends BaseCourier {
           data: cities,
           expiresAt: Date.now() + 24 * 60 * 60 * 1000,
         };
+        FlagshipCourier._sharedCities.set(cacheKey, this._citiesCache);
         return cities;
       }
     } catch (_) {
@@ -791,6 +799,7 @@ class FlagshipCourier extends BaseCourier {
       data: cities,
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
     };
+    FlagshipCourier._sharedCities.set(cacheKey, this._citiesCache);
     return cities;
   }
 
