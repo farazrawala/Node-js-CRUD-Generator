@@ -836,18 +836,19 @@ function generateControllerFunctions(modelName) {
           const includeDeleted =
             modelName === "integration" &&
             (req.query.include_deleted === "true" || req.query.include_deleted === "1");
+          const includeInactive =
+            req.query.include_inactive === "true" || req.query.include_inactive === "1";
           let filter = includeDeleted
             ? {
                 $or: [
-                  { deletedAt: null, status: "active" },
+                  includeInactive
+                    ? { deletedAt: null }
+                    : { deletedAt: null, status: "active" },
                   { deletedAt: { $ne: null } },
                 ],
               }
             : { deletedAt: null };
           if (!includeDeleted && modelName === "user") {
-            const includeInactive =
-              req.query.include_inactive === "true" ||
-              req.query.include_inactive === "1";
             if (!includeInactive) {
               filter.status = { $ne: "inactive" };
             }
@@ -863,6 +864,12 @@ function generateControllerFunctions(modelName) {
                 ],
               },
             ];
+          } else if (
+            !includeDeleted &&
+            modelName === "integration" &&
+            includeInactive
+          ) {
+            // Integrations page shows inactive rows so the status switch can turn them back on.
           } else if (
             !includeDeleted &&
             modelName !== "user" &&
