@@ -182,6 +182,30 @@ const modelSchema = new mongoose.Schema(
       field_name: "Daraz Chart Image",
       default: "",
     },
+    /** Product-level Daraz category attributes, keyed by Daraz attribute name. */
+    daraz_attributes: {
+      type: mongoose.Schema.Types.Mixed,
+      field_name: "Daraz Attributes",
+      default: {},
+      set(value) {
+        if (value == null || value === "") return {};
+        if (typeof value === "string") {
+          const text = value.trim();
+          if (!text) return {};
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              return parsed;
+            }
+          } catch {
+            return {};
+          }
+          return {};
+        }
+        if (typeof value === "object" && !Array.isArray(value)) return value;
+        return {};
+      },
+    },
     product_relations: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "product_relations",

@@ -934,6 +934,28 @@ function darazRichText(value) {
   return darazDescriptionHtml(value);
 }
 
+function savedDarazAttributes(product) {
+  const raw = product?.daraz_attributes;
+  if (!raw) return {};
+  let source = raw;
+  if (typeof raw === "string") {
+    try {
+      source = JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(source)) {
+    const name = String(key || "").trim();
+    const text = Array.isArray(value) ? value.filter(Boolean).join(",") : String(value ?? "").trim();
+    if (!name || !text) continue;
+    out[name] = text;
+  }
+  return out;
+}
+
 async function fetchDarazCategoryAttributes(client, categoryId) {
   const data = await client.call("/category/attributes/get", {
     primary_category_id: String(categoryId),
@@ -999,7 +1021,9 @@ function buildDarazAttributeObject(attrs, ctx, skuLevel) {
     } else {
       if (isDarazSkuAttribute(attr)) continue;
       if (DARAZ_PRODUCT_STRUCTURAL_ATTRS.has(key)) continue;
-      if (!isDarazMandatoryAttribute(attr)) continue;
+      const known = ctx.known?.[name] ?? ctx.known?.[key];
+      const hasKnown = known != null && String(known).trim() !== "";
+      if (!isDarazMandatoryAttribute(attr) && !hasKnown) continue;
     }
     let value = valueForDarazAttribute(attr, ctx);
     if (skuLevel && isDarazSaleProp(attr)) {
@@ -1989,6 +2013,7 @@ async function createDarazListing({
       brand: brandName,
       warranty_type: "No Warranty",
       model: resolvePosProductSku(product),
+      ...savedDarazAttributes(product),
       ...(sizeChartUrl ? { size_chart: sizeChartUrl } : {}),
     },
   };
