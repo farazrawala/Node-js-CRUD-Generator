@@ -139,6 +139,15 @@ function buildPublicCourierTrackingUrl(provider, trackingId) {
   return "";
 }
 
+/** Courier scan time. Skips the row we insert at booking time ("Shipment booked"). */
+function courierScanInstant(event) {
+  if (String(event?.description || "").trim().toLowerCase() === "shipment booked") {
+    return null;
+  }
+  const parsed = event?.event_time ? new Date(event.event_time) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+}
+
 /**
  * Attach latest courier shipment tracking_id / tracking_url onto order list rows.
  * @param {Array<object>} orders
@@ -190,8 +199,24 @@ async function attachCourierTrackingToOrders(orders) {
   );
 
   const CourierTracking = getCourierTrackingModel();
+  const courierClockByShipment = new Map();
   const inTransitSinceByShipment = new Map();
   if (CourierTracking) {
+    const scanEvents = await CourierTracking.find({
+      shipment_id: { $in: shipments.map((shipment) => shipment._id) },
+      event_time: { $ne: null },
+    })
+      .select("shipment_id event_time description raw_response")
+      .lean();
+    for (const event of scanEvents) {
+      const instant = courierScanInstant(event);
+      if (!instant) continue;
+      const key = String(event.shipment_id);
+      const slot = courierClockByShipment.get(key) || { booked: null, last: null };
+      if (!slot.booked || instant < slot.booked) slot.booked = instant;
+      if (!slot.last || instant > slot.last) slot.last = instant;
+      courierClockByShipment.set(key, slot);
+    }
     const inTransitEvents = await CourierTracking.aggregate([
       {
         $match: {
@@ -217,6 +242,7 @@ async function attachCourierTrackingToOrders(orders) {
   return orders.map((order) => {
     const shipment = byOrderId.get(String(order._id));
     if (shipment) {
+      const courierClock = courierClockByShipment.get(String(shipment._id));
       const inTransitSince = inTransitSinceByShipment.get(String(shipment._id));
       const inTransitDays = inTransitSince
         ? Math.max(
@@ -246,6 +272,8 @@ async function attachCourierTrackingToOrders(orders) {
         tracking_url,
         in_transit_since: inTransitSince || null,
         in_transit_days: inTransitDays,
+        booked_at: courierClock?.booked || null,
+        courier_last_event_at: courierClock?.last || null,
         courier_provider: shipment.courier || null,
         courier_company,
         courier_shipment: {
@@ -254,6 +282,8 @@ async function attachCourierTrackingToOrders(orders) {
           courier_company,
           label_url: shipment.label_url || null,
           shipment_status: shipment.shipment_status || null,
+          booked_at: courierClock?.booked || null,
+          courier_last_event_at: courierClock?.last || null,
         },
       };
     }
