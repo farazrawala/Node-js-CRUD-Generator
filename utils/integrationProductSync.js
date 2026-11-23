@@ -38,28 +38,33 @@ function isQuantitySyncEnabled(integration) {
 }
 
 /**
- * Compact process remark for Product settings toggles:
- * `name skipped, slug updated, image updated, quantity updated, description updated, status updated`.
+ * Process remark for Product settings toggles, one line each:
+ * `Product name updated = true`
+ * `Product stock updated = false`
  */
 function formatProductSyncFieldRemarks(integration) {
   const fields = [
-    ["sync_product_name", "name"],
-    ["sync_product_slug", "slug"],
-    ["sync_product_image", "image"],
-    ["quantity", "quantity"],
-    ["sync_product_description", "description"],
-    ["sync_product_status", "status"],
-    ["sync_product_barcode", "barcode"],
+    ["sync_product_name", "Product name"],
+    ["sync_product_slug", "Product slug"],
+    ["sync_product_image", "Product image"],
+    ["sync_product_price", "Product price"],
+    ["sync_product_description", "Product description"],
+    ["stock", "Product stock"],
+    ["sync_product_status", "Product status"],
+    ["sync_product_barcode", "Product barcode"],
   ];
-  return fields
-    .map(([key, label]) => {
-      const enabled =
-        key === "quantity" ?
-          isQuantitySyncEnabled(integration)
-        : isIntegrationSyncEnabled(integration, key);
-      return enabled ? `${label} updated` : `${label} skipped`;
-    })
-    .join(", ");
+  return (
+    "\n" +
+    fields
+      .map(([key, label]) => {
+        const enabled =
+          key === "stock" ?
+            isQuantitySyncEnabled(integration)
+          : isIntegrationSyncEnabled(integration, key);
+        return `${label} updated = ${enabled ? "true" : "false"}`;
+      })
+      .join("\n")
+  );
 }
 
 function resolvePosProductSku(product) {
