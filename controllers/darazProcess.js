@@ -912,7 +912,7 @@ function valueForDarazAttribute(attr, ctx) {
   const name = darazAttrName(attr);
   const input = darazAttrInputType(attr);
   if (!name || input === "img" || input === "date") return "";
-  const known = ctx.known[name] ?? ctx.known[name.toLowerCase()];
+  const known = ctx.known?.[name] ?? ctx.known?.[name.toLowerCase()];
   if (
     input.includes("select") ||
     input.includes("enum") ||
