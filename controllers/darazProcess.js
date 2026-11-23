@@ -1547,6 +1547,73 @@ function skuIdFromCreateList(skuList, sellerSku) {
   return String(row?.sku_id || row?.SkuId || "").trim();
 }
 
+function darazSizeFieldsForSku(attributes, skuAttributes) {
+  const fields = {};
+  for (const attr of attributes || []) {
+    if (darazSalePropGroup(attr) !== "size") continue;
+    const name = darazAttrName(attr);
+    const value = String(skuAttributes?.[name] || "").trim();
+    if (name && value) fields[name] = value;
+  }
+  return fields;
+}
+
+/** Push each variation's chosen Daraz size onto an existing listing. */
+async function applyDarazVariationSizeUpdate({ client, itemId, product, skus }) {
+  const rows = (skus || []).filter(
+    (sku) => String(sku?.darazSize || "").trim() && (sku.sellerSku || sku.skuId),
+  );
+  if (!itemId || !rows.length) return false;
+
+  const categoryId = String(product?.daraz_category_id || "").trim();
+  if (!categoryId) {
+    throw new Error(
+      "Choose a Daraz category on the product before syncing variation sizes.",
+    );
+  }
+
+  const attributes = await fetchDarazCategoryAttributes(client, categoryId);
+  const { skusWithAttributes } = assignDarazSkuSaleProps(
+    attributes,
+    rows.map((sku) => ({
+      sellerSku: sku.sellerSku,
+      variationName: sku.variationName || "",
+      darazSize: sku.darazSize,
+    })),
+    { name: product?.product_name || "" },
+  );
+
+  const skuXml = skusWithAttributes
+    .map((sku, index) => {
+      const source = rows[index];
+      const fields = darazSizeFieldsForSku(attributes, sku.attributes);
+      const fieldXml = Object.entries(fields)
+        .map(([name, value]) => `          <${name}>${xmlEscape(value)}</${name}>`)
+        .join("\n");
+      if (!fieldXml) return "";
+      return `        <Sku>
+          ${source.skuId ? `<SkuId>${xmlEscape(source.skuId)}</SkuId>` : ""}
+          <SellerSku>${xmlEscape(source.sellerSku)}</SellerSku>
+${fieldXml}
+        </Sku>`;
+    })
+    .filter(Boolean)
+    .join("\n");
+  if (!skuXml) return false;
+
+  const xml = `<?xml version="1.0" encoding="UTF-8" ?>
+<Request>
+  <Product>
+    <ItemId>${xmlEscape(itemId)}</ItemId>
+    <Skus>
+${skuXml}
+    </Skus>
+  </Product>
+</Request>`;
+  await client.call("/product/update", { payload: xml });
+  return true;
+}
+
 async function applyDarazPriceStockUpdates({
   client,
   integration,
@@ -3090,26 +3157,35 @@ async function syncDarazVariableProductToStore({
   if (itemId) {
     const detail = await fetchDarazProductDetail(client, itemId, null);
     const remoteSkus = darazSkus(detail);
+    const updateSkus = skuPlan.map((plan) => {
+      const remote =
+        remoteSkus.find((row) => darazSellerSku(row) === plan.sellerSku) ||
+        null;
+      return {
+        sellerSku: plan.sellerSku,
+        imageProduct: plan.child,
+        variationName: plan.child.product_name,
+        darazSize: plan.child.daraz_size || "",
+        skuId: String(
+          remote?.SkuId ||
+            remote?.sku_id ||
+            parseDarazSyncRef(plan.syncRow?.refference_id).skuId ||
+            "",
+        ).trim(),
+      };
+    });
     await applyDarazProductAttributeUpdate({
       client,
       integration,
       itemId,
       product: parentProduct,
-      skus: skuPlan.map((plan) => {
-        const remote =
-          remoteSkus.find((row) => darazSellerSku(row) === plan.sellerSku) ||
-          null;
-        return {
-          sellerSku: plan.sellerSku,
-          imageProduct: plan.child,
-          skuId: String(
-            remote?.SkuId ||
-              remote?.sku_id ||
-              parseDarazSyncRef(plan.syncRow?.refference_id).skuId ||
-              "",
-          ).trim(),
-        };
-      }),
+      skus: updateSkus,
+    });
+    await applyDarazVariationSizeUpdate({
+      client,
+      itemId,
+      product: parentProduct,
+      skus: updateSkus,
     });
 
     let updated = 0;
