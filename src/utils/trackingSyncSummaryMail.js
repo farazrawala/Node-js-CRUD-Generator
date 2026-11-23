@@ -12,6 +12,7 @@
  */
 
 const { sendEmail } = require("../../utils/orderUpdateMail");
+const { mapGenericStatus } = require("../couriers/statusMap");
 
 const DEFAULT_TO = "johndavid78663@gmail.com";
 const DEFAULT_TZ = "Asia/Karachi";
@@ -62,7 +63,9 @@ function statusChangeOf(change) {
 function prettyStatus(value) {
   const text = String(value || "").trim();
   if (!text) return "";
-  // order_status values are snake_case ("in_transit"); courier ones are already readable.
+  // Raw courier scans (TCS, Leopard, Trax, …) become the same POS statuses.
+  const unified = mapGenericStatus(text);
+  if (unified) return unified;
   if (/^[a-z_]+$/.test(text)) {
     return text
       .split("_")
@@ -77,8 +80,11 @@ function changeLine(change) {
   const status = statusChangeOf(change) || {};
   const from = prettyStatus(status.from);
   const to = prettyStatus(status.to) || "-";
+  if (from && from === to) return "";
+  const courier = String(change.courier || "").trim();
   const label = `POS Order ${orderLabel(change)}`;
-  return from ? `${label} from ${from} to ${to}` : `${label} set to ${to}`;
+  const who = courier ? `${label} (${courier})` : label;
+  return from ? `${who} from ${from} to ${to}` : `${who} set to ${to}`;
 }
 
 const MAX_ORDERS_PER_REASON = 60;
@@ -156,7 +162,12 @@ function buildTrackingSyncSummaryEmail(summary = {}, meta = {}) {
   const changes = (Array.isArray(summary.changes) ? summary.changes : []).filter(
     statusChangeOf,
   );
-  const count = changes.length;
+  const detailLines = [];
+  for (const c of changes) {
+    const line = changeLine(c);
+    if (line) detailLines.push(line);
+  }
+  const count = detailLines.length;
 
   const headline =
     count === 0
@@ -166,7 +177,7 @@ function buildTrackingSyncSummaryEmail(summary = {}, meta = {}) {
   const lines = [headline];
   if (count) {
     lines.push("");
-    for (const c of changes) lines.push(changeLine(c));
+    lines.push(...detailLines);
   }
   // Always list which orders were polled (including the 0-change email).
   lines.push(...checkedOrderLines(summary.checked));

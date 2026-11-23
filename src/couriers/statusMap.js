@@ -13,6 +13,11 @@ const { UNIFIED_STATUSES } = require("./constants");
 const COMMON_RULES = [
   { pattern: /deliver(ed|y complete)/i, status: UNIFIED_STATUSES.DELIVERED },
   { pattern: /\bok\b/i, status: UNIFIED_STATUSES.DELIVERED },
+  { pattern: /ready\s+for\s+return|being\s+return|return(ed|ing)?(\s+to\s+(shipper|origin|sender))?|\brto\b/i, status: UNIFIED_STATUSES.RETURNED },
+  { pattern: /assign(ed)?\s+to\s+courier/i, status: UNIFIED_STATUSES.OUT_FOR_DELIVERY },
+  { pattern: /pickup\s+request\s+not\s+send|consignment\s+booked/i, status: UNIFIED_STATUSES.BOOKED },
+  { pattern: /\bpending\b/i, status: UNIFIED_STATUSES.BOOKED },
+  { pattern: /dispatch/i, status: UNIFIED_STATUSES.IN_TRANSIT },
   { pattern: /out[\s_-]*for[\s_-]*delivery/i, status: UNIFIED_STATUSES.OUT_FOR_DELIVERY },
   { pattern: /arriv(ed|al)/i, status: UNIFIED_STATUSES.ARRIVED },
   { pattern: /in[\s_-]*transit|dispatched|departed|on[\s_-]*route/i, status: UNIFIED_STATUSES.IN_TRANSIT },
