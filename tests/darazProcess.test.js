@@ -320,6 +320,8 @@ describe("darazProcess create payload", () => {
     assert.match(xml, /<price>1<\/price>/);
     assert.match(xml, /<name>Moana Petty<\/name>/);
     assert.match(xml, /<name_en>Moana Petty<\/name_en>/);
+    assert.match(xml, /<description_en><!\[CDATA\[<p>Pet toy<\/p>\]\]><\/description_en>/);
+    assert.match(xml, /<short_description_en><!\[CDATA\[<ul><li>Pet toy<\/li><\/ul>\]\]><\/short_description_en>/);
     assert.match(xml, /<Skus>/);
     assert.match(xml, /<Sku>/);
   });

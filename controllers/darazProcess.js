@@ -872,11 +872,66 @@ const DARAZ_PRODUCT_STRUCTURAL_ATTRS = new Set([
   "brand_id",
 ]);
 
-function darazRichText(value) {
+function darazPlainText(value) {
+  return String(value || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
+/** Daraz "Product details" renders short_description_en as a bullet list. */
+function darazHighlightsHtml(value, name) {
+  const plain = darazPlainText(value);
+  const namePlain = darazPlainText(name);
+  let parts = plain
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) {
+    parts = plain
+      .split(/(?<=[.!?])\s+/)
+      .map((part) => part.trim())
+      .filter((part) => part.length > 15);
+  }
+  parts = parts.filter(
+    (part) => part.toLowerCase() !== namePlain.toLowerCase(),
+  );
+  if (!parts.length) parts = [plain || namePlain || "N/A"];
+  const items = parts.slice(0, 8).map((part) => part.slice(0, 240));
+  return `<ul>${items.map((part) => `<li>${xmlEscape(part)}</li>`).join("")}</ul>`;
+}
+
+/** Long description. Daraz only keeps a small HTML subset. */
+function darazDescriptionHtml(value, name) {
   const text = String(value || "").trim();
-  if (!text) return "<ul><li>N/A</li></ul>";
-  if (/<[a-z][\s\S]*>/i.test(text)) return text;
-  return `<ul><li>${xmlEscape(text)}</li></ul>`;
+  if (!text) return darazHighlightsHtml(name, name);
+  if (!/<[a-z][\s\S]*>/i.test(text)) {
+    return darazPlainText(text)
+      .split(/\n+/)
+      .filter(Boolean)
+      .map((part) => `<p>${xmlEscape(part)}</p>`)
+      .join("");
+  }
+  return text
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/\s(?:style|class|id|dir|lang)="[^"]*"/gi, "")
+    .replace(/<\/?(?:span|div|font|section|article)[^>]*>/gi, "")
+    .replace(/<h[1-6][^>]*>/gi, "<p><strong>")
+    .replace(/<\/h[1-6]>/gi, "</strong></p>");
+}
+
+function darazRichText(value) {
+  return darazDescriptionHtml(value);
 }
 
 async function fetchDarazCategoryAttributes(client, categoryId) {
@@ -1002,7 +1057,8 @@ function buildDarazProductCreatePayload({
       Images: { Image: imageList },
     };
   });
-  const highlights = String(description || name || "").replace(/<[^>]+>/g, " ").trim().slice(0, 255);
+  const body = darazDescriptionHtml(description || name, name);
+  const highlights = darazHighlightsHtml(description || name, name);
   return {
     Request: {
       Product: {
@@ -1012,10 +1068,10 @@ function buildDarazProductCreatePayload({
           name: String(name || sellerNameFallback(skus)),
           name_en: String(name || sellerNameFallback(skus)),
           title: String(name || sellerNameFallback(skus)),
-          description: String(description || name || ""),
-          description_en: darazRichText(description || name),
-          short_description: highlights || String(name || ""),
-          short_description_en: highlights || String(name || ""),
+          description: body,
+          description_en: body,
+          short_description: highlights,
+          short_description_en: highlights,
           brand: String(brand || "No Brand"),
           ...(extraAttributes || {}),
         },
@@ -1071,8 +1127,8 @@ function buildDarazProductCreateXml({
   const skuXml = (skus || [])
     .map((sku) => buildDarazSkuXml(sku, extraSkuXml, images))
     .join("\n");
-  const highlights = darazRichText(String(description || name).slice(0, 255));
-  const body = darazRichText(description || name);
+  const body = darazDescriptionHtml(description || name, name);
+  const highlights = darazHighlightsHtml(description || name, name);
   return `<?xml version="1.0" encoding="UTF-8" ?>
 <Request>
   <Product>
@@ -1085,8 +1141,8 @@ ${imageXml}
       <name_en>${xmlEscape(name)}</name_en>
       <title>${xmlEscape(name)}</title>
       <description><![CDATA[${xmlCdata(body)}]]></description>
-      <short_description>${xmlEscape(String(description || name || "").replace(/<[^>]+>/g, " ").trim().slice(0, 255) || name)}</short_description>
-      <short_description_en>${xmlEscape(String(description || name || "").replace(/<[^>]+>/g, " ").trim().slice(0, 255) || name)}</short_description_en>
+      <short_description><![CDATA[${xmlCdata(highlights)}]]></short_description>
+      <short_description_en><![CDATA[${xmlCdata(highlights)}]]></short_description_en>
       <description_en><![CDATA[${xmlCdata(body)}]]></description_en>
       <brand>${xmlEscape(brand || "No Brand")}</brand>
 ${extraAttributeXml || ""}
@@ -1133,16 +1189,19 @@ function buildDarazProductUpdateXml({
     attrs.push(`        <name_en>${xmlEscape(name)}</name_en>`);
   }
   if (description) {
-    const highlights = String(description || name || "")
-      .replace(/<[^>]+>/g, " ")
-      .trim()
-      .slice(0, 255);
-    const body = darazRichText(description);
+    const body = darazDescriptionHtml(description, name);
+    const highlights = darazHighlightsHtml(description, name);
     attrs.push(
-      `        <short_description>${xmlEscape(highlights || name || "")}</short_description>`,
+      `        <short_description><![CDATA[${xmlCdata(highlights)}]]></short_description>`,
+    );
+    attrs.push(
+      `        <short_description_en><![CDATA[${xmlCdata(highlights)}]]></short_description_en>`,
     );
     attrs.push(
       `        <description><![CDATA[${xmlCdata(body)}]]></description>`,
+    );
+    attrs.push(
+      `        <description_en><![CDATA[${xmlCdata(body)}]]></description_en>`,
     );
   }
   const imageXml =
@@ -1207,11 +1266,12 @@ function buildDarazProductUpdatePayload({
     attributes.name_en = name;
   }
   if (description) {
-    attributes.short_description = String(description)
-      .replace(/<[^>]+>/g, " ")
-      .trim()
-      .slice(0, 255);
-    attributes.description = darazRichText(description);
+    const body = darazDescriptionHtml(description, name);
+    const highlights = darazHighlightsHtml(description, name);
+    attributes.short_description = highlights;
+    attributes.short_description_en = highlights;
+    attributes.description = body;
+    attributes.description_en = body;
   }
   return {
     Request: {
