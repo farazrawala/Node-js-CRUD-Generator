@@ -145,6 +145,17 @@ const modelSchema = new mongoose.Schema(
       field_name: "Category",
       field_type: "multiselect",
     },
+    /** When yes, the product edit form shows the Daraz category and chart image. */
+    is_daraz: {
+      type: Boolean,
+      default: false,
+      field_name: "Is Daraz",
+      set(value) {
+        if (value === true || value === 1) return true;
+        const text = String(value ?? "").trim().toLowerCase();
+        return text === "yes" || text === "true" || text === "1";
+      },
+    },
     /** Daraz leaf category id chosen from the cascading Daraz category picker. */
     daraz_category_id: {
       type: String,
