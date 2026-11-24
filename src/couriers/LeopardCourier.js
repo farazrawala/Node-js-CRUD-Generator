@@ -253,13 +253,13 @@ class LeopardCourier extends BaseCourier {
         : [];
 
     const packet = packetList[0] || res.data || {};
-    const details = Array.isArray(packet.TrackingDetail)
-      ? packet.TrackingDetail
-      : Array.isArray(packet.tracking_detail)
-        ? packet.tracking_detail
-        : Array.isArray(packet.booked_packet_history)
-          ? packet.booked_packet_history
-          : [];
+    const details = firstArray(
+      packet.TrackingDetail,
+      packet["Tracking Detail"],
+      packet.tracking_detail,
+      packet.tracking_details,
+      packet.booked_packet_history,
+    );
 
     const events = details.map((ev) => {
       const mapped = mapLeopardStatus(ev);
@@ -289,15 +289,17 @@ class LeopardCourier extends BaseCourier {
       });
     }
 
-    const latest = events[0] || {
+    const latest = latestLeopardEvent(events) || {
       status: UNIFIED_STATUSES.BOOKED,
       description: "",
     };
+    const packetStatus = mapLeopardStatus(packet);
+    const status = preferTerminalStatus(packetStatus, latest.status);
 
     return {
       trackingNumber: String(trackingNo),
-      status: latest.status,
-      statusCode: packet.booked_packet_status || null,
+      status,
+      statusCode: packet.booked_packet_status || latest.description || null,
       events,
       raw: res.data,
     };
@@ -406,6 +408,40 @@ class LeopardCourier extends BaseCourier {
     }
     return mapLeopardStatus({ status: statusOrEvent });
   }
+}
+
+function firstArray(...candidates) {
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length) return candidate;
+  }
+  return [];
+}
+
+const TERMINAL_UNIFIED = new Set([
+  UNIFIED_STATUSES.DELIVERED,
+  UNIFIED_STATUSES.RETURNED,
+  UNIFIED_STATUSES.CANCELLED,
+  UNIFIED_STATUSES.FAILED,
+]);
+
+function preferTerminalStatus(packetStatus, scanStatus) {
+  if (packetStatus && TERMINAL_UNIFIED.has(packetStatus)) return packetStatus;
+  return scanStatus || packetStatus || UNIFIED_STATUSES.BOOKED;
+}
+
+function latestLeopardEvent(events) {
+  if (!events.length) return null;
+  let best = null;
+  let bestTime = -Infinity;
+  for (const event of events) {
+    const time = event.eventTime ? new Date(event.eventTime).getTime() : NaN;
+    if (!Number.isNaN(time) && time >= bestTime) {
+      best = event;
+      bestTime = time;
+    }
+  }
+  // Leopard history is oldest-first when dates are missing.
+  return best || events[events.length - 1];
 }
 
 function parseLooseDate(value) {

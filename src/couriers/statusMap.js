@@ -90,9 +90,12 @@ function mapTcsStatus(event = {}) {
 function mapLeopardStatus(event = {}) {
   const raw =
     event.status ||
+    event.Status ||
     event.packet_status ||
-    event.TrackingDetail ||
     event.booked_packet_status ||
+    event.activity ||
+    event.Activity ||
+    event.TrackingDetail ||
     "";
   const key = String(raw).trim();
   if (key && LEOPARD_CODE_MAP[key]) return LEOPARD_CODE_MAP[key];
