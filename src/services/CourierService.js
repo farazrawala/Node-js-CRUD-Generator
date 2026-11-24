@@ -1062,10 +1062,7 @@ async function persistOrderTracking(shipment, result) {
     result.status ||
     null;
 
-  const mappedOrderStatus =
-    mapCourierStatusToOrderStatus(result.status) ||
-    mapCourierStatusToOrderStatus(result.statusCode) ||
-    mapCourierStatusToOrderStatus(lastStatus);
+  const mappedOrderStatus = pickMappedOrderStatus(result, lastStatus);
 
   let details = null;
   if (result.raw != null) {
@@ -1138,6 +1135,12 @@ async function persistOrderTracking(shipment, result) {
       });
     }
     update.order_status = mappedOrderStatus;
+    const OrderModel = mongoose.model("order");
+    const websiteStatus =
+      typeof OrderModel.mapPosOrderStatusToWebsiteStatus === "function"
+        ? OrderModel.mapPosOrderStatusToWebsiteStatus(mappedOrderStatus)
+        : null;
+    if (websiteStatus) update.order_website_status = websiteStatus;
   }
 
   const trackingStatusChanged = Boolean(previousTrackingStatus && update.tracking_status);
