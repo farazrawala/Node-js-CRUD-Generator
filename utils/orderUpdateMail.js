@@ -107,6 +107,10 @@ async function emailWebhookParameters(req) {
   const topic = String(
     req.get?.("x-shopify-topic") || req.headers?.["x-shopify-topic"] || "",
   ).trim();
+  const normalized = topic.toLowerCase();
+  if (normalized === "orders/updated" || normalized === "orders/edited") {
+    return { sent: false, reason: "order_updated_email_disabled" };
+  }
   const shop = String(
     req.get?.("x-shopify-shop-domain") || req.headers?.["x-shopify-shop-domain"] || "",
   ).trim();
