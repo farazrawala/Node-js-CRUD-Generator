@@ -205,12 +205,34 @@ function buildTrackingSyncSummaryEmail(summary = {}, meta = {}) {
  * Send the summary email. Never throws.
  */
 async function emailTrackingSyncSummary(summary, meta = {}) {
-  if (!isSummaryEmailEnabled()) return { sent: false, reason: "disabled" };
+  const to = summaryRecipients();
+  if (!isSummaryEmailEnabled()) {
+    return {
+      sent: false,
+      to,
+      reason: "disabled",
+      message: "Tracking summary email is turned off.",
+    };
+  }
   try {
     const { subject, text } = buildTrackingSyncSummaryEmail(summary, meta);
-    return await sendEmail({ to: summaryRecipients(), subject, text });
+    const result = await sendEmail({ to, subject, text });
+    if (result.sent) {
+      return { sent: true, to, message: `Tracking update email sent to ${to}.` };
+    }
+    const message =
+      result.reason === "smtp_not_configured"
+        ? "SMTP is not configured on the server."
+        : result.error || result.reason || "Tracking check finished. No email was sent.";
+    return { ...result, to, message };
   } catch (err) {
-    return { sent: false, reason: "send_failed", error: err.message };
+    return {
+      sent: false,
+      to,
+      reason: "send_failed",
+      error: err.message,
+      message: err.message || "Tracking check finished. No email was sent.",
+    };
   }
 }
 

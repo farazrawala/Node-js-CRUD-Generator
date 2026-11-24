@@ -72,15 +72,16 @@ async function sendEmail({ to, subject, text, html } = {}) {
     socketTimeout: 20000,
   });
 
+  const recipient = String(to || "").trim() || settings.to;
   await transporter.sendMail({
     from: settings.user,
-    to: String(to || "").trim() || settings.to,
+    to: recipient,
     subject: String(subject || "").slice(0, 180),
     text: text == null ? undefined : String(text).slice(0, 400000),
     html: html == null ? undefined : String(html).slice(0, 400000),
   });
 
-  return { sent: true };
+  return { sent: true, to: recipient };
 }
 
 async function sendWebhookEmail(payload, subject) {
