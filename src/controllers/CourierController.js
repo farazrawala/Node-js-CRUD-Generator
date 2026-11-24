@@ -10,6 +10,7 @@ const { createApplicationLog } = require("../../utils/applicationLogs");
 const CourierFactory = require("../couriers/CourierFactory");
 const courierLogger = require("../utils/courierLogger");
 const { listCourierTypes } = require("../../models/courier");
+const { emailTrackingSyncSummary } = require("../utils/trackingSyncSummaryMail");
 
 function companyIdFromReq(req) {
   return (
@@ -293,12 +294,17 @@ async function syncTracking(req, res) {
       });
     }
 
+    const started = Date.now();
     const summary = await CourierService.syncOpenShipments({
       companyId,
       limit: Number(req.body?.limit ?? req.query?.limit) || 25,
       courierIds: Array.isArray(req.body?.courier_ids)
         ? req.body.courier_ids.map((id) => String(id).trim()).filter(Boolean)
         : undefined,
+    });
+    const email = await emailTrackingSyncSummary(summary, {
+      startedAt: new Date(started),
+      durationMs: Date.now() - started,
     });
     await createApplicationLog(req, {
       action: "Courier tracking sync",
@@ -319,6 +325,7 @@ async function syncTracking(req, res) {
       success: true,
       scope: "company",
       eligible_statuses: ["in_transit", "shipment_booked"],
+      email,
       ...summary,
     });
   } catch (err) {
