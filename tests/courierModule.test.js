@@ -68,7 +68,17 @@ describe("courier status to order_status", () => {
 
   it("maps returned and cancelled", () => {
     assert.equal(mapCourierStatusToOrderStatus("Returned"), "return");
+    assert.equal(mapCourierStatusToOrderStatus("Returned to shipper"), "return");
     assert.equal(mapCourierStatusToOrderStatus("Cancelled"), "cancelled");
+  });
+
+  it("reads Leopard Status field", () => {
+    const { mapLeopardStatus } = require("../src/couriers/statusMap");
+    assert.equal(mapLeopardStatus({ Status: "Returned" }), "Returned");
+    assert.equal(
+      mapLeopardStatus({ booked_packet_status: "Returned to shipper" }),
+      "Returned",
+    );
   });
 });
 

@@ -1044,6 +1044,29 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
   };
 }
 
+const TERMINAL_ORDER_STATUSES = new Set([
+  "delivered",
+  "return",
+  "cancelled",
+  "failed",
+]);
+
+function pickMappedOrderStatus(result, lastStatus) {
+  const candidates = [
+    mapCourierStatusToOrderStatus(result?.status),
+    mapCourierStatusToOrderStatus(result?.statusCode),
+    mapCourierStatusToOrderStatus(lastStatus),
+    ...(Array.isArray(result?.events) ? result.events : []).map((event) =>
+      mapCourierStatusToOrderStatus(event?.description || event?.status),
+    ),
+  ].filter(Boolean);
+  return (
+    candidates.find((status) => TERMINAL_ORDER_STATUSES.has(status)) ||
+    candidates[0] ||
+    null
+  );
+}
+
 /**
  * Persist courier last status + full tracking payload onto the order.
  * `tracking_status` is the latest provider status (e.g. PostEx "Out For Delivery").
