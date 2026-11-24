@@ -90,6 +90,7 @@ const ORDER_TAG_VALUES = [
   "confirmed_by_sms",
   "confirmed_by_whatsapp",
   "confirmed_by_call",
+  "return_received",
 ];
 
 /**
