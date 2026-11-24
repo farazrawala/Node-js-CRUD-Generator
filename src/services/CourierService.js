@@ -1697,6 +1697,16 @@ async function printLabel(orderId, options = {}) {
   };
 }
 
+const SHIPMENT_SYNC_TIMEOUT_MS = 45_000;
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Sync open shipments (used by cron job).
  * @param {object} [options]
@@ -1733,9 +1743,12 @@ async function syncOpenShipments(options = {}) {
       tracking_number: shipment.tracking_number || null,
     };
     try {
-      const result = await refreshTrackingForShipment(shipment, {
-        allowStale: false,
-      });
+      // One hung courier call must not block the summary email or later hourly runs.
+      const result = await withTimeout(
+        refreshTrackingForShipment(shipment, { allowStale: false }),
+        SHIPMENT_SYNC_TIMEOUT_MS,
+        `Tracking sync timed out for ${shipment.tracking_number || shipment._id}`,
+      );
       summary.updated += 1;
       checkedRow.order_no = result?.order_no || null;
       checkedRow.integration_order_id = result?.integration_order_id || null;

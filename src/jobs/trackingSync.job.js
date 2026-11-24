@@ -33,7 +33,12 @@ function getSyncBatchSize() {
 }
 
 async function runOnce() {
-  if (running) return { skipped: true };
+  if (running) {
+    console.error(
+      "[tracking-sync] skipped this run because the previous sync is still going, so no summary email was sent",
+    );
+    return { skipped: true };
+  }
   running = true;
   const started = Date.now();
   let summary;
@@ -64,6 +69,11 @@ async function runOnce() {
     durationMs: Date.now() - started,
   });
   if (!mail.sent && mail.reason !== "disabled") {
+    const detail =
+      mail.reason === "smtp_not_configured"
+        ? "SMTP is not configured. Set ORDER_UPDATE_SMTP_USER and ORDER_UPDATE_SMTP_PASS in .env"
+        : mail.error || mail.reason || "unknown";
+    console.error(`[tracking-sync] summary email was not sent: ${detail}`);
     courierLogger.apiError({
       event: "sync_summary_email_failed",
       reason: mail.reason,
