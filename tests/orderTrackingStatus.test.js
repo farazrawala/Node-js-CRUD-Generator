@@ -17,6 +17,20 @@ describe("order tracking status filter", () => {
     assert.equal(orderStatus.order_status.test("in_transit"), true);
   });
 
+  it("matches Flagship shipper advise portal codes and live scans", () => {
+    const filter = buildTrackingStatusFilter("Shipper Advise Requested");
+
+    assert.equal(filter.tracking_status.test("SHIPPER_ADVISE"), true);
+    assert.equal(filter.tracking_status.test("Shipper Advise"), true);
+    assert.equal(filter.tracking_status.test("Shipper Advise Requested"), true);
+    assert.equal(
+      filter.tracking_status.test("Shipment - Shipper Advise Requested"),
+      true,
+    );
+    assert.equal(filter.tracking_status.test("In Transit"), false);
+    assert.equal(filter.tracking_status.test("Shipment - In Transit"), false);
+  });
+
   it("keeps other tracking status filters specific to courier status", () => {
     const filter = buildTrackingStatusFilter("Re-Attempt Call Requested");
 

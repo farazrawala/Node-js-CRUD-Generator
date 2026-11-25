@@ -9,12 +9,17 @@ function buildTrackingStatusFilter(value) {
   if (!requestedStatus) return {};
 
   const isInTransit = /^in[\s_-]*transit$/i.test(requestedStatus);
+  const isShipperAdvise = /^shipper[\s_-]*advi[cs]e(?:[\s_-]*requested)?$/i.test(
+    requestedStatus,
+  );
   const trackingStatusRegex = isInTransit
     ? /^(?:(?:shipment|shipper)\s*[-:–]\s*)?(?:in[\s_-]*transit|transit|dispatched|departed|on[\s_-]*route)$/i
-    : new RegExp(
-        `^(?:(?:shipment|shipper)\\s*[-:–]\\s*)?${escapeRegex(requestedStatus)}$`,
-        "i",
-      );
+    : isShipperAdvise
+      ? /^(?:(?:shipment|shipper)\s*[-:–]\s*)?(?:shipper[\s_-]*advi[cs]e(?:[\s_-]*requested)?)$/i
+      : new RegExp(
+          `^(?:(?:shipment|shipper)\\s*[-:–]\\s*)?${escapeRegex(requestedStatus)}$`,
+          "i",
+        );
 
   if (isInTransit) {
     return {

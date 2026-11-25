@@ -1005,11 +1005,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     result.status ||
     null;
 
-  const history = (
-    await CourierTracking.find({ shipment_id: shipment._id })
-      .sort({ event_time: -1, created_at: -1 })
-      .lean()
-  ).filter((row) => !isCourierInputError(row?.status, row?.description));
+  const history = liveTrackingHistory(result);
 
   const push_order_tracking = await queueWooTrackingPushAfterCourierPoll(
     shipment,
@@ -1032,11 +1028,61 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     order_no: orderTracking?.order_no || null,
     integration_order_id: orderTracking?.integration_order_id || null,
     tracking_details: result.raw ?? null,
+    tracking: history,
     history,
     last_tracking_sync: new Date(),
     push_order_tracking,
     raw: options.includeRaw ? result.raw : undefined,
   };
+}
+
+/**
+ * Timeline the courier returned (`tracking` / `tracking_history`), not the
+ * mapped rows stored in courier_tracking.
+ */
+function liveTrackingHistory(result) {
+  const raw = result?.raw && typeof result.raw === "object" ? result.raw : null;
+  const rows = Array.isArray(raw?.tracking)
+    ? raw.tracking
+    : Array.isArray(raw?.details?.tracking_history)
+      ? raw.details.tracking_history
+      : Array.isArray(raw?.details?.tracking)
+        ? raw.details.tracking
+        : null;
+
+  if (rows) {
+    return rows
+      .map((ev) => {
+        const status = String(
+          ev?.status || ev?.description || ev?.message || "",
+        ).trim();
+        if (!status || isCourierInputError(status)) return null;
+        const time =
+          ev.time || ev.dateTime || ev.datetime || ev.date_time || ev.createdAt || null;
+        return {
+          status,
+          description: status,
+          time,
+          event_time: time,
+          location: ev.station || ev.location || ev.city || null,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  return (Array.isArray(result?.events) ? result.events : [])
+    .map((ev) => {
+      const status = String(ev?.description || ev?.status || "").trim();
+      if (!status || isCourierInputError(status)) return null;
+      return {
+        status,
+        description: status,
+        time: ev.eventTime || null,
+        event_time: ev.eventTime || null,
+        location: ev.location || null,
+      };
+    })
+    .filter(Boolean);
 }
 
 function parseStoredTrackingDetails(value) {
@@ -1061,13 +1107,8 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
         .lean()
     : null;
 
-  const history = (
-    await CourierTracking.find({ shipment_id: shipment._id })
-      .sort({ event_time: -1, created_at: -1 })
-      .lean()
-  ).filter((row) => !isCourierInputError(row?.status, row?.description));
-
   const trackingDetails = parseStoredTrackingDetails(order?.tracking_details);
+  const history = liveTrackingHistory({ raw: trackingDetails });
   const trackingStatus =
     order?.tracking_status ||
     shipment.status_code ||
@@ -1086,6 +1127,7 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     tracking_status: trackingStatus,
     order_status: order?.order_status || null,
     tracking_details: trackingDetails,
+    tracking: history,
     history,
     last_tracking_sync: shipment.last_tracking_sync || null,
     push_order_tracking: {
