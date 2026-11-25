@@ -889,6 +889,49 @@ async function getTrackingByTrackingNumber(trackingNumber, options = {}) {
   return refreshTrackingForShipment(shipment, options);
 }
 
+function isCourierInputError(...parts) {
+  return parts.some((part) => /error\(s\) in input/i.test(String(part || "")));
+}
+
+/**
+ * Flagship books Trax CNs on Flaship's shipper account. Tracking that CN with
+ * the store's Trax key returns "Error(s) in Input". Try the other integration.
+ */
+async function trackWithAlternateCourier(company, shipment, err) {
+  const message = String(err?.message || "");
+  if (!/error\(s\) in input|invalid api token/i.test(message)) return null;
+  const current = String(shipment.courier || "").toLowerCase();
+  const alternateKey = /trax/.test(current)
+    ? "flagship"
+    : /flagship|flaship/.test(current)
+      ? "trax"
+      : null;
+  if (!alternateKey) return null;
+  try {
+    const alt = await resolveDriver(company, alternateKey);
+    const result = await alt.driver.getTracking(shipment.tracking_number);
+    if (!result || isCourierInputError(result.status, result.statusCode, result.lastStatus)) {
+      return null;
+    }
+    courierLogger.apiError({
+      event: "tracking_alternate_courier",
+      provider: shipment.courier,
+      alternate: alternateKey,
+      trackingNumber: shipment.tracking_number,
+      orderId: String(shipment.order_id || ""),
+    });
+    return result;
+  } catch (altErr) {
+    courierLogger.apiError({
+      event: "tracking_alternate_failed",
+      provider: alternateKey,
+      trackingNumber: shipment.tracking_number,
+      error: altErr.message,
+    });
+    return null;
+  }
+}
+
 /**
  * @param {object} shipment
  * @param {object} [options]
@@ -909,18 +952,24 @@ async function refreshTrackingForShipment(shipment, options = {}) {
   try {
     result = await driver.getTracking(shipment.tracking_number);
   } catch (err) {
-    courierLogger.apiError({
-      event: "tracking_live_failed",
-      provider: shipment.courier,
-      trackingNumber: shipment.tracking_number,
-      orderId: String(shipment.order_id || ""),
-      error: err.message,
-    });
-    if (options.allowStale === false) throw err;
-    return loadPreviousTrackingResponse(shipment, options, err);
+    const alternate = await trackWithAlternateCourier(company, shipment, err);
+    if (alternate) {
+      result = alternate;
+    } else {
+      courierLogger.apiError({
+        event: "tracking_live_failed",
+        provider: shipment.courier,
+        trackingNumber: shipment.tracking_number,
+        orderId: String(shipment.order_id || ""),
+        error: err.message,
+      });
+      if (options.allowStale === false) throw err;
+      return loadPreviousTrackingResponse(shipment, options, err);
+    }
   }
 
   for (const event of result.events || []) {
+    if (isCourierInputError(event.status, event.description)) continue;
     await appendTrackingEvent({
       shipment,
       trackingNumber: shipment.tracking_number,
@@ -956,9 +1005,11 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     result.status ||
     null;
 
-  const history = await CourierTracking.find({ shipment_id: shipment._id })
-    .sort({ event_time: -1, created_at: -1 })
-    .lean();
+  const history = (
+    await CourierTracking.find({ shipment_id: shipment._id })
+      .sort({ event_time: -1, created_at: -1 })
+      .lean()
+  ).filter((row) => !isCourierInputError(row?.status, row?.description));
 
   const push_order_tracking = await queueWooTrackingPushAfterCourierPoll(
     shipment,
@@ -1010,9 +1061,11 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
         .lean()
     : null;
 
-  const history = await CourierTracking.find({ shipment_id: shipment._id })
-    .sort({ event_time: -1, created_at: -1 })
-    .lean();
+  const history = (
+    await CourierTracking.find({ shipment_id: shipment._id })
+      .sort({ event_time: -1, created_at: -1 })
+      .lean()
+  ).filter((row) => !isCourierInputError(row?.status, row?.description));
 
   const trackingDetails = parseStoredTrackingDetails(order?.tracking_details);
   const trackingStatus =
