@@ -11,6 +11,7 @@ const { UNIFIED_STATUSES } = require("./constants");
 
 /** @type {StatusRule[]} */
 const COMMON_RULES = [
+  { pattern: /shipper\s*advi[cs]e/i, status: UNIFIED_STATUSES.EXCEPTION },
   { pattern: /deliver(ed|y complete)/i, status: UNIFIED_STATUSES.DELIVERED },
   { pattern: /\bok\b/i, status: UNIFIED_STATUSES.DELIVERED },
   { pattern: /ready\s+for\s+return|being\s+return|return(ed|ing)?(\s+to\s+(shipper|origin|sender))?|\brto\b/i, status: UNIFIED_STATUSES.RETURNED },
@@ -139,6 +140,8 @@ const FLASHIP_CODE_MAP = Object.freeze({
   "Return in Transit": UNIFIED_STATUSES.RETURNED,
   SHIPPER_ADVISE: UNIFIED_STATUSES.EXCEPTION,
   "Shipper Advise": UNIFIED_STATUSES.EXCEPTION,
+  "Shipper Advise Requested": UNIFIED_STATUSES.EXCEPTION,
+  "Shipment - Shipper Advise Requested": UNIFIED_STATUSES.EXCEPTION,
   "Picked up": UNIFIED_STATUSES.PICKED,
   "Picked Up": UNIFIED_STATUSES.PICKED,
 });

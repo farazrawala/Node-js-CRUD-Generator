@@ -1131,7 +1131,9 @@ function pickMappedOrderStatus(result, lastStatus) {
 async function persistOrderTracking(shipment, result) {
   if (!shipment?.order_id) return { order_status: null };
 
+  const liveCourierStatus = String(result?.raw?.live_courier_status || "").trim();
   const lastStatus =
+    liveCourierStatus ||
     result.lastStatus ||
     result.statusCode ||
     result.events?.[0]?.description ||
