@@ -254,6 +254,7 @@ class LeopardCourier extends BaseCourier {
 
     const packet = packetList[0] || res.data || {};
     const details = firstArray(
+      packet.Tracking_Detail,
       packet.TrackingDetail,
       packet["Tracking Detail"],
       packet.tracking_detail,
@@ -263,17 +264,22 @@ class LeopardCourier extends BaseCourier {
 
     const events = details.map((ev) => {
       const mapped = mapLeopardStatus(ev);
+      const description =
+        ev.Status ||
+        ev.status ||
+        ev.TrackingDetail ||
+        ev.activity ||
+        "";
       return {
         status: mapped,
-        description:
-          ev.Status ||
-          ev.status ||
-          ev.TrackingDetail ||
-          ev.activity ||
-          "",
-        location: ev.Recieve_Date || ev.location || ev.city || null,
+        description,
+        location: ev.Status_With_City || ev.Recieve_Date || ev.location || ev.city || null,
         eventTime: parseLooseDate(
-          ev.Activity_Date || ev.date_time || ev.datetime || ev.Recieve_Date,
+          ev.Activity_datetime ||
+            ev.Activity_Date ||
+            ev.date_time ||
+            ev.datetime ||
+            ev.Recieve_Date,
         ),
         raw: ev,
       };
@@ -295,11 +301,15 @@ class LeopardCourier extends BaseCourier {
     };
     const packetStatus = mapLeopardStatus(packet);
     const status = preferTerminalStatus(packetStatus, latest.status);
+    // booked_packet_status is the booking state ("Pending"), not the live scan.
+    // The website "Current Status" is the newest Tracking_Detail row.
+    const liveStatus = latest.description || packet.booked_packet_status || null;
 
     return {
       trackingNumber: String(trackingNo),
       status,
-      statusCode: packet.booked_packet_status || latest.description || null,
+      statusCode: liveStatus,
+      lastStatus: liveStatus,
       events,
       raw: res.data,
     };
