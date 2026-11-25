@@ -35,6 +35,8 @@ describe("order tracking status filter", () => {
     const filter = buildTrackingStatusFilter("Re-Attempt Call Requested");
 
     assert.equal(filter.tracking_status.test("Re-Attempt Call Requested"), true);
+    assert.equal(filter.tracking_status.test("Re Attempt Call Requested"), true);
+    assert.equal(filter.tracking_status.test("Re-Attempt Call Requested — customer not available"), true);
     assert.equal(filter.tracking_status.test("In Transit"), false);
     assert.equal(filter.$or, undefined);
   });
