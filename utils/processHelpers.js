@@ -2041,7 +2041,7 @@ function mapShopifyShipmentStatusToPosTrackingStatus(shipmentStatus) {
   const map = {
     label_printed: "booked",
     label_purchased: "booked",
-    attempted_delivery: "out_for_delivery",
+    attempted_delivery: "attempted_delivery",
     ready_for_pickup: "booked",
     confirmed: "booked",
     in_transit: "in_transit",
@@ -2212,7 +2212,6 @@ async function hasPosBookedCourierShipment(orderId) {
     order_id: orderId,
     deletedAt: null,
     tracking_number: { $nin: [null, ""] },
-    "api_request.source": { $ne: "shopify_import" },
   });
   return Boolean(row);
 }
