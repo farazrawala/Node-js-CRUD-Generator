@@ -529,7 +529,7 @@ class FlagshipCourier extends BaseCourier {
       url,
     });
 
-    const res = await httpRequest(url, {
+    let res = await httpRequest(url, {
       method: "GET",
       provider: this.providerName,
       headers: this.authHeaders(),
@@ -542,13 +542,55 @@ class FlagshipCourier extends BaseCourier {
       url,
     });
 
+    let history = Array.isArray(res.data?.tracking) ? res.data.tracking : [];
+    const integrationMessage = this.extractErrorMessage(res, "");
+    const integrationFailed =
+      res.status >= 400 ||
+      res.data?.status === false ||
+      res.data?.success === false ||
+      /error\(s\) in input/i.test(integrationMessage) ||
+      /error\(s\) in input/i.test(String(res.data?.status || "")) ||
+      /error\(s\) in input/i.test(String(res.data?.live_courier_status || ""));
+
+    // Integration tracking sometimes echoes Trax's "Error(s) in Input" for a
+    // CN the portal already has scans for. The legacy merchant endpoint still
+    // returns the timeline.
+    if (integrationFailed && !history.length) {
+      const legacyUrl = `${this.origin}/mr/api/order_tracking/${encodeURIComponent(cn)}/`;
+      const legacy = await httpRequest(legacyUrl, {
+        method: "GET",
+        provider: this.providerName,
+        headers: this.authHeaders(),
+      });
+      const legacyHistory = Array.isArray(legacy.data?.tracking)
+        ? legacy.data.tracking
+        : [];
+      const legacyOk =
+        legacy.status < 400 &&
+        legacy.data?.status !== false &&
+        legacy.data?.success !== false &&
+        (legacyHistory.length || legacy.data?.order_status || legacy.data?.status);
+      if (legacyOk && !/error\(s\) in input/i.test(String(legacy.data?.status || ""))) {
+        res = legacy;
+        history = legacyHistory;
+        if (!res.data.live_courier_status && res.data.order_status) {
+          res.data.live_courier_status = res.data.order_status;
+        }
+      }
+    }
+
+    const statusText = String(res.data?.status || "");
+    const liveText = String(res.data?.live_courier_status || "");
+    const echoedTraxError =
+      /error\(s\) in input/i.test(this.extractErrorMessage(res, "")) ||
+      /error\(s\) in input/i.test(statusText) ||
+      /error\(s\) in input/i.test(liveText);
     const bodyFailed =
       res.status >= 400 ||
       res.data?.status === false ||
-      res.data?.success === false;
-    const history = Array.isArray(res.data?.tracking) ? res.data.tracking : [];
-
-    if (bodyFailed && !history.length && !res.data?.status) {
+      res.data?.success === false ||
+      echoedTraxError;
+    if (bodyFailed && !history.length && (!res.data?.status || echoedTraxError)) {
       throw fromProviderMessage(
         this.extractErrorMessage(res, "Flaship tracking failed"),
         {

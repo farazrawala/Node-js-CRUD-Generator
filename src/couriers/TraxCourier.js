@@ -152,7 +152,7 @@ class TraxCourier extends BaseCourier {
       this._forceOrigin = /app\.sonic\.pk/i.test(this.baseUrl)
         ? DEFAULT_PROD
         : DEFAULT_SANDBOX;
-      return this.request(path, options, true);
+      return this.request(path, { method, query, body }, true);
     }
     return { ...res, url };
   }
@@ -377,9 +377,21 @@ class TraxCourier extends BaseCourier {
       trackingNo: cn,
       url,
     });
-    const res = await this.request("shipment/track", {
+    // type 0 is shipper tracking and Trax answers "Error(s) in Input" when the
+    // CN was booked on another account (Flaship books Trax on its own shipper).
+    // type 1 is general/consignee tracking and still returns tracking_history.
+    let res = await this.request("shipment/track", {
       query: { tracking_number: cn, type: 0 },
     });
+    const firstMessage = this.extractErrorMessage(res, "");
+    if (
+      (res.status >= 400 || !this.isOk(res.data)) &&
+      /error\(s\) in input/i.test(firstMessage)
+    ) {
+      res = await this.request("shipment/track", {
+        query: { tracking_number: cn, type: 1 },
+      });
+    }
     courierLogger.trackingResponse({
       provider: this.providerName,
       trackingNo: cn,
