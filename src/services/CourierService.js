@@ -889,6 +889,83 @@ async function getTrackingByTrackingNumber(trackingNumber, options = {}) {
   return refreshTrackingForShipment(shipment, options);
 }
 
+async function findShipmentForAdvice({ trackingNumber, orderId, companyId }) {
+  const query = { deletedAt: null };
+  if (companyId) query.company_id = companyId;
+  const cn = String(trackingNumber || "").trim();
+  const oid = String(orderId || "").trim();
+  if (cn) query.tracking_number = cn;
+  else if (oid) query.order_id = oid;
+  else {
+    throw new CourierError("Tracking number or order id is required", {
+      code: "VALIDATION",
+      httpStatus: 400,
+    });
+  }
+  const shipment = await CourierShipment.findOne(query).sort({ created_at: -1 }).lean();
+  if (!shipment) throw shipmentNotFound(cn || `order:${oid}`);
+  return shipment;
+}
+
+async function flagshipDriverForShipment(shipment) {
+  const Company = mongoose.model("company");
+  const company = await Company.findById(shipment.company_id).lean();
+  if (!company) {
+    throw new CourierError("Company not found for shipment", {
+      code: "COMPANY_NOT_FOUND",
+      httpStatus: 400,
+    });
+  }
+  const { driver } = await resolveDriver(company, "flagship");
+  if (typeof driver.checkShipperAdvice !== "function") {
+    throw new CourierError("Shipper advice is only available on the Flaship integration", {
+      code: "ADVICE_UNSUPPORTED",
+      httpStatus: 400,
+    });
+  }
+  return driver;
+}
+
+async function checkShipperAdvice(options = {}) {
+  const shipment = await findShipmentForAdvice(options);
+  const driver = await flagshipDriverForShipment(shipment);
+  const result = await driver.checkShipperAdvice(shipment.tracking_number);
+  return {
+    success: true,
+    tracking_number: shipment.tracking_number,
+    order_id: shipment.order_id,
+    ...result,
+  };
+}
+
+async function submitShipperAdvice(options = {}) {
+  const shipment = await findShipmentForAdvice(options);
+  const driver = await flagshipDriverForShipment(shipment);
+  const result = await driver.submitShipperAdvice({
+    tracking_number: shipment.tracking_number,
+    status: options.status,
+    remarks: options.remarks,
+    reason: options.reason,
+    address: options.address,
+    phone: options.phone,
+  });
+  const liveStatus = String(result.live_courier_status || result.order_status || "").trim();
+  if (liveStatus) {
+    await persistOrderTracking(shipment, {
+      lastStatus: liveStatus,
+      status: liveStatus,
+      raw: { live_courier_status: result.live_courier_status || liveStatus },
+    });
+  }
+  return {
+    success: true,
+    tracking_number: shipment.tracking_number,
+    order_id: shipment.order_id,
+    status: String(options.status || "").trim().toUpperCase(),
+    ...result,
+  };
+}
+
 function isCourierInputError(...parts) {
   return parts.some((part) => /error\(s\) in input/i.test(String(part || "")));
 }
@@ -1216,6 +1293,7 @@ async function persistOrderTracking(shipment, result) {
     update.tracking_status = nextTrackingStatus;
   }
   if (details) update.tracking_details = details;
+  if (shipment?.order_id) update.last_tracking_sync = new Date();
 
   const trackingNumber = String(shipment?.tracking_number || "").trim();
   if (
@@ -2140,6 +2218,8 @@ module.exports = {
   createShipmentsBulk,
   getTracking,
   getTrackingByTrackingNumber,
+  checkShipperAdvice,
+  submitShipperAdvice,
   cancelShipment,
   printLabel,
   syncOpenShipments,

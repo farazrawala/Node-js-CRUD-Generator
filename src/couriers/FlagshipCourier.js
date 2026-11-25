@@ -868,6 +868,87 @@ class FlagshipCourier extends BaseCourier {
     }
   }
 
+  /**
+   * GET /api/integration/advice/check/?tracking_number=
+   */
+  async checkShipperAdvice(trackingNumber) {
+    const cn = String(trackingNumber || "").trim();
+    if (!cn) {
+      throw fromProviderMessage("Tracking number is required", {
+        provider: this.providerName,
+        httpStatus: 400,
+      });
+    }
+    const url = this.endpoint(
+      `advice/check/?tracking_number=${encodeURIComponent(cn)}`,
+    );
+    const res = await httpRequest(url, {
+      method: "GET",
+      provider: this.providerName,
+      headers: this.authHeaders(),
+    });
+    if (res.status >= 400 || res.data?.success === false) {
+      throw fromProviderMessage(
+        this.extractErrorMessage(res, "Shipper advice check failed"),
+        {
+          provider: this.providerName,
+          details: { httpStatus: res.status, url, response: res.data },
+          httpStatus: res.status >= 400 ? res.status : 502,
+        },
+      );
+    }
+    return res.data || {};
+  }
+
+  /**
+   * POST /api/integration/advice/
+   * status: RETURN | REATTEMPT. remarks is optional free text.
+   */
+  async submitShipperAdvice(input = {}) {
+    const cn = String(input.tracking_number || input.trackingNumber || "").trim();
+    const status = String(input.status || "").trim().toUpperCase();
+    if (!cn) {
+      throw fromProviderMessage("Tracking number is required", {
+        provider: this.providerName,
+        httpStatus: 400,
+      });
+    }
+    if (status !== "RETURN" && status !== "REATTEMPT") {
+      throw fromProviderMessage("status must be RETURN or REATTEMPT", {
+        provider: this.providerName,
+        httpStatus: 400,
+      });
+    }
+    const body = {
+      tracking_number: cn,
+      status,
+      remarks: String(input.remarks || "").trim(),
+      address: String(input.address || "").trim(),
+      phone: String(input.phone || "").trim(),
+    };
+    const reason = String(input.reason ?? "").trim();
+    if (reason) body.reason = reason;
+
+    const url = this.endpoint("advice/");
+    const res = await httpRequest(url, {
+      method: "POST",
+      provider: this.providerName,
+      headers: this.authHeaders({ "Content-Type": "application/json" }),
+      body,
+    });
+    if (res.status >= 400 || res.data?.success === false) {
+      throw fromProviderMessage(
+        this.extractErrorMessage(res, "Shipper advice submit failed"),
+        {
+          provider: this.providerName,
+          details: { httpStatus: res.status, url, response: res.data },
+          httpStatus: res.status >= 400 ? res.status : 502,
+        },
+      );
+    }
+    return res.data || {};
+  }
+
   mapStatus(statusOrEvent) {
     if (statusOrEvent && typeof statusOrEvent === "object") {
       return mapFlashipStatus(statusOrEvent);

@@ -549,6 +549,12 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Tracking Details",
     },
+    /** Set each time the courier tracking API is synced for this order. */
+    last_tracking_sync: {
+      type: Date,
+      default: null,
+      field_name: "Last Tracking Sync",
+    },
 
     tags: {
       type: [String],

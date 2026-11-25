@@ -16,6 +16,9 @@ router.post("/create-bulk", CourierController.createShipmentsBulk);
 router.post("/create/:orderId", CourierController.createShipment);
 
 /** Public: any booked tracking / courier id, no Authorization header. */
+router.get("/advice/check", CourierController.checkShipperAdvice);
+router.post("/advice", CourierController.submitShipperAdvice);
+
 router.get("/tracking/:trackingNo", CourierController.getTrackingByNumber);
 router.get("/order/:orderId/tracking", CourierController.getTrackingByOrder);
 

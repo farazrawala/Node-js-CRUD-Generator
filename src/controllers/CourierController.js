@@ -212,6 +212,52 @@ async function getTrackingByOrder(req, res) {
 }
 
 /**
+ * GET /courier/advice/check?tracking_number=&order_id=
+ */
+async function checkShipperAdvice(req, res) {
+  try {
+    const result = await CourierService.checkShipperAdvice({
+      companyId: companyIdFromReq(req),
+      trackingNumber: req.query?.tracking_number || req.query?.trackingNumber,
+      orderId: req.query?.order_id || req.query?.orderId,
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    await logControllerError(req, err.message, {
+      action: "COURIER SHIPPER ADVICE CHECK",
+      tags: ["courier", "advice", "error"],
+    });
+    return sendError(res, err);
+  }
+}
+
+/**
+ * POST /courier/advice
+ * Body: tracking_number or order_id, status RETURN|REATTEMPT, remarks optional.
+ */
+async function submitShipperAdvice(req, res) {
+  try {
+    const result = await CourierService.submitShipperAdvice({
+      companyId: companyIdFromReq(req),
+      trackingNumber: req.body?.tracking_number || req.body?.trackingNumber,
+      orderId: req.body?.order_id || req.body?.orderId,
+      status: req.body?.status,
+      remarks: req.body?.remarks,
+      reason: req.body?.reason,
+      address: req.body?.address,
+      phone: req.body?.phone,
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    await logControllerError(req, err.message, {
+      action: "COURIER SHIPPER ADVICE",
+      tags: ["courier", "advice", "error"],
+    });
+    return sendError(res, err);
+  }
+}
+
+/**
  * POST /courier/cancel/:orderId
  */
 async function cancelShipment(req, res) {
@@ -412,6 +458,8 @@ module.exports = {
   createShipmentsBulk,
   getTrackingByNumber,
   getTrackingByOrder,
+  checkShipperAdvice,
+  submitShipperAdvice,
   cancelShipment,
   printLabel,
   listProviders,
