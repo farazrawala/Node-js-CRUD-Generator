@@ -173,6 +173,7 @@ async function createShipment(req, res) {
 
 /**
  * GET /courier/tracking/:trackingNo
+ * Public — no Authorization header. Looks up the consignment across companies.
  */
 async function getTrackingByNumber(req, res) {
   try {

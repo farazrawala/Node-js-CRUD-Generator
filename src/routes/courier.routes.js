@@ -15,6 +15,7 @@ router.post("/create-bulk", CourierController.createShipmentsBulk);
 /** Create shipment — body must NOT include customer/address data; only orderId in path. */
 router.post("/create/:orderId", CourierController.createShipment);
 
+/** Public: any booked tracking / courier id, no Authorization header. */
 router.get("/tracking/:trackingNo", CourierController.getTrackingByNumber);
 router.get("/order/:orderId/tracking", CourierController.getTrackingByOrder);
 
