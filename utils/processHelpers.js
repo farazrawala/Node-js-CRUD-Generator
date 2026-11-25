@@ -1876,31 +1876,18 @@ async function updatePosOrderFromRemote(existing, remoteOrder, store, ctx) {
       remoteTracking = null;
     }
     const trackingFields = buildPosTrackingFieldsFromShopify(remoteTracking);
+    delete trackingFields.tracking_status;
     const existingCn = String(existing?.courier_tracking_number || "").trim();
-    // Prefer POS-booked tracking when already set; otherwise import from Shopify.
+    // Courier tracking_status is written only by the courier sync, never by a Shopify update.
     if (trackingFields.courier_tracking_number && !existingCn) {
       Object.assign(patch, trackingFields);
       appliedShopifyTracking = remoteTracking;
     } else if (trackingFields.courier_tracking_number && existingCn) {
-      // A shipment booked from POS is tracked live from the courier API.
-      // Shopify only knows the coarse status we pushed (e.g. in_transit), so
-      // it must not overwrite the courier's status/details on pull.
       if (!(await hasPosBookedCourierShipment(existing._id))) {
-        if (trackingFields.tracking_status) {
-          patch.tracking_status = trackingFields.tracking_status;
-        }
         if (trackingFields.tracking_details) {
           patch.tracking_details = trackingFields.tracking_details;
         }
         appliedShopifyTracking = remoteTracking;
-      }
-    } else if (
-      trackingFields.tracking_status &&
-      !String(existing?.tracking_status || "").trim()
-    ) {
-      patch.tracking_status = trackingFields.tracking_status;
-      if (trackingFields.tracking_details) {
-        patch.tracking_details = trackingFields.tracking_details;
       }
     }
 
