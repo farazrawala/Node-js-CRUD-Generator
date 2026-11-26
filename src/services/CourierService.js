@@ -1140,6 +1140,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     status: result.status,
     status_code: result.statusCode,
     tracking_status: lastStatus,
+    exact_courier_status: result.status || null,
     order_status: orderTracking?.order_status || null,
     order_status_change: orderTracking?.order_status_change || null,
     tracking_status_change: orderTracking?.tracking_status_change || null,
@@ -1360,6 +1361,8 @@ async function persistOrderTracking(shipment, result) {
   }
 
   const update = {};
+  const exactCourierStatus = String(result?.status || "").trim();
+  if (exactCourierStatus) update.exact_courier_status = exactCourierStatus;
   const previousTrackingStatus = String(order?.tracking_status || "").trim();
   const nextTrackingStatus = lastStatus ? String(lastStatus) : "";
   if (

@@ -547,6 +547,15 @@ const modelSchema = new mongoose.Schema(
       type: String,
       field_name: "Tracking Status",
     },
+    /**
+     * Courier's own status from the latest fetch.
+     * Same labels as Courier statuses: Booked, Arrived, Out For Delivery, Returned, …
+     */
+    exact_courier_status: {
+      type: String,
+      default: "",
+      field_name: "Exact Courier Status",
+    },
     tracking_details: {
       type: String,
       field_name: "Tracking Details",
