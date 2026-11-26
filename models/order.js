@@ -1114,12 +1114,18 @@ MODEL.isCriticalStatus = function isCriticalStatus(value) {
   return CRITICAL_STATUS_KEYS.has(key);
 };
 
-/** Critical only when a tracking id exists and status is return, pending, or cancelled. */
+/** Critical only when a live tracking id exists and status is return, pending, or cancelled. */
 MODEL.shouldMarkCritical = function shouldMarkCritical(order) {
   const trackingId = String(
     order?.courier_tracking_number || order?.tracking_number || "",
   ).trim();
   if (!trackingId) return false;
+  // A cancelled CN is still stored, but the list shows Add tracking. It is not a live shipment.
+  const trackingKey = String(order?.tracking_status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (trackingKey === "cancelled" || trackingKey === "canceled") return false;
   return (
     MODEL.isCriticalStatus(order?.order_status) ||
     MODEL.isCriticalStatus(order?.tracking_status)
