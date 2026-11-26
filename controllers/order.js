@@ -2862,6 +2862,16 @@ const ORDER_LIST_SORT_ALIASES = {
  * @param {Record<string, unknown>} query
  * @param {Record<string, number>} fallback
  */
+/** Orders whose last_tracking_sync is at least this many hours old. */
+function buildStaleTrackingSyncFilter(query = {}) {
+  const raw = query?.last_tracking_sync_older_than_hours;
+  if (raw == null || String(raw).trim() === "") return {};
+  const hours = Number(raw);
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 365) return {};
+  const before = new Date(Date.now() - hours * 60 * 60 * 1000);
+  return { last_tracking_sync: { $ne: null, $lte: before } };
+}
+
 /** `?tags=packed` or repeated `tags` / `tag` values. Match orders that have any listed tag. */
 function buildOrderTagsFilter(query = {}) {
   const raw = [];
@@ -2989,6 +2999,7 @@ async function getOrdersWithItems(
       : {}),
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
     ...buildOrderTagsFilter(req.query),
+    ...buildStaleTrackingSyncFilter(req.query),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (

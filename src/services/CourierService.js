@@ -2010,6 +2010,7 @@ async function scanOneShipment(shipment, summary) {
           integration_order_id: result.integration_order_id || null,
           courier: shipment.courier || null,
           tracking_number: shipment.tracking_number || null,
+          last_tracking_sync: shipment.last_tracking_sync || null,
           order_status_change: result.order_status_change || null,
           tracking_status_change: result.tracking_status_change || null,
         });

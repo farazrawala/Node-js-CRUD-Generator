@@ -76,6 +76,21 @@ function prettyStatus(value) {
   return text;
 }
 
+/** Age of the previous last_tracking_sync, e.g. "3hr 10 mins". */
+function formatSyncAge(value) {
+  if (!value) return "never synced";
+  const then = new Date(value);
+  if (Number.isNaN(then.getTime())) return "never synced";
+  const totalMinutes = Math.max(0, Math.round((Date.now() - then.getTime()) / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const hourLabel = `${hours}hr`;
+  const minuteLabel = `${minutes} min${minutes === 1 ? "" : "s"}`;
+  if (hours === 0) return minuteLabel;
+  if (minutes === 0) return hourLabel;
+  return `${hourLabel} ${minuteLabel}`;
+}
+
 function changeLine(change) {
   const status = statusChangeOf(change) || {};
   const from = prettyStatus(status.from);
@@ -84,7 +99,8 @@ function changeLine(change) {
   const courier = String(change.courier || "").trim();
   const label = `POS Order ${orderLabel(change)}`;
   const who = courier ? `${label} (${courier})` : label;
-  return from ? `${who} from ${from} to ${to}` : `${who} set to ${to}`;
+  const gap = `last_tracking_sync ${formatSyncAge(change.last_tracking_sync)}`;
+  return from ? `${who} from ${from} to ${to} (${gap})` : `${who} set to ${to} (${gap})`;
 }
 
 const MAX_ORDERS_PER_REASON = 60;
