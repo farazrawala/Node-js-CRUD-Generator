@@ -2868,8 +2868,19 @@ function buildStaleTrackingSyncFilter(query = {}) {
   if (raw == null || String(raw).trim() === "") return {};
   const hours = Number(raw);
   if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 365) return {};
+  const includeNeverSynced = ["1", "true", "yes"].includes(
+    String(query?.include_never_synced || "").trim().toLowerCase(),
+  );
   const before = new Date(Date.now() - hours * 60 * 60 * 1000);
-  return { last_tracking_sync: { $ne: null, $lte: before } };
+  if (!includeNeverSynced) {
+    return { last_tracking_sync: { $ne: null, $lte: before } };
+  }
+  return {
+    $or: [
+      { last_tracking_sync: null },
+      { last_tracking_sync: { $lte: before } },
+    ],
+  };
 }
 
 /** Orders whose last_tracking_sync is newer than this many hours. */
