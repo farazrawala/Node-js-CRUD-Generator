@@ -8889,15 +8889,24 @@ async function order_mark_packed_by_scan(req, res) {
   });
 }
 
+function criticalTagAction(order) {
+  const critical =
+    Order.isCriticalStatus(order.order_status) ||
+    Order.isCriticalStatus(order.tracking_status);
+  const had = Array.isArray(order.tags) && order.tags.includes("critical");
+  if (critical && !had) return "marked";
+  if (!critical && had) return "unmarked";
+  return "unchanged";
+}
+
 /**
  * POST /api/order/sync-critical-tag/:id
- * POST /api/order/sync-critical-tag  body: { order_ids: [] }
- * Reads order_status and tracking_status. Adds `critical` for return, pending,
- * or cancelled, and removes it for every other status.
+ * POST /api/order/sync-critical-tag
+ * With no id, every order is checked. With an id or order_ids, only those orders.
+ * Adds `critical` for return, pending, or cancelled, and removes it otherwise.
  */
 async function order_sync_critical_tag(req, res) {
   const companyId = coalesceObjectId(req.user?.company_id);
-
   const rawIds = [
     req.params?.id,
     ...(Array.isArray(req.body?.order_ids) ? req.body.order_ids : []),
@@ -8906,50 +8915,74 @@ async function order_sync_critical_tag(req, res) {
     .map((id) => String(id || "").trim())
     .filter((id) => mongoose.Types.ObjectId.isValid(id));
   const orderIds = [...new Set(rawIds)];
-  if (!orderIds.length) {
-    return res.status(400).json({
-      success: false,
-      error: "Pass an order id in the path or order_ids in the body",
-    });
-  }
 
-  const orders = await Order.find({
-    _id: { $in: orderIds },
+  const filter = {
     deletedAt: null,
-    ...(companyId ? { company_id: companyId } : {}),
-  })
-    .select("order_no order_status tracking_status tags")
-    .lean();
+    ...(orderIds.length ? { _id: { $in: orderIds } } : {}),
+    ...(companyId && orderIds.length ? { company_id: companyId } : {}),
+  };
 
-  const results = [];
-  for (const order of orders) {
+  let checked = 0;
+  let marked = 0;
+  let unmarked = 0;
+  const orders = [];
+  const ops = [];
+
+  const flush = async () => {
+    if (!ops.length) return;
+    await Order.bulkWrite(ops, { ordered: false });
+    ops.length = 0;
+  };
+
+  const cursor = Order.find(filter)
+    .select("order_no order_status tracking_status tags")
+    .lean()
+    .cursor();
+
+  for await (const order of cursor) {
+    checked += 1;
+    const action = criticalTagAction(order);
     const critical =
       Order.isCriticalStatus(order.order_status) ||
       Order.isCriticalStatus(order.tracking_status);
-    const had = Array.isArray(order.tags) && order.tags.includes("critical");
-    let action = "unchanged";
-    if (critical && !had) {
-      await Order.updateOne({ _id: order._id }, { $addToSet: { tags: "critical" } });
-      action = "marked";
-    } else if (!critical && had) {
-      await Order.updateOne({ _id: order._id }, { $pull: { tags: "critical" } });
-      action = "unmarked";
+    if (action === "marked") {
+      marked += 1;
+      ops.push({
+        updateOne: {
+          filter: { _id: order._id },
+          update: { $addToSet: { tags: "critical" } },
+        },
+      });
+    } else if (action === "unmarked") {
+      unmarked += 1;
+      ops.push({
+        updateOne: {
+          filter: { _id: order._id },
+          update: { $pull: { tags: "critical" } },
+        },
+      });
     }
-    results.push({
-      order_id: order._id,
-      order_no: order.order_no || null,
-      order_status: order.order_status || null,
-      tracking_status: order.tracking_status || null,
-      critical,
-      action,
-    });
+    if (orderIds.length) {
+      orders.push({
+        order_id: order._id,
+        order_no: order.order_no || null,
+        order_status: order.order_status || null,
+        tracking_status: order.tracking_status || null,
+        critical,
+        action,
+      });
+    }
+    if (ops.length >= 500) await flush();
   }
+  await flush();
 
   return res.status(200).json({
     success: true,
-    marked: results.filter((row) => row.action === "marked").length,
-    unmarked: results.filter((row) => row.action === "unmarked").length,
-    orders: results,
+    scope: orderIds.length ? "selected" : "all",
+    checked,
+    marked,
+    unmarked,
+    ...(orderIds.length ? { orders } : {}),
   });
 }
 
