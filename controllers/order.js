@@ -2893,6 +2893,15 @@ function buildRecentTrackingSyncFilter(query = {}) {
   return { last_tracking_sync: { $gt: after } };
 }
 
+/** Drop orders that have no courier tracking number. */
+function buildRequireTrackingNumberFilter(query = {}) {
+  const on = ["1", "true", "yes"].includes(
+    String(query?.require_tracking_number || "").trim().toLowerCase(),
+  );
+  if (!on) return {};
+  return { courier_tracking_number: { $exists: true, $nin: [null, ""] } };
+}
+
 /** `?tags=packed` or repeated `tags` / `tag` values. Match orders that have any listed tag. */
 function buildOrderTagsFilter(query = {}) {
   const raw = [];
@@ -3022,6 +3031,7 @@ async function getOrdersWithItems(
     ...buildOrderTagsFilter(req.query),
     ...buildStaleTrackingSyncFilter(req.query),
     ...buildRecentTrackingSyncFilter(req.query),
+    ...buildRequireTrackingNumberFilter(req.query),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (
