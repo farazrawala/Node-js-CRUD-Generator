@@ -8889,6 +8889,70 @@ async function order_mark_packed_by_scan(req, res) {
   });
 }
 
+/**
+ * POST /api/order/sync-critical-tag/:id
+ * POST /api/order/sync-critical-tag  body: { order_ids: [] }
+ * Reads order_status and tracking_status. Adds `critical` for return, pending,
+ * or cancelled, and removes it for every other status.
+ */
+async function order_sync_critical_tag(req, res) {
+  const companyId = coalesceObjectId(req.user?.company_id);
+
+  const rawIds = [
+    req.params?.id,
+    ...(Array.isArray(req.body?.order_ids) ? req.body.order_ids : []),
+    ...(Array.isArray(req.body?.ids) ? req.body.ids : []),
+  ]
+    .map((id) => String(id || "").trim())
+    .filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const orderIds = [...new Set(rawIds)];
+  if (!orderIds.length) {
+    return res.status(400).json({
+      success: false,
+      error: "Pass an order id in the path or order_ids in the body",
+    });
+  }
+
+  const orders = await Order.find({
+    _id: { $in: orderIds },
+    deletedAt: null,
+    ...(companyId ? { company_id: companyId } : {}),
+  })
+    .select("order_no order_status tracking_status tags")
+    .lean();
+
+  const results = [];
+  for (const order of orders) {
+    const critical =
+      Order.isCriticalStatus(order.order_status) ||
+      Order.isCriticalStatus(order.tracking_status);
+    const had = Array.isArray(order.tags) && order.tags.includes("critical");
+    let action = "unchanged";
+    if (critical && !had) {
+      await Order.updateOne({ _id: order._id }, { $addToSet: { tags: "critical" } });
+      action = "marked";
+    } else if (!critical && had) {
+      await Order.updateOne({ _id: order._id }, { $pull: { tags: "critical" } });
+      action = "unmarked";
+    }
+    results.push({
+      order_id: order._id,
+      order_no: order.order_no || null,
+      order_status: order.order_status || null,
+      tracking_status: order.tracking_status || null,
+      critical,
+      action,
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    marked: results.filter((row) => row.action === "marked").length,
+    unmarked: results.filter((row) => row.action === "unmarked").length,
+    orders: results,
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -8899,6 +8963,7 @@ module.exports = {
   order_update,
   order_update_status,
   order_update_tags,
+  order_sync_critical_tag,
   order_mark_packed_by_scan,
   order_confirm_by_sms,
   order_confirm_by_email,
