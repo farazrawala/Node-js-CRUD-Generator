@@ -1362,13 +1362,19 @@ async function persistOrderTracking(shipment, result) {
 
   try {
     const orderUpdateOp = { $set: update };
+    const pullTags = [];
     if (
       mappedOrderStatus === "in_transit" ||
       currentStatus === "in_transit"
     ) {
-      orderUpdateOp.$pullAll = {
-        tags: ["stock_awaiting", "incomplete_address"],
-      };
+      pullTags.push("stock_awaiting", "incomplete_address");
+    }
+    // Booked keeps the packed tag. Any later courier update removes it.
+    if (result?.status && result.status !== UNIFIED_STATUSES.BOOKED) {
+      pullTags.push("packed");
+    }
+    if (pullTags.length) {
+      orderUpdateOp.$pullAll = { tags: pullTags };
     }
     await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
   } catch (err) {
