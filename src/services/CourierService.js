@@ -1126,6 +1126,41 @@ async function refreshTrackingForShipment(shipment, options = {}) {
  * Timeline the courier returned (`tracking` / `tracking_history`), not the
  * mapped rows stored in courier_tracking.
  */
+function isTrackingDetailRow(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  return (
+    raw.Status != null ||
+    raw.Status_With_City != null ||
+    raw.Activity_datetime != null ||
+    raw.Activity_Date != null ||
+    raw.status != null ||
+    raw.transactionStatus != null ||
+    raw.description != null ||
+    raw.datetime != null
+  );
+}
+
+/** Courier's own tracking-detail objects, unchanged (Status, Activity_datetime, Reason, …). */
+function courierTrackingDetailRows(result) {
+  const fromEvents = (Array.isArray(result?.events) ? result.events : [])
+    .map((event) => event?.raw)
+    .filter(isTrackingDetailRow);
+  if (fromEvents.length) return fromEvents;
+
+  const raw = result?.raw && typeof result.raw === "object" ? result.raw : null;
+  const packet = Array.isArray(raw?.packet_list) ? raw.packet_list[0] : null;
+  const candidates = [
+    packet?.["Tracking Detail"],
+    packet?.Tracking_Detail,
+    packet?.TrackingDetail,
+    raw?.details?.tracking_history,
+    raw?.checkpoints,
+    raw?.deliveryinfo,
+  ];
+  const list = candidates.find((rows) => Array.isArray(rows) && rows.some(isTrackingDetailRow));
+  return Array.isArray(list) ? list.filter(isTrackingDetailRow) : [];
+}
+
 function liveTrackingHistory(result) {
   const raw = result?.raw && typeof result.raw === "object" ? result.raw : null;
   const rows = Array.isArray(raw?.tracking)
@@ -1375,6 +1410,10 @@ async function persistOrderTracking(shipment, result) {
     }
     if (pullTags.length) {
       orderUpdateOp.$pullAll = { tags: pullTags };
+    }
+    const trackingHistory = courierTrackingDetailRows(result);
+    if (trackingHistory.length) {
+      orderUpdateOp.$set.tracking_history = trackingHistory;
     }
     await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
   } catch (err) {

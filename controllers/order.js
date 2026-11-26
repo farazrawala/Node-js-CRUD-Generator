@@ -2910,6 +2910,7 @@ function buildExcludeDeliveredFilter(query = {}) {
   if (!on) return {};
   return {
     order_status: { $not: /^delivered$/i },
+    order_website_status: { $not: /^delivered$/i },
     tracking_status: { $not: /^delivered$/i },
   };
 }

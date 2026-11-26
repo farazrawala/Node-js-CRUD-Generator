@@ -556,6 +556,16 @@ const modelSchema = new mongoose.Schema(
       default: null,
       field_name: "Last Tracking Sync",
     },
+    /**
+     * Full courier tracking-detail rows from the latest scan
+     * (Leopard "Tracking Detail", TCS checkpoints, PostEx trackDetail, …).
+     * Keys stay as the courier sent them.
+     */
+    tracking_history: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+      field_name: "Tracking History",
+    },
 
     tags: {
       type: [String],
