@@ -67,7 +67,8 @@ async function findSyncableShipments(limit, options = {}) {
     const shipmentFilter = {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
-      shipment_status: { $nin: TERMINAL_STATUSES },
+      // Keep polling returned, cancelled, and failed shipments. Stop only once delivered.
+      shipment_status: { $ne: UNIFIED_STATUSES.DELIVERED },
       // Never scanned, or last scan is at least 3 hours old.
       $or: [
         { last_tracking_sync: null },
@@ -89,11 +90,10 @@ async function findSyncableShipments(limit, options = {}) {
     const orderFilter = {
       _id: { $in: candidates.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      // Pending, packed, in_transit, and every other live status. Stop only
-      // when the POS order is already finished the same way the shipment is.
-      order_status: {
-        $nin: ["delivered", "return", "return_received", "cancelled", "failed"],
-      },
+      // Keep scanning returns and cancellations. Stop once delivered, or once
+      // the order is tagged return_received.
+      order_status: { $ne: "delivered" },
+      tags: { $ne: "return_received" },
       ...(hasCourierSelection ? { courier_id: { $in: courierIds } } : {}),
     };
     if (companyId) orderFilter.company_id = companyId;

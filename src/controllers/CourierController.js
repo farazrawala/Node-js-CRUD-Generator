@@ -360,7 +360,7 @@ async function syncTracking(req, res) {
       tags: ["sync_courier"],
       description: {
         scope: "company",
-        eligible_statuses: "all except delivered, return, cancelled, failed",
+        eligible_statuses: "all except delivered or tagged return_received",
         total: summary.total,
         updated: summary.updated,
         errors: summary.errors,
@@ -373,7 +373,7 @@ async function syncTracking(req, res) {
     return res.status(200).json({
       success: true,
       scope: "company",
-      eligible_statuses: "all except delivered, return, cancelled, failed",
+      eligible_statuses: "all except delivered or tagged return_received",
       email,
       ...summary,
     });
@@ -384,7 +384,7 @@ async function syncTracking(req, res) {
         tags: ["sync_courier"],
         description: {
           scope: "company",
-          eligible_statuses: "all except delivered, return, cancelled, failed",
+          eligible_statuses: "all except delivered or tagged return_received",
           error: String(err?.message || "Courier tracking sync failed").slice(
             0,
             300,
