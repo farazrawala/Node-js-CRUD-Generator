@@ -40,6 +40,8 @@ function pickShipmentCourierCompany(shipment) {
 /** Skip a repeat health check for the same courier during a bulk run. */
 const healthOkUntil = new Map();
 const HEALTH_OK_MS = 10 * 60 * 1000;
+/** Do not scan a shipment again until this long after last_tracking_sync. */
+const MIN_TRACKING_SYNC_GAP_MS = 3 * 60 * 60 * 1000;
 
 const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
@@ -61,10 +63,16 @@ async function findSyncableShipments(limit, options = {}) {
     : [];
 
   while (syncable.length < limit) {
+    const syncedBefore = new Date(Date.now() - MIN_TRACKING_SYNC_GAP_MS);
     const shipmentFilter = {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
       shipment_status: { $nin: TERMINAL_STATUSES },
+      // Never scanned, or last scan is at least 3 hours old.
+      $or: [
+        { last_tracking_sync: null },
+        { last_tracking_sync: { $lte: syncedBefore } },
+      ],
     };
     if (excludeIds.length) shipmentFilter._id = { $nin: excludeIds };
     if (companyId) shipmentFilter.company_id = companyId;
