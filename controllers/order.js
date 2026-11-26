@@ -2872,6 +2872,16 @@ function buildStaleTrackingSyncFilter(query = {}) {
   return { last_tracking_sync: { $ne: null, $lte: before } };
 }
 
+/** Orders whose last_tracking_sync is newer than this many hours. */
+function buildRecentTrackingSyncFilter(query = {}) {
+  const raw = query?.last_tracking_sync_within_hours;
+  if (raw == null || String(raw).trim() === "") return {};
+  const hours = Number(raw);
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 365) return {};
+  const after = new Date(Date.now() - hours * 60 * 60 * 1000);
+  return { last_tracking_sync: { $gt: after } };
+}
+
 /** `?tags=packed` or repeated `tags` / `tag` values. Match orders that have any listed tag. */
 function buildOrderTagsFilter(query = {}) {
   const raw = [];
@@ -3000,6 +3010,7 @@ async function getOrdersWithItems(
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
     ...buildOrderTagsFilter(req.query),
     ...buildStaleTrackingSyncFilter(req.query),
+    ...buildRecentTrackingSyncFilter(req.query),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (
