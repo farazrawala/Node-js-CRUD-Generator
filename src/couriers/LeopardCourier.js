@@ -456,9 +456,25 @@ function latestLeopardEvent(events) {
 
 function parseLooseDate(value) {
   if (!value) return null;
-  const d = new Date(value);
-  if (!Number.isNaN(d.getTime())) return d;
-  return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  const raw = String(value).trim();
+  const wall = raw.match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/,
+  );
+  if (wall && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const [, year, month, day, hour, minute, second] = wall;
+    // Leopard sends a Pakistan wall clock with no timezone.
+    return new Date(Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour) - 5,
+      Number(minute),
+      Number(second || 0),
+    ));
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 module.exports = LeopardCourier;
