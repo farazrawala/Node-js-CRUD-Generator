@@ -8718,6 +8718,109 @@ async function order_record_label_print(req, res) {
   });
 }
 
+/**
+ * POST /api/order/mark-packed-by-scan
+ * Body: { code } — courier tracking barcode or order number.
+ * Adds the `packed` tag and sets packed_timestamp when it was not already packed.
+ */
+async function order_mark_packed_by_scan(req, res) {
+  const code = String(req.body?.code ?? req.body?.barcode ?? "").trim();
+  if (!code) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Barcode is required",
+    });
+  }
+
+  const companyId = coalesceObjectId(req.user?.company_id);
+  if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "company_id is required",
+    });
+  }
+
+  const base = {
+    company_id: companyId,
+    status: "active",
+    deletedAt: null,
+  };
+
+  let order = await Order.findOne({ ...base, order_no: code }).lean();
+  if (!order) {
+    order = await Order.findOne({ ...base, courier_tracking_number: code }).lean();
+  }
+  if (!order) {
+    const Shipment = getCourierShipmentModel();
+    if (Shipment) {
+      const shipment = await Shipment.findOne({
+        company_id: companyId,
+        tracking_number: code,
+        deletedAt: null,
+      })
+        .sort({ createdAt: -1, created_at: -1 })
+        .lean();
+      if (shipment?.order_id) {
+        order = await Order.findOne({ ...base, _id: shipment.order_id }).lean();
+      }
+    }
+  }
+
+  if (!order) {
+    return res.status(404).json({
+      success: false,
+      status: 404,
+      error: "No order found for this barcode",
+      code,
+    });
+  }
+
+  const previousTags = (order.tags || []).map((tag) => String(tag).trim()).filter(Boolean);
+  const alreadyPacked = previousTags.includes("packed");
+  let saved = order;
+
+  if (!alreadyPacked) {
+    const actorUserId = coalesceObjectId(req.user?._id);
+    const $set = {
+      tags: [...previousTags, "packed"],
+      packed_timestamp: new Date(),
+    };
+    if (actorUserId) $set.updated_by = actorUserId;
+    saved = await Order.findOneAndUpdate(
+      { _id: order._id, company_id: companyId, status: "active", deletedAt: null },
+      { $set },
+      { new: true, runValidators: true },
+    ).lean();
+    if (!saved) {
+      return res.status(404).json({
+        success: false,
+        status: 404,
+        error: "Order not found",
+      });
+    }
+  }
+
+  return res.status(200).json({
+    success: true,
+    status: 200,
+    message: alreadyPacked ? "Order is already packed" : "Order marked packed",
+    already_packed: alreadyPacked,
+    data: {
+      order: {
+        _id: saved._id,
+        order_no: saved.order_no,
+        name: saved.name,
+        phone: saved.phone,
+        courier_tracking_number: saved.courier_tracking_number,
+        tags: saved.tags || [],
+        packed_timestamp: saved.packed_timestamp || null,
+      },
+    },
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -8728,6 +8831,7 @@ module.exports = {
   order_update,
   order_update_status,
   order_update_tags,
+  order_mark_packed_by_scan,
   order_confirm_by_sms,
   order_confirm_by_email,
   order_confirm_by_whatsapp,

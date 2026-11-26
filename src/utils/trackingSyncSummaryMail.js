@@ -184,9 +184,15 @@ function buildTrackingSyncSummaryEmail(summary = {}, meta = {}) {
   lines.push(
     "",
     "--",
-    `Checked ${total} shipment${total === 1 ? "" : "s"} at ${when}` +
-      ` (took ${formatDuration(meta.durationMs)}).`,
+    `Checked ${total} shipment${total === 1 ? "" : "s"}` +
+      (Number(summary.pages) > 1
+        ? ` in ${summary.pages} pages of ${summary.page_size || 25}`
+        : "") +
+      ` at ${when} (took ${formatDuration(meta.durationMs)}).`,
   );
+  if (summary.has_more) {
+    lines.push("More open shipments remain for the next run.");
+  }
   if (errors) {
     lines.push(
       "",

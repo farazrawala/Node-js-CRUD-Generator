@@ -172,6 +172,7 @@ const {
   order_update,
   order_update_status,
   order_update_tags,
+  order_mark_packed_by_scan,
   order_confirm_by_sms,
   order_confirm_by_email,
   order_confirm_by_whatsapp,
@@ -1076,6 +1077,7 @@ router.patch("/order/update-status/:id", order_update_status);
 router.post("/order/update-status/:id", order_update_status);
 router.patch("/order/update-tags/:id", order_update_tags);
 router.post("/order/update-tags/:id", order_update_tags);
+router.post("/order/mark-packed-by-scan", order_mark_packed_by_scan);
 router.patch("/order/confirm-by-sms/:id", order_confirm_by_sms);
 router.post("/order/confirm-by-sms/:id", order_confirm_by_sms);
 router.patch("/order/confirm-by-email/:id", order_confirm_by_email);

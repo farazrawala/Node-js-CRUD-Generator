@@ -70,6 +70,7 @@ test("manual tracking sync is scoped to the user's company and accepts a batch l
     assert.deepEqual(receivedOptions, {
       companyId: "64b000000000000000000002",
       limit: 3,
+      pages: 1,
       courierIds: ["64b000000000000000000003"],
     });
     assert.equal(res.statusCode, 200);

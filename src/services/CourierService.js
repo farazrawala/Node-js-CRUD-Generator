@@ -56,6 +56,9 @@ async function findSyncableShipments(limit, options = {}) {
     : [];
   const pageSize = 100;
   let offset = 0;
+  const excludeIds = Array.isArray(options.excludeIds)
+    ? options.excludeIds.filter(Boolean)
+    : [];
 
   while (syncable.length < limit) {
     const shipmentFilter = {
@@ -63,6 +66,7 @@ async function findSyncableShipments(limit, options = {}) {
       tracking_number: { $nin: [null, ""] },
       shipment_status: { $nin: TERMINAL_STATUSES },
     };
+    if (excludeIds.length) shipmentFilter._id = { $nin: excludeIds };
     if (companyId) shipmentFilter.company_id = companyId;
 
     const candidates = await CourierShipment.find(shipmentFilter)
@@ -1905,34 +1909,71 @@ function withTimeout(promise, ms, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+const SYNC_PAGE_SIZE = 25;
+const SYNC_MAX_PAGES = 40;
+
 /**
  * Sync open shipments (used by cron job).
+ * Walks the oldest `last_tracking_sync` rows in pages so one run is not stuck
+ * on the first 25. Each page is at most 25 courier calls.
  * @param {object} [options]
- * @param {number} [options.limit]
+ * @param {number} [options.limit] page size (max 25)
+ * @param {number} [options.pages] how many pages to scan (max 40)
  */
 async function syncOpenShipments(options = {}) {
   const requestedLimit = Number(options.limit);
-  const limit =
+  const pageSize =
     Number.isFinite(requestedLimit) && requestedLimit > 0
-      ? Math.max(1, Math.min(Math.floor(requestedLimit), 25))
-      : 25;
-  const open = await findSyncableShipments(limit, {
-    companyId: options.companyId,
-    courierIds: options.courierIds,
-  });
+      ? Math.max(1, Math.min(Math.floor(requestedLimit), SYNC_PAGE_SIZE))
+      : SYNC_PAGE_SIZE;
+  const requestedPages = Number(options.pages ?? options.maxPages);
+  const maxPages =
+    Number.isFinite(requestedPages) && requestedPages > 0
+      ? Math.max(1, Math.min(Math.floor(requestedPages), SYNC_MAX_PAGES))
+      : 1;
 
   const summary = {
-    total: open.length,
+    total: 0,
     updated: 0,
     errors: 0,
     order_status_changed: 0,
     tracking_status_changed: 0,
+    pages: 0,
+    page_size: pageSize,
+    has_more: false,
     changes: [],
     checked: [],
     failures: [],
   };
 
-  for (const shipment of open) {
+  const excludeIds = [];
+  for (let page = 0; page < maxPages; page += 1) {
+    const open = await findSyncableShipments(pageSize, {
+      companyId: options.companyId,
+      courierIds: options.courierIds,
+      excludeIds,
+    });
+    if (!open.length) break;
+
+    summary.pages += 1;
+    summary.total += open.length;
+
+    for (const shipment of open) {
+      excludeIds.push(shipment._id);
+      await scanOneShipment(shipment, summary);
+    }
+
+    if (open.length < pageSize) break;
+    if (page + 1 >= maxPages) summary.has_more = true;
+  }
+
+  await attachOrderNumbers(summary.checked);
+  await attachOrderNumbers(summary.failures);
+  await logTrackingSyncOrders(summary);
+  return summary;
+}
+
+async function scanOneShipment(shipment, summary) {
     const checkedRow = {
       order_id: String(shipment.order_id || ""),
       company_id: shipment.company_id || null,
@@ -1979,13 +2020,12 @@ async function syncOpenShipments(options = {}) {
         shipmentId: String(shipment._id),
         error: err.message,
       });
+      // Move a failed row off the front of the queue so the next page is new work.
+      await CourierShipment.updateOne(
+        { _id: shipment._id },
+        { $set: { last_tracking_sync: new Date() } },
+      ).catch(() => {});
     }
-  }
-
-  await attachOrderNumbers(summary.checked);
-  await attachOrderNumbers(summary.failures);
-  await logTrackingSyncOrders(summary);
-  return summary;
 }
 
 function statusChangeComment(label, change) {

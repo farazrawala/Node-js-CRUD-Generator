@@ -342,9 +342,11 @@ async function syncTracking(req, res) {
     }
 
     const started = Date.now();
+    const requestedPages = Number(req.body?.pages ?? req.query?.pages);
     const summary = await CourierService.syncOpenShipments({
       companyId,
       limit: Number(req.body?.limit ?? req.query?.limit) || 25,
+      pages: Number.isFinite(requestedPages) && requestedPages > 0 ? requestedPages : 1,
       courierIds: Array.isArray(req.body?.courier_ids)
         ? req.body.courier_ids.map((id) => String(id).trim()).filter(Boolean)
         : undefined,

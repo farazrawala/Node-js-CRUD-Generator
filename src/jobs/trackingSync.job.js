@@ -10,6 +10,8 @@ const { emailTrackingSyncSummary } = require("../utils/trackingSyncSummaryMail")
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_SYNC_BATCH_SIZE = 25;
+const DEFAULT_SYNC_PAGES = 8;
+const MAX_SYNC_PAGES = 40;
 
 let timer = null;
 let running = false;
@@ -32,6 +34,12 @@ function getSyncBatchSize() {
   return Math.max(1, Math.min(Math.floor(configured), MAX_SYNC_BATCH_SIZE));
 }
 
+function getSyncMaxPages() {
+  const configured = Number(process.env.COURIER_TRACKING_SYNC_PAGES);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_SYNC_PAGES;
+  return Math.max(1, Math.min(Math.floor(configured), MAX_SYNC_PAGES));
+}
+
 async function runOnce() {
   if (running) {
     console.error(
@@ -46,6 +54,7 @@ async function runOnce() {
     courierLogger.syncJob({ phase: "start" });
     summary = await CourierService.syncOpenShipments({
       limit: getSyncBatchSize(),
+      pages: getSyncMaxPages(),
     });
     const { changes, failures, ...counts } = summary;
     courierLogger.syncJob({
@@ -132,4 +141,5 @@ module.exports = {
   getTrackingSyncStatus,
   getIntervalMs,
   getSyncBatchSize,
+  getSyncMaxPages,
 };
