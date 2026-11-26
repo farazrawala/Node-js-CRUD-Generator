@@ -7,7 +7,7 @@ const CourierShipment = require("../src/models/courier_shipment.model");
 const Order = require("../models/order");
 const { TERMINAL_STATUSES } = require("../src/couriers/constants");
 
-test("tracking sync selects only POS in-transit shipments with an active courier integration", async () => {
+test("tracking sync selects every non-terminal order with an active courier integration", async () => {
   const shipments = [
     {
       _id: "missing-config",
@@ -58,7 +58,6 @@ test("tracking sync selects only POS in-transit shipments with an active courier
     "company-e:PostEx",
     "company-f:Flagship",
   ]);
-  const posInTransit = new Set(["order-a", "order-b", "order-e"]);
   const findFilters = [];
   const orderFilters = [];
   const providerFilters = [];
@@ -89,22 +88,12 @@ test("tracking sync selects only POS in-transit shipments with an active courier
   };
   Order.find = (filter) => {
     orderFilters.push(filter);
-    const bookedCondition = filter.$or.find((condition) => condition._id);
-    const bookedOrderIds = bookedCondition
-      ? bookedCondition._id.$in
-      : [];
     return {
       select() {
         return this;
       },
       lean: async () =>
-        [...posInTransit]
-          .concat((bookedOrderIds || []).map(String))
-          .filter((id, index, values) => values.indexOf(id) === index)
-          .filter((id) =>
-            filter._id.$in.some((candidate) => String(candidate) === id),
-          )
-          .map((_id) => ({ _id })),
+        filter._id.$in.map((id) => ({ _id: String(id) })),
     };
   };
   CourierProvider.findOne = (filter) => {
@@ -134,16 +123,16 @@ test("tracking sync selects only POS in-transit shipments with an active courier
     assert.deepEqual(orderFilters[0], {
       _id: { $in: shipments.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      $or: [
-        { order_status: "in_transit" },
-        { _id: { $in: ["order-a", "order-d", "order-e", "order-f"] } },
-      ],
+      order_status: {
+        $nin: ["delivered", "return", "return_received", "cancelled", "failed"],
+      },
     });
     assert.deepEqual(
       providerFilters.map(({ company_id, provider }) => `${company_id}:${provider}`),
       [
         "company-a:Leopard",
         "company-b:Trax",
+        "company-c:TCS",
         "company-d:TCS",
         "company-e:PostEx",
         "company-f:Flagship",

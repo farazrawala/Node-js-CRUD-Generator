@@ -1,9 +1,11 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  buildOrderStatusFilter,
   buildTrackingStatusFilter,
   findStuckInTransitOrderIds,
   isStoredInTransitTrackingStatus,
+  isStoredReturnInTransitTrackingStatus,
 } = require("../src/utils/orderTrackingStatus");
 
 describe("order tracking status filter", () => {
@@ -52,6 +54,40 @@ describe("order tracking status filter", () => {
       assert.equal(isStoredInTransitTrackingStatus(status), true, status);
     }
     assert.equal(isStoredInTransitTrackingStatus("Re-Attempt Call Requested"), false);
+    assert.equal(isStoredInTransitTrackingStatus("RETURN_IN_TRANSIT"), false);
+    assert.equal(isStoredInTransitTrackingStatus("Return - In Transit"), false);
+  });
+
+  it("matches POS return, store refunded, and courier return scans for the Returned tile", () => {
+    const filter = buildOrderStatusFilter("return");
+    const [orderStatus, websiteStatus, returnInTransit, otherReturn] = filter.$or;
+
+    assert.equal(orderStatus.order_status.test("return"), true);
+    assert.equal(orderStatus.order_status.test("Returned"), true);
+    assert.equal(orderStatus.order_status.test("refunded"), true);
+    assert.equal(orderStatus.order_status.test("in_transit"), false);
+    assert.equal(websiteStatus.order_website_status.test("refunded"), true);
+    assert.equal(websiteStatus.order_website_status.test("returned"), true);
+    assert.equal(returnInTransit.tracking_status.test("RETURN_IN_TRANSIT"), true);
+    assert.equal(returnInTransit.tracking_status.test("Return in Transit"), true);
+    assert.equal(returnInTransit.tracking_status.test("In Transit"), false);
+    assert.equal(otherReturn.tracking_status.test("Returned"), true);
+    assert.equal(otherReturn.tracking_status.test("RTO"), true);
+    assert.equal(otherReturn.tracking_status.test("Return in Transit"), false);
+  });
+
+  it("matches Flagship return-in-transit codes without counting them as In Transit", () => {
+    const filter = buildTrackingStatusFilter("Return in Transit");
+
+    assert.equal(filter.tracking_status.test("Return in Transit"), true);
+    assert.equal(filter.tracking_status.test("RETURN_IN_TRANSIT"), true);
+    assert.equal(filter.tracking_status.test("Return - In Transit"), true);
+    assert.equal(filter.tracking_status.test("Shipment - Return in Transit"), true);
+    assert.equal(filter.tracking_status.test("In Transit"), false);
+    assert.equal(filter.tracking_status.test("Shipment - In Transit"), false);
+    assert.equal(filter.$or, undefined);
+    assert.equal(isStoredReturnInTransitTrackingStatus("RETURN_IN_TRANSIT"), true);
+    assert.equal(isStoredReturnInTransitTrackingStatus("In Transit"), false);
   });
 
   it("finds active company shipments with an In Transit event older than the threshold", async () => {

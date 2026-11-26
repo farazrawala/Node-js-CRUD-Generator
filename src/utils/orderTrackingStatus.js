@@ -8,14 +8,18 @@ function buildTrackingStatusFilter(value) {
     .replace(/^\s*(?:shipment|shipper)\s*[-:–]\s*/i, "");
   if (!requestedStatus) return {};
 
-  const isInTransit = /^in[\s_-]*transit$/i.test(requestedStatus);
+  const isReturnInTransit = isReturnInTransitStatus(requestedStatus);
+  const isInTransit =
+    !isReturnInTransit && /^in[\s_-]*transit$/i.test(requestedStatus);
   const isShipperAdvise = /^shipper[\s_-]*advi[cs]e(?:[\s_-]*requested)?$/i.test(
     requestedStatus,
   );
   const isReattempt = /^re[\s_-]*attempt(?:[\s_-]*call(?:[\s_-]*requested)?)?$/i.test(
     requestedStatus,
   );
-  const trackingStatusRegex = isInTransit
+  const trackingStatusRegex = isReturnInTransit
+    ? returnInTransitStatusPattern()
+    : isInTransit
     ? /^(?:(?:shipment|shipper)\s*[-:–]\s*)?(?:in[\s_-]*transit|transit|dispatched|departed|on[\s_-]*route)$/i
     : isShipperAdvise
       ? /^(?:(?:shipment|shipper)\s*[-:–]\s*)?(?:shipper[\s_-]*advi[cs]e(?:[\s_-]*requested)?)$/i
@@ -38,9 +42,60 @@ function buildTrackingStatusFilter(value) {
   return { tracking_status: trackingStatusRegex };
 }
 
+/** OMS Returned tile: POS return, store refunded/returned, and courier return scans. */
+function buildOrderStatusFilter(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return {};
+  const key = value.toLowerCase().replace(/[\s-]+/g, "_");
+  if (key === "return" || key === "returned" || key === "refunded") {
+    return {
+      $or: [
+        { order_status: /^(?:return|returned|refunded)$/i },
+        { order_website_status: /^(?:returned|refunded)$/i },
+        { tracking_status: returnInTransitStatusPattern() },
+        {
+          tracking_status:
+            /^(?:(?:shipment|shipper)\s*[-:–]\s*)?(?:returned|rto(?:[\s_-]*received)?|return(?:ed)?(?:[\s_-]+to[\s_-]+(?:shipper|origin|sender))?)$/i,
+        },
+      ],
+    };
+  }
+  if (key === "return_received" || key === "rto_received") {
+    return { order_status: /^(?:return_received|rto_received)$/i };
+  }
+  return {
+    order_status: new RegExp(`^${escapeRegex(value)}$`, "i"),
+  };
+}
+
+function isReturnFamilyStatusKey(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return key === "return" || key === "returned" || key === "refunded";
+}
+
+function isReturnInTransitStatus(value) {
+  const text = String(value || "")
+    .trim()
+    .replace(/^\s*(?:shipment|shipper)\s*[-:–]\s*/i, "");
+  return /^return[\s_-]*in[\s_-]*transit$/i.test(text);
+}
+
+function returnInTransitStatusPattern() {
+  return /^(?:(?:shipment|shipper)\s*[-:–]\s*)?return[\s_-]*in[\s_-]*transit$/i;
+}
+
+function isStoredReturnInTransitTrackingStatus(value) {
+  return returnInTransitStatusPattern().test(String(value || "").trim());
+}
+
 function isStoredInTransitTrackingStatus(value) {
+  const text = String(value || "").trim();
+  if (isStoredReturnInTransitTrackingStatus(text)) return false;
   return /^(?:(?:shipment|shipper)\s*[-:–]\s*)?(?:in[\s_-]*transit|transit|dispatched|departed|on[\s_-]*route)$/i.test(
-    String(value || "").trim(),
+    text,
   );
 }
 
@@ -73,7 +128,10 @@ async function findStuckInTransitOrderIds({
 }
 
 module.exports = {
+  buildOrderStatusFilter,
   buildTrackingStatusFilter,
   findStuckInTransitOrderIds,
+  isReturnFamilyStatusKey,
   isStoredInTransitTrackingStatus,
+  isStoredReturnInTransitTrackingStatus,
 };

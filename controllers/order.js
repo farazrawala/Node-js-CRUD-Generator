@@ -21,9 +21,12 @@ const {
 const { createApplicationLog } = require("../utils/applicationLogs");
 const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
+  buildOrderStatusFilter,
   buildTrackingStatusFilter,
   findStuckInTransitOrderIds,
+  isReturnFamilyStatusKey,
   isStoredInTransitTrackingStatus,
+  isStoredReturnInTransitTrackingStatus,
 } = require("../src/utils/orderTrackingStatus");
 const {
   createTransactionsFromItems: transactionBulkCreate,
@@ -2859,6 +2862,26 @@ const ORDER_LIST_SORT_ALIASES = {
  * @param {Record<string, unknown>} query
  * @param {Record<string, number>} fallback
  */
+/** `?tags=packed` or repeated `tags` / `tag` values. Match orders that have any listed tag. */
+function buildOrderTagsFilter(query = {}) {
+  const raw = [];
+  for (const key of ["tags", "tag"]) {
+    const value = query?.[key];
+    if (value == null) continue;
+    raw.push(...(Array.isArray(value) ? value : [value]));
+  }
+  const tags = [
+    ...new Set(
+      raw
+        .flatMap((value) => String(value).split(","))
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!tags.length) return {};
+  return { tags: { $in: tags } };
+}
+
 function buildOrderListSortFromQuery(query = {}, fallback = { createdAt: -1 }) {
   const raw = typeof query.sortBy === "string" ? query.sortBy.trim() : "";
   if (!raw) return fallback;
@@ -2952,15 +2975,7 @@ async function getOrdersWithItems(
     : { status: "active", deletedAt: null }),
     company_id: req.user?.company_id,
     ...extraFilter,
-    ...(typeof req.query?.order_status === "string" &&
-    req.query.order_status.trim()
-      ? {
-          order_status: new RegExp(
-            `^${req.query.order_status.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-            "i",
-          ),
-        }
-      : {}),
+    ...buildOrderStatusFilter(req.query?.order_status),
     ...(typeof req.query?.tracking_status === "string"
       ? buildTrackingStatusFilter(req.query.tracking_status)
       : {}),
@@ -2973,6 +2988,7 @@ async function getOrdersWithItems(
         }
       : {}),
     ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
+    ...buildOrderTagsFilter(req.query),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (
@@ -3058,9 +3074,23 @@ async function getOrdersWithItems(
       }
       return counts;
     }, {});
+    for (const key of Object.keys(orderStatusCounts)) {
+      if (isReturnFamilyStatusKey(key)) delete orderStatusCounts[key];
+    }
+    const returnListMatch = {
+      status: "active",
+      deletedAt: null,
+      company_id: companyObjectId,
+      ...extraFilter,
+      ...buildOrderStatusFilter("return"),
+    };
+    orderStatusCounts.return = await Order.countDocuments(returnListMatch);
     trackingStatusCounts = trackingStatusRows.reduce((counts, row) => {
       if (typeof row._id === "string" && row._id.trim()) {
-        if (!isStoredInTransitTrackingStatus(row._id)) {
+        if (
+          !isStoredInTransitTrackingStatus(row._id) &&
+          !isStoredReturnInTransitTrackingStatus(row._id)
+        ) {
           counts[row._id] = row.count;
         }
       }
@@ -3072,6 +3102,13 @@ async function getOrdersWithItems(
       company_id: companyObjectId,
       ...extraFilter,
       ...buildTrackingStatusFilter("In Transit"),
+    });
+    trackingStatusCounts["Return in Transit"] = await Order.countDocuments({
+      status: "active",
+      deletedAt: null,
+      company_id: companyObjectId,
+      ...extraFilter,
+      ...buildTrackingStatusFilter("Return in Transit"),
     });
   }
 
@@ -8092,6 +8129,11 @@ async function order_update_tags(req, res) {
   const actorUserId = coalesceObjectId(req.user?._id);
   const $set = { tags: nextTags };
   if (actorUserId) $set.updated_by = actorUserId;
+
+  const hadPacked = previousTags.includes("packed");
+  const hasPacked = nextTags.includes("packed");
+  if (!hadPacked && hasPacked) $set.packed_timestamp = new Date();
+  if (hadPacked && !hasPacked) $set.packed_timestamp = null;
 
   const updatedOrder = await Order.findOneAndUpdate(
     {

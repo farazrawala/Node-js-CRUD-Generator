@@ -284,3 +284,7 @@ client_secret
 cost_code
 
 
+
+
+//courier it will not scanned these status
+Delivered, Returned, Cancelled, or Failed

@@ -91,6 +91,7 @@ const ORDER_TAG_VALUES = [
   "confirmed_by_whatsapp",
   "confirmed_by_call",
   "return_received",
+  "packed",
 ];
 
 /**
@@ -563,6 +564,12 @@ const modelSchema = new mongoose.Schema(
         message: "{VALUE} is not a valid order tag",
       },
       default: [],
+    },
+    /** Set when the `packed` tag is added; cleared when that tag is removed. */
+    packed_timestamp: {
+      type: Date,
+      default: null,
+      field_name: "Packed Timestamp",
     },
     order_status: {
       type: String,

@@ -27,6 +27,7 @@ const {
   decryptProviderSecrets,
 } = require("../utils/encryptCredentials");
 const courierLogger = require("../utils/courierLogger");
+const { createApplicationLog } = require("../../utils/applicationLogs");
 const { enqueueJob, isQueueEnabled } = require("../../utils/redisQueue");
 
 function pickShipmentCourierCompany(shipment) {
@@ -73,18 +74,14 @@ async function findSyncableShipments(limit, options = {}) {
     if (!candidates.length) break;
     offset += candidates.length;
 
-    const bookedOrderIds = candidates
-      .filter(
-        (shipment) => shipment.shipment_status === UNIFIED_STATUSES.BOOKED,
-      )
-      .map((shipment) => shipment.order_id);
     const orderFilter = {
       _id: { $in: candidates.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      $or: [
-        { order_status: "in_transit" },
-        ...(bookedOrderIds.length ? [{ _id: { $in: bookedOrderIds } }] : []),
-      ],
+      // Pending, packed, in_transit, and every other live status. Stop only
+      // when the POS order is already finished the same way the shipment is.
+      order_status: {
+        $nin: ["delivered", "return", "return_received", "cancelled", "failed"],
+      },
       ...(hasCourierSelection ? { courier_id: { $in: courierIds } } : {}),
     };
     if (companyId) orderFilter.company_id = companyId;
@@ -1938,6 +1935,7 @@ async function syncOpenShipments(options = {}) {
   for (const shipment of open) {
     const checkedRow = {
       order_id: String(shipment.order_id || ""),
+      company_id: shipment.company_id || null,
       order_no: null,
       integration_order_id: null,
       courier: shipment.courier || null,
@@ -1986,7 +1984,74 @@ async function syncOpenShipments(options = {}) {
 
   await attachOrderNumbers(summary.checked);
   await attachOrderNumbers(summary.failures);
+  await logTrackingSyncOrders(summary);
   return summary;
+}
+
+function statusChangeComment(label, change) {
+  const parts = [];
+  if (change?.tracking_status_change) {
+    const from = change.tracking_status_change.from || "none";
+    const to = change.tracking_status_change.to || "none";
+    parts.push(`tracking ${from} → ${to}`);
+  }
+  if (change?.order_status_change) {
+    const from = change.order_status_change.from || "none";
+    const to = change.order_status_change.to || "none";
+    parts.push(`order ${from} → ${to}`);
+  }
+  return `Tracking scanned for ${label}. Status changed: ${parts.join("; ")}.`;
+}
+
+/**
+ * One `logs` row per scanned order: order id, comment, tag, and whether status changed.
+ */
+async function logTrackingSyncOrders(summary) {
+  const changesByOrder = new Map(
+    (summary.changes || []).map((row) => [String(row.order_id), row]),
+  );
+  const failuresByOrder = new Map(
+    (summary.failures || []).map((row) => [String(row.order_id), row]),
+  );
+
+  for (const row of summary.checked || []) {
+    const orderId = String(row.order_id || "");
+    const label = row.order_no || orderId || row.tracking_number || "order";
+    const failure = failuresByOrder.get(orderId);
+    const change = changesByOrder.get(orderId);
+    const statusChanged = Boolean(
+      change?.order_status_change || change?.tracking_status_change,
+    );
+    let comment;
+    let tag;
+    if (failure) {
+      tag = "scan_failed";
+      comment = `Tracking scan failed for ${label}. ${failure.reason || "Unknown error"}`;
+    } else if (statusChanged) {
+      tag = "status_changed";
+      comment = statusChangeComment(label, change);
+    } else {
+      tag = "status_unchanged";
+      comment = `Tracking scanned for ${label}. Status not changed.`;
+    }
+
+    await createApplicationLog(null, {
+      action: "Courier tracking scan",
+      url: "/api/courier/sync",
+      tags: ["sync_courier", tag],
+      reference_id: orderId,
+      reference_type: "order",
+      company_id: row.company_id,
+      description: {
+        order_id: orderId,
+        order_no: row.order_no || null,
+        courier: row.courier || null,
+        tracking_number: row.tracking_number || null,
+        status_changed: statusChanged,
+        comment,
+      },
+    });
+  }
 }
 
 /** Fill order_no / integration_order_id on failure rows (one query). */
