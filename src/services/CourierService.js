@@ -46,6 +46,36 @@ const MIN_TRACKING_SYNC_GAP_MS = 3 * 60 * 60 * 1000;
 const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
 const CourierTracking = require("../models/courier_tracking.model");
+const CourierStatus = require("../models/courier_status.model");
+
+async function recordCourierStatuses(courier, result) {
+  const name = normalizeProviderKey(courier) || String(courier || "").trim();
+  if (!name) return;
+  const statuses = new Set();
+  if (result?.status) statuses.add(String(result.status).trim());
+  for (const event of result?.events || []) {
+    const status = String(event?.status || "").trim();
+    if (status) statuses.add(status);
+  }
+  for (const status of statuses) {
+    if (!status) continue;
+    try {
+      await CourierStatus.updateOne(
+        { courier: name, status },
+        { $setOnInsert: { courier: name, status } },
+        { upsert: true },
+      );
+    } catch (err) {
+      if (err?.code === 11000) continue;
+      courierLogger.apiError({
+        event: "courier_status_save_failed",
+        courier: name,
+        status,
+        error: err.message,
+      });
+    }
+  }
+}
 
 async function findSyncableShipments(limit, options = {}) {
   const syncable = [];
@@ -1066,6 +1096,8 @@ async function refreshTrackingForShipment(shipment, options = {}) {
       raw: event.raw,
     });
   }
+
+  await recordCourierStatuses(shipment.courier, result);
 
   await CourierShipment.updateOne(
     { _id: shipment._id },

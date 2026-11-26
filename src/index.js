@@ -12,6 +12,7 @@
 require("./models/courier_provider.model");
 require("./models/courier_shipment.model");
 require("./models/courier_tracking.model");
+require("./models/courier_status.model");
 
 const CourierService = require("./services/CourierService");
 const CourierFactory = require("./couriers/CourierFactory");

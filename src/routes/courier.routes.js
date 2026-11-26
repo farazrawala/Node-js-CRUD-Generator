@@ -25,6 +25,7 @@ router.get("/order/:orderId/tracking", CourierController.getTrackingByOrder);
 router.post("/cancel/:orderId", CourierController.cancelShipment);
 router.get("/label/:orderId", CourierController.printLabel);
 
+router.get("/statuses", CourierController.listStatuses);
 router.get("/providers", CourierController.listProviders);
 router.get("/types", CourierController.listTypes);
 router.get("/booking-options", CourierController.getBookingOptions);
