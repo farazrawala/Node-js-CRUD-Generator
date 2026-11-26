@@ -1114,6 +1114,18 @@ MODEL.isCriticalStatus = function isCriticalStatus(value) {
   return CRITICAL_STATUS_KEYS.has(key);
 };
 
+/** Critical only when a tracking id exists and status is return, pending, or cancelled. */
+MODEL.shouldMarkCritical = function shouldMarkCritical(order) {
+  const trackingId = String(
+    order?.courier_tracking_number || order?.tracking_number || "",
+  ).trim();
+  if (!trackingId) return false;
+  return (
+    MODEL.isCriticalStatus(order?.order_status) ||
+    MODEL.isCriticalStatus(order?.tracking_status)
+  );
+};
+
 /**
  * Soft-delete older duplicate imported orders so unique indexes can build.
  * Keeps the best row per key (prefer more advanced OMS status, then newest).

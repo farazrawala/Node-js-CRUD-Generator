@@ -1443,9 +1443,13 @@ async function persistOrderTracking(shipment, result) {
     const statusForTag = update.order_status || currentStatus;
     const trackingForTag = nextTrackingStatus || previousTrackingStatus;
     const critical =
-      (typeof Order.isCriticalStatus === "function" &&
-        (Order.isCriticalStatus(statusForTag) ||
-          Order.isCriticalStatus(trackingForTag)));
+      typeof Order.shouldMarkCritical === "function" &&
+      Order.shouldMarkCritical({
+        order_status: statusForTag,
+        tracking_status: trackingForTag,
+        courier_tracking_number:
+          trackingNumber || order?.courier_tracking_number || "",
+      });
     if (critical) {
       orderUpdateOp.$addToSet = { tags: "critical" };
     } else {

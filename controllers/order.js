@@ -7585,9 +7585,10 @@ async function order_update_status(req, res) {
     if (nextStatus === "in_transit" || previousStatus === "in_transit") {
       pullTags.push("stock_awaiting", "incomplete_address");
     }
-    const critical =
-      Order.isCriticalStatus(nextStatus) ||
-      Order.isCriticalStatus(existingOrder.tracking_status);
+    const critical = Order.shouldMarkCritical({
+      ...existingOrder,
+      order_status: nextStatus,
+    });
     if (critical) {
       updateDoc.$addToSet = { tags: "critical" };
     } else {
@@ -8890,9 +8891,7 @@ async function order_mark_packed_by_scan(req, res) {
 }
 
 function criticalTagAction(order) {
-  const critical =
-    Order.isCriticalStatus(order.order_status) ||
-    Order.isCriticalStatus(order.tracking_status);
+  const critical = Order.shouldMarkCritical(order);
   const had = Array.isArray(order.tags) && order.tags.includes("critical");
   if (critical && !had) return "marked";
   if (!critical && had) return "unmarked";
@@ -8935,16 +8934,14 @@ async function order_sync_critical_tag(req, res) {
   };
 
   const cursor = Order.find(filter)
-    .select("order_no order_status tracking_status tags")
+    .select("order_no order_status tracking_status courier_tracking_number tags")
     .lean()
     .cursor();
 
   for await (const order of cursor) {
     checked += 1;
     const action = criticalTagAction(order);
-    const critical =
-      Order.isCriticalStatus(order.order_status) ||
-      Order.isCriticalStatus(order.tracking_status);
+    const critical = Order.shouldMarkCritical(order);
     if (action === "marked") {
       marked += 1;
       ops.push({
