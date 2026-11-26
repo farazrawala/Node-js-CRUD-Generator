@@ -1120,12 +1120,10 @@ MODEL.shouldMarkCritical = function shouldMarkCritical(order) {
     order?.courier_tracking_number || order?.tracking_number || "",
   ).trim();
   if (!trackingId) return false;
-  // A cancelled CN is still stored, but the list shows Add tracking. It is not a live shipment.
-  const trackingKey = String(order?.tracking_status || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-  if (trackingKey === "cancelled" || trackingKey === "canceled") return false;
+  // A cancelled CN is still stored ("Cancelled" or "Shipment - Cancelled"),
+  // and the list shows Add tracking. It is not a live shipment.
+  const trackingText = String(order?.tracking_status || "").trim().toLowerCase();
+  if (/cancel/.test(trackingText)) return false;
   return (
     MODEL.isCriticalStatus(order?.order_status) ||
     MODEL.isCriticalStatus(order?.tracking_status)
