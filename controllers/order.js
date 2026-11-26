@@ -2902,6 +2902,18 @@ function buildRequireTrackingNumberFilter(query = {}) {
   return { courier_tracking_number: { $exists: true, $nin: [null, ""] } };
 }
 
+/** Courier sync queue: delivered orders do not need another tracking sync. */
+function buildExcludeDeliveredFilter(query = {}) {
+  const on = ["1", "true", "yes"].includes(
+    String(query?.exclude_delivered || "").trim().toLowerCase(),
+  );
+  if (!on) return {};
+  return {
+    order_status: { $not: /^delivered$/i },
+    tracking_status: { $not: /^delivered$/i },
+  };
+}
+
 /** `?tags=packed` or repeated `tags` / `tag` values. Match orders that have any listed tag. */
 function buildOrderTagsFilter(query = {}) {
   const raw = [];
@@ -3032,6 +3044,7 @@ async function getOrdersWithItems(
     ...buildStaleTrackingSyncFilter(req.query),
     ...buildRecentTrackingSyncFilter(req.query),
     ...buildRequireTrackingNumberFilter(req.query),
+    ...buildExcludeDeliveredFilter(req.query),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (
