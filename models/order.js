@@ -565,7 +565,7 @@ const modelSchema = new mongoose.Schema(
       },
       default: [],
     },
-    /** Set when the `packed` tag is added; cleared when that tag is removed. */
+    /** Set when the `packed` tag is added. Removing the tag leaves this time in place. */
     packed_timestamp: {
       type: Date,
       default: null,

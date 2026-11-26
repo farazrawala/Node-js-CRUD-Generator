@@ -8144,7 +8144,6 @@ async function order_update_tags(req, res) {
   const hadPacked = previousTags.includes("packed");
   const hasPacked = nextTags.includes("packed");
   if (!hadPacked && hasPacked) $set.packed_timestamp = new Date();
-  if (hadPacked && !hasPacked) $set.packed_timestamp = null;
 
   const updatedOrder = await Order.findOneAndUpdate(
     {
