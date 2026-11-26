@@ -162,6 +162,12 @@ async function checkHeaderAuthentication(req, res, next) {
     /^\/api\/user\/get\/.*/, // /api/user/get/:id
     /^\/order\/public-get-order-by-order-no\/.*/, // public order lookup (no auth)
     /^\/api\/order\/public-get-order-by-order-no\/.*/, // public order lookup (no auth)
+    "/order/sync-critical-tag",
+    "/api/order/sync-critical-tag",
+    "/pos_admin/api/order/sync-critical-tag",
+    /^\/order\/sync-critical-tag\/.*/,
+    /^\/api\/order\/sync-critical-tag\/.*/,
+    /^\/pos_admin\/api\/order\/sync-critical-tag\/.*/,
     /^\/courier\/tracking\/.+/, // public courier tracking by number (no auth)
     /^\/api\/courier\/tracking\/.+/, // public courier tracking by number (no auth)
     /^\/purchase_order\/public-get-purchase-order\/.*/, // public PO view (no auth)

@@ -92,6 +92,7 @@ const ORDER_TAG_VALUES = [
   "confirmed_by_call",
   "return_received",
   "packed",
+  "critical",
 ];
 
 /**
@@ -555,6 +556,16 @@ const modelSchema = new mongoose.Schema(
       type: Date,
       default: null,
       field_name: "Last Tracking Sync",
+    },
+    /**
+     * Full courier tracking-detail rows from the latest scan
+     * (Leopard "Tracking Detail", TCS checkpoints, PostEx trackDetail, …).
+     * Keys stay as the courier sent them.
+     */
+    tracking_history: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+      field_name: "Tracking History",
     },
 
     tags: {
@@ -1085,6 +1096,39 @@ MODEL.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
 MODEL.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;
 MODEL.getOrderStatusStockEffect = getOrderStatusStockEffect;
 MODEL.getOrderStatusStockAction = getOrderStatusStockAction;
+
+const CRITICAL_STATUS_KEYS = new Set([
+  "return",
+  "returned",
+  "pending",
+  "cancelled",
+  "canceled",
+]);
+
+/** True for order or tracking status return, pending, or cancelled. */
+MODEL.isCriticalStatus = function isCriticalStatus(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return CRITICAL_STATUS_KEYS.has(key);
+};
+
+/** Critical only when a live tracking id exists and status is return, pending, or cancelled. */
+MODEL.shouldMarkCritical = function shouldMarkCritical(order) {
+  const trackingId = String(
+    order?.courier_tracking_number || order?.tracking_number || "",
+  ).trim();
+  if (!trackingId) return false;
+  // A cancelled CN is still stored ("Cancelled" or "Shipment - Cancelled"),
+  // and the list shows Add tracking. It is not a live shipment.
+  const trackingText = String(order?.tracking_status || "").trim().toLowerCase();
+  if (/cancel/.test(trackingText)) return false;
+  return (
+    MODEL.isCriticalStatus(order?.order_status) ||
+    MODEL.isCriticalStatus(order?.tracking_status)
+  );
+};
 
 /**
  * Soft-delete older duplicate imported orders so unique indexes can build.

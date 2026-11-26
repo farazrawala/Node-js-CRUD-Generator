@@ -5,7 +5,6 @@ const CourierService = require("../src/services/CourierService");
 const CourierProvider = require("../src/models/courier_provider.model");
 const CourierShipment = require("../src/models/courier_shipment.model");
 const Order = require("../models/order");
-const { TERMINAL_STATUSES } = require("../src/couriers/constants");
 
 test("tracking sync selects every non-terminal order with an active courier integration", async () => {
   const shipments = [
@@ -115,17 +114,18 @@ test("tracking sync selects every non-terminal order with an active courier inte
       "booked-in-transit",
       "booked-pos-packed",
     ]);
-    assert.deepEqual(findFilters[0], {
+    const { $or, ...shipmentFilter } = findFilters[0];
+    assert.ok(Array.isArray($or));
+    assert.deepEqual(shipmentFilter, {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
-      shipment_status: { $nin: TERMINAL_STATUSES },
+      shipment_status: { $ne: "Delivered" },
     });
     assert.deepEqual(orderFilters[0], {
       _id: { $in: shipments.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      order_status: {
-        $nin: ["delivered", "return", "return_received", "cancelled", "failed"],
-      },
+      order_status: { $ne: "delivered" },
+      tags: { $ne: "return_received" },
     });
     assert.deepEqual(
       providerFilters.map(({ company_id, provider }) => `${company_id}:${provider}`),

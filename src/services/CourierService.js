@@ -46,6 +46,36 @@ const MIN_TRACKING_SYNC_GAP_MS = 3 * 60 * 60 * 1000;
 const CourierProvider = require("../models/courier_provider.model");
 const CourierShipment = require("../models/courier_shipment.model");
 const CourierTracking = require("../models/courier_tracking.model");
+const CourierStatus = require("../models/courier_status.model");
+
+async function recordCourierStatuses(courier, result) {
+  const name = normalizeProviderKey(courier) || String(courier || "").trim();
+  if (!name) return;
+  const statuses = new Set();
+  if (result?.status) statuses.add(String(result.status).trim());
+  for (const event of result?.events || []) {
+    const status = String(event?.status || "").trim();
+    if (status) statuses.add(status);
+  }
+  for (const status of statuses) {
+    if (!status) continue;
+    try {
+      await CourierStatus.updateOne(
+        { courier: name, status },
+        { $setOnInsert: { courier: name, status } },
+        { upsert: true },
+      );
+    } catch (err) {
+      if (err?.code === 11000) continue;
+      courierLogger.apiError({
+        event: "courier_status_save_failed",
+        courier: name,
+        status,
+        error: err.message,
+      });
+    }
+  }
+}
 
 async function findSyncableShipments(limit, options = {}) {
   const syncable = [];
@@ -67,7 +97,8 @@ async function findSyncableShipments(limit, options = {}) {
     const shipmentFilter = {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
-      shipment_status: { $nin: TERMINAL_STATUSES },
+      // Keep polling returned, cancelled, and failed shipments. Stop only once delivered.
+      shipment_status: { $ne: UNIFIED_STATUSES.DELIVERED },
       // Never scanned, or last scan is at least 3 hours old.
       $or: [
         { last_tracking_sync: null },
@@ -89,11 +120,10 @@ async function findSyncableShipments(limit, options = {}) {
     const orderFilter = {
       _id: { $in: candidates.map((shipment) => shipment.order_id) },
       deletedAt: null,
-      // Pending, packed, in_transit, and every other live status. Stop only
-      // when the POS order is already finished the same way the shipment is.
-      order_status: {
-        $nin: ["delivered", "return", "return_received", "cancelled", "failed"],
-      },
+      // Keep scanning returns and cancellations. Stop once delivered, or once
+      // the order is tagged return_received.
+      order_status: { $ne: "delivered" },
+      tags: { $ne: "return_received" },
       ...(hasCourierSelection ? { courier_id: { $in: courierIds } } : {}),
     };
     if (companyId) orderFilter.company_id = companyId;
@@ -1067,6 +1097,8 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     });
   }
 
+  await recordCourierStatuses(shipment.courier, result);
+
   await CourierShipment.updateOne(
     { _id: shipment._id },
     {
@@ -1126,6 +1158,41 @@ async function refreshTrackingForShipment(shipment, options = {}) {
  * Timeline the courier returned (`tracking` / `tracking_history`), not the
  * mapped rows stored in courier_tracking.
  */
+function isTrackingDetailRow(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  return (
+    raw.Status != null ||
+    raw.Status_With_City != null ||
+    raw.Activity_datetime != null ||
+    raw.Activity_Date != null ||
+    raw.status != null ||
+    raw.transactionStatus != null ||
+    raw.description != null ||
+    raw.datetime != null
+  );
+}
+
+/** Courier's own tracking-detail objects, unchanged (Status, Activity_datetime, Reason, …). */
+function courierTrackingDetailRows(result) {
+  const fromEvents = (Array.isArray(result?.events) ? result.events : [])
+    .map((event) => event?.raw)
+    .filter(isTrackingDetailRow);
+  if (fromEvents.length) return fromEvents;
+
+  const raw = result?.raw && typeof result.raw === "object" ? result.raw : null;
+  const packet = Array.isArray(raw?.packet_list) ? raw.packet_list[0] : null;
+  const candidates = [
+    packet?.["Tracking Detail"],
+    packet?.Tracking_Detail,
+    packet?.TrackingDetail,
+    raw?.details?.tracking_history,
+    raw?.checkpoints,
+    raw?.deliveryinfo,
+  ];
+  const list = candidates.find((rows) => Array.isArray(rows) && rows.some(isTrackingDetailRow));
+  return Array.isArray(list) ? list.filter(isTrackingDetailRow) : [];
+}
+
 function liveTrackingHistory(result) {
   const raw = result?.raw && typeof result.raw === "object" ? result.raw : null;
   const rows = Array.isArray(raw?.tracking)
@@ -1362,13 +1429,38 @@ async function persistOrderTracking(shipment, result) {
 
   try {
     const orderUpdateOp = { $set: update };
+    const pullTags = [];
     if (
       mappedOrderStatus === "in_transit" ||
       currentStatus === "in_transit"
     ) {
-      orderUpdateOp.$pullAll = {
-        tags: ["stock_awaiting", "incomplete_address"],
-      };
+      pullTags.push("stock_awaiting", "incomplete_address");
+    }
+    // Booked keeps the packed tag. Any later courier update removes it.
+    if (result?.status && result.status !== UNIFIED_STATUSES.BOOKED) {
+      pullTags.push("packed");
+    }
+    const statusForTag = update.order_status || currentStatus;
+    const trackingForTag = nextTrackingStatus || previousTrackingStatus;
+    const critical =
+      typeof Order.shouldMarkCritical === "function" &&
+      Order.shouldMarkCritical({
+        order_status: statusForTag,
+        tracking_status: trackingForTag,
+        courier_tracking_number:
+          trackingNumber || order?.courier_tracking_number || "",
+      });
+    if (critical) {
+      orderUpdateOp.$addToSet = { tags: "critical" };
+    } else {
+      pullTags.push("critical");
+    }
+    if (pullTags.length) {
+      orderUpdateOp.$pullAll = { tags: pullTags };
+    }
+    const trackingHistory = courierTrackingDetailRows(result);
+    if (trackingHistory.length) {
+      orderUpdateOp.$set.tracking_history = trackingHistory;
     }
     await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
   } catch (err) {

@@ -2910,6 +2910,7 @@ function buildExcludeDeliveredFilter(query = {}) {
   if (!on) return {};
   return {
     order_status: { $not: /^delivered$/i },
+    order_website_status: { $not: /^delivered$/i },
     tracking_status: { $not: /^delivered$/i },
   };
 }
@@ -7580,8 +7581,21 @@ async function order_update_status(req, res) {
 
     const previousStatus = String(existingOrder.order_status || "").trim();
     const updateDoc = { $set };
+    const pullTags = [];
     if (nextStatus === "in_transit" || previousStatus === "in_transit") {
-      updateDoc.$pullAll = { tags: ["stock_awaiting", "incomplete_address"] };
+      pullTags.push("stock_awaiting", "incomplete_address");
+    }
+    const critical = Order.shouldMarkCritical({
+      ...existingOrder,
+      order_status: nextStatus,
+    });
+    if (critical) {
+      updateDoc.$addToSet = { tags: "critical" };
+    } else {
+      pullTags.push("critical");
+    }
+    if (pullTags.length) {
+      updateDoc.$pullAll = { tags: pullTags };
     }
 
     updatedOrder = await Order.findOneAndUpdate(
@@ -8876,6 +8890,99 @@ async function order_mark_packed_by_scan(req, res) {
   });
 }
 
+function criticalTagAction(order) {
+  const critical = Order.shouldMarkCritical(order);
+  const had = Array.isArray(order.tags) && order.tags.includes("critical");
+  if (critical && !had) return "marked";
+  if (!critical && had) return "unmarked";
+  return "unchanged";
+}
+
+/**
+ * POST /api/order/sync-critical-tag/:id
+ * POST /api/order/sync-critical-tag
+ * With no id, every order is checked. With an id or order_ids, only those orders.
+ * Adds `critical` for return, pending, or cancelled, and removes it otherwise.
+ */
+async function order_sync_critical_tag(req, res) {
+  const companyId = coalesceObjectId(req.user?.company_id);
+  const rawIds = [
+    req.params?.id,
+    ...(Array.isArray(req.body?.order_ids) ? req.body.order_ids : []),
+    ...(Array.isArray(req.body?.ids) ? req.body.ids : []),
+  ]
+    .map((id) => String(id || "").trim())
+    .filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const orderIds = [...new Set(rawIds)];
+
+  const filter = {
+    deletedAt: null,
+    ...(orderIds.length ? { _id: { $in: orderIds } } : {}),
+    ...(companyId && orderIds.length ? { company_id: companyId } : {}),
+  };
+
+  let checked = 0;
+  let marked = 0;
+  let unmarked = 0;
+  const orders = [];
+  const ops = [];
+
+  const flush = async () => {
+    if (!ops.length) return;
+    await Order.bulkWrite(ops, { ordered: false });
+    ops.length = 0;
+  };
+
+  const cursor = Order.find(filter)
+    .select("order_no order_status tracking_status courier_tracking_number tags")
+    .lean()
+    .cursor();
+
+  for await (const order of cursor) {
+    checked += 1;
+    const action = criticalTagAction(order);
+    const critical = Order.shouldMarkCritical(order);
+    if (action === "marked") {
+      marked += 1;
+      ops.push({
+        updateOne: {
+          filter: { _id: order._id },
+          update: { $addToSet: { tags: "critical" } },
+        },
+      });
+    } else if (action === "unmarked") {
+      unmarked += 1;
+      ops.push({
+        updateOne: {
+          filter: { _id: order._id },
+          update: { $pull: { tags: "critical" } },
+        },
+      });
+    }
+    if (orderIds.length) {
+      orders.push({
+        order_id: order._id,
+        order_no: order.order_no || null,
+        order_status: order.order_status || null,
+        tracking_status: order.tracking_status || null,
+        critical,
+        action,
+      });
+    }
+    if (ops.length >= 500) await flush();
+  }
+  await flush();
+
+  return res.status(200).json({
+    success: true,
+    scope: orderIds.length ? "selected" : "all",
+    checked,
+    marked,
+    unmarked,
+    ...(orderIds.length ? { orders } : {}),
+  });
+}
+
 module.exports = {
   // orderCreate,
   // orderUpdate,
@@ -8886,6 +8993,7 @@ module.exports = {
   order_update,
   order_update_status,
   order_update_tags,
+  order_sync_critical_tag,
   order_mark_packed_by_scan,
   order_confirm_by_sms,
   order_confirm_by_email,

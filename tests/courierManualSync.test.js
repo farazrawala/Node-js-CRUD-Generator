@@ -77,7 +77,7 @@ test("manual tracking sync is scoped to the user's company and accepts a batch l
     assert.equal(res.body.scope, "company");
     assert.equal(
       res.body.eligible_statuses,
-      "all except delivered, return, cancelled, failed",
+      "all except delivered or tagged return_received",
     );
     assert.deepEqual(createdLog.tags, ["sync_courier"]);
     assert.equal(createdLog.action, "Courier tracking sync");

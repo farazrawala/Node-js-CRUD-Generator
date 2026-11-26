@@ -172,6 +172,7 @@ const {
   order_update,
   order_update_status,
   order_update_tags,
+  order_sync_critical_tag,
   order_mark_packed_by_scan,
   order_confirm_by_sms,
   order_confirm_by_email,
@@ -1075,6 +1076,8 @@ router.post(
 router.patch("/order/order_update/:id", order_update);
 router.patch("/order/update-status/:id", order_update_status);
 router.post("/order/update-status/:id", order_update_status);
+router.post("/order/sync-critical-tag", order_sync_critical_tag);
+router.post("/order/sync-critical-tag/:id", order_sync_critical_tag);
 router.patch("/order/update-tags/:id", order_update_tags);
 router.post("/order/update-tags/:id", order_update_tags);
 router.post("/order/mark-packed-by-scan", order_mark_packed_by_scan);

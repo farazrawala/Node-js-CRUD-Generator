@@ -10,6 +10,8 @@ const { createApplicationLog } = require("../../utils/applicationLogs");
 const CourierFactory = require("../couriers/CourierFactory");
 const courierLogger = require("../utils/courierLogger");
 const { listCourierTypes } = require("../../models/courier");
+const CourierStatus = require("../models/courier_status.model");
+const { normalizeProviderKey } = require("../couriers/constants");
 const { emailTrackingSyncSummary } = require("../utils/trackingSyncSummaryMail");
 
 function companyIdFromReq(req) {
@@ -306,6 +308,40 @@ async function printLabel(req, res) {
 }
 
 /**
+ * GET /courier/statuses
+ * Query: courier (optional) — Leopard, TCS, PostEx, …
+ * Unique statuses recorded from scans.
+ */
+async function listStatuses(req, res) {
+  const requested = String(req.query?.courier || req.query?.provider || "").trim();
+  const courier = requested ? normalizeProviderKey(requested) || requested : "";
+  const filter = courier ? { courier } : {};
+  const rows = await CourierStatus.find(filter)
+    .select("courier status")
+    .sort({ courier: 1, status: 1 })
+    .lean();
+
+  const byCourier = new Map();
+  for (const row of rows) {
+    const name = row.courier || "";
+    if (!byCourier.has(name)) byCourier.set(name, []);
+    byCourier.get(name).push(row.status);
+  }
+
+  const grouped = [...byCourier.entries()].map(([name, statuses]) => ({
+    courier: name,
+    statuses,
+  }));
+
+  return res.status(200).json({
+    success: true,
+    courier: courier || null,
+    statuses: courier ? grouped[0]?.statuses || [] : [...new Set(rows.map((row) => row.status))],
+    by_courier: grouped,
+  });
+}
+
+/**
  * GET /courier/providers
  */
 async function listProviders(req, res) {
@@ -360,7 +396,7 @@ async function syncTracking(req, res) {
       tags: ["sync_courier"],
       description: {
         scope: "company",
-        eligible_statuses: "all except delivered, return, cancelled, failed",
+        eligible_statuses: "all except delivered or tagged return_received",
         total: summary.total,
         updated: summary.updated,
         errors: summary.errors,
@@ -373,7 +409,7 @@ async function syncTracking(req, res) {
     return res.status(200).json({
       success: true,
       scope: "company",
-      eligible_statuses: "all except delivered, return, cancelled, failed",
+      eligible_statuses: "all except delivered or tagged return_received",
       email,
       ...summary,
     });
@@ -384,7 +420,7 @@ async function syncTracking(req, res) {
         tags: ["sync_courier"],
         description: {
           scope: "company",
-          eligible_statuses: "all except delivered, return, cancelled, failed",
+          eligible_statuses: "all except delivered or tagged return_received",
           error: String(err?.message || "Courier tracking sync failed").slice(
             0,
             300,
@@ -464,6 +500,7 @@ module.exports = {
   submitShipperAdvice,
   cancelShipment,
   printLabel,
+  listStatuses,
   listProviders,
   listTypes,
   syncTracking,

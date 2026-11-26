@@ -1,6 +1,6 @@
 /**
  * Background tracking sync — every hour by default.
- * Stops syncing terminal statuses (Delivered / Returned / Cancelled / Failed).
+ * Stops syncing once the shipment is Delivered, or the order is tagged return_received.
  * @module src/jobs/trackingSync.job
  */
 
