@@ -1440,6 +1440,17 @@ async function persistOrderTracking(shipment, result) {
     if (result?.status && result.status !== UNIFIED_STATUSES.BOOKED) {
       pullTags.push("packed");
     }
+    const statusForTag = update.order_status || currentStatus;
+    const trackingForTag = nextTrackingStatus || previousTrackingStatus;
+    const critical =
+      (typeof Order.isCriticalStatus === "function" &&
+        (Order.isCriticalStatus(statusForTag) ||
+          Order.isCriticalStatus(trackingForTag)));
+    if (critical) {
+      orderUpdateOp.$addToSet = { tags: "critical" };
+    } else {
+      pullTags.push("critical");
+    }
     if (pullTags.length) {
       orderUpdateOp.$pullAll = { tags: pullTags };
     }

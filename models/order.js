@@ -92,6 +92,7 @@ const ORDER_TAG_VALUES = [
   "confirmed_by_call",
   "return_received",
   "packed",
+  "critical",
 ];
 
 /**
@@ -1095,6 +1096,23 @@ MODEL.ORDER_STATUS_GROUPS = ORDER_STATUS_GROUPS;
 MODEL.ORDER_STATUS_STOCK = ORDER_STATUS_STOCK;
 MODEL.getOrderStatusStockEffect = getOrderStatusStockEffect;
 MODEL.getOrderStatusStockAction = getOrderStatusStockAction;
+
+const CRITICAL_STATUS_KEYS = new Set([
+  "return",
+  "returned",
+  "pending",
+  "cancelled",
+  "canceled",
+]);
+
+/** True for order or tracking status return, pending, or cancelled. */
+MODEL.isCriticalStatus = function isCriticalStatus(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return CRITICAL_STATUS_KEYS.has(key);
+};
 
 /**
  * Soft-delete older duplicate imported orders so unique indexes can build.

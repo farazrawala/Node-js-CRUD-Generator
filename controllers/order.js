@@ -7581,8 +7581,20 @@ async function order_update_status(req, res) {
 
     const previousStatus = String(existingOrder.order_status || "").trim();
     const updateDoc = { $set };
+    const pullTags = [];
     if (nextStatus === "in_transit" || previousStatus === "in_transit") {
-      updateDoc.$pullAll = { tags: ["stock_awaiting", "incomplete_address"] };
+      pullTags.push("stock_awaiting", "incomplete_address");
+    }
+    const critical =
+      Order.isCriticalStatus(nextStatus) ||
+      Order.isCriticalStatus(existingOrder.tracking_status);
+    if (critical) {
+      updateDoc.$addToSet = { tags: "critical" };
+    } else {
+      pullTags.push("critical");
+    }
+    if (pullTags.length) {
+      updateDoc.$pullAll = { tags: pullTags };
     }
 
     updatedOrder = await Order.findOneAndUpdate(
