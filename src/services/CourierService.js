@@ -1349,7 +1349,7 @@ async function persistOrderTracking(shipment, result) {
   try {
     order = await Order.findById(shipment.order_id)
       .select(
-        "order_status company_id deletedAt status courier_tracking_number tracking_status order_no integration_order_id integration_id name email createdAt",
+        "order_status company_id deletedAt status courier_tracking_number tracking_status exact_courier_status order_no integration_order_id integration_id name email createdAt",
       )
       .lean();
   } catch (err) {
@@ -1362,7 +1362,11 @@ async function persistOrderTracking(shipment, result) {
 
   const update = {};
   const exactCourierStatus = String(result?.status || "").trim();
-  if (exactCourierStatus) update.exact_courier_status = exactCourierStatus;
+  const previousExactStatus = String(order?.exact_courier_status || "").trim();
+  if (exactCourierStatus && exactCourierStatus !== previousExactStatus) {
+    update.exact_courier_status = exactCourierStatus;
+    update.last_tracking_activity_sync = new Date();
+  }
   const previousTrackingStatus = String(order?.tracking_status || "").trim();
   const nextTrackingStatus = lastStatus ? String(lastStatus) : "";
   if (
@@ -1453,19 +1457,21 @@ async function persistOrderTracking(shipment, result) {
         courier_tracking_number:
           trackingNumber || order?.courier_tracking_number || "",
       });
-    if (critical) {
-      orderUpdateOp.$addToSet = { tags: "critical" };
-    } else {
-      pullTags.push("critical");
-    }
-    if (pullTags.length) {
-      orderUpdateOp.$pullAll = { tags: pullTags };
-    }
+    if (!critical) pullTags.push("critical");
     const trackingHistory = courierTrackingDetailRows(result);
     if (trackingHistory.length) {
       orderUpdateOp.$set.tracking_history = trackingHistory;
     }
+    if (pullTags.length) {
+      orderUpdateOp.$pullAll = { tags: [...new Set(pullTags)] };
+    }
+    // $addToSet and $pullAll cannot both target `tags` in one update.
     await Order.findByIdAndUpdate(shipment.order_id, orderUpdateOp);
+    if (critical) {
+      await Order.findByIdAndUpdate(shipment.order_id, {
+        $addToSet: { tags: "critical" },
+      });
+    }
   } catch (err) {
     courierLogger.apiError({
       event: "order_tracking_persist_failed",

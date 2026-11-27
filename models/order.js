@@ -566,6 +566,12 @@ const modelSchema = new mongoose.Schema(
       default: null,
       field_name: "Last Tracking Sync",
     },
+    /** Set only when the courier booking status (exact_courier_status) changes. */
+    last_tracking_activity_sync: {
+      type: Date,
+      default: null,
+      field_name: "Last Tracking Activity Sync",
+    },
     /**
      * Full courier tracking-detail rows from the latest scan
      * (Leopard "Tracking Detail", TCS checkpoints, PostEx trackDetail, …).
