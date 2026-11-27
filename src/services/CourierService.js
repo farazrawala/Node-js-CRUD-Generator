@@ -99,11 +99,6 @@ async function findSyncableShipments(limit, options = {}) {
       tracking_number: { $nin: [null, ""] },
       // Keep polling returned, cancelled, and failed shipments. Stop only once delivered.
       shipment_status: { $ne: UNIFIED_STATUSES.DELIVERED },
-      // Never scanned, or last scan is at least 3 hours old.
-      $or: [
-        { last_tracking_sync: null },
-        { last_tracking_sync: { $lte: syncedBefore } },
-      ],
     };
     if (excludeIds.length) shipmentFilter._id = { $nin: excludeIds };
     if (companyId) shipmentFilter.company_id = companyId;
@@ -124,6 +119,11 @@ async function findSyncableShipments(limit, options = {}) {
       // the order is tagged return_received.
       order_status: { $ne: "delivered" },
       tags: { $ne: "return_received" },
+      // Same clock as the Next courier sync screen: never synced, or at least 3 hours ago.
+      $or: [
+        { last_tracking_sync: null },
+        { last_tracking_sync: { $lte: syncedBefore } },
+      ],
       ...(hasCourierSelection ? { courier_id: { $in: courierIds } } : {}),
     };
     if (companyId) orderFilter.company_id = companyId;
@@ -2131,10 +2131,20 @@ async function scanOneShipment(shipment, summary) {
         error: err.message,
       });
       // Move a failed row off the front of the queue so the next page is new work.
+      const syncedAt = new Date();
       await CourierShipment.updateOne(
         { _id: shipment._id },
-        { $set: { last_tracking_sync: new Date() } },
+        { $set: { last_tracking_sync: syncedAt } },
       ).catch(() => {});
+      if (shipment.order_id) {
+        await mongoose
+          .model("order")
+          .updateOne(
+            { _id: shipment.order_id },
+            { $set: { last_tracking_sync: syncedAt } },
+          )
+          .catch(() => {});
+      }
     }
 }
 

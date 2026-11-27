@@ -114,14 +114,14 @@ test("tracking sync selects every non-terminal order with an active courier inte
       "booked-in-transit",
       "booked-pos-packed",
     ]);
-    const { $or, ...shipmentFilter } = findFilters[0];
-    assert.ok(Array.isArray($or));
-    assert.deepEqual(shipmentFilter, {
+    assert.deepEqual(findFilters[0], {
       deletedAt: null,
       tracking_number: { $nin: [null, ""] },
       shipment_status: { $ne: "Delivered" },
     });
-    assert.deepEqual(orderFilters[0], {
+    const { $or, ...orderFilter } = orderFilters[0];
+    assert.ok(Array.isArray($or));
+    assert.deepEqual(orderFilter, {
       _id: { $in: shipments.map((shipment) => shipment.order_id) },
       deletedAt: null,
       order_status: { $ne: "delivered" },
