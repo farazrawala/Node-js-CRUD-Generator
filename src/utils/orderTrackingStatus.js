@@ -52,7 +52,9 @@ function buildExactCourierStatusFilter(value) {
       ? /^out[\s_-]*for[\s_-]*delivery$/i
       : /^exception$/i.test(requestedStatus)
         ? /^(?:(?:courier|shipment|shipper)\s*[-:–]\s*)?exception$/i
-        : new RegExp(`^${escapeRegex(requestedStatus)}$`, "i");
+        : /^picked$/i.test(requestedStatus)
+          ? /picked/i
+          : new RegExp(`^${escapeRegex(requestedStatus)}$`, "i");
   return { exact_courier_status: pattern };
 }
 
