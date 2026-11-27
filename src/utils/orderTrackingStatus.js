@@ -42,6 +42,20 @@ function buildTrackingStatusFilter(value) {
   return { tracking_status: trackingStatusRegex };
 }
 
+/** OMS tiles that match the saved exact_courier_status label. */
+function buildExactCourierStatusFilter(value) {
+  const requestedStatus = String(value || "").trim();
+  if (!requestedStatus) return {};
+  const pattern = /^in[\s_-]*transit$/i.test(requestedStatus)
+    ? /^in[\s_-]*transit$/i
+    : /^out[\s_-]*for[\s_-]*delivery$/i.test(requestedStatus)
+      ? /^out[\s_-]*for[\s_-]*delivery$/i
+      : /^exception$/i.test(requestedStatus)
+        ? /^(?:(?:courier|shipment|shipper)\s*[-:–]\s*)?exception$/i
+        : new RegExp(`^${escapeRegex(requestedStatus)}$`, "i");
+  return { exact_courier_status: pattern };
+}
+
 /** OMS Returned tile: POS return, store refunded/returned, and courier return scans. */
 function buildOrderStatusFilter(raw) {
   const value = String(raw || "").trim();
@@ -130,6 +144,7 @@ async function findStuckInTransitOrderIds({
 module.exports = {
   buildOrderStatusFilter,
   buildTrackingStatusFilter,
+  buildExactCourierStatusFilter,
   findStuckInTransitOrderIds,
   isReturnFamilyStatusKey,
   isStoredInTransitTrackingStatus,

@@ -23,6 +23,7 @@ const { generateTransactionNumber } = require("../utils/transactionNumber");
 const {
   buildOrderStatusFilter,
   buildTrackingStatusFilter,
+  buildExactCourierStatusFilter,
   findStuckInTransitOrderIds,
   isReturnFamilyStatusKey,
   isStoredInTransitTrackingStatus,
@@ -3031,6 +3032,9 @@ async function getOrdersWithItems(
     ...buildOrderStatusFilter(req.query?.order_status),
     ...(typeof req.query?.tracking_status === "string"
       ? buildTrackingStatusFilter(req.query.tracking_status)
+      : {}),
+    ...(typeof req.query?.exact_courier_status === "string"
+      ? buildExactCourierStatusFilter(req.query.exact_courier_status)
       : {}),
     ...(stuckInTransitOrderIds
       ? {

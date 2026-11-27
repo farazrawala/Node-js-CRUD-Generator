@@ -115,7 +115,7 @@ class TraxCourier extends BaseCourier {
     return code === 0 || code === "0";
   }
 
-  async request(path, { method = "GET", query, body } = {}, optsRetried = false) {
+  async request(path, { method = "GET", query, body, timeoutMs } = {}, optsRetried = false) {
     const qs = query
       ? `?${new URLSearchParams(
           Object.fromEntries(
@@ -141,6 +141,7 @@ class TraxCourier extends BaseCourier {
       provider: this.providerName,
       headers,
       body: payload,
+      ...(timeoutMs ? { timeoutMs } : {}),
     });
     const message = this.extractErrorMessage(res, "");
     // Live key on the sandbox host (or the reverse) comes back as a bad token.
@@ -152,7 +153,7 @@ class TraxCourier extends BaseCourier {
       this._forceOrigin = /app\.sonic\.pk/i.test(this.baseUrl)
         ? DEFAULT_PROD
         : DEFAULT_SANDBOX;
-      return this.request(path, { method, query, body }, true);
+      return this.request(path, { method, query, body, timeoutMs }, true);
     }
     return { ...res, url };
   }
@@ -377,19 +378,18 @@ class TraxCourier extends BaseCourier {
       trackingNo: cn,
       url,
     });
-    // type 0 is shipper tracking and Trax answers "Error(s) in Input" when the
-    // CN was booked on another account (Flaship books Trax on its own shipper).
-    // type 1 is general/consignee tracking and still returns tracking_history.
+    // type 1 is consignee tracking and returns history for CNs booked on another
+    // shipper. type 0 is only a fallback. Each call is capped so one slow Trax
+    // response cannot run for a minute and stall the sync.
+    const trackTimeoutMs = 12_000;
     let res = await this.request("shipment/track", {
-      query: { tracking_number: cn, type: 0 },
+      query: { tracking_number: cn, type: 1 },
+      timeoutMs: trackTimeoutMs,
     });
-    const firstMessage = this.extractErrorMessage(res, "");
-    if (
-      (res.status >= 400 || !this.isOk(res.data)) &&
-      /error\(s\) in input/i.test(firstMessage)
-    ) {
+    if (res.status >= 400 || !this.isOk(res.data)) {
       res = await this.request("shipment/track", {
-        query: { tracking_number: cn, type: 1 },
+        query: { tracking_number: cn, type: 0 },
+        timeoutMs: trackTimeoutMs,
       });
     }
     courierLogger.trackingResponse({
