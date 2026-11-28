@@ -19,6 +19,7 @@ router.post("/create/:orderId", CourierController.createShipment);
 router.get("/advice/check", CourierController.checkShipperAdvice);
 router.post("/advice", CourierController.submitShipperAdvice);
 
+router.post("/tracking/bulk", CourierController.syncTrackingBulk);
 router.get("/tracking/:trackingNo", CourierController.getTrackingByNumber);
 router.get("/order/:orderId/tracking", CourierController.getTrackingByOrder);
 

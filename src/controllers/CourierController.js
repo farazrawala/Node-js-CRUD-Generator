@@ -194,6 +194,30 @@ async function getTrackingByNumber(req, res) {
 }
 
 /**
+ * POST /courier/tracking/bulk
+ * Body: { order_ids?: string[], tracking_numbers?: string[] }
+ * Live-fetches each booked shipment and saves exact_courier_status.
+ */
+async function syncTrackingBulk(req, res) {
+  try {
+    const result = await CourierService.syncTrackingBulk({
+      companyId: companyIdFromReq(req),
+      orderIds: req.body?.order_ids || req.body?.orderIds || [],
+      trackingNumbers:
+        req.body?.tracking_numbers || req.body?.trackingNumbers || [],
+      concurrency: req.body?.concurrency,
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    await logControllerError(req, err.message, {
+      action: "COURIER BULK TRACKING SYNC",
+      tags: ["courier", "tracking", "bulk", "error"],
+    });
+    return sendError(res, err instanceof CourierError ? err : err);
+  }
+}
+
+/**
  * GET /courier/order/:orderId/tracking
  */
 async function getTrackingByOrder(req, res) {
@@ -496,6 +520,7 @@ module.exports = {
   createShipmentsBulk,
   getTrackingByNumber,
   getTrackingByOrder,
+  syncTrackingBulk,
   checkShipperAdvice,
   submitShipperAdvice,
   cancelShipment,

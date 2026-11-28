@@ -928,6 +928,139 @@ async function getTrackingByTrackingNumber(trackingNumber, options = {}) {
   return refreshTrackingForShipment(shipment, options);
 }
 
+const BULK_TRACKING_LIMIT = 25;
+
+/**
+ * Live-fetch tracking for the given orders or consignment numbers.
+ * One failure does not stop the rest. Each call is capped at 45s.
+ * @param {object} options
+ * @param {string[]} [options.orderIds]
+ * @param {string[]} [options.trackingNumbers]
+ */
+async function syncTrackingBulk(options = {}) {
+  const orderIds = [
+    ...new Set(
+      (Array.isArray(options.orderIds) ? options.orderIds : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  const trackingNumbers = [
+    ...new Set(
+      (Array.isArray(options.trackingNumbers) ? options.trackingNumbers : [])
+        .map((cn) => String(cn || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!orderIds.length && !trackingNumbers.length) {
+    throw new CourierError("order_ids or tracking_numbers is required", {
+      code: "VALIDATION_ERROR",
+      httpStatus: 400,
+    });
+  }
+  if (orderIds.length + trackingNumbers.length > BULK_TRACKING_LIMIT) {
+    throw new CourierError(
+      `Bulk tracking sync is limited to ${BULK_TRACKING_LIMIT} shipments`,
+      { code: "VALIDATION_ERROR", httpStatus: 400 },
+    );
+  }
+
+  const companyFilter = options.companyId ? { company_id: options.companyId } : {};
+  const jobs = [];
+  const seen = new Set();
+
+  const pushShipment = (shipment, requested) => {
+    const key = String(shipment?._id || "");
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    jobs.push({ shipment, requested });
+  };
+
+  if (orderIds.length) {
+    const rows = await CourierShipment.find({
+      order_id: { $in: orderIds },
+      deletedAt: null,
+      ...companyFilter,
+    })
+      .sort({ created_at: -1 })
+      .lean();
+    const byOrder = new Map();
+    for (const row of rows) {
+      const id = String(row.order_id);
+      if (!byOrder.has(id)) byOrder.set(id, row);
+    }
+    for (const orderId of orderIds) {
+      const shipment = byOrder.get(orderId);
+      if (shipment) pushShipment(shipment, { order_id: orderId });
+      else jobs.push({ shipment: null, requested: { order_id: orderId } });
+    }
+  }
+
+  if (trackingNumbers.length) {
+    const rows = await CourierShipment.find({
+      tracking_number: { $in: trackingNumbers },
+      deletedAt: null,
+      ...companyFilter,
+    })
+      .sort({ created_at: -1 })
+      .lean();
+    const byCn = new Map();
+    for (const row of rows) {
+      const cn = String(row.tracking_number);
+      if (!byCn.has(cn)) byCn.set(cn, row);
+    }
+    for (const trackingNumber of trackingNumbers) {
+      const shipment = byCn.get(trackingNumber);
+      if (shipment) pushShipment(shipment, { tracking_number: trackingNumber });
+      else if (![...jobs].some((job) => job.requested.tracking_number === trackingNumber && !job.shipment)) {
+        jobs.push({ shipment: null, requested: { tracking_number: trackingNumber } });
+      }
+    }
+  }
+
+  const concurrency = Math.min(3, Math.max(1, Number(options.concurrency) || 3));
+  const results = await mapWithConcurrency(jobs, concurrency, async (job) => {
+    const base = {
+      order_id: job.shipment?.order_id ? String(job.shipment.order_id) : job.requested.order_id || null,
+      tracking_number: job.shipment?.tracking_number || job.requested.tracking_number || null,
+      courier: job.shipment?.courier || null,
+    };
+    if (!job.shipment) {
+      return { ...base, success: false, error: "Shipment not found" };
+    }
+    try {
+      const live = await withTimeout(
+        refreshTrackingForShipment(job.shipment, { allowStale: false }),
+        SHIPMENT_SYNC_TIMEOUT_MS,
+        `Tracking sync timed out for ${base.tracking_number || base.order_id}`,
+      );
+      return {
+        ...base,
+        success: true,
+        exact_courier_status: live?.exact_courier_status || null,
+        tracking_status: live?.tracking_status || null,
+        status: live?.status || null,
+        order_status: live?.order_status || null,
+      };
+    } catch (err) {
+      return {
+        ...base,
+        success: false,
+        error: String(err?.message || "Tracking sync failed").slice(0, 300),
+      };
+    }
+  });
+
+  const updated = results.filter((row) => row.success).length;
+  return {
+    success: updated > 0,
+    total: results.length,
+    updated,
+    errors: results.length - updated,
+    results,
+  };
+}
+
 async function findShipmentForAdvice({ trackingNumber, orderId, companyId }) {
   const query = { deletedAt: null };
   if (companyId) query.company_id = companyId;
@@ -2478,6 +2611,7 @@ module.exports = {
   createShipmentsBulk,
   getTracking,
   getTrackingByTrackingNumber,
+  syncTrackingBulk,
   checkShipperAdvice,
   submitShipperAdvice,
   cancelShipment,
