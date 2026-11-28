@@ -1140,7 +1140,7 @@ async function refreshTrackingForShipment(shipment, options = {}) {
     status: result.status,
     status_code: result.statusCode,
     tracking_status: lastStatus,
-    exact_courier_status: result.status || null,
+    exact_courier_status: pickExactCourierStatus(result) || null,
     order_status: orderTracking?.order_status || null,
     order_status_change: orderTracking?.order_status_change || null,
     tracking_status_change: orderTracking?.tracking_status_change || null,
@@ -1317,6 +1317,21 @@ function pickMappedOrderStatus(result, lastStatus) {
 }
 
 /**
+ * Portal status from the courier payload (`RETURN_IN_TRANSIT`), not the mapped
+ * bucket (`Returned`) and not the live scan (`Return - Arrived at Origin`).
+ */
+function pickExactCourierStatus(result) {
+  const rawStatus = result?.raw?.status;
+  const portal = typeof rawStatus === "string" ? rawStatus.trim() : "";
+  if (portal && portal !== "true" && portal !== "false" && !isCourierInputError(portal)) {
+    return portal;
+  }
+  const code = String(result?.statusCode || "").trim();
+  if (code && !isCourierInputError(code)) return code;
+  return String(result?.status || "").trim();
+}
+
+/**
  * Persist courier last status + full tracking payload onto the order.
  * `tracking_status` is the latest provider status (e.g. PostEx "Out For Delivery").
  * `tracking_details` stores the full API response as JSON.
@@ -1361,7 +1376,7 @@ async function persistOrderTracking(shipment, result) {
   }
 
   const update = {};
-  const exactCourierStatus = String(result?.status || "").trim();
+  const exactCourierStatus = pickExactCourierStatus(result);
   const previousExactStatus = String(order?.exact_courier_status || "").trim();
   if (exactCourierStatus && exactCourierStatus !== previousExactStatus) {
     update.exact_courier_status = exactCourierStatus;
@@ -1435,6 +1450,19 @@ async function persistOrderTracking(shipment, result) {
   }
 
   try {
+    const statusSet = {};
+    if (update.exact_courier_status) {
+      statusSet.exact_courier_status = update.exact_courier_status;
+    }
+    if (update.last_tracking_activity_sync) {
+      statusSet.last_tracking_activity_sync = update.last_tracking_activity_sync;
+    }
+    if (update.tracking_status) statusSet.tracking_status = update.tracking_status;
+    if (update.last_tracking_sync) statusSet.last_tracking_sync = update.last_tracking_sync;
+    if (Object.keys(statusSet).length) {
+      await Order.findByIdAndUpdate(shipment.order_id, { $set: statusSet });
+    }
+
     const orderUpdateOp = { $set: update };
     const pullTags = [];
     if (
@@ -1458,7 +1486,14 @@ async function persistOrderTracking(shipment, result) {
           trackingNumber || order?.courier_tracking_number || "",
       });
     if (!critical) pullTags.push("critical");
-    const trackingHistory = courierTrackingDetailRows(result);
+    let trackingHistory = courierTrackingDetailRows(result);
+    if (!trackingHistory.length) {
+      trackingHistory = liveTrackingHistory(result).map((row) => ({
+        status: row.status,
+        time: row.time,
+        location: row.location,
+      }));
+    }
     if (trackingHistory.length) {
       orderUpdateOp.$set.tracking_history = trackingHistory;
     }
