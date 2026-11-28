@@ -1508,11 +1508,25 @@ function pickMappedOrderStatus(result, lastStatus) {
 function pickExactCourierStatus(result) {
   const rawStatus = result?.raw?.status;
   const portal = typeof rawStatus === "string" ? rawStatus.trim() : "";
+  // Flagship portal bucket (RETURN_IN_TRANSIT). TCS has no field like this.
+  if (
+    portal &&
+    /^[A-Z0-9_]+$/.test(portal) &&
+    portal.includes("_") &&
+    !isCourierInputError(portal)
+  ) {
+    return portal;
+  }
+  const events = Array.isArray(result?.events) ? result.events : [];
+  for (const event of events) {
+    const text = String(event?.description || event?.raw?.status || "").trim();
+    if (!text || isCourierInputError(text)) continue;
+    if (/^[A-Z0-9]{1,4}$/.test(text)) continue;
+    return text;
+  }
   if (portal && portal !== "true" && portal !== "false" && !isCourierInputError(portal)) {
     return portal;
   }
-  const code = String(result?.statusCode || "").trim();
-  if (code && !isCourierInputError(code)) return code;
   return String(result?.status || "").trim();
 }
 
