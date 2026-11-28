@@ -1019,13 +1019,17 @@ async function syncTrackingBulk(options = {}) {
   }
 
   const concurrency = Math.min(3, Math.max(1, Number(options.concurrency) || 3));
+  const summary = { checked: [], changes: [], failures: [] };
   const results = await mapWithConcurrency(jobs, concurrency, async (job) => {
     const base = {
       order_id: job.shipment?.order_id ? String(job.shipment.order_id) : job.requested.order_id || null,
       tracking_number: job.shipment?.tracking_number || job.requested.tracking_number || null,
       courier: job.shipment?.courier || null,
+      company_id: job.shipment?.company_id || options.companyId || null,
     };
     if (!job.shipment) {
+      summary.checked.push(base);
+      summary.failures.push({ ...base, reason: "Shipment not found" });
       return { ...base, success: false, error: "Shipment not found" };
     }
     try {
@@ -1034,6 +1038,19 @@ async function syncTrackingBulk(options = {}) {
         SHIPMENT_SYNC_TIMEOUT_MS,
         `Tracking sync timed out for ${base.tracking_number || base.order_id}`,
       );
+      const checked = {
+        ...base,
+        order_no: live?.order_no || null,
+        integration_order_id: live?.integration_order_id || null,
+      };
+      summary.checked.push(checked);
+      if (live?.order_status_change || live?.tracking_status_change) {
+        summary.changes.push({
+          ...checked,
+          order_status_change: live.order_status_change || null,
+          tracking_status_change: live.tracking_status_change || null,
+        });
+      }
       return {
         ...base,
         success: true,
@@ -1043,13 +1060,16 @@ async function syncTrackingBulk(options = {}) {
         order_status: live?.order_status || null,
       };
     } catch (err) {
-      return {
-        ...base,
-        success: false,
-        error: String(err?.message || "Tracking sync failed").slice(0, 300),
-      };
+      const reason = String(err?.message || "Tracking sync failed").slice(0, 300);
+      summary.checked.push(base);
+      summary.failures.push({ ...base, reason });
+      return { ...base, success: false, error: reason };
     }
   });
+
+  await attachOrderNumbers(summary.checked);
+  await attachOrderNumbers(summary.failures);
+  await logTrackingSyncOrders(summary, { url: "/api/courier/tracking/bulk" });
 
   const updated = results.filter((row) => row.success).length;
   return {
@@ -2334,7 +2354,7 @@ function statusChangeComment(label, change) {
 /**
  * One `logs` row per scanned order: order id, comment, tag, and whether status changed.
  */
-async function logTrackingSyncOrders(summary) {
+async function logTrackingSyncOrders(summary, options = {}) {
   const changesByOrder = new Map(
     (summary.changes || []).map((row) => [String(row.order_id), row]),
   );
@@ -2365,7 +2385,7 @@ async function logTrackingSyncOrders(summary) {
 
     await createApplicationLog(null, {
       action: "Courier tracking scan",
-      url: "/api/courier/sync",
+      url: options.url || "/api/courier/sync",
       tags: ["sync_courier", tag],
       reference_id: orderId,
       reference_type: "order",
