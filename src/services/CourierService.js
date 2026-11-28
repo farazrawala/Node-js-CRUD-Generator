@@ -1506,6 +1506,15 @@ function pickMappedOrderStatus(result, lastStatus) {
  * bucket (`Returned`) and not the live scan (`Return - Arrived at Origin`).
  */
 function pickExactCourierStatus(result) {
+  const packet = Array.isArray(result?.raw?.packet_list)
+    ? result.raw.packet_list[0]
+    : Array.isArray(result?.raw?.data)
+      ? result.raw.data[0]
+      : null;
+  const bookedPacketStatus = String(packet?.booked_packet_status || "").trim();
+  if (bookedPacketStatus && !isCourierInputError(bookedPacketStatus)) {
+    return bookedPacketStatus;
+  }
   const rawStatus = result?.raw?.status;
   const portal = typeof rawStatus === "string" ? rawStatus.trim() : "";
   // Flagship portal status: DELIVERED, RETURN_IN_TRANSIT, IN_TRANSIT, …
