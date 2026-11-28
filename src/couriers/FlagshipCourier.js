@@ -533,6 +533,8 @@ class FlagshipCourier extends BaseCourier {
       method: "GET",
       provider: this.providerName,
       headers: this.authHeaders(),
+      timeoutMs: 90000,
+      retries: 0,
     });
 
     courierLogger.trackingResponse({
@@ -561,6 +563,8 @@ class FlagshipCourier extends BaseCourier {
         method: "GET",
         provider: this.providerName,
         headers: this.authHeaders(),
+        timeoutMs: 90000,
+        retries: 0,
       });
       const legacyHistory = Array.isArray(legacy.data?.tracking)
         ? legacy.data.tracking
