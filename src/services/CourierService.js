@@ -1508,13 +1508,9 @@ function pickMappedOrderStatus(result, lastStatus) {
 function pickExactCourierStatus(result) {
   const rawStatus = result?.raw?.status;
   const portal = typeof rawStatus === "string" ? rawStatus.trim() : "";
-  // Flagship portal bucket (RETURN_IN_TRANSIT). TCS has no field like this.
-  if (
-    portal &&
-    /^[A-Z0-9_]+$/.test(portal) &&
-    portal.includes("_") &&
-    !isCourierInputError(portal)
-  ) {
+  // Flagship portal status: DELIVERED, RETURN_IN_TRANSIT, IN_TRANSIT, …
+  // TCS has no field like this; its scan text is on the checkpoint.
+  if (portal && /^[A-Z0-9_]+$/.test(portal) && !isCourierInputError(portal)) {
     return portal;
   }
   const events = Array.isArray(result?.events) ? result.events : [];
