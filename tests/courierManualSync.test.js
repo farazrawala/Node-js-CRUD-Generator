@@ -80,7 +80,7 @@ test("manual tracking sync is scoped to the user's company and accepts a batch l
       "all except delivered or tagged return_received",
     );
     assert.deepEqual(createdLog.tags, ["sync_courier"]);
-    assert.equal(createdLog.action, "Courier tracking sync");
+    assert.equal(createdLog.action, "sync courier");
     assert.equal(createdLog.company_id.toString(), "64b000000000000000000002");
   } finally {
     CourierService.syncOpenShipments = originalSync;

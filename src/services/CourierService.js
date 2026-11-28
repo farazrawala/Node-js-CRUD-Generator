@@ -1340,6 +1340,7 @@ function courierTrackingDetailRows(result) {
     packet?.Tracking_Detail,
     packet?.TrackingDetail,
     raw?.details?.tracking_history,
+    raw?.tracking,
     raw?.checkpoints,
     raw?.deliveryinfo,
   ];
@@ -1410,7 +1411,7 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
   const Order = mongoose.model("order");
   const order = shipment.order_id
     ? await Order.findById(shipment.order_id)
-        .select("tracking_status tracking_details order_status")
+        .select("tracking_status tracking_details tracking_history order_status exact_courier_status")
         .lean()
     : null;
 
@@ -1421,6 +1422,36 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     shipment.status_code ||
     shipment.shipment_status ||
     null;
+  const exactCourierStatus = pickExactCourierStatus({
+    raw: trackingDetails,
+    statusCode: shipment.status_code,
+    status: shipment.shipment_status,
+  });
+  const previousExactStatus = String(order?.exact_courier_status || "").trim();
+  const storedHistory = Array.isArray(trackingDetails?.tracking)
+    ? trackingDetails.tracking.filter((row) => row && typeof row === "object")
+    : history;
+  const previousHistory = Array.isArray(order?.tracking_history) ? order.tracking_history : [];
+  const statusPatch = {};
+  if (exactCourierStatus && exactCourierStatus !== previousExactStatus) {
+    statusPatch.exact_courier_status = exactCourierStatus;
+    statusPatch.last_tracking_activity_sync = new Date();
+  }
+  if (storedHistory.length && storedHistory.length !== previousHistory.length) {
+    statusPatch.tracking_history = storedHistory;
+  }
+  if (shipment.order_id && Object.keys(statusPatch).length) {
+    await Order.updateOne(
+      { _id: shipment.order_id },
+      { $set: statusPatch },
+    ).catch((saveErr) => {
+      courierLogger.apiError({
+        event: "exact_courier_status_stale_save_failed",
+        orderId: String(shipment.order_id),
+        error: saveErr.message,
+      });
+    });
+  }
 
   return {
     success: true,
@@ -1432,6 +1463,7 @@ async function loadPreviousTrackingResponse(shipment, options = {}, err) {
     status: shipment.shipment_status,
     status_code: shipment.status_code,
     tracking_status: trackingStatus,
+    exact_courier_status: exactCourierStatus || previousExactStatus || null,
     order_status: order?.order_status || null,
     tracking_details: trackingDetails,
     tracking: history,
@@ -2384,7 +2416,7 @@ async function logTrackingSyncOrders(summary, options = {}) {
     }
 
     await createApplicationLog(null, {
-      action: "Courier tracking scan",
+      action: "sync courier",
       url: options.url || "/api/courier/sync",
       tags: ["sync_courier", tag],
       reference_id: orderId,

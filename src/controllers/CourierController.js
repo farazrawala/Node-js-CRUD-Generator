@@ -416,7 +416,7 @@ async function syncTracking(req, res) {
       durationMs: Date.now() - started,
     });
     await createApplicationLog(req, {
-      action: "Courier tracking sync",
+      action: "sync courier",
       tags: ["sync_courier"],
       description: {
         scope: "company",
@@ -440,7 +440,7 @@ async function syncTracking(req, res) {
   } catch (err) {
     if (companyId) {
       await createApplicationLog(req, {
-        action: "Courier tracking sync failed",
+        action: "sync courier failed",
         tags: ["sync_courier"],
         description: {
           scope: "company",
