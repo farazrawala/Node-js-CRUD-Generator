@@ -2903,6 +2903,21 @@ function buildRequireTrackingNumberFilter(query = {}) {
   return { courier_tracking_number: { $exists: true, $nin: [null, ""] } };
 }
 
+/**
+ * `?no_label_print=1`: orders that have a courier assigned but no shipping
+ * label printed yet (print_times is 0 or missing).
+ */
+function buildNoLabelPrintFilter(query = {}) {
+  const on = ["1", "true", "yes"].includes(
+    String(query?.no_label_print || "").trim().toLowerCase(),
+  );
+  if (!on) return {};
+  return {
+    courier_id: { $exists: true, $ne: null },
+    print_times: { $in: [0, null] },
+  };
+}
+
 /** Courier sync queue: delivered orders do not need another tracking sync. */
 function buildExcludeDeliveredFilter(query = {}) {
   const on = ["1", "true", "yes"].includes(
@@ -3050,6 +3065,7 @@ async function getOrdersWithItems(
     ...buildRecentTrackingSyncFilter(req.query),
     ...buildRequireTrackingNumberFilter(req.query),
     ...buildExcludeDeliveredFilter(req.query),
+    ...buildNoLabelPrintFilter(req.query),
   };
   const populate = buildPopulateFromQuery(req.query || {}, "order");
   if (
